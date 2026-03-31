@@ -180,6 +180,11 @@ public:
 	virtual void onTraderError(WTSError* err, void* pData = NULL){}
 
 	/*
+	 *	报价回报推送
+	 */
+	virtual void onPushQuote(WTSEntrust* quoteInfo){}
+
+	/*
 	 *	合约状态推送
 	 */
 	virtual void onPushInstrumentStatus(const char* exchg, const char* code, WTSTradeStatus state) {}
@@ -252,6 +257,16 @@ public:
 	 *	action	操作的具体数据结构
 	 */
 	virtual int orderAction(WTSEntrustAction* action) { return -1; }
+
+	/*
+	 *	做市商双边报价插入接口
+	 */
+	virtual int quoteInsert(WTSEntrust* bidEntrust, WTSEntrust* askEntrust) { return -1; }
+
+	/*
+	 *	做市商双边报价操作接口 (撤改)
+	 */
+	virtual int quoteAction(WTSEntrustAction* action) { return -1; }
 
 	/*
 	 *	查询账户信息

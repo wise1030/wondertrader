@@ -79,6 +79,10 @@ public:
 
 	virtual int orderAction(WTSEntrustAction* action) override;
 
+	virtual int quoteInsert(WTSEntrust* bidEntrust, WTSEntrust* askEntrust) override;
+
+	virtual int quoteAction(WTSEntrustAction* action) override;
+
 	virtual int queryAccount() override;
 
 	virtual int queryPositions() override;
@@ -124,13 +128,23 @@ public:
 
 	virtual void OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) override;
 
+	virtual void OnRspQuoteInsert(CThostFtdcInputQuoteField *pInputQuote, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) override;
+
+	virtual void OnRspQuoteAction(CThostFtdcInputQuoteActionField *pInputQuoteAction, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) override;
+
 	virtual void OnRspError(CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) override;
 
 	virtual void OnRtnOrder(CThostFtdcOrderField *pOrder) override;
 
 	virtual void OnRtnTrade(CThostFtdcTradeField *pTrade) override;
 
+	virtual void OnRtnQuote(CThostFtdcQuoteField *pQuote) override;
+
 	virtual void OnErrRtnOrderInsert(CThostFtdcInputOrderField *pInputOrder, CThostFtdcRspInfoField *pRspInfo) override;
+
+	virtual void OnErrRtnQuoteInsert(CThostFtdcInputQuoteField *pInputQuote, CThostFtdcRspInfoField *pRspInfo) override;
+
+	virtual void OnErrRtnQuoteAction(CThostFtdcQuoteActionField *pQuoteAction, CThostFtdcRspInfoField *pRspInfo) override;
 
 	virtual void OnRtnInstrumentStatus(CThostFtdcInstrumentStatusField *pInstrumentStatus) override;
 

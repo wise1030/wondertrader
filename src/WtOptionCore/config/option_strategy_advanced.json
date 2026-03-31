@@ -1,0 +1,68 @@
+{
+    "strategy": {
+        "underlyingCode": "cu2505",
+        "hedgeCode": "cu2505",
+        "enableCurveFitting": true,
+        "curveFitPeriod": 60000000,
+        "traceLevel": 1,
+        "useCompositePricer": true,
+        "riskLimits": {
+            "maxDelta": 200.0,
+            "maxGamma": 5000.0,
+            "maxVega": 10000.0,
+            "maxLossPerDay": 50000.0,
+            "panicThreshold": 0.05
+        }
+    },
+    "scanners": [
+        {
+            "type": "VolSpreadScanner",
+            "enabled": true,
+            "config": {
+                "scanCalls": true,
+                "scanPuts": true,
+                "minVolSpread": 0.02
+            }
+        }
+    ],
+    "expiryConfigs": [
+        {
+            "expiryDate": 202505,
+            "config": {
+                "enable": true,
+                "enableAutoClose": true,
+                "maxPosFut": 100,
+                "maxPosOpt": 500,
+                "maxOrderSize": 5,
+                "deltaMin": 0.1,
+                "deltaMax": 0.8,
+                "spreadFut": 0.0002,
+                "spreadVol": 0.015,
+                "minSpread": 0.005,
+                "spreadMultiplier": 1.2,
+                "configName": "FrontMonth_Aggressive",
+                "quoteUnderlying": true,
+                "minUnderlyingSpread": 0.0002,
+                "underlyingOrderSize": 2
+            }
+        },
+        {
+            "expiryDate": 202506,
+            "config": {
+                "enable": true,
+                "enableAutoClose": false,
+                "maxPosFut": 50,
+                "maxPosOpt": 200,
+                "maxOrderSize": 2,
+                "deltaMin": 0.2,
+                "deltaMax": 0.7,
+                "spreadFut": 0.0005,
+                "spreadVol": 0.025,
+                "minSpread": 0.01,
+                "spreadMultiplier": 1.5,
+                "configName": "BackMonth_Conservative",
+                "quoteUnderlying": false
+            }
+        }
+    ]
+}

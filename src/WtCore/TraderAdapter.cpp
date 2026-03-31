@@ -1282,6 +1282,78 @@ bool TraderAdapter::cancel(uint32_t localid)
 	return bRet;
 }
 
+uint32_t TraderAdapter::quote(const char* stdCode, double bidPrice, double bidQty, double askPrice, double askQty, int flag, WTSContractInfo* cInfo)
+{
+	if (bidQty == 0 && askQty == 0) return 0;
+
+	if (cInfo == NULL) cInfo = getContract(stdCode);
+
+	WTSEntrust* bidEntrust = WTSEntrust::create(stdCode, bidQty, bidPrice, cInfo->getExchg());
+	bidEntrust->setDirection(WDT_LONG);
+	bidEntrust->setOffsetType(WOT_OPEN);
+	bidEntrust->setOrderFlag((WTSOrderFlag)flag);
+	bidEntrust->setContractInfo(cInfo);
+
+	WTSEntrust* askEntrust = WTSEntrust::create(stdCode, askQty, askPrice, cInfo->getExchg());
+	askEntrust->setDirection(WDT_SHORT);
+	askEntrust->setOffsetType(WOT_OPEN);
+	askEntrust->setOrderFlag((WTSOrderFlag)flag);
+	askEntrust->setContractInfo(cInfo);
+
+	_trader_api->makeEntrustID(bidEntrust->getEntrustID(), 64);
+	wt_strcpy(askEntrust->getEntrustID(), bidEntrust->getEntrustID());
+
+	uint32_t localid = makeLocalOrderID();
+	char* usertag = bidEntrust->getUserTag();
+	wt_strcpy(usertag, _order_pattern.c_str(), _order_pattern.size());
+	usertag[_order_pattern.size()] = '.';
+	fmtutil::format_to(usertag + _order_pattern.size() + 1, "{}", localid);
+	wt_strcpy(askEntrust->getUserTag(), bidEntrust->getUserTag());
+
+	int32_t ret = _trader_api->quoteInsert(bidEntrust, askEntrust);
+	if (ret < 0)
+	{
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] Quote placing failed: {}", _id.c_str(), ret);
+		bidEntrust->release();
+		askEntrust->release();
+		return 0;
+	}
+
+	bidEntrust->release();
+	askEntrust->release();
+	return localid;
+}
+
+bool TraderAdapter::cancelQuote(uint32_t localid)
+{
+	if (_trader_api == NULL)
+		return false;
+
+	SpinLock lock(_mtx_orders);
+	auto it = _orders->find(localid);
+	if (it == _orders->end())
+		return false;
+
+	WTSOrderInfo* orderInfo = (WTSOrderInfo*)it->second;
+	if(orderInfo == NULL || !orderInfo->isAlive())
+		return false;
+
+	WTSEntrustAction* action = WTSEntrustAction::create(orderInfo->getCode(), orderInfo->getExchg());
+	action->setEntrustID(orderInfo->getEntrustID());
+	action->setOrderID(orderInfo->getOrderID());
+	action->setActionFlag(WAF_CANCEL);
+	
+	int ret = _trader_api->quoteAction(action);
+	action->release();
+
+	return (ret >= 0);
+}
+
+void TraderAdapter::onPushQuote(WTSEntrust* quoteInfo)
+{
+	// Log or forward to sinks
+}
+
 OrderIDs TraderAdapter::cancel(const char* stdCode, bool isBuy, double qty /* = 0 */)
 {
 	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, NULL);

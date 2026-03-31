@@ -20,8 +20,10 @@ LINK_DIRECTORIES(${LNKS})
 
 SET(LIBS
 	WtCore
+	WtOptionCore
 	WTSTools
 	WTSUtils
+	Share
 	)
 
 IF (MSVC)

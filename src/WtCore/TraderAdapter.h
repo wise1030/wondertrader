@@ -161,8 +161,13 @@ public:
 	
 	OrderIDs buy(const char* stdCode, double price, double qty, int flag, bool bForceClose, WTSContractInfo* cInfo = NULL);
 	OrderIDs sell(const char* stdCode, double price, double qty, int flag, bool bForceClose, WTSContractInfo* cInfo = NULL);
+	
+	// 双边报价接口
+	uint32_t quote(const char* stdCode, double bidPrice, double bidQty, double askPrice, double askQty, int flag, WTSContractInfo* cInfo = NULL);
+	
 	bool	cancel(uint32_t localid);
 	OrderIDs cancel(const char* stdCode, bool isBuy, double qty = 0);
+	bool	cancelQuote(uint32_t localid);
 
 	inline bool	isTradeEnabled(const char* stdCode) const;
 
@@ -203,6 +208,8 @@ public:
 	virtual void onPushOrder(WTSOrderInfo* orderInfo) override;
 
 	virtual void onPushTrade(WTSTradeInfo* tradeRecord) override;
+
+	virtual void onPushQuote(WTSEntrust* quoteInfo) override;
 
 	virtual void onTraderError(WTSError* err, void* pData = NULL) override;
 

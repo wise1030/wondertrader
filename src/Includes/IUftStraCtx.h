@@ -228,6 +228,39 @@ public:
 	 *	@stdCode	代码，格式如SSE.600000
 	 *	@isLong		多头or空头
 	 */
+	//==========================================================================
+	// Market-Making Extensions (做市专用交易接口)
+	//==========================================================================
+
+	/*
+	 *	双边报价接口 - 同时下买单和卖单
+	 *	这是做市的核心交易接口，用于高效双边挂单
+	 *
+	 *	@stdCode	合约代码，格式如SHFE.rb2205
+	 *	@bidPrice	买价
+	 *	@bidQty		买量
+	 *	@askPrice	卖价
+	 *	@askQty		卖量
+	 *	@userTag	用户标签
+	 *	@return		买单本地单号（卖单为买单+1，由TraderAdapter保证）
+	 *	
+	 *	注意：库存偏离度、Delta、波动率等业务指标由策略层计算，
+	 *	可使用 InventoryManager、SpreadOptimizer、FutuPortfolio 等模块
+	 */
+	virtual uint32_t	stra_quote(const char* stdCode, double bidPrice, double bidQty, 
+								double askPrice, double askQty, const char* userTag = "") { return 0; }
+
+	/*
+	 *	撤销双边报价
+	 *	@localid	买单本地单号
+	 *	@return		是否成功撤销
+	 */
+	virtual bool		stra_cancel_quote(uint32_t localid) { return false; }
+
+	//==========================================================================
+	// Local position tracking (本地持仓跟踪)
+	//==========================================================================
+
 	virtual double stra_get_local_position(const char* stdCode) = 0;
 
 	virtual double stra_get_local_posprofit(const char* stdCode) { return 0; }

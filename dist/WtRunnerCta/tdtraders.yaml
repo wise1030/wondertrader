@@ -14,12 +14,12 @@ traders:
                 order_times_boundary: 20    # 时间窗口内最大下单次数，如果超过该次数，下单指令不会发送
     # 以上是TraderAdapter读取的配置
     # 以下是TraderXXX读取的配置
-    front: tcp://180.168.146.187:10201
+    front: tcp://182.254.243.31:30001
     broker: '9999'                      
     appid: simnow_client_test
-    authcode: '0000000000000000'    
-    user: "yoursimnowaccount"
-    pass: "yoursimnowpassword"
+    authcode: '0000000000000000'  
+    user: "048363"
+    pass: "clx@#10300"
     quick: true                       # 是否订阅快速私有流，如果为true，则不会接受上次之前的私有流，这个一定要为true！！！
     # ctpmodule: thosttraderapi_se    # ctp模块名，如果需要使用其他仿制CTP模块，使用该配置项直接将仿制的CTP模块传给TraderCTP即可
     # flowdir: CTPTDFlow              # 数据流存储目录，可不填，也可以自己定义

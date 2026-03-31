@@ -1,0 +1,89 @@
+# WtFutuRunner 配置文件示例
+# 期货做市引擎运行配置
+
+# 基础数据文件
+basefiles:
+  session: ./common/sessions.json
+  commodity: ./common/commodities.json
+  contract: ./common/contracts.json
+  holiday: ./common/holidays.json
+
+# 运行环境配置
+env:
+  name: futu_mm        # 引擎名称
+
+# 行情源配置
+parsers:
+  - active: true
+    id: parser_ctp
+    module: ParserCTP.so
+    front: tcp://180.168.146.187:10211
+    userid: "000000"
+    password: "888888"
+    brokerid: "9999"
+
+# 交易通道配置  
+traders:
+  - active: true
+    id: trader_ctp
+    module: TraderCTP.so
+    front: tcp://180.168.146.187:10201
+    userid: "000000"
+    password: "888888"
+    brokerid: "9999"
+    # 委托单超时时间(秒)
+    ordertimeout: 60
+    # 流控参数
+    ratectrl:
+      limit: 50        # 每秒最大委托数
+      window: 1000     # 流控窗口(ms)
+
+# 做市策略配置
+strategies:
+  futu:
+    - active: true
+      id: mm_if_main
+      name: FutuMM
+      trader: trader_ctp
+      params:
+        # 合约配置
+        contracts:
+          - code: CFFEX.IF.2503
+            multiplier: 300
+            tickSize: 0.2
+            hedgeRatio: 1.0
+            isAnchor: true
+          - code: CFFEX.IF.2506
+            multiplier: 300
+            tickSize: 0.2
+            hedgeRatio: 0.95
+            isAnchor: false
+        # 对冲合约
+        hedgeCode: CFFEX.IF.2503
+        # Delta限制
+        deltaLimit: 50.0
+        hedgeThreshold: 30.0
+        maxSpreadMult: 3.0
+        # 报价参数
+        quoter:
+          numLevels: 3
+          baseSpread: 2.0
+          levelStep: 1.0
+          baseQty: 1.0
+          qtyDecay: 0.7
+        # 库存参数
+        inventory:
+          skewFactor: 0.0001
+          maxSkew: 5.0
+          deltaLimit: 50.0
+          hedgeRatio: 0.5
+        # 风控参数
+        riskMonitor:
+          maxLongPosition: 100.0
+          maxShortPosition: 100.0
+          maxDelta: 200.0
+          maxDailyLoss: -50000.0
+          maxOrdersPerSec: 50
+
+# 报单策略文件
+bspolicy: ./common/actpolicy.json

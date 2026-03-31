@@ -203,6 +203,21 @@ public:
 	virtual void stra_sub_order_queues(const char* stdCode) override;
 	virtual void stra_sub_transactions(const char* stdCode) override;
 
+	//==========================================================================
+	// Market-Making Extensions (做市专用交易接口实现)
+	//==========================================================================
+	
+	/*
+	 *	双边报价：同时下买单和卖单
+	 */
+	virtual uint32_t	stra_quote(const char* stdCode, double bidPrice, double bidQty,
+								double askPrice, double askQty, const char* userTag = "") override;
+
+	/*
+	 *	撤销双边报价
+	 */
+	virtual bool		stra_cancel_quote(uint32_t localid) override;
+
 private:
 	template<typename... Args>
 	void log_debug(const char* format, const Args& ...args)

@@ -1,0 +1,273 @@
+{
+    "option": {
+        "threading": {
+            "order_pool_size": 4,
+            "risk_interval_ms": 100,
+            "pnl_interval_ms": 500
+        },
+        "strategy": {
+            "underlyingCode": "cu2505",
+            "hedgeCode": "cu2505",
+            "enableCurveFitting": true,
+            "curveFitPeriod": 60000000,
+            "traceLevel": 1,
+            "useCompositePricer": true,
+            "signals": {
+                "price": {
+                    "name": "DtSignal",
+                    "params": "period=10"
+                },
+                "vol": {
+                    "name": "GarchSignal",
+                    "params": "p=1,q=1"
+                }
+            },
+            "riskLimits": {
+                "maxDelta": 200.0,
+                "maxGamma": 5000.0,
+                "maxVega": 10000.0,
+                "maxLossPerDay": 50000.0,
+                "panicThreshold": 0.05
+            }
+        },
+        "scanners": [
+            {
+                "name": "MMScanner",
+                "enabled": true,
+                "minEdge": 0.5,
+                "maxSpreadTicks": 8.0,
+                "tickSize": 0.1,
+                "fairValueBuffer": 0.5,
+                "maxOpenPositions": 50,
+                "maxPositionPerStrike": 10,
+                "minDaysToExpiry": 1,
+                "maxDaysToExpiry": 60,
+                "quoteOnBid": true,
+                "quoteOnAsk": true,
+                "expiryOverrides": {
+                    "202505": {
+                        "enabled": true,
+                        "maxPosOpt": 80,
+                        "maxOrderSize": 20
+                    },
+                    "202506": {
+                        "enabled": true,
+                        "maxPosOpt": 30,
+                        "maxOrderSize": 5
+                    }
+                }
+            },
+            {
+                "name": "GarchScanner",
+                "enabled": true,
+                "omega": 0.000001,
+                "alpha": 0.1,
+                "beta": 0.85,
+                "lookbackPeriod": 20,
+                "volDiffThreshold": 0.05,
+                "maxOpenPositions": 10,
+                "maxOrderSize": 100,
+                "minDaysToExpiry": 5,
+                "maxDaysToExpiry": 30,
+                "expiryOverrides": {
+                    "202505": {
+                        "maxPosOpt": 15,
+                        "maxOrderSize": 50
+                    }
+                }
+            },
+            {
+                "name": "VolSpreadScanner",
+                "enabled": true,
+                "minVolSpread": 0.02,
+                "maxVolSpread": 0.20,
+                "maxOpenPositions": 5,
+                "minDaysToExpiry": 5,
+                "maxDaysToExpiry": 60,
+                "minTermSpread": 10,
+                "expiryOverrides": {
+                    "202505": {
+                        "enabled": true,
+                        "maxPosOpt": 10
+                    },
+                    "202506": {
+                        "enabled": true,
+                        "maxPosOpt": 5
+                    }
+                }
+            },
+            {
+                "name": "SpreadScanner",
+                "enabled": true,
+                "minSpread": 5.0,
+                "maxSpread": 50.0,
+                "minProfitPct": 0.5,
+                "scanCalls": true,
+                "scanPuts": true,
+                "minDaysToExpiry": 1,
+                "maxDaysToExpiry": 60,
+                "maxOrderSize": 1,
+                "maxPosOpt": 10,
+                "expiryOverrides": {
+                    "202505": {
+                        "enabled": true,
+                        "maxPosOpt": 20,
+                        "maxOrderSize": 5,
+                        "minProfit": 3.0
+                    },
+                    "202506": {
+                        "enabled": true,
+                        "maxPosOpt": 10,
+                        "maxOrderSize": 2,
+                        "minProfit": 5.0
+                    }
+                }
+            },
+            {
+                "name": "ButterflyScanner",
+                "enabled": true,
+                "minProfitTicks": 1.0,
+                "maxSpreadWidth": 10.0,
+                "minThreshold": 0.0,
+                "maxOpenPositions": 10,
+                "maxOrderSize": 100,
+                "scanCalls": true,
+                "scanPuts": true,
+                "minDaysToExpiry": 1,
+                "maxDaysToExpiry": 60,
+                "tickSize": 0.1,
+                "expiryOverrides": {
+                    "202505": {
+                        "maxPosOpt": 20,
+                        "maxOrderSize": 50
+                    }
+                }
+            },
+            {
+                "name": "SyntheticFutureScanner",
+                "enabled": false,
+                "minProfitTicks": 2.0,
+                "buyThreshold": -2.0,
+                "sellThreshold": 2.0,
+                "maxOpenPositions": 5,
+                "maxOrderSize": 100,
+                "minDaysToExpiry": 5,
+                "maxDaysToExpiry": 60,
+                "tickSize": 1.0,
+                "expiryOverrides": {
+                    "202505": {
+                        "enabled": true,
+                        "maxPosOpt": 10,
+                        "maxOrderSize": 50
+                    }
+                }
+            },
+            {
+                "name": "StrikeSpreadScanner",
+                "enabled": true,
+                "spreadThreshold": 0.02,
+                "gutsThreshold": 0.02,
+                "synpairThreshold": 0.01,
+                "maxSpreadSize": 10,
+                "maxGutsSize": 10,
+                "maxSynpairSize": 10,
+                "maxOpenSize": 50,
+                "cancelInterval1": 5000000,
+                "cancelInterval2": 3000000,
+                "maxTick": 3.0,
+                "enableSpread": true,
+                "enableGuts": true,
+                "enableSynpair": true,
+                "gutsSignalOnly": false,
+                "expiryOverrides": {
+                    "202505": {
+                        "maxPosOpt": 80,
+                        "maxOrderSize": 20
+                    },
+                    "202506": {
+                        "maxPosOpt": 30,
+                        "maxOrderSize": 10
+                    }
+                }
+            },
+            {
+                "name": "LowBidsScanner",
+                "enabled": true,
+                "minBidThreshold": 0.01,
+                "maxBidThreshold": 0.5,
+                "theoPremium": 0.02,
+                "minDelta": 0.05,
+                "maxDelta": 0.5,
+                "maxSize": 10,
+                "minDaysToExpiry": 3,
+                "expiryOverrides": {
+                    "202505": {
+                        "maxPosOpt": 20
+                    }
+                }
+            },
+            {
+                "name": "OpenScanner",
+                "enabled": true,
+                "openInterestThreshold": 1000,
+                "volumeThreshold": 500,
+                "volumeOiRatio": 0.5,
+                "minDelta": 0.1,
+                "maxDelta": 0.9,
+                "trackIntraday": true
+            },
+            {
+                "name": "SimplexScanner",
+                "enabled": false,
+                "minProfit": 100,
+                "maxRisk": 10000,
+                "maxLegs": 4,
+                "deltaLimit": 100,
+                "gammaLimit": 50,
+                "vegaLimit": 1000,
+                "useMarginConstraint": true,
+                "marginLimit": 100000
+            }
+        ],
+        "expiryConfigs": [
+            {
+                "expiryDate": 202505,
+                "config": {
+                    "enable": true,
+                    "enableAutoClose": true,
+                    "maxPosFut": 100,
+                    "maxPosOpt": 500,
+                    "maxOrderSize": 5,
+                    "deltaMin": 0.1,
+                    "deltaMax": 0.8,
+                    "spreadFut": 0.0002,
+                    "spreadVol": 0.015,
+                    "minSpread": 0.005,
+                    "spreadMultiplier": 1.2,
+                    "configName": "FrontMonth_Aggressive",
+                    "quoteUnderlying": true,
+                    "minUnderlyingSpread": 0.0002,
+                    "underlyingOrderSize": 2
+                }
+            },
+            {
+                "expiryDate": 202506,
+                "config": {
+                    "enable": true,
+                    "enableAutoClose": false,
+                    "maxPosFut": 50,
+                    "maxPosOpt": 200,
+                    "maxOrderSize": 2,
+                    "deltaMin": 0.2,
+                    "deltaMax": 0.7,
+                    "spreadFut": 0.0005,
+                    "spreadVol": 0.025,
+                    "minSpread": 0.01,
+                    "spreadMultiplier": 1.5,
+                    "configName": "BackMonth_Conservative",
+                    "quoteUnderlying": false
+                }
+            }
+        ]
+    }
+}

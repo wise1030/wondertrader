@@ -453,6 +453,90 @@ int TraderCTP::orderAction(WTSEntrustAction* action)
 	return 0;
 }
 
+int TraderCTP::quoteInsert(WTSEntrust* bidEntrust, WTSEntrust* askEntrust)
+{
+	if (m_pUserAPI == NULL || m_wrapperState != WS_ALLREADY)
+	{
+		write_log(m_sink, LL_ERROR, "[TraderCTP] Trading channel not ready");
+		return -1;
+	}
+
+	CThostFtdcInputQuoteField req;
+	memset(&req, 0, sizeof(req));
+	wt_strcpy(req.BrokerID, m_strBroker.c_str(), m_strBroker.size());
+	wt_strcpy(req.InvestorID, m_strUser.c_str(), m_strUser.size());
+
+	wt_strcpy(req.InstrumentID, bidEntrust->getCode());
+	wt_strcpy(req.ExchangeID, bidEntrust->getExchg());
+
+	if (strlen(bidEntrust->getUserTag()) == 0)
+	{
+		fmt::format_to(req.QuoteRef, "{}", m_orderRef.fetch_add(0));
+	}
+	else
+	{
+		uint32_t fid, sid, orderref;
+		extractEntrustID(bidEntrust->getEntrustID(), fid, sid, orderref);
+		fmt::format_to(req.QuoteRef, "{}", orderref);
+	}
+
+	if (strlen(bidEntrust->getUserTag()) > 0)
+	{
+		m_eidCache.put(bidEntrust->getEntrustID(), bidEntrust->getUserTag(), 0, [this](const char* message) {
+			write_log(m_sink, LL_WARN, message);
+		});
+	}
+
+	req.BidPrice = bidEntrust->getPrice();
+	req.BidVolume = (int)bidEntrust->getVolume();
+	req.BidOffsetFlag = wrapOffsetType(bidEntrust->getOffsetType());
+	req.BidHedgeFlag = THOST_FTDC_HF_Speculation;
+
+	req.AskPrice = askEntrust->getPrice();
+	req.AskVolume = (int)askEntrust->getVolume();
+	req.AskOffsetFlag = wrapOffsetType(askEntrust->getOffsetType());
+	req.AskHedgeFlag = THOST_FTDC_HF_Speculation;
+
+	int iResult = m_pUserAPI->ReqQuoteInsert(&req, genRequestID());
+	if (iResult != 0)
+	{
+		write_log(m_sink, LL_ERROR, "[TraderCTP] Quote inserting failed: {}", iResult);
+	}
+
+	return 0;
+}
+
+int TraderCTP::quoteAction(WTSEntrustAction* action)
+{
+	if (m_wrapperState != WS_ALLREADY)
+		return -1;
+
+	uint32_t frontid, sessionid, orderref;
+	if (!extractEntrustID(action->getEntrustID(), frontid, sessionid, orderref))
+		return -1;
+
+	CThostFtdcInputQuoteActionField req;
+	memset(&req, 0, sizeof(req));
+	wt_strcpy(req.BrokerID, m_strBroker.c_str(), m_strBroker.size());
+	wt_strcpy(req.InvestorID, m_strUser.c_str(), m_strUser.size());
+
+	fmt::format_to(req.QuoteRef, "{}", orderref);
+	req.FrontID = frontid;
+	req.SessionID = sessionid;
+	req.ActionFlag = wrapActionFlag(action->getActionFlag());
+	wt_strcpy(req.InstrumentID, action->getCode());
+	wt_strcpy(req.QuoteSysID, action->getOrderID());
+	wt_strcpy(req.ExchangeID, action->getExchg());
+
+	int iResult = m_pUserAPI->ReqQuoteAction(&req, genRequestID());
+	if (iResult != 0)
+	{
+		write_log(m_sink, LL_ERROR, "[TraderCTP] Sending quote cancel request failed: {}", iResult);
+	}
+
+	return 0;
+}
+
 int TraderCTP::queryAccount()
 {
 	if (m_pUserAPI == NULL || m_wrapperState != WS_ALLREADY)
@@ -760,6 +844,56 @@ void TraderCTP::OnRspOrderAction(CThostFtdcInputOrderActionField *pInputOrderAct
 
 		if (action)
 			action->release();
+	}
+}
+
+void TraderCTP::OnRspQuoteInsert(CThostFtdcInputQuoteField *pInputQuote, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast)
+{
+	if(IsErrorRspInfo(pRspInfo))
+	{
+		WTSError *err = makeError(pRspInfo, WEC_ORDERINSERT);
+		if (m_sink)
+			m_sink->onTraderError(err);
+		err->release();
+	}
+}
+
+void TraderCTP::OnRtnQuote(CThostFtdcQuoteField *pQuote)
+{
+}
+
+void TraderCTP::OnErrRtnQuoteInsert(CThostFtdcInputQuoteField *pInputQuote, CThostFtdcRspInfoField *pRspInfo)
+{
+	if (IsErrorRspInfo(pRspInfo))
+	{
+		WTSError* error = makeError(pRspInfo, WEC_ORDERINSERT);
+		if (m_sink)
+			m_sink->onTraderError(error, NULL);
+		error->release();
+	}
+}
+
+void TraderCTP::OnErrRtnQuoteAction(CThostFtdcQuoteActionField *pQuoteAction, CThostFtdcRspInfoField *pRspInfo)
+{
+	if (IsErrorRspInfo(pRspInfo))
+	{
+		WTSError* error = makeError(pRspInfo, WEC_ORDERCANCEL);
+		if (m_sink)
+			m_sink->onTraderError(error, NULL);
+		error->release();
+	}
+}
+
+void TraderCTP::OnRspQuoteAction(CThostFtdcInputQuoteActionField *pInputQuoteAction, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast)
+{
+	if (IsErrorRspInfo(pRspInfo))
+	{
+		WTSError* error = WTSError::create(WEC_ORDERCANCEL, pRspInfo->ErrorMsg);
+		if (m_sink)
+			m_sink->onTraderError(error, NULL);
+
+		if (error)
+			error->release();
 	}
 }
 

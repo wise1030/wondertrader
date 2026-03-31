@@ -18,6 +18,7 @@
 #include "../Share/decimal.h"
 #include "../Share/StrUtil.hpp"
 #include "../Share/TimeUtils.hpp"
+#include "../Share/CodeHelper.hpp"
 
 #include "../Includes/WTSVariant.hpp"
 #include "../Includes/IBaseDataMgr.h"
@@ -78,18 +79,14 @@ void WtUftEngine::set_trading_date(uint32_t curTDate)
 
 WTSCommodityInfo* WtUftEngine::get_commodity_info(const char* stdCode)
 {
-	const StringVector& ay = StrUtil::split(stdCode, ".");
-	WTSContractInfo* cInfo = _base_data_mgr->getContract(ay[1].c_str(), ay[0].c_str());
-	if (cInfo == NULL)
-		return NULL;
-
-	return cInfo->getCommInfo();
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(stdCode, NULL);
+	return _base_data_mgr->getCommodity(codeInfo._exchg, codeInfo._product);
 }
 
 WTSContractInfo* WtUftEngine::get_contract_info(const char* stdCode)
 {
-	const StringVector& ay = StrUtil::split(stdCode, ".");
-	return _base_data_mgr->getContract(ay[1].c_str(), ay[0].c_str());
+	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, NULL);
+	return _base_data_mgr->getContract(cInfo._code, cInfo._exchg);
 }
 
 WTSSessionInfo* WtUftEngine::get_session_info(const char* sid, bool isCode /* = false */)
@@ -97,13 +94,12 @@ WTSSessionInfo* WtUftEngine::get_session_info(const char* sid, bool isCode /* = 
 	if (!isCode)
 		return _base_data_mgr->getSession(sid);
 
-	const StringVector& ay = StrUtil::split(sid, ".");
-	WTSContractInfo* cInfo = _base_data_mgr->getContract(ay[1].c_str(), ay[0].c_str());
+	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(sid, NULL);
+	WTSCommodityInfo* cInfo = _base_data_mgr->getCommodity(codeInfo._exchg, codeInfo._product);
 	if (cInfo == NULL)
 		return NULL;
 
-	WTSCommodityInfo* commInfo = cInfo->getCommInfo();
-	return commInfo->getSessionInfo();
+	return _base_data_mgr->getSession(cInfo->getSession());
 }
 
 WTSTickSlice* WtUftEngine::get_tick_slice(uint32_t sid, const char* code, uint32_t count)

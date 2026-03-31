@@ -1,0 +1,82 @@
+{
+    "option": {
+        "threading": {
+            "order_pool_size": 4,
+            "risk_interval_ms": 100,
+            "pnl_interval_ms": 500
+        },
+        "strategy": {
+            "underlyingCode": "cu2505",
+            "hedgeCode": "cu2505",
+            "enableCurveFitting": true,
+            "curveFitPeriod": 60000000,
+            "traceLevel": 1,
+            "useCompositePricer": true,
+            "riskLimits": {
+                "maxDelta": 200.0,
+                "maxGamma": 5000.0,
+                "maxVega": 10000.0,
+                "maxLossPerDay": 50000.0,
+                "panicThreshold": 0.05
+            }
+        },
+        "scanners": [
+            {
+                "name": "MMScanner",
+                "enabled": true,
+                "minEdge": 0.5,
+                "maxSpreadTicks": 8.0,
+                "tickSize": 0.1,
+                "fairValueBuffer": 0.5,
+                "maxOpenPositions": 50,
+                "maxPositionPerStrike": 10,
+                "minDaysToExpiry": 1,
+                "maxDaysToExpiry": 60,
+                "quoteOnBid": true,
+                "quoteOnAsk": true,
+                "expiryOverrides": {
+                    "202505": {
+                        "enabled": true,
+                        "maxPosOpt": 80,
+                        "maxOrderSize": 20
+                    }
+                }
+            },
+            {
+                "name": "SpreadScanner",
+                "enabled": true,
+                "minSpread": 5.0,
+                "maxSpread": 50.0,
+                "minProfitPct": 0.5,
+                "scanCalls": true,
+                "scanPuts": true,
+                "minDaysToExpiry": 1,
+                "maxDaysToExpiry": 60,
+                "maxOrderSize": 1,
+                "maxPosOpt": 10
+            }
+        ],
+        "expiryConfigs": [
+            {
+                "expiryDate": 202505,
+                "config": {
+                    "enable": true,
+                    "enableAutoClose": true,
+                    "maxPosFut": 100,
+                    "maxPosOpt": 500,
+                    "maxOrderSize": 5,
+                    "deltaMin": 0.1,
+                    "deltaMax": 0.8,
+                    "spreadFut": 0.0002,
+                    "spreadVol": 0.015,
+                    "minSpread": 0.005,
+                    "spreadMultiplier": 1.2,
+                    "configName": "FrontMonth_Aggressive",
+                    "quoteUnderlying": true,
+                    "minUnderlyingSpread": 0.0002,
+                    "underlyingOrderSize": 2
+                }
+            }
+        ]
+    }
+}

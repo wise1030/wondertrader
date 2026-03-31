@@ -1,0 +1,428 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		// =========================================================================
+		// CMake 基础任务
+		// =========================================================================
+		{
+			"type": "cmake",
+			"label": "CMake: configure",
+			"command": "configure",
+			"problemMatcher": [],
+			"detail": "CMake template configure task",
+			"group": "build"
+		},
+		{
+			"type": "cmake",
+			"label": "CMake: build",
+			"command": "build",
+			"targets": [
+				"all"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [],
+			"detail": "CMake template build task"
+		},
+		// =========================================================================
+		// 构建所有目标
+		// =========================================================================
+		{
+			"label": "Build all (Debug)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"Debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build all targets in Debug mode"
+		},
+		{
+			"label": "Build all (Release)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"Release"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build all targets in Release mode"
+		},
+		// =========================================================================
+		// 部署共享文件到 dist/bin
+		// =========================================================================
+		{
+			"label": "Deploy: common",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"deploy-common"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Deploy shared binaries and libraries to dist/bin/"
+		},
+		// =========================================================================
+		// CTA 策略
+		// =========================================================================
+		{
+			"label": "Build: cta (Debug)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"cta",
+				"Debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build CTA strategy with debug symbols"
+		},
+		{
+			"label": "Deploy: cta",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"deploy",
+				"cta"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Deploy CTA strategy to dist/WtRunnerCta/",
+			"dependsOn": ["Build: cta (Debug)"],
+			"dependsOrder": "sequence"
+		},
+		// =========================================================================
+		// HFT 策略
+		// =========================================================================
+		{
+			"label": "Build: hft (Debug)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"hft",
+				"Debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build HFT strategy with debug symbols"
+		},
+		{
+			"label": "Deploy: hft",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"deploy",
+				"hft"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Deploy HFT strategy to dist/WtRunnerHft/",
+			"dependsOn": ["Build: hft (Debug)"],
+			"dependsOrder": "sequence"
+		},
+		// =========================================================================
+		// UFT 策略
+		// =========================================================================
+		{
+			"label": "Build: uft (Debug)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"uft",
+				"Debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build UFT strategy with debug symbols"
+		},
+		{
+			"label": "Deploy: uft",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"deploy",
+				"uft"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Deploy UFT strategy to dist/WtRunnerUft/",
+			"dependsOn": ["Build: uft (Debug)"],
+			"dependsOrder": "sequence"
+		},
+		// =========================================================================
+		// Futu 期货做市策略
+		// =========================================================================
+		{
+			"label": "Build: futu (Debug)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"futu",
+				"Debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build WtFutuCore with debug symbols"
+		},
+		{
+			"label": "Build: futu (Release)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"futu",
+				"Release"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build WtFutuCore with Release optimizations"
+		},
+		{
+			"label": "Deploy: futu",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"deploy",
+				"futu"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Deploy WtFutuCore to dist/WtRunnerFutu/",
+			"dependsOn": ["Build: futu (Debug)"],
+			"dependsOrder": "sequence"
+		},
+		// =========================================================================
+		// Option 策略
+		// =========================================================================
+		{
+			"label": "Build: opt (Debug)",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"build",
+				"opt",
+				"Debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build Option strategy with debug symbols"
+		},
+		{
+			"label": "Deploy: opt",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"deploy",
+				"opt"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Deploy Option strategy to dist/WtRunnerOpt/",
+			"dependsOn": ["Build: opt (Debug)"],
+			"dependsOrder": "sequence"
+		},
+		// =========================================================================
+		// 组合任务: 构建 + 部署
+		// =========================================================================
+		{
+			"label": "Build & Deploy: cta",
+			"dependsOn": [
+				"Build: cta (Debug)",
+				"Deploy: cta"
+			],
+			"dependsOrder": "sequence",
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Build and deploy CTA strategy"
+		},
+		{
+			"label": "Build & Deploy: hft",
+			"dependsOn": [
+				"Build: hft (Debug)",
+				"Deploy: hft"
+			],
+			"dependsOrder": "sequence",
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Build and deploy HFT strategy"
+		},
+		{
+			"label": "Build & Deploy: uft",
+			"dependsOn": [
+				"Build: uft (Debug)",
+				"Deploy: uft"
+			],
+			"dependsOrder": "sequence",
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Build and deploy UFT strategy"
+		},
+		{
+			"label": "Build & Deploy: futu",
+			"dependsOn": [
+				"Build: futu (Debug)",
+				"Deploy: futu"
+			],
+			"dependsOrder": "sequence",
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Build and deploy Futu strategy"
+		},
+		{
+			"label": "Build & Deploy: opt",
+			"dependsOn": [
+				"Build: opt (Debug)",
+				"Deploy: opt"
+			],
+			"dependsOrder": "sequence",
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "Build and deploy Option strategy"
+		},
+		// =========================================================================
+		// 停止运行中的策略
+		// =========================================================================
+		{
+			"label": "Stop: cta",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"stop",
+				"cta"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "none",
+			"problemMatcher": [],
+			"detail": "Stop running CTA strategy"
+		},
+		{
+			"label": "Stop: hft",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"stop",
+				"hft"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "none",
+			"problemMatcher": [],
+			"detail": "Stop running HFT strategy"
+		},
+		{
+			"label": "Stop: uft",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"stop",
+				"uft"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "none",
+			"problemMatcher": [],
+			"detail": "Stop running UFT strategy"
+		},
+		{
+			"label": "Stop: futu",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"stop",
+				"futu"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "none",
+			"problemMatcher": [],
+			"detail": "Stop running WtUftRunner process"
+		},
+		{
+			"label": "Stop: opt",
+			"type": "shell",
+			"command": "${workspaceFolder}/../scripts/deployment/manage_linux.sh",
+			"args": [
+				"stop",
+				"opt"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "none",
+			"problemMatcher": [],
+			"detail": "Stop running Option strategy"
+		}
+	]
+}

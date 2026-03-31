@@ -14,15 +14,35 @@
 
 #ifdef _MSC_VER
 #include "../Common/mdump.h"
+#else
+#include <signal.h>
+#include <unistd.h>
 #endif
 
 #include "../Share/cppcli.hpp"
 //#include <vld.h>
 
+// SIGCHLD 信号处理函数
+#ifndef _MSC_VER
+static void sigchld_handler(int signo)
+{
+    // SIGCHLD 通常不需要特殊处理，只需忽略即可
+    // 这样可以避免 "app discard signal 17" 错误
+    (void)signo;  // 避免未使用参数警告
+}
+#endif
+
 int main(int argc, char* argv[])
 {
 #ifdef _MSC_VER
 	CMiniDumper::Enable("WtUftRunner.exe", true);
+#else
+    // 设置 SIGCHLD 信号处理，避免信号被丢弃导致错误日志
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, nullptr);
 #endif
 
 	cppcli::Option opt(argc, argv);

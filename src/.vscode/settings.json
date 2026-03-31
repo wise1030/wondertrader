@@ -1,0 +1,5 @@
+{
+    "cmake.configureSettings": {
+        "CMAKE_CXX_FLAGS": "-I/mnt/d/gf_pc/WonderTrader/wondertrader/deps/usr/include"
+    }
+}

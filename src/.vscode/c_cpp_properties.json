@@ -1,0 +1,26 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/WtFutuCore",
+                "${workspaceFolder}/WtUftCore",
+                "${workspaceFolder}/Includes",
+                "${workspaceFolder}/Share",
+                "${workspaceFolder}/WTSTools",
+                "${workspaceFolder}/WTSUtils",
+                "/mnt/d/gf_pc/WonderTrader/wondertrader/deps/usr/include",
+                "/usr/include",
+                "/usr/local/include",
+                "/home/mydeps/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/g++",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

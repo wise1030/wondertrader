@@ -1352,3 +1352,58 @@ void UftStraContext::load_local_data()
 		}
 	}
 }
+
+//==========================================================================
+// Market-Making Extensions (做市专用交易接口实现)
+//==========================================================================
+
+uint32_t UftStraContext::stra_quote(const char* stdCode, double bidPrice, double bidQty,
+									 double askPrice, double askQty, const char* userTag)
+{
+	// 双边报价：同时下买单和卖单
+	// 返回买单单号，卖单单号为买单单号+1（由TraderAdapter保证）
+	if (!_trader)
+		return 0;
+
+	// 先下买单
+	uint32_t bidLocalId = _trader->openLong(stdCode, bidPrice, bidQty, 0);
+	if (bidLocalId == 0)
+	{
+		log_error("Quote BUY failed: {} @ {} x {}", stdCode, bidPrice, bidQty);
+		return 0;
+	}
+	_order_ids[bidLocalId] = NULL;
+
+	// 再下卖单
+	uint32_t askLocalId = _trader->openShort(stdCode, askPrice, askQty, 0);
+	if (askLocalId == 0)
+	{
+		log_error("Quote SELL failed: {} @ {} x {}", stdCode, askPrice, askQty);
+		// 卖单失败，撤销买单
+		_trader->cancel(bidLocalId);
+		_order_ids.erase(bidLocalId);
+		return 0;
+	}
+	_order_ids[askLocalId] = NULL;
+
+	log_info("Quote placed: {} BID {}@{} ASK {}@{} (bid_id={}, ask_id={})", 
+		stdCode, bidQty, bidPrice, askQty, askPrice, bidLocalId, askLocalId);
+
+	// 返回买单单号
+	return bidLocalId;
+}
+
+bool UftStraContext::stra_cancel_quote(uint32_t localid)
+{
+	// 撤销双边报价
+	if (!_trader)
+		return false;
+
+	// 撤销传入的单号
+	bool ret = _trader->cancel(localid);
+	if (ret)
+		_order_ids.erase(localid);
+
+	return ret;
+}
+

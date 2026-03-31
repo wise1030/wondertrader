@@ -1,0 +1,280 @@
+/*!
+ * \file SpreadArbitrageManager.h
+ * \brief Main Manager for Cross-Term Spread Arbitrage System
+ * 
+ * Coordinates all spread arbitrage components:
+ *   - Spread calculation and monitoring
+ *   - Strategy signal generation
+ *   - Risk management
+ *   - Order execution coordination
+ * 
+ * Part of WtFutuCore - Futures High-Frequency Market Making Engine
+ */
+#pragma once
+
+#include "SpreadArbitrageTypes.h"
+#include "SpreadCalculator.h"
+#include "SpreadRiskManager.h"
+#include "MeanReversionStrategy.h"
+#include "TrendFollowingStrategy.h"
+#include "PairsTradingStrategy.h"
+#include "StatisticalArbStrategy.h"
+#include "MarketMakingEnhancer.h"
+#include "../Includes/FasterDefs.h"
+#include <memory>
+#include <vector>
+#include <functional>
+
+NS_WTP_BEGIN
+class WTSTickData;
+NS_WTP_END
+
+namespace futu {
+
+//==============================================================================
+// Arbitrage Manager Configuration
+//==============================================================================
+
+struct SpreadArbitrageConfig
+{
+    // General settings
+    bool enabled;                   ///< Enable spread arbitrage
+    bool enhance_market_making;     ///< Enable MM enhancement
+    bool use_hybrid_strategy;       ///< Use hybrid strategy combination
+    
+    // Strategy selection
+    ArbitrageStrategy primary_strategy;
+    
+    // Portfolio settings
+    double max_total_position;      ///< Maximum total position
+    uint32_t max_pairs;             ///< Maximum number of pairs
+    
+    // Signal settings
+    double min_signal_confidence;   ///< Minimum confidence for execution
+    uint32_t signal_cooldown_ms;    ///< Cooldown between signals
+    
+    // Integration settings
+    double mm_enhancement_weight;   ///< Weight of MM enhancement signals
+    
+    SpreadArbitrageConfig()
+        : enabled(true)
+        , enhance_market_making(true)
+        , use_hybrid_strategy(false)
+        , primary_strategy(ArbitrageStrategy::MEAN_REVERSION)
+        , max_total_position(50.0)
+        , max_pairs(10)
+        , min_signal_confidence(0.3)
+        , signal_cooldown_ms(1000)
+        , mm_enhancement_weight(0.5)
+    {}
+};
+
+//==============================================================================
+// Strategy Instance
+//==============================================================================
+
+struct StrategyInstance
+{
+    std::string pair_id;
+    ArbitrageStrategy strategy_type;
+    
+    std::unique_ptr<MeanReversionStrategy> mean_reversion;
+    std::unique_ptr<TrendFollowingStrategy> trend_following;
+    std::unique_ptr<PairsTradingStrategy> pairs_trading;
+    std::unique_ptr<StatisticalArbStrategy> statistical_arb;
+    
+    StrategyInstance() = default;
+    StrategyInstance(StrategyInstance&&) = default;
+    StrategyInstance& operator=(StrategyInstance&&) = default;
+};
+
+//==============================================================================
+// Signal Callback Types
+//==============================================================================
+
+/// Callback for spread signals
+using SpreadSignalCallback = std::function<void(const SpreadSignal&)>;
+
+/// Callback for risk alerts
+using RiskAlertCallback = std::function<void(const RiskAlert&)>;
+
+/// Callback for quoting adjustments
+using QuotingAdjustCallback = std::function<void(const std::string& pair_id, 
+                                                  const QuotingAdjustment&)>;
+
+//==============================================================================
+// Spread Arbitrage Manager
+//==============================================================================
+
+class SpreadArbitrageManager
+{
+public:
+    SpreadArbitrageManager();
+    ~SpreadArbitrageManager() = default;
+    
+    //==========================================================================
+    // Configuration
+    //==========================================================================
+    
+    void setConfig(const SpreadArbitrageConfig& config) { _config = config; }
+    const SpreadArbitrageConfig& getConfig() const { return _config; }
+    
+    void setCalculatorConfig(const SpreadCalculatorConfig& config);
+    void setRiskConfig(const SpreadRiskConfig& config);
+    void setMmEnhancerConfig(const MmEnhancerConfig& config);
+    
+    /// Set expiry date callback for risk manager
+    void setExpiryDateCallback(ExpiryDateCallback callback);
+    
+    /// Set current trading date for expiry calculation
+    void setCurrentDate(uint32_t current_date);
+    
+    //==========================================================================
+    // Spread Pair Management
+    //==========================================================================
+    
+    /// Add a spread pair for trading
+    bool addSpreadPair(const SpreadPairConfig& pair_config);
+    
+    /// Remove a spread pair
+    void removeSpreadPair(const std::string& pair_id);
+    
+    /// Get all configured pairs
+    std::vector<std::string> getSpreadPairs() const;
+    
+    //==========================================================================
+    // Data Input
+    //==========================================================================
+    
+    /// Process incoming tick
+    void onTick(const std::string& code, double price, double multiplier, uint64_t timestamp);
+    
+    /// Process incoming WTSTickData
+    void onWtTick(wtp::WTSTickData* tick);
+    
+    //==========================================================================
+    // Signal Generation
+    //==========================================================================
+    
+    /// Generate signals for all pairs
+    std::vector<SpreadSignal> generateSignals(uint64_t current_time);
+    
+    /// Generate signal for specific pair
+    SpreadSignal generateSignal(const std::string& pair_id, uint64_t current_time);
+    
+    //==========================================================================
+    // Market Making Integration
+    //==========================================================================
+    
+    /// Get quoting adjustment for a pair
+    QuotingAdjustment getQuotingAdjustment(const std::string& pair_id, uint64_t current_time);
+    
+    /// Check if should pause quoting
+    bool shouldPauseQuoting(const std::string& code, bool is_bid) const;
+    
+    //==========================================================================
+    // Position Management
+    //==========================================================================
+    
+    /// Update position for a pair
+    void updatePosition(const std::string& pair_id, 
+                        double leg1_pos, double leg2_pos,
+                        double unrealized_pnl);
+    
+    /// Get current state for a pair
+    SpreadState getSpreadState(const std::string& pair_id) const;
+    
+    /// Get all pair states
+    std::vector<SpreadState> getAllStates() const;
+    
+    //==========================================================================
+    // Risk Management
+    //==========================================================================
+    
+    /// Get current risk summary
+    PortfolioRiskSummary getRiskSummary() const;
+    
+    /// Check if position is allowed
+    bool canOpenPosition(const std::string& pair_id, double size) const;
+    
+    /// Get active risk alerts
+    std::vector<RiskAlert> getActiveAlerts() const;
+    
+    //==========================================================================
+    // Callbacks
+    //==========================================================================
+    
+    void setSignalCallback(SpreadSignalCallback callback) { _signal_callback = callback; }
+    void setAlertCallback(RiskAlertCallback callback) { _alert_callback = callback; }
+    void setQuotingCallback(QuotingAdjustCallback callback) { _quoting_callback = callback; }
+    
+    //==========================================================================
+    // Management
+    //==========================================================================
+    
+    void reset();
+    void enable() { _config.enabled = true; }
+    void disable() { _config.enabled = false; }
+    bool isEnabled() const { return _config.enabled; }
+    
+    size_t getPairCount() const { return _strategies.size(); }
+    
+private:
+    //==========================================================================
+    // Internal Methods
+    //==========================================================================
+    
+    void initializeStrategy(StrategyInstance& instance, const SpreadPairConfig& config);
+    SpreadSignal combineSignals(const std::vector<SpreadSignal>& signals, 
+                                 const SpreadState& state,
+                                 uint64_t current_time);
+    void dispatchSignal(const SpreadSignal& signal);
+    void checkRiskAlerts();
+    
+    //==========================================================================
+    // Configuration
+    //==========================================================================
+    
+    SpreadArbitrageConfig _config;
+    SpreadCalculatorConfig _calc_config;
+    SpreadRiskConfig _risk_config;
+    MmEnhancerConfig _mm_config;
+    
+    //==========================================================================
+    // Components
+    //==========================================================================
+    
+    std::unique_ptr<SpreadCalculatorManager> _calculator_manager;
+    std::unique_ptr<SpreadRiskManager> _risk_manager;
+    std::unique_ptr<MarketMakingEnhancer> _mm_enhancer;
+    
+    //==========================================================================
+    // Strategy Instances
+    //==========================================================================
+    
+    wtp::wt_hashmap<std::string, StrategyInstance> _strategies;
+    wtp::wt_hashmap<std::string, SpreadPairConfig> _pair_configs;
+    
+    //==========================================================================
+    // Position Tracking
+    //==========================================================================
+    
+    wtp::wt_hashmap<std::string, SpreadState> _pair_states;
+    
+    //==========================================================================
+    // Signal State
+    //==========================================================================
+    
+    wtp::wt_hashmap<std::string, uint64_t> _last_signal_time;
+    wtp::wt_hashmap<std::string, SpreadSignal> _last_signals;
+    
+    //==========================================================================
+    // Callbacks
+    //==========================================================================
+    
+    SpreadSignalCallback _signal_callback;
+    RiskAlertCallback _alert_callback;
+    QuotingAdjustCallback _quoting_callback;
+};
+
+} // namespace futu

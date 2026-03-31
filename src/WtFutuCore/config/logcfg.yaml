@@ -1,0 +1,56 @@
+# WtFutuRunner 日志配置
+# Logging Configuration for Futures Market Making Engine
+
+# 全局日志级别
+global:
+  level: info    # debug, info, warn, error, fatal
+
+# 控制台输出
+console:
+  enabled: true
+  level: info
+  pattern: "[%Y%m%d %H:%M:%S.%e] [%l] %v"
+
+# 文件输出
+files:
+  - name: main
+    enabled: true
+    level: info
+    pattern: "[%Y%m%d %H:%M:%S.%e] [%l] [%t] %v"
+    filename: ./logs/wtfutu_%Y%m%d.log
+    rotate: daily
+    maxsize: 104857600  # 100MB
+    maxfiles: 10
+
+  - name: trade
+    enabled: true
+    level: debug
+    pattern: "[%Y%m%d %H:%M:%S.%e] [%l] %v"
+    filename: ./logs/trade_%Y%m%d.log
+    rotate: daily
+    maxsize: 104857600
+    maxfiles: 30
+
+  - name: risk
+    enabled: true
+    level: warn
+    pattern: "[%Y%m%d %H:%M:%S.%e] [%l] %v"
+    filename: ./logs/risk_%Y%m%d.log
+    rotate: daily
+    maxsize: 104857600
+    maxfiles: 30
+
+# 模块日志级别覆盖
+modules:
+  WtFutuEngine: info
+  WtFutuContext: debug
+  FutuQuoter: debug
+  FutuPortfolio: info
+  InventoryManager: info
+  SpreadOptimizer: debug
+  MarketStateDetector: info
+  AutoCancelPolicy: info
+  OrderBookAnalyzer: debug
+  FutuRiskMonitor: warn
+  TraderAdapter: info
+  ParserAdapter: info

@@ -1,0 +1,199 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    
+    "version": "0.2.0",
+    "configurations": [
+        // =========================================================================
+        // WonderTrader 主程序调试 (使用共享 bin 目录)
+        // =========================================================================
+        {
+            "name": "WtRunner (CTA/HFT)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/bin/WtRunner",
+            "args": ["./config.yaml"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/config",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/bin/parsers:${workspaceFolder}/../dist/bin/traders:${env:LD_LIBRARY_PATH}"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb", 
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true}
+            ]
+        },
+        // =========================================================================
+        // CTA 策略调试 (使用共享 bin 目录)
+        // =========================================================================
+        {
+            "name": "CTA Strategy",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/bin/WtRunner",
+            "args": ["./config.yaml"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/WtRunnerCta",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/bin/parsers:${workspaceFolder}/../dist/bin/traders:${workspaceFolder}/../dist/WtRunnerCta/cta:${env:LD_LIBRARY_PATH}"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true}
+            ],
+            // "preLaunchTask": "Deploy: cta"
+        },
+        // =========================================================================
+        // HFT 策略调试 (使用共享 bin 目录)
+        // =========================================================================
+        {
+            "name": "HFT Strategy",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/bin/WtRunner",
+            "args": ["./config.yaml"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/WtRunnerHft",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/bin/parsers:${workspaceFolder}/../dist/bin/traders:${workspaceFolder}/../dist/WtRunnerHft/hft:${env:LD_LIBRARY_PATH}"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true}
+            ],
+            "preLaunchTask": "Deploy: hft"
+        },
+        // =========================================================================
+        // UFT 策略调试 (使用共享 bin 目录)
+        // =========================================================================
+        {
+            "name": "UFT Strategy",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/bin/WtUftRunner",
+            "args": ["./config.yaml"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/WtRunnerUft",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/bin/parsers:${workspaceFolder}/../dist/bin/traders:${workspaceFolder}/../dist/WtRunnerUft/uft:${env:LD_LIBRARY_PATH}"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true}
+            ],
+            "preLaunchTask": "Deploy: uft"
+        },
+        // =========================================================================
+        // Futu 期货做市策略调试 (使用共享 bin 目录)
+        // =========================================================================
+        {
+            "name": "Futu MM Strategy",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/bin/WtUftRunner",
+            "args": ["./config.yaml"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/WtRunnerFutu",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/bin/parsers:${workspaceFolder}/../dist/bin/traders:${workspaceFolder}/../dist/WtRunnerFutu/uft:${env:LD_LIBRARY_PATH}"},
+                {"name": "WT_COMMON", "value": "${workspaceFolder}/../dist/common"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true},
+                {"text": "directory ${workspaceFolder}", "ignoreFailures": true},
+                {"description": "Skip standard library steps","text": "skip -gfi /usr/include/**/*"}
+            ],
+            "sourceFileMap": {
+                "/mnt/d/gf_pc/WonderTrader/wondertrader/src": "${workspaceFolder}"
+            }
+        },
+        // =========================================================================
+        // Option 策略调试 (使用共享 bin 目录)
+        // =========================================================================
+        {
+            "name": "Option Strategy",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/bin/WtRunner",
+            "args": ["./config.yaml"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/WtRunnerOpt",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/bin/parsers:${workspaceFolder}/../dist/bin/traders:${workspaceFolder}/../dist/WtRunnerOpt/opt:${env:LD_LIBRARY_PATH}"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true}
+            ],
+            "preLaunchTask": "Deploy: opt"
+        },
+        // =========================================================================
+        // Futu 策略 - 附加调试 (Attach to running process)
+        // =========================================================================
+        {
+            "name": "Futu MM (Attach)",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceFolder}/../dist/bin/WtUftRunner",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "processId": "${command:pickProcess}",
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true}
+            ]
+        },
+        // =========================================================================
+        // LoaderRunner (CTP Loader)
+        // =========================================================================
+        {
+            "name": "LoaderRunner",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/../dist/LoaderRunner/LoaderRunner",
+            "args": [
+                "-m", "./libCTPLoader.so",
+                "-c", "./config.ini"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/../dist/LoaderRunner",
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/../dist/bin:${workspaceFolder}/../dist/LoaderRunner:${env:LD_LIBRARY_PATH}"}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb", 
+            "setupCommands": [
+                {"description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true},
+                {"description": "Set Disassembly Flavor to Intel", "text": "-gdb-set disassembly-flavor intel", "ignoreFailures": true},
+                {"text": "set pagination off", "ignoreFailures": true}
+            ]
+        }
+    ]
+}
