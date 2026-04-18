@@ -1,3 +1,6 @@
 {
-    "cmake.sourceDirectory": "/mnt/d/gf_pc/WonderTrader/wondertrader/src"
+    "cmake.sourceDirectory": "/mnt/d/gf_pc/WonderTrader/wondertrader/src",
+    "files.associations": {
+        "chrono": "cpp"
+    }
 }

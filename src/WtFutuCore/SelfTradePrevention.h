@@ -1,21 +1,22 @@
 /*!
  * \file SelfTradePrevention.h
- * \brief Self-Trade Prevention Module for Combined Market Making and Spread Arbitrage
+ * \brief Self-Trade Prevention Module (UnifiedOrderTracker Wrapper)
  * 
  * Provides self-trade detection and prevention between:
  *   - Market making orders (limit orders on both sides)
  *   - Spread arbitrage orders (cross-leg trades)
  * 
- * Prevention strategies:
- *   - Price check: Reject if arbitrage order would cross MM orders
- *   - Cancel first: Cancel conflicting MM orders before placing arbitrage orders
- *   - Adjust price: Adjust arbitrage order price to avoid crossing
+ * This is now a lightweight wrapper around UnifiedOrderTracker.
+ * All order tracking is delegated to the unified tracker for:
+ *   - Single source of truth
+ *   - Better memory efficiency
+ *   - Consistent statistics
  * 
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
 
-#include "../Includes/FasterDefs.h"
+#include "UnifiedOrderTracker.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -23,116 +24,58 @@
 namespace futu {
 
 //==============================================================================
-// Active Order Info
+// Legacy Types (for API compatibility)
 //==============================================================================
 
+/// Legacy active order info (for getMMBuyOrders/getMMSellOrders API)
 struct ActiveOrder
 {
-    std::string code;           ///< Contract code
-    uint32_t order_id;          ///< Order ID
-    double price;               ///< Order price
-    double qty;                 ///< Remaining quantity
-    bool is_buy;                ///< true = buy, false = sell
-    uint64_t timestamp;         ///< Order timestamp
+    std::string code;
+    uint32_t order_id;
+    double price;
+    double qty;
+    bool is_buy;
+    uint64_t timestamp;
     
     ActiveOrder()
-        : order_id(0), price(0), qty(0), is_buy(true), timestamp(0)
-    {}
+        : order_id(0), price(0), qty(0), is_buy(true), timestamp(0) {}
     
     ActiveOrder(const std::string& c, uint32_t id, double p, double q, bool buy, uint64_t ts)
-        : code(c), order_id(id), price(p), qty(q), is_buy(buy), timestamp(ts)
-    {}
+        : code(c), order_id(id), price(p), qty(q), is_buy(buy), timestamp(ts) {}
 };
 
-//==============================================================================
-// Arbitrage Order Request
-//==============================================================================
+// Note: ArbitrageOrderRequest and SelfTradeCheckResult are defined in UnifiedOrderTracker.h
+// We reuse those definitions via the include above.
 
-struct ArbitrageOrderRequest
-{
-    std::string code;           ///< Contract code
-    bool is_buy;                ///< Direction
-    double price;               ///< Requested price (0 = market order)
-    double qty;                 ///< Quantity
-    bool is_market_order;       ///< Is this a market order?
-    
-    ArbitrageOrderRequest()
-        : price(0), qty(0), is_buy(true), is_market_order(false)
-    {}
-};
-
-//==============================================================================
-// Self-Trade Check Result
-//==============================================================================
-
-struct SelfTradeCheckResult
-{
-    bool has_risk;              ///< Has self-trade risk
-    std::string risk_code;      ///< Code with risk
-    double conflict_price;      ///< Price level of conflict
-    double conflict_qty;        ///< Quantity at risk
-    
-    // Conflicting orders
-    std::vector<uint32_t> conflicting_order_ids;
-    
-    // Recommended action
-    enum class Action : uint8_t
-    {
-        ALLOW,                  ///< No conflict, allow order
-        REJECT,                 ///< Reject arbitrage order
-        CANCEL_FIRST,           ///< Cancel MM orders first
-        ADJUST_PRICE            ///< Adjust arbitrage price
-    } recommended_action;
-    
-    double adjusted_price;      ///< Adjusted price if ADJUST_PRICE
-    
-    SelfTradeCheckResult()
-        : has_risk(false)
-        , conflict_price(0)
-        , conflict_qty(0)
-        , recommended_action(Action::ALLOW)
-        , adjusted_price(0)
-    {}
-};
-
-//==============================================================================
-// Self-Trade Prevention Configuration
-//==============================================================================
-
+/// Legacy configuration
 struct StpConfig
 {
-    bool enabled;               ///< Enable self-trade prevention
-    bool allow_same_price;      ///< Allow orders at same price (no cross)
-    double min_price_gap;       ///< Minimum price gap (in ticks)
+    bool enabled;
+    bool allow_same_price;
+    double min_price_gap;
     
-    // Prevention strategy
     enum class Strategy : uint8_t
     {
-        REJECT_ARB,             ///< Reject arbitrage order
-        CANCEL_MM,              ///< Cancel MM orders first
-        ADJUST_ARB_PRICE        ///< Adjust arbitrage price
+        REJECT_ARB,
+        CANCEL_MM,
+        ADJUST_ARB_PRICE
     } strategy;
     
-    // Price adjustment
-    double price_adjust_ticks;  ///< How many ticks to adjust
+    double price_adjust_ticks;
     
     StpConfig()
-        : enabled(true)
-        , allow_same_price(false)
-        , min_price_gap(1.0)
-        , strategy(Strategy::CANCEL_MM)
-        , price_adjust_ticks(1.0)
-    {}
+        : enabled(true), allow_same_price(false), min_price_gap(1.0),
+          strategy(Strategy::CANCEL_MM), price_adjust_ticks(1.0) {}
 };
 
 //==============================================================================
-// Self-Trade Prevention Manager
+// Self-Trade Prevention Manager (UnifiedOrderTracker Wrapper)
 //==============================================================================
 
 class SelfTradePrevention
 {
 public:
-    SelfTradePrevention();
+    SelfTradePrevention() : _tracker(nullptr) {}
     ~SelfTradePrevention() = default;
     
     //==========================================================================
@@ -142,8 +85,12 @@ public:
     void setConfig(const StpConfig& config) { _config = config; }
     const StpConfig& getConfig() const { return _config; }
     
+    /// Set the unified order tracker (must be called before use)
+    void setUnifiedTracker(UnifiedOrderTracker* tracker) { _tracker = tracker; }
+    UnifiedOrderTracker* getUnifiedTracker() const { return _tracker; }
+    
     //==========================================================================
-    // Order Tracking
+    // Order Tracking (delegated to UnifiedOrderTracker)
     //==========================================================================
     
     /// Track a new market making order
@@ -193,38 +140,12 @@ public:
     // Statistics
     //==========================================================================
     
-    size_t totalOrders() const { return _orders_by_id.size(); }
+    size_t totalOrders() const;
     size_t ordersForContract(const std::string& code) const;
-    
+
 private:
-    //==========================================================================
-    // Internal Methods
-    //==========================================================================
-    
-    double computeAdjustedPrice(double original_price, bool is_buy) const;
-    
-    //==========================================================================
-    // Configuration
-    //==========================================================================
-    
     StpConfig _config;
-    
-    //==========================================================================
-    // Order Storage
-    //==========================================================================
-    
-    // All orders by order ID
-    wtp::wt_hashmap<uint32_t, ActiveOrder> _orders_by_id;
-    
-    // Orders by contract code
-    // For buy orders: map<code, map<order_id, ActiveOrder>>
-    // For sell orders: same structure
-    wtp::wt_hashmap<std::string, wtp::wt_hashmap<uint32_t, ActiveOrder>> _buy_orders_by_code;
-    wtp::wt_hashmap<std::string, wtp::wt_hashmap<uint32_t, ActiveOrder>> _sell_orders_by_code;
-    
-    // Best prices cache
-    wtp::wt_hashmap<std::string, double> _best_buy_price;
-    wtp::wt_hashmap<std::string, double> _best_sell_price;
+    UnifiedOrderTracker* _tracker;  ///< Not owned, shared with strategy
 };
 
 } // namespace futu

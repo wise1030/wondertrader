@@ -197,6 +197,9 @@ public:
 
 	inline const char*	get(const char* key) const
 	{
+		if (_cache._block == NULL)
+			return "";
+
 		auto it = _indice.find(key);
 		if (it == _indice.end())
 			return "";
@@ -206,6 +209,9 @@ public:
 
 	void	put(const char* key, const char*val, std::size_t len = 0, CacheLogger logger = nullptr)
 	{
+		if (_cache._block == NULL)
+			return;
+
 		auto it = _indice.find(key);
 		if (it != _indice.end())
 		{

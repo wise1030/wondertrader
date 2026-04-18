@@ -1,0 +1,36 @@
+# 手动持仓文件 - 用于同步本地持仓与CTP持仓
+# 文件位置: ./generated/outputs/futu_mm_ag/mannual.yaml
+# 加载后会被自动重命名为 mannual.yaml.YYYYMMDDhhmmss
+#
+# 字段说明:
+#   exchg: 交易所代码
+#   code: 合约代码
+#   direct: 方向 (0=多头, 1=空头)
+#   volume: 持仓量
+#   openprice: 开仓均价 (用于计算持仓盈亏)
+#
+# 日志分析:
+#   SHFE.ag2606: long=264, short=330, 净=-66
+#   SHFE.ag2612: long=0, short=21, 净=-21
+
+details:
+  # ag2606 多头 264 手
+  - exchg: SHFE
+    code: ag2606
+    direct: 0              # 0=多头
+    volume: 264
+    openprice: 8000.0      # 请替换为实际开仓均价
+  
+  # ag2606 空头 330 手
+  - exchg: SHFE
+    code: ag2606
+    direct: 1              # 1=空头
+    volume: 330
+    openprice: 8100.0      # 请替换为实际开仓均价
+  
+  # ag2612 空头 21 手
+  - exchg: SHFE
+    code: ag2612
+    direct: 1              # 1=空头
+    volume: 21
+    openprice: 8200.0      # 请替换为实际开仓均价

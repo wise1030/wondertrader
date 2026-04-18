@@ -28,7 +28,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <memory>
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -230,22 +230,20 @@ private:
     std::atomic<bool> _running;
     std::atomic<bool> _stop_requested;
     
-    // Condition variable for wake-up
-    std::mutex _cv_mutex;
-    std::condition_variable _cv;
+    // Flag for tick notification
     std::atomic<bool> _tick_available;
     
     //==========================================================================
     // State (for arb thread)
     //==========================================================================
     
-    // MM order state copy for self-trade check
-    std::mutex _mm_orders_mutex;
+    // MM order state copy for self-trade check (using atomic_flag as spinlock)
+    std::atomic_flag _mm_orders_spin = ATOMIC_FLAG_INIT;
     wtp::wt_hashmap<std::string, std::vector<ActiveOrder>> _mm_buy_orders;
     wtp::wt_hashmap<std::string, std::vector<ActiveOrder>> _mm_sell_orders;
     
-    // Tick sizes for price adjustment (contract code -> tick size)
-    std::mutex _tick_size_mutex;
+    // Tick sizes for price adjustment (using atomic_flag as spinlock)
+    std::atomic_flag _tick_size_spin = ATOMIC_FLAG_INIT;
     wtp::wt_hashmap<std::string, double> _tick_sizes;
     double _min_profit_threshold = 0.0;  // Minimum profit threshold in ticks
     

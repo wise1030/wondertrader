@@ -47,7 +47,7 @@ void TickTransactionInferer::resetAccumulation()
 // Main Inference Logic
 //------------------------------------------------------------------------------
 
-InferenceTransaction TickTransactionInferer::inferFromTick(wtp::WTSTickData* tick)
+InferredTransaction TickTransactionInferer::inferFromTick(wtp::WTSTickData* tick)
 {
     if (!tick) {
         return InferredTransaction();
@@ -56,8 +56,8 @@ InferenceTransaction TickTransactionInferer::inferFromTick(wtp::WTSTickData* tic
     auto& tickStruct = tick->getTickStruct();
     
     return inferFromTick(
-        tickStruct.bid_price[0],
-        tickStruct.ask_price[0],
+        tickStruct.bid_prices[0],
+        tickStruct.ask_prices[0],
         tickStruct.bid_qty[0],
         tickStruct.ask_qty[0],
         tickStruct.price,
@@ -66,7 +66,7 @@ InferenceTransaction TickTransactionInferer::inferFromTick(wtp::WTSTickData* tic
     );
 }
 
-InferenceTransaction TickTransactionInferer::inferFromTick(
+InferredTransaction TickTransactionInferer::inferFromTick(
     double bid_px, double ask_px,
     double bid_vol, double ask_vol,
     double last_price, double last_vol,
@@ -192,21 +192,39 @@ InferenceMethod TickTransactionInferer::detectMethod(
     double price_change = last_price - prev_last_price;
     double tick_size = _config.tick_size;
     
-    // Check for spread cross
-    double prev_mid = (prev_bid_px + prev_ask_px) / 2.0;
-    double prev_spread = prev_ask_px - prev_bid_px;
+    //==========================================================================
+    // Lee-Ready 算法（优先级最高）
+    // 1. 如果成交价 >= ask1，则为买方发起
+    // 2. 如果成交价 <= bid1，则为卖方发起
+    //==========================================================================
     
-    // Price crossed to ask side
-    if (prev_last_price <= prev_ask_px && last_price > prev_ask_px) {
+    // 价格在卖一价或之上 -> 买方发起
+    if (last_price >= ask_px - tick_size * 0.1) {
         return InferenceMethod::SPREAD_CROSS_UP;
     }
     
-    // Price crossed to bid side
-    if (prev_last_price >= prev_bid_px && last_price < prev_bid_px) {
+    // 价格在买一价或之下 -> 卖方发起
+    if (last_price <= bid_px + tick_size * 0.1) {
         return InferenceMethod::SPREAD_CROSS_DOWN;
     }
     
-    // Significant price movement
+    //==========================================================================
+    // 价格穿越价差（从一侧到另一侧）
+    //==========================================================================
+    if (prev_last_price > 0) {
+        // 从买方穿越到卖方
+        if (prev_last_price <= prev_ask_px && last_price > ask_px) {
+            return InferenceMethod::SPREAD_CROSS_UP;
+        }
+        // 从卖方穿越到买方
+        if (prev_last_price >= prev_bid_px && last_price < bid_px) {
+            return InferenceMethod::SPREAD_CROSS_DOWN;
+        }
+    }
+    
+    //==========================================================================
+    // Tick Rule: 价格变化方向
+    //==========================================================================
     if (price_change > tick_size * 0.5) {
         return InferenceMethod::PRICE_UP;
     }
@@ -214,12 +232,15 @@ InferenceMethod TickTransactionInferer::detectMethod(
         return InferenceMethod::PRICE_DOWN;
     }
     
-    // Bid price moved down (new bid level)
+    //==========================================================================
+    // 盘口消耗（价格不变时的备选方法）
+    //==========================================================================
+    // Bid 价格下移（新买一价）-> 卖方消耗
     if (bid_px < prev_bid_px - tick_size * 0.5) {
         return InferenceMethod::BID_DEPLETION;
     }
     
-    // Ask price moved up (new ask level)
+    // Ask 价格上移（新卖一价）-> 买方消耗
     if (ask_px > prev_ask_px + tick_size * 0.5) {
         return InferenceMethod::ASK_DEPLETION;
     }

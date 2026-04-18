@@ -240,12 +240,12 @@ private:
  * For cases where multiple producers/consumers are needed
  */
 template<typename T, size_t Capacity>
-class MPMCQueue
+class BlockingQueue
 {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be power of 2");
     
 public:
-    MPMCQueue()
+    BlockingQueue()
         : _head(0)
         , _tail(0)
     {

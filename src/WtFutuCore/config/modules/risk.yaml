@@ -1,0 +1,34 @@
+# ============================================================
+# 风控模块配置
+# 包含：流控参数、风险限制、恢复机制、收盘前平仓
+# ============================================================
+
+# 流控参数
+rateLimits:
+  maxOrdersPerSec: 50           # 每秒最大下单数
+  maxCancelsPerSec: 30          # 每秒最大撤单数
+  maxTradesPerSec: 20           # 每秒最大成交数
+
+# 风险限制
+limits:
+  deltaLimit: 5000000.0         # Delta阈值
+  maxDelta: 100000000.0         # 最大组合Delta
+  maxExposure: 300000000.0      # 最大暴露
+  hedgeThreshold: 3000000.0     # 对冲触发阈值
+  maxSpreadMult: 3.0            # 最大价差倍数
+  maxDailyLoss: -200000.0       # 最大日内亏损
+
+# 恢复机制
+recovery:
+  cooldownMs: 30000             # 风控冷却期 (毫秒)
+  checkIntervalMs: 5000         # 恢复检查间隔 (毫秒)
+  recoveryThreshold: 0.8        # 恢复阈值 (利用率)
+
+# 收盘前平仓
+closeout:
+  minutesBefore: 5              # 收盘前多少分钟停止报价
+  flattenPosition: true         # 收盘前是否平掉所有敞口
+
+# 下单错误处理
+orderError:
+  threshold: 3                  # 触发暂停的连续下单错误次数

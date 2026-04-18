@@ -155,18 +155,20 @@ public:
         return static_cast<double>(sum()) / _size;
     }
 
-    // Standard deviation
+    // Standard deviation (sample standard deviation using Bessel's correction)
+    // Requires at least 2 samples, returns 0.0 otherwise
     template<typename U = T>
     typename std::enable_if<std::is_arithmetic<U>::value, double>::type
     stddev() const {
-        if (_size < 2) return 0.0;
+        if (_size < 2) return 0.0;  // Safe: cannot divide by zero
         double avg = average();
         double variance = 0.0;
         for (size_type i = 0; i < _size; ++i) {
             double diff = (*this)[i] - avg;
             variance += diff * diff;
         }
-        return std::sqrt(variance / (_size - 1));
+        // Safe division: _size >= 2, so (_size - 1) >= 1
+        return std::sqrt(variance / static_cast<double>(_size - 1));
     }
 
     // Min value

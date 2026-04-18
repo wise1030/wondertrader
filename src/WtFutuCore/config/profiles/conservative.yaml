@@ -1,0 +1,205 @@
+# ============================================================
+# 保守模式配置模板
+# 适用于低风险偏好、稳定收益场景
+# ============================================================
+
+# 使用说明：
+# 1. 复制此文件到 config/ 目录并重命名为 config.yaml
+# 2. 修改行情和交易通道的连接信息
+# 3. 修改合约配置为实际交易的合约
+
+# ============================================================
+# 基础配置（需要修改连接信息）
+# ============================================================
+basefiles:
+  session: ../common/sessions.json
+  commodity: ../common/commodities.json
+  contract: ../common/contracts.json
+  holiday: ../common/holidays.json
+
+parsers:
+  - active: true
+    id: parser_ctp
+    module: ParserCTP
+    front: tcp://your_md_front
+    userid: "your_userid"
+    password: "your_password"
+    brokerid: "your_brokerid"
+
+traders:
+  - active: true
+    id: trader_ctp
+    module: TraderCTP
+    savedata: true
+    front: tcp://your_td_front
+    broker: "your_broker"
+    appid: your_appid
+    authcode: "your_authcode"
+    user: "your_user"
+    pass: "your_pass"
+    quick: true
+
+env:
+  name: uft
+  product:
+    session: TRADING
+
+data:
+  store:
+    path: ./data/
+
+bspolicy: actpolicy.yaml
+
+# ============================================================
+# 策略配置 - 保守模式
+# ============================================================
+strategies:
+  uft:
+    - active: true
+      id: futu_mm_conservative
+      name: FutuStraFact.FutuMM
+      trader: trader_ctp
+      params:
+        # 合约配置
+        anchorCode: SHFE.ag2606
+        contracts:
+          - code: SHFE.ag2606
+            maxPosition: 20          # 保守：较小仓位
+            maxDelta: 200000
+        
+        # 核心报价参数（保守：较大价差，较小数量）
+        numLevels: 1
+        baseSpread: 5.0              # 较大价差
+        baseQty: 1.0                 # 较小基础量
+        qtyDecay: 0.7
+        levelStep: 1.0
+        
+        # 库存管理（保守：严格库存控制）
+        maxInventory: 20.0           # 较小库存
+        skewFactor: 0.02             # 较大库存惩罚
+        maxSkew: 3.0
+        hedgeRatio: 1.0
+        targetInventory: 0
+        
+        # Sticky/Skew 参数
+        stickyThreshold: 1.0
+        maxPriceDeviation: 20.0
+        skewSensitivity: 3.0         # 更敏感的skew
+        aggressiveSkewThreshold: 0.4 # 更早触发激进skew
+        oneSidedThreshold: 0.7
+        
+        # Alpha Engine 参数
+        alphaEngine:
+          sensitivity: 0.3           # 较低的alpha敏感度
+          ofiWeight: 0.4
+          tradeWeight: 0.3
+          leadlagWeight: 0.3
+          emaFactor: 0.3
+          strongThreshold: 0.8       # 更高的强信号阈值
+          ofiWindow: 50
+          tradeWindow: 100
+        
+        # 组合风险参数（保守：严格限制）
+        deltaLimit: 1000000.0        # 较小delta限制
+        maxDelta: 2000000.0
+        maxExposure: 5000000.0
+        hedgeThreshold: 500000.0
+        maxSpreadMult: 2.0           # 较小的价差倍数
+        maxDailyLoss: -50000.0       # 较小的日亏损限制
+        
+        # 下单错误处理
+        orderErrorThreshold: 3
+        
+        # 收盘前平仓
+        closeoutMinutesBefore: 10    # 更早开始平仓
+        closeoutFlattenPosition: true
+        
+        # Risk Monitor 参数（保守：严格流控）
+        riskMonitor:
+          maxOrdersPerSec: 20        # 较低下单频率
+          maxCancelsPerSec: 10
+          maxTradesPerSec: 10
+          cooldownMs: 60000          # 更长冷却期
+          checkIntervalMs: 10000
+          recoveryThreshold: 0.6     # 更低的恢复阈值
+        
+        # Correlation Manager 参数
+        correlationManager:
+          windowSize: 100
+          minCorrelation: 0.5
+          spreadZThreshold: 2.0
+        
+        # 模块开关
+        useSpreadOptimizer: true
+        useAutoCancel: true
+        useMarketState: true
+        useOrderBook: false
+        useAlphaEngine: true
+        useToxicityDetector: true
+        usePerformanceMonitor: false
+        useAdaptiveParam: false
+        usePerformanceAnalyzer: false
+        
+        # SpreadOptimizer 参数（保守）
+        spreadOptimizer:
+          volSensitivity: 1.5        # 更高波动率敏感度
+          depthSensitivity: 0.5
+          volWindow: 100
+          minSpreadMult: 0.8         # 较高最小价差
+          phi: 0.02                  # 更大库存惩罚
+          portfolioSkewWeight: 0.5
+          minCorrelation: 0.5
+        
+        # Toxicity Detector 参数（保守）
+        toxicityDetector:
+          vpinThreshold: 0.6         # 更低的毒性阈值
+          window: 50
+          cooloffMs: 10000           # 更长冷却时间
+        
+        # Synthetic Transaction 参数
+        syntheticTransaction:
+          enabled: true
+          tickWeight: 0.4
+          bookWeight: 0.4
+          selfTradeWeight: 0.2
+          minSamples: 5
+          imbalanceWindowMs: 5000
+          largeTradeThreshold: 50.0
+          minConfidence: 0.3
+          lookbackTrades: 50
+          toxicityWindowMs: 5000
+          adverseThreshold: 0.6
+        
+        # Market State Detector 参数
+        marketState:
+          volThreshold: 0.002        # 更低的波动率阈值
+          moveThreshold: 0.003
+          spreadThreshold: 5.0
+          volumeThreshold: 10.0
+          lookbackTicks: 50
+          cooldownTicks: 30
+        
+        # Auto Cancel Policy 参数
+        autoCancel:
+          maxAgeMs: 3000             # 更短订单存活时间
+          priceDeviation: 3.0
+          cancelOnStateChange: true
+          cancelOnInventoryLimit: true
+          inventoryLimitCooldownMs: 2000
+        
+        # 跨期价差套利（保守：关闭）
+        spreadArbitrage:
+          enabled: false
+          enhanceMarketMaking: false
+          maxPosition: 10.0
+          entryZScore: 2.5           # 更高的入场阈值
+          exitZScore: 0.8
+          windowSize: 200
+        
+        # 自成交防护
+        selfTradePrevention:
+          enabled: true
+          strategy: cancelMM
+          minPriceGap: 1.0
+          allowSamePrice: false
+          priceAdjustTicks: 1.0

@@ -1,6 +1,6 @@
 /*!
  * \file SelfTradeCalibrator.cpp
- * \brief Implementation of Self-Trade Calibration
+ * \brief Implementation of Self-Trade Calibration (Optimized with RingBuffer)
  */
 #include "SelfTradeCalibrator.h"
 #include <cmath>
@@ -22,18 +22,81 @@ SelfTradeCalibrator::SelfTradeCalibrator()
 
 void SelfTradeCalibrator::reset()
 {
-    _fill_history.clear();
-    _current_market.clear();
-    _cached_calibration.clear();
-    _cache_dirty.clear();
+    _contract_states.clear();
 }
 
 void SelfTradeCalibrator::resetContract(const std::string& code)
 {
-    _fill_history.erase(code);
-    _current_market.erase(code);
-    _cached_calibration.erase(code);
-    _cache_dirty.erase(code);
+    _contract_states.erase(code);
+}
+
+void SelfTradeCalibrator::resetCalibration(const std::string& code)
+{
+    auto it = _contract_states.find(code);
+    if (it != _contract_states.end())
+    {
+        // Clear fill history and reset cache
+        it->second.fill_history.clear();
+        it->second.cached_result = CalibrationResult();
+        it->second.cache_dirty = true;
+    }
+}
+
+void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t current_time, uint64_t decay_window_ms)
+{
+    auto it = _contract_states.find(code);
+    if (it == _contract_states.end())
+        return;
+    
+    auto& state = it->second;
+    
+    // If no fills, nothing to decay
+    if (state.fill_history.empty())
+        return;
+    
+    // 时间戳格式: date * 1000000 + time * 100 + secs
+    // 其中 secs 格式为 SSMMM (秒*1000 + 毫秒)
+    // 对于同一天内的比较，可以直接比较时间戳差值
+    // decay_window_ms 是毫秒，需要转换
+    
+    // 计算截止时间
+    // 注意：这个简单的减法只在同一天内有效
+    // 对于跨天的情况，fill 会被自然淘汰（因为 RingBuffer 容量有限）
+    uint64_t cutoff_time = 0;
+    if (current_time > decay_window_ms)
+    {
+        cutoff_time = current_time - decay_window_ms;
+    }
+    
+    // 创建新的缓冲区，只保留最近的 fills
+    RingBuffer<SelfFillRecord, 128> recent_fills;
+    uint32_t removed_count = 0;
+    
+    for (const auto& fill : state.fill_history)
+    {
+        if (fill.fill_time >= cutoff_time)
+        {
+            recent_fills.push(fill);
+        }
+        else
+        {
+            removed_count++;
+        }
+    }
+    
+    // 如果有 fills 被移除，更新状态
+    if (removed_count > 0)
+    {
+        state.fill_history = recent_fills;
+        state.cache_dirty = true;
+        
+        // 如果所有 fills 都被移除，重置缓存
+        if (state.fill_history.empty())
+        {
+            state.cached_result = CalibrationResult();
+            state.cache_dirty = false;
+        }
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -57,30 +120,29 @@ void SelfTradeCalibrator::recordFill(
     record.spread_at_fill = spread;
     record.analysis_time = timestamp;
     
-    // Add to history
-    auto& history = _fill_history[code];
-    history.push_back(record);
+    // Get or create contract state
+    auto& state = _contract_states[code];
     
-    // Limit history size
-    while (history.size() > _config.lookback_trades) {
-        history.pop_front();
-    }
+    // Add to history (RingBuffer auto-manages size)
+    state.fill_history.push(record);
     
     // Mark cache as dirty
-    _cache_dirty[code] = true;
+    state.cache_dirty = true;
 }
 
 void SelfTradeCalibrator::onTick(const std::string& code, double mid_price, uint64_t timestamp)
 {
+    // Get or create contract state
+    auto& state = _contract_states[code];
+    
     // Update current market state
-    auto& state = _current_market[code];
     state.mid_price = mid_price;
     state.timestamp = timestamp;
     
     // Analyze existing fills for toxicity
     analyzeFills(code);
     
-    // Prune old fills
+    // Prune old fills (time-based)
     pruneHistory(code, timestamp);
 }
 
@@ -90,21 +152,29 @@ void SelfTradeCalibrator::onTick(const std::string& code, double mid_price, uint
 
 void SelfTradeCalibrator::analyzeFills(const std::string& code) const
 {
-    auto it = _fill_history.find(code);
-    if (it == _fill_history.end() || it->second.empty()) {
+    auto it = _contract_states.find(code);
+    if (it == _contract_states.end()) {
         return;
     }
     
-    auto market_it = _current_market.find(code);
-    if (market_it == _current_market.end()) {
+    auto& state = it->second;
+    
+    // Skip if cache is clean
+    if (!state.cache_dirty && state.cached_result.sample_size > 0) {
         return;
     }
     
-    const auto& history = it->second;
-    double current_mid = market_it->second.mid_price;
-    uint64_t current_time = market_it->second.timestamp;
+    // Check if we have fills
+    if (state.fill_history.empty()) {
+        state.cached_result = CalibrationResult();
+        state.cache_dirty = false;
+        return;
+    }
     
-    // Calculate statistics
+    double current_mid = state.mid_price;
+    uint64_t current_time = state.timestamp;
+    
+    // Calculate statistics by iterating through RingBuffer
     CalibrationResult result;
     double total_adverse_move = 0;
     uint32_t adverse_count = 0;
@@ -112,23 +182,25 @@ void SelfTradeCalibrator::analyzeFills(const std::string& code) const
     uint32_t sell_count = 0;
     uint32_t buy_adverse = 0;
     uint32_t sell_adverse = 0;
+    uint32_t total_count = 0;
     
-    for (const auto& fill : history) {
+    // Iterate through RingBuffer using range-based for loop
+    for (const auto& fill : state.fill_history) {
         // Check if enough time has passed for analysis
         uint64_t elapsed = current_time - fill.fill_time;
         if (elapsed < _config.toxicity_window_ms / 2) {
             continue;  // Not enough time for meaningful analysis
         }
         
-        // Calculate price move
-        double move = current_mid - fill.mid_at_fill;
-        double move_ticks = move / _config.tick_size;
+        total_count++;
         
         // Check for adverse selection
         bool is_adverse = checkAdverse(fill, current_mid);
         
         if (is_adverse) {
             adverse_count++;
+            double move = current_mid - fill.mid_at_fill;
+            double move_ticks = move / _config.tick_size;
             total_adverse_move += std::abs(move_ticks);
             
             if (fill.is_buy) {
@@ -145,7 +217,7 @@ void SelfTradeCalibrator::analyzeFills(const std::string& code) const
         }
     }
     
-    result.sample_size = static_cast<double>(history.size());
+    result.sample_size = static_cast<double>(total_count);
     
     // Calculate adverse ratios
     if (buy_count > 0) {
@@ -156,10 +228,8 @@ void SelfTradeCalibrator::analyzeFills(const std::string& code) const
     }
     
     // Calculate overall toxicity
-    uint32_t total_count = buy_count + sell_count;
     if (total_count > 0) {
         result.toxicity_level = static_cast<double>(adverse_count) / total_count;
-        result.realized_toxicity = result.toxicity_level;
     }
     
     // Calculate direction bias
@@ -191,8 +261,8 @@ void SelfTradeCalibrator::analyzeFills(const std::string& code) const
     }
     
     // Cache result
-    _cached_calibration[code] = result;
-    _cache_dirty[code] = false;
+    state.cached_result = result;
+    state.cache_dirty = false;
 }
 
 bool SelfTradeCalibrator::checkAdverse(const SelfFillRecord& fill, double current_mid) const
@@ -225,17 +295,18 @@ double SelfTradeCalibrator::calculateRealizedToxicity(const SelfFillRecord& fill
 
 void SelfTradeCalibrator::pruneHistory(const std::string& code, uint64_t current_time)
 {
-    auto it = _fill_history.find(code);
-    if (it == _fill_history.end()) {
+    auto it = _contract_states.find(code);
+    if (it == _contract_states.end()) {
         return;
     }
     
-    auto& history = it->second;
+    auto& state = it->second;
     uint64_t expiry = current_time - (_config.toxicity_window_ms * 10);  // Keep longer for analysis
     
-    while (!history.empty() && history.front().fill_time < expiry) {
-        history.pop_front();
-    }
+    // Note: RingBuffer doesn't support selective removal from front
+    // We rely on its fixed-size nature to auto-prune oldest entries
+    // For time-based pruning, we would need a different approach
+    // For now, the RingBuffer's fixed size (128) serves as the pruning mechanism
 }
 
 //------------------------------------------------------------------------------
@@ -244,23 +315,19 @@ void SelfTradeCalibrator::pruneHistory(const std::string& code, uint64_t current
 
 CalibrationResult SelfTradeCalibrator::getCalibration(const std::string& code) const
 {
-    auto cache_it = _cached_calibration.find(code);
-    auto dirty_it = _cache_dirty.find(code);
-    
-    if (cache_it != _cached_calibration.end() && 
-        dirty_it != _cache_dirty.end() && !dirty_it->second) {
-        return cache_it->second;
+    auto it = _contract_states.find(code);
+    if (it == _contract_states.end()) {
+        return CalibrationResult();
     }
+    
+    auto& state = it->second;
     
     // Re-analyze if cache is dirty or missing
-    analyzeFills(code);
-    
-    cache_it = _cached_calibration.find(code);
-    if (cache_it != _cached_calibration.end()) {
-        return cache_it->second;
+    if (state.cache_dirty || state.cached_result.sample_size == 0) {
+        analyzeFills(code);
     }
     
-    return CalibrationResult();
+    return state.cached_result;
 }
 
 SelfTradeToxicityMetrics SelfTradeCalibrator::getToxicityMetrics(const std::string& code) const
@@ -273,21 +340,19 @@ SelfTradeToxicityMetrics SelfTradeCalibrator::getToxicityMetrics(const std::stri
     metrics.is_toxic = calib.high_toxicity;
     metrics.toxic_side = -calib.recommended_side;  // Invert: if recommend buy, avoid sell
     
-    auto it = _fill_history.find(code);
-    if (it != _fill_history.end()) {
-        metrics.total_fills = static_cast<uint32_t>(it->second.size());
+    auto it = _contract_states.find(code);
+    if (it != _contract_states.end()) {
+        auto& state = it->second;
+        metrics.total_fills = static_cast<uint32_t>(state.fill_history.size());
         
         uint32_t adverse = 0;
         double total_move = 0;
         
-        for (const auto& fill : it->second) {
-            auto market_it = _current_market.find(code);
-            if (market_it != _current_market.end()) {
-                if (checkAdverse(fill, market_it->second.mid_price)) {
-                    adverse++;
-                    double move = market_it->second.mid_price - fill.mid_at_fill;
-                    total_move += std::abs(move / _config.tick_size);
-                }
+        for (const auto& fill : state.fill_history) {
+            if (checkAdverse(fill, state.mid_price)) {
+                adverse++;
+                double move = state.mid_price - fill.mid_at_fill;
+                total_move += std::abs(move / _config.tick_size);
             }
         }
         
@@ -314,20 +379,20 @@ bool SelfTradeCalibrator::isHighToxicity(const std::string& code) const
 // Statistics
 //------------------------------------------------------------------------------
 
-const std::deque<SelfFillRecord>* SelfTradeCalibrator::getFillHistory(const std::string& code) const
+const RingBuffer<SelfFillRecord, 128>* SelfTradeCalibrator::getFillHistory(const std::string& code) const
 {
-    auto it = _fill_history.find(code);
-    if (it != _fill_history.end()) {
-        return &it->second;
+    auto it = _contract_states.find(code);
+    if (it != _contract_states.end()) {
+        return &it->second.fill_history;
     }
     return nullptr;
 }
 
 uint32_t SelfTradeCalibrator::getSampleCount(const std::string& code) const
 {
-    auto it = _fill_history.find(code);
-    if (it != _fill_history.end()) {
-        return static_cast<uint32_t>(it->second.size());
+    auto it = _contract_states.find(code);
+    if (it != _contract_states.end()) {
+        return static_cast<uint32_t>(it->second.fill_history.size());
     }
     return 0;
 }

@@ -1,0 +1,25 @@
+# ============================================================
+# 报价模块配置
+# 包含：核心报价参数、库存管理、Sticky/Skew参数
+# ============================================================
+
+# 核心报价参数
+numLevels: 1                    # 每边档位数
+baseSpread: 3.0                 # 基础价差 (tick)
+baseQty: 3.0                    # 基础量 (手)
+qtyDecay: 0.7                   # 外层衰减
+levelStep: 1.0                  # 档位间距 (tick)
+
+# 库存管理
+maxInventory: 100.0             # 最大库存
+skewFactor: 0.01                # GLFT φ系数 (库存惩罚系数)
+maxSkew: 5.0                    # 最大倾斜 (tick)
+hedgeRatio: 1.0                 # 对冲比例
+targetInventory: 0              # 目标库存
+
+# Sticky/Skew 参数
+stickyThreshold: 1.0            # 价格粘性阈值 (tick)
+maxPriceDeviation: 20.0         # 最大价格偏离 (tick)
+skewSensitivity: 2.0            # Skew 非线性增强系数
+aggressiveSkewThreshold: 0.5    # 激进 Skew 触发阈值 (delta利用率)
+oneSidedThreshold: 0.8          # 单向报价阈值 (delta利用率)

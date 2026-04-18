@@ -4,7 +4,7 @@
  * 
  * Fuses signals from multiple sources to create synthetic transaction data:
  *   1. TickTransactionInferer: Tick-level inference
- *   2. OrderBookAnalyzer: Depth imbalance signals
+ *   2. MarketDataContext: Depth imbalance signals
  *   3. SelfTradeCalibrator: Ground truth calibration
  * 
  * Uses adaptive weighting based on:
@@ -20,7 +20,7 @@
 #include "../Includes/WTSMarcos.h"
 #include "TickTransactionInferer.h"
 #include "SelfTradeCalibrator.h"
-#include "OrderBookAnalyzer.h"
+#include "MarketDataContext.h"
 
 namespace futu {
 
@@ -63,24 +63,11 @@ struct FusionConfig
 };
 
 //==============================================================================
-// Depth Imbalance Signal (from OrderBookAnalyzer)
+// Depth Imbalance Signal (from MarketDataContext)
+// Note: This is now an alias for BookAnalysisResult to unify signal types
 //==============================================================================
 
-struct DepthImbalanceSignal
-{
-    double weighted_imbalance;      ///< Depth-weighted imbalance [-1, 1]
-    double pressure_intensity;      ///< Pressure intensity [0, 1]
-    bool bid_dominant;              ///< Buy pressure dominant
-    bool ask_dominant;              ///< Sell pressure dominant
-    double confidence;              ///< Signal confidence [0, 1]
-    uint64_t timestamp;
-    
-    DepthImbalanceSignal()
-        : weighted_imbalance(0), pressure_intensity(0)
-        , bid_dominant(false), ask_dominant(false)
-        , confidence(0), timestamp(0)
-    {}
-};
+using DepthImbalanceSignal = BookAnalysisResult;
 
 //==============================================================================
 // Synthetic Transaction Data
@@ -234,7 +221,7 @@ private:
     
     // Latest signals
     InferredTransaction _latest_tick_inf;
-    DepthImbalanceSignal _latest_book_sig;
+    BookAnalysisResult _latest_book_sig;  // Using BookAnalysisResult (DepthImbalanceSignal is alias)
     CalibrationResult _latest_calibration;
     
     // Market state
@@ -259,6 +246,37 @@ private:
     bool _has_tick_inf;
     bool _has_book_sig;
     bool _has_calibration;
+    
+    // Accuracy tracking for adaptive weights
+    struct SourceAccuracy {
+        std::vector<bool> predictions;
+        double accuracy{0.5};
+        uint32_t window{100};
+        
+        void addPrediction(bool predicted_up, bool actual_up) {
+            bool correct = (predicted_up == actual_up);
+            predictions.push_back(correct);
+            if (predictions.size() > window) {
+                predictions.erase(predictions.begin());
+            }
+            uint32_t correct_count = 0;
+            for (bool p : predictions) {
+                if (p) correct_count++;
+            }
+            if (!predictions.empty()) {
+                accuracy = static_cast<double>(correct_count) / predictions.size();
+            }
+        }
+    };
+    
+    SourceAccuracy _tick_accuracy;
+    SourceAccuracy _book_accuracy;
+    SourceAccuracy _self_trade_accuracy;
+    
+    double _last_tick_direction{0};
+    double _last_book_direction{0};
+    double _last_self_trade_direction{0};
+    double _last_recorded_price{0};
     
     //==========================================================================
     // Internal Methods

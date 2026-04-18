@@ -19,9 +19,10 @@
 #include <cstdint>
 #include <atomic>
 #include <cmath>
+#include <mutex>
 #include "../Includes/FasterDefs.h"
 #include "../Includes/WTSMarcos.h"
-#include "../Share/RingBuffer.hpp"
+#include "../Share/LockFreeRingBuffer.hpp"
 
 NS_WTP_BEGIN
 class EventNotifier;
@@ -109,17 +110,25 @@ struct RateLimits
     {}
 };
 
-/// Recovery configuration for reversible risks
+/// Recovery configuration for reversible risks - P1-3.3 enhanced
 struct RecoveryConfig
 {
     uint32_t cooldown_ms;           ///< Cooldown period before recovery (milliseconds)
     uint32_t check_interval_ms;     ///< Interval between recovery checks
     double   recovery_threshold;    ///< Risk utilization threshold for recovery (< 1.0)
     
+    // Enhanced recovery limits
+    uint32_t max_recovery_count;    ///< Maximum number of auto-recoveries per session
+    double   pnl_recovery_ratio;    ///< Required PnL recovery ratio (e.g., 0.5 = 50% of loss recovered)
+    double   max_loss_for_recovery; ///< Max absolute loss at halt to allow auto-recovery (0=disabled)
+    
     RecoveryConfig()
         : cooldown_ms(30000)        // 30 seconds default cooldown
         , check_interval_ms(5000)   // 5 seconds default check interval
         , recovery_threshold(0.8)   // 80% utilization threshold
+        , max_recovery_count(3)     // Max 3 auto-recoveries per session
+        , pnl_recovery_ratio(0.5)   // Must recover 50% of loss before resuming
+        , max_loss_for_recovery(0)  // Disabled by default
     {}
 };
 
@@ -133,6 +142,46 @@ struct CloseoutConfig
         : minutes_before(5)         // 5 minutes before close
         , flatten_position(true)    // Flatten by default
     {}
+};
+
+/// Closeout state machine states
+enum class CloseoutState
+{
+    IDLE,           ///< Not triggered, normal trading
+    TRIGGERED,      ///< Triggered, waiting to execute closeout
+    FLATTENING,     ///< Executing flatten orders
+    COMPLETED       ///< Closeout completed
+};
+
+/// Closeout state with transition tracking
+struct CloseoutStateInfo
+{
+    CloseoutState state;
+    uint64_t trigger_time;      ///< When state was triggered
+    uint64_t flatten_start;     ///< When flattening started
+    uint64_t complete_time;     ///< When completed
+    
+    CloseoutStateInfo()
+        : state(CloseoutState::IDLE)
+        , trigger_time(0), flatten_start(0), complete_time(0)
+    {}
+    
+    inline bool canTransitionTo(CloseoutState next) const
+    {
+        switch (state)
+        {
+            case CloseoutState::IDLE:
+                return next == CloseoutState::TRIGGERED;
+            case CloseoutState::TRIGGERED:
+                return next == CloseoutState::FLATTENING || next == CloseoutState::COMPLETED;
+            case CloseoutState::FLATTENING:
+                return next == CloseoutState::COMPLETED;
+            case CloseoutState::COMPLETED:
+                return false;  // Terminal state, must reset to IDLE
+            default:
+                return false;
+        }
+    }
 };
 
 /// Simplified Risk Monitor - reads from Portfolio
@@ -228,7 +277,9 @@ public:
     }
     
     /// Halt trading with category (irreversible risks need manual recovery)
-    void haltTrading(RiskCategory category = RiskCategory::REVERSIBLE);
+    /// @param category Risk category (reversible/irreversible)
+    /// @param pnl_snapshot Current PnL at halt time (for loss-based recovery check)
+    void haltTrading(RiskCategory category = RiskCategory::REVERSIBLE, double pnl_snapshot = 0);
     
     /// Resume trading (only for reversible risks)
     void resumeTrading();
@@ -262,7 +313,7 @@ public:
     void resumeQuoting();
     
     //==========================================================================
-    // Closeout Management (收盘前平仓)
+    // Closeout Management (收盘前平仓) - State Machine
     //==========================================================================
     
     /// Check if closeout should be triggered
@@ -271,20 +322,43 @@ public:
     /// @return true if closeout triggered, false otherwise
     bool checkCloseout(uint32_t currentTime, uint32_t closeTime);
     
+    /// Get current closeout state
+    inline CloseoutState getCloseoutState() const {
+        return _closeout_state.state;
+    }
+    
+    /// Get closeout state info
+    inline const CloseoutStateInfo& getCloseoutStateInfo() const {
+        return _closeout_state;
+    }
+    
     /// Check if closeout has been triggered
     inline bool isCloseoutTriggered() const {
-        return _closeout_triggered.load(std::memory_order_relaxed);
+        return _closeout_state.state != CloseoutState::IDLE;
     }
     
     /// Check if closeout has been completed
     inline bool isCloseoutCompleted() const {
-        return _closeout_completed.load(std::memory_order_relaxed);
+        return _closeout_state.state == CloseoutState::COMPLETED;
     }
     
-    /// Mark closeout as completed
-    void markCloseoutCompleted() {
-        _closeout_completed.store(true, std::memory_order_relaxed);
+    /// Check if currently flattening positions
+    inline bool isCloseoutFlattening() const {
+        return _closeout_state.state == CloseoutState::FLATTENING;
     }
+    
+    /// Transition closeout state (with validation)
+    /// @return true if transition successful, false otherwise
+    bool transitionCloseoutState(CloseoutState next_state, uint64_t timestamp = 0);
+    
+    /// Mark closeout as triggered
+    void markCloseoutTriggered(uint64_t timestamp = 0);
+    
+    /// Mark closeout as flattening
+    void markCloseoutFlattening(uint64_t timestamp = 0);
+    
+    /// Mark closeout as completed
+    void markCloseoutCompleted(uint64_t timestamp = 0);
     
     /// Reset closeout state (for new trading day)
     void resetCloseout();
@@ -320,9 +394,9 @@ private:
     // Timestamp tracking using fixed-size RingBuffer (no dynamic allocation)
     // This prevents memory reallocation and potential data races
     static constexpr size_t MAX_TIMESTAMPS = 256;  // Enough for 1 second at 200Hz
-    RingBuffer<uint64_t, MAX_TIMESTAMPS> _order_times;
-    RingBuffer<uint64_t, MAX_TIMESTAMPS> _cancel_times;
-    RingBuffer<uint64_t, MAX_TIMESTAMPS> _trade_times;
+    wtp::LockFreeRingBuffer<uint64_t, MAX_TIMESTAMPS> _order_times;
+    wtp::LockFreeRingBuffer<uint64_t, MAX_TIMESTAMPS> _cancel_times;
+    wtp::LockFreeRingBuffer<uint64_t, MAX_TIMESTAMPS> _trade_times;
     
     // State
     std::atomic<bool> _trading_halted{false};
@@ -339,10 +413,14 @@ private:
     uint64_t _pause_timestamp{0};       ///< When quoting was paused
     uint64_t _last_recovery_check{0};   ///< Last time recovery was checked
     
-    // Closeout state (收盘前平仓)
+    // Recovery tracking
+    mutable uint32_t _recovery_count{0};        ///< Number of auto-recoveries this session
+    mutable double _halt_pnl_snapshot{0};       ///< PnL at halt time (for loss-based halt)
+    mutable bool _was_loss_triggered{false};    ///< Whether halt was triggered by daily loss
+    
+    // Closeout state (收盘前平仓) - State Machine
     CloseoutConfig _closeout_config;
-    std::atomic<bool> _closeout_triggered{false};
-    std::atomic<bool> _closeout_completed{false};
+    CloseoutStateInfo _closeout_state;
     
     // Event notifier (optional)
     wtp::EventNotifier* _event_notifier = nullptr;

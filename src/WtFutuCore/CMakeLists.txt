@@ -94,6 +94,7 @@ ELSE()
         boost_filesystem
         dl
         pthread
+        atomic          # Required for std::atomic on lock-free data structures
     )
 ENDIF()
 

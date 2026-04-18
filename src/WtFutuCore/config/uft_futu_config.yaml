@@ -13,6 +13,15 @@ basefiles:
   holiday: ./common/holidays.json
 
 # ============================================================
+# 参数热更新配置 (ShareManager)
+# ============================================================
+# 启用后，可通过外部进程修改共享内存中的参数
+# 框架自动检测参数变化并触发 on_params_updated 回调
+share_domain:
+  module: ./WtShareHelper.so    # 共享内存模块
+  name: futu_mm                 # 共享内存域名 (生成 futu_mm.share 文件)
+
+# ============================================================
 # 行情源配置
 # ============================================================
 parsers:
@@ -49,13 +58,13 @@ strategies:
         # ============================================================
         # 合约配置
         # ============================================================
-        anchorCode: CFFEX.IF.2503       # 锚定合约（用于对冲）
+        anchorCode: CFFEX.IF2503       # 锚定合约（用于对冲）
         contracts:
-          - code: CFFEX.IF.2503
+          - code: CFFEX.IF2503
             # multiplier/tickSize 可选，未配置时从基础数据获取
             maxPosition: 50             # 单合约最大持仓 (手)
             maxDelta: 30                # 单合约最大 Delta
-          - code: CFFEX.IF.2506
+          - code: CFFEX.IF2506
             maxPosition: 30
             maxDelta: 20
         
@@ -79,25 +88,44 @@ strategies:
         baseQty: 1.0                    # 基础量 (手)
         qtyDecay: 0.7                   # 外层衰减
         levelStep: 1.0                  # 档位间距 (tick)
-        maxInventory: 100.0             # 默认最大库存
-        skewFactor: 0.01                # GLFT φ系数
+        maxInventory: 100.0             # 最大库存
+        skewFactor: 0.01                # GLFT φ系数 (库存惩罚系数)
         maxSkew: 5.0                    # 最大倾斜 (tick)
         
         # ============================================================
-        # 模块开关
+        # Sticky 策略参数 (减少频繁撤单重报)
+        # 不对称粘性：改善价格(更激进)容忍更大，撤退(更保守)更敏感
         # ============================================================
-        useSpreadOptimizer: true        # GLFT价差优化
-        useAutoCancel: true             # 自动撤单
-        useMarketState: true            # 市场状态检测
-        useOrderBook: false             # 订单簿分析(与Alpha重叠)
-        useAlphaEngine: true            # Alpha预测引擎
-        useToxicityDetector: true       # VPIN毒性检测
-        usePerformanceMonitor: false    # 性能监控(默认关闭，影响tick-to-quote延迟)
-        useAdaptiveParam: false         # 自适应参数调整(默认关闭)
-        usePerformanceAnalyzer: false   # 绩效分析(默认关闭)
+        stickyThreshold: 1.0            # 价格粘性阈值 (tick)
+        improveRetreatRatio: 2.0        # 改善/撤退容忍比 (改善侧阈值=stickyThreshold*ratio)
+        maxPriceDeviation: 20.0         # 最大价格偏离(tick) - 防止计算错误
+        
+        # 增强 Skew 参数 (更激进的库存回归)
+        skewSensitivity: 2.0            # Skew 非线性增强系数
+        aggressiveSkewThreshold: 0.5    # 激进 Skew 触发阈值 (delta利用率)
+        oneSidedThreshold: 0.8          # 单向报价阈值 (delta利用率)
         
         # ============================================================
-        # GLFT SpreadOptimizer 参数
+        # 下单错误处理
+        # ============================================================
+        orderErrorThreshold: 3          # 触发暂停的连续下单错误次数
+        
+        # ============================================================
+        # 收盘前平仓 (收盘时间从基础数据自动获取)
+        # ============================================================
+        closeoutMinutesBefore: 5         # 收盘前多少分钟停止报价 (0=不启用)
+        closeoutFlattenPosition: true    # 收盘前是否平掉所有敞口
+        
+        # ============================================================
+        # 模块开关 (已迁移至 coordinator.yaml)
+        # 新架构使用 SignalAggregator 替代 AlphaEngine
+        # ============================================================
+        modules:
+          useMarketMaking: true
+          useSpreadArbitrage: false
+        
+        # ============================================================
+        # GLFT SpreadOptimizer 参数 (含市场状态检测)
         # ============================================================
         spreadOptimizer:
           volSensitivity: 1.0           # 波动率敏感度
@@ -107,17 +135,17 @@ strategies:
           phi: 0.01                     # 库存惩罚系数
           portfolioSkewWeight: 0.5      # 组合级倾斜权重
           minCorrelation: 0.5           # 最小相关系数阈值
-        
-        # ============================================================
-        # Alpha Engine 参数
-        # ============================================================
-        alphaEngine:
-          sensitivity: 0.5              # η: Alpha对价格影响
-          ofiWeight: 0.4                # OFI权重
-          tradeWeight: 0.3              # 交易流权重
-          leadlagWeight: 0.3            # 跨品种权重
-          emaFactor: 0.3                # EMA平滑因子
-          strongThreshold: 0.7          # 强信号阈值
+          
+          # 市场状态检测 (融合自 MarketStateDetector)
+          # FAST_MOVE → should_hedge=true (暂停报价+撤单)
+          # ELEVATED_VOL → should_widen=true (扩宽价差)
+          # LOW_LIQUIDITY → should_widen=true (扩宽价差)
+          marketState:
+            volThreshold: 0.003         # 波动率阈值 (ELEVATED_VOL)
+            moveThreshold: 0.005        # 价格变动阈值 (FAST_MOVE)
+            spreadThreshold: 5.0        # 价差阈值/tick (LOW_LIQUIDITY)
+            volumeThreshold: 10.0       # 最小量阈值 (LOW_LIQUIDITY)
+            cooldownTicks: 20           # 状态切换冷却ticks
         
         # ============================================================
         # Toxicity Detector 参数
@@ -141,9 +169,14 @@ strategies:
           bookWeight: 0.4               # 订单簿权重
           selfTradeWeight: 0.2          # 自身成交校准权重
           minSamples: 5                 # 最小样本数(自身成交)
-          imbalanceWindowMs: 5000       # Trade Imbalance计算窗口
+          # TickTransactionInferer 参数
+          imbalanceWindowMs: 5000       # 失衡计算窗口(ms)
           largeTradeThreshold: 50.0     # 大单判定阈值
-          minConfidence: 0.3            # 最小置信度阈值
+          minConfidence: 0.3            # 最小置信度
+          # SelfTradeCalibrator 参数
+          lookbackTrades: 50            # 回看成交数
+          toxicityWindowMs: 5000        # 毒性计算窗口(ms)
+          adverseThreshold: 0.6         # 逆向选择阈值
           # 信号融合说明:
           # - tickWeight: 从Tick快照推断交易方向的权重
           # - bookWeight: 订单簿深度不平衡信号的权重
@@ -170,7 +203,8 @@ strategies:
           priceDeviation: 3.0           # 价格偏离阈值(tick)
           checkIntervalMs: 100          # 撤单检查间隔(ms)
           cancelOnStateChange: true     # 状态变化撤单
-          cancelOnInventoryLimit: true  # 库存限制撤单
+          cancelOnInventoryLimit: true   # 库存限制撤单
+          inventoryLimitCooldownMs: 2000  # 库存限制撤单冷却期(ms)
         
         # ============================================================
         # Risk Monitor 参数
@@ -179,6 +213,9 @@ strategies:
           maxOrdersPerSec: 50           # 每秒最大下单
           maxCancelsPerSec: 30          # 每秒最大撤单
           maxTradesPerSec: 20           # 每秒最大成交
+          cooldownMs: 30000            # 风险触发后冷却期(ms)
+          checkIntervalMs: 5000         # 恢复检查间隔(ms)
+          recoveryThreshold: 0.8        # 恢复阈值 (利用率)
         
         # ============================================================
         # Correlation Manager 参数 (跨合约组合级库存偏移)
@@ -223,6 +260,7 @@ strategies:
           windowSize: 200               # 价差统计窗口
           convergenceTimeout: 3600      # 收敛超时时间(秒)
           minCorrelation: 0.7           # 最小相关系数
+          pauseZThreshold: 3.0         # 报价暂停Z阈值
           signalIntervalMs: 100         # 信号生成间隔(ms)
           # 价差对通过 API 动态添加 (addSpreadPair)
           # 示例: IF_2503_2506 (近月-远月)

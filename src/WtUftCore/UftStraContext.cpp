@@ -19,6 +19,8 @@
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSVariant.hpp"
 
+#include <utility>  // for std::pair
+
 #include "../Share/decimal.h"
 #include "../Share/TimeUtils.hpp"
 
@@ -121,8 +123,20 @@ void UftStraContext::on_trade(uint32_t localid, const char* stdCode, bool isLong
 		return;
 
 	WTSContractInfo* cInfo = _engine->get_contract_info(stdCode);
+	if (cInfo == nullptr)
+	{
+		WTSLogger::error("UftStraContext[{}] on_trade: contract info not found for {}", _name, stdCode);
+		return;
+	}
 
-	uint32_t volscale = cInfo->getCommInfo()->getVolScale();
+	WTSCommodityInfo* commInfo = cInfo->getCommInfo();
+	if (commInfo == nullptr)
+	{
+		WTSLogger::error("UftStraContext[{}] on_trade: commodity info not found for {}", _name, stdCode);
+		return;
+	}
+
+	uint32_t volscale = commInfo->getVolScale();
 
 	PosInfo& pItem = _positions[stdCode];
 
@@ -595,6 +609,12 @@ void UftStraContext::on_order(uint32_t localid, const char* stdCode, bool isLong
 		return;
 
 	WTSContractInfo* cInfo = _engine->get_contract_info(stdCode);
+	if (cInfo == nullptr)
+	{
+		WTSLogger::error("UftStraContext[{}] on_order: contract info not found for {}", _name, stdCode);
+		return;
+	}
+
 	uft::OrderStruct*& curOrd = it->second;
 	if(curOrd == NULL)
 	{
@@ -1357,20 +1377,20 @@ void UftStraContext::load_local_data()
 // Market-Making Extensions (做市专用交易接口实现)
 //==========================================================================
 
-uint32_t UftStraContext::stra_quote(const char* stdCode, double bidPrice, double bidQty,
+std::pair<uint32_t, uint32_t> UftStraContext::stra_quote(const char* stdCode, double bidPrice, double bidQty,
 									 double askPrice, double askQty, const char* userTag)
 {
 	// 双边报价：同时下买单和卖单
-	// 返回买单单号，卖单单号为买单单号+1（由TraderAdapter保证）
+	// 返回 {bidOrderId, askOrderId}
 	if (!_trader)
-		return 0;
+		return {0, 0};
 
 	// 先下买单
 	uint32_t bidLocalId = _trader->openLong(stdCode, bidPrice, bidQty, 0);
 	if (bidLocalId == 0)
 	{
 		log_error("Quote BUY failed: {} @ {} x {}", stdCode, bidPrice, bidQty);
-		return 0;
+		return {0, 0};
 	}
 	_order_ids[bidLocalId] = NULL;
 
@@ -1382,15 +1402,15 @@ uint32_t UftStraContext::stra_quote(const char* stdCode, double bidPrice, double
 		// 卖单失败，撤销买单
 		_trader->cancel(bidLocalId);
 		_order_ids.erase(bidLocalId);
-		return 0;
+		return {0, 0};
 	}
 	_order_ids[askLocalId] = NULL;
 
 	log_info("Quote placed: {} BID {}@{} ASK {}@{} (bid_id={}, ask_id={})", 
 		stdCode, bidQty, bidPrice, askQty, askPrice, bidLocalId, askLocalId);
 
-	// 返回买单单号
-	return bidLocalId;
+	// 返回买单和卖单的订单ID
+	return {bidLocalId, askLocalId};
 }
 
 bool UftStraContext::stra_cancel_quote(uint32_t localid)

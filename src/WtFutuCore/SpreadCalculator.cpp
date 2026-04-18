@@ -4,41 +4,19 @@
  * 
  * Performance Optimizations:
  *   - Welford's online algorithm for O(1) mean/variance updates
- *   - SIMD vectorization for correlation/beta calculations
+ *   - Scalar calculations for RingBuffer compatibility
+ * 
+ * NOTE: SIMD removed because RingBuffer uses non-contiguous memory layout.
+ *       SIMD vector loads (_mm256_loadu_pd) require contiguous memory,
+ *       but RingBuffer's operator[] maps logical indices to physical indices.
+ *       Using SIMD on RingBuffer causes boundary violations and crashes.
  */
 #include "SpreadCalculator.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#define SIMD_AVAILABLE 1
-#elif defined(__SSE2__)
-#include <emmintrin.h>
-#define SIMD_AVAILABLE 1
-#else
-#define SIMD_AVAILABLE 0
-#endif
-
 namespace futu {
-
-//==============================================================================
-// SIMD Helper Functions for Vectorized Statistics
-//==============================================================================
-
-#if SIMD_AVAILABLE && defined(__AVX2__)
-/// SIMD-optimized horizontal sum of 4 doubles from __m256d
-static inline double hsum_avx(__m256d v)
-{
-    __m128d vlow = _mm256_castpd256_pd128(v);
-    __m128d vhigh = _mm256_extractf128_pd(v, 1);
-    vlow = _mm_add_pd(vlow, vhigh);
-    __m128d vtmp = _mm_unpackhi_pd(vlow, vlow);
-    vlow = _mm_add_pd(vlow, vtmp);
-    return _mm_cvtsd_f64(vlow);
-}
-#endif
 
 //==============================================================================
 // SpreadCalculator Implementation
@@ -61,6 +39,7 @@ SpreadCalculator::SpreadCalculator()
     , _ema_spread(0)
     , _correlation(0)
     , _beta(1.0)
+    , _smoothed_beta(1.0)   // 初始值 1.0，与 beta 同步
     , _alpha(0)
     , _half_life(0)
     , _last_update(0)
@@ -189,6 +168,19 @@ void SpreadCalculator::updateStatistics()
     {
         _correlation = calculateCorrelation();
         _beta = calculateBeta();
+        
+        // EMA smoothing for beta (hedge ratio)
+        // 减少价格跳跃和短期波动对 beta 的影响
+        // smoothed_beta = α × new_beta + (1-α) × prev_smoothed_beta
+        _smoothed_beta = _config.ema_alpha * _beta + (1 - _config.ema_alpha) * _smoothed_beta;
+        
+        // Beta 边界约束 [0.5, 2.0]
+        // 防止极端值导致 delta 计算异常
+        // 对于同品种跨期，beta 应该接近 1.0
+        constexpr double BETA_MIN = 0.5;
+        constexpr double BETA_MAX = 2.0;
+        if (_smoothed_beta < BETA_MIN) _smoothed_beta = BETA_MIN;
+        if (_smoothed_beta > BETA_MAX) _smoothed_beta = BETA_MAX;
     }
     
     // Estimate half-life periodically
@@ -201,95 +193,58 @@ void SpreadCalculator::updateStatistics()
 double SpreadCalculator::calculateCorrelation() const
 {
     size_t n = std::min(_leg1_history.size(), _leg2_history.size());
-    if (n < _config.min_samples)
+    if (n < _config.min_samples + 1)  // 需要 n+1 个价格计算 n 个 return
         return 0;
     
-    // SIMD-optimized correlation calculation
-    // Uses AVX2 for processing 4 doubles at once
+    // 使用 log return 计算相关性（解决非平稳序列问题）
+    // log_return = ln(P_t / P_{t-1}) = ln(P_t) - ln(P_{t-1})
+    // 优势：平稳性、消除价格水平影响、统计稳定性好
     
-#if SIMD_AVAILABLE && defined(__AVX2__)
-    if (n >= 8)  // Use SIMD only for sufficient data
-    {
-        __m256d sum1_vec = _mm256_setzero_pd();
-        __m256d sum2_vec = _mm256_setzero_pd();
-        
-        // Calculate means using SIMD
-        size_t i = 0;
-        for (; i + 4 <= n; i += 4)
-        {
-            __m256d v1 = _mm256_loadu_pd(&_leg1_history[i]);
-            __m256d v2 = _mm256_loadu_pd(&_leg2_history[i]);
-            sum1_vec = _mm256_add_pd(sum1_vec, v1);
-            sum2_vec = _mm256_add_pd(sum2_vec, v2);
-        }
-        
-        double mean1 = hsum_avx(sum1_vec) / n;
-        double mean2 = hsum_avx(sum2_vec) / n;
-        
-        // Handle remaining elements
-        for (; i < n; ++i)
-        {
-            mean1 += _leg1_history[i];
-            mean2 += _leg2_history[i];
-        }
-        
-        // Calculate covariance and variances using SIMD
-        __m256d cov_vec = _mm256_setzero_pd();
-        __m256d var1_vec = _mm256_setzero_pd();
-        __m256d var2_vec = _mm256_setzero_pd();
-        __m256d mean1_vec = _mm256_set1_pd(mean1);
-        __m256d mean2_vec = _mm256_set1_pd(mean2);
-        
-        i = 0;
-        for (; i + 4 <= n; i += 4)
-        {
-            __m256d v1 = _mm256_loadu_pd(&_leg1_history[i]);
-            __m256d v2 = _mm256_loadu_pd(&_leg2_history[i]);
-            
-            __m256d d1 = _mm256_sub_pd(v1, mean1_vec);
-            __m256d d2 = _mm256_sub_pd(v2, mean2_vec);
-            
-            cov_vec = _mm256_fmadd_pd(d1, d2, cov_vec);
-            var1_vec = _mm256_fmadd_pd(d1, d1, var1_vec);
-            var2_vec = _mm256_fmadd_pd(d2, d2, var2_vec);
-        }
-        
-        double cov = hsum_avx(cov_vec);
-        double var1 = hsum_avx(var1_vec);
-        double var2 = hsum_avx(var2_vec);
-        
-        // Handle remaining elements
-        for (; i < n; ++i)
-        {
-            double d1 = _leg1_history[i] - mean1;
-            double d2 = _leg2_history[i] - mean2;
-            cov += d1 * d2;
-            var1 += d1 * d1;
-            var2 += d2 * d2;
-        }
-        
-        if (var1 < 1e-10 || var2 < 1e-10)
-            return 0;
-        
-        return cov / std::sqrt(var1 * var2);
-    }
-#endif
-    
-    // Scalar fallback for small data or no SIMD
     double mean1 = 0, mean2 = 0;
-    for (size_t i = 0; i < n; ++i)
+    size_t valid_count = 0;
+    
+    for (size_t i = 1; i < n; ++i)
     {
-        mean1 += _leg1_history[i];
-        mean2 += _leg2_history[i];
+        double prev1 = _leg1_history[i - 1];
+        double prev2 = _leg2_history[i - 1];
+        double curr1 = _leg1_history[i];
+        double curr2 = _leg2_history[i];
+        
+        // 跳过无效价格
+        if (prev1 <= 0 || prev2 <= 0 || curr1 <= 0 || curr2 <= 0)
+            continue;
+        
+        double ret1 = std::log(curr1 / prev1);
+        double ret2 = std::log(curr2 / prev2);
+        
+        mean1 += ret1;
+        mean2 += ret2;
+        valid_count++;
     }
-    mean1 /= n;
-    mean2 /= n;
+    
+    if (valid_count < _config.min_samples)
+        return 0;
+    
+    mean1 /= valid_count;
+    mean2 /= valid_count;
     
     double cov = 0, var1 = 0, var2 = 0;
-    for (size_t i = 0; i < n; ++i)
+    
+    for (size_t i = 1; i < n; ++i)
     {
-        double d1 = _leg1_history[i] - mean1;
-        double d2 = _leg2_history[i] - mean2;
+        double prev1 = _leg1_history[i - 1];
+        double prev2 = _leg2_history[i - 1];
+        double curr1 = _leg1_history[i];
+        double curr2 = _leg2_history[i];
+        
+        if (prev1 <= 0 || prev2 <= 0 || curr1 <= 0 || curr2 <= 0)
+            continue;
+        
+        double ret1 = std::log(curr1 / prev1);
+        double ret2 = std::log(curr2 / prev2);
+        
+        double d1 = ret1 - mean1;
+        double d2 = ret2 - mean2;
         cov += d1 * d2;
         var1 += d1 * d1;
         var2 += d2 * d2;
@@ -304,78 +259,57 @@ double SpreadCalculator::calculateCorrelation() const
 double SpreadCalculator::calculateBeta() const
 {
     size_t n = std::min(_leg1_history.size(), _leg2_history.size());
-    if (n < _config.min_samples)
+    if (n < _config.min_samples + 1)  // 需要 n+1 个价格计算 n 个 return
         return 1.0;
     
-    // OLS regression: Y = alpha + beta * X + epsilon
-    // where Y = leg1, X = leg2
+    // OLS regression on log returns: ret_Y = alpha + beta * ret_X + epsilon
+    // 其中 ret_Y = ln(leg1_t / leg1_{t-1}), ret_X = ln(leg2_t / leg2_{t-1})
+    // 
+    // 优势：
+    // 1. 使用平稳序列，避免伪回归（spurious regression）
+    // 2. beta 代表收益率敏感度，而非价格水平敏感度
+    // 3. 消除价格水平差异的影响
+    // 4. 统计稳定性更好
     
-#if SIMD_AVAILABLE && defined(__AVX2__)
-    if (n >= 8)
-    {
-        __m256d sum_x_vec = _mm256_setzero_pd();
-        __m256d sum_y_vec = _mm256_setzero_pd();
-        __m256d sum_xy_vec = _mm256_setzero_pd();
-        __m256d sum_xx_vec = _mm256_setzero_pd();
-        
-        size_t i = 0;
-        for (; i + 4 <= n; i += 4)
-        {
-            __m256d x = _mm256_loadu_pd(&_leg2_history[i]);
-            __m256d y = _mm256_loadu_pd(&_leg1_history[i]);
-            
-            sum_x_vec = _mm256_add_pd(sum_x_vec, x);
-            sum_y_vec = _mm256_add_pd(sum_y_vec, y);
-            sum_xy_vec = _mm256_fmadd_pd(x, y, sum_xy_vec);
-            sum_xx_vec = _mm256_fmadd_pd(x, x, sum_xx_vec);
-        }
-        
-        double sum_x = hsum_avx(sum_x_vec);
-        double sum_y = hsum_avx(sum_y_vec);
-        double sum_xy = hsum_avx(sum_xy_vec);
-        double sum_xx = hsum_avx(sum_xx_vec);
-        
-        // Handle remaining elements
-        for (; i < n; ++i)
-        {
-            double x = _leg2_history[i];
-            double y = _leg1_history[i];
-            sum_x += x;
-            sum_y += y;
-            sum_xy += x * y;
-            sum_xx += x * x;
-        }
-        
-        double denom = n * sum_xx - sum_x * sum_x;
-        if (std::abs(denom) < 1e-10)
-            return 1.0;
-        
-        double beta = (n * sum_xy - sum_x * sum_y) / denom;
-        _alpha = (sum_y - beta * sum_x) / n;
-        
-        return beta;
-    }
-#endif
-    
-    // Scalar fallback
     double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
+    size_t valid_count = 0;
     
-    for (size_t i = 0; i < n; ++i)
+    for (size_t i = 1; i < n; ++i)
     {
-        double x = _leg2_history[i];
-        double y = _leg1_history[i];
-        sum_x += x;
-        sum_y += y;
-        sum_xy += x * y;
-        sum_xx += x * x;
+        double prev1 = _leg1_history[i - 1];
+        double prev2 = _leg2_history[i - 1];
+        double curr1 = _leg1_history[i];
+        double curr2 = _leg2_history[i];
+        
+        // 跳过无效价格
+        if (prev1 <= 0 || prev2 <= 0 || curr1 <= 0 || curr2 <= 0)
+            continue;
+        
+        // Log return
+        double ret_x = std::log(curr2 / prev2);  // leg2 return
+        double ret_y = std::log(curr1 / prev1);  // leg1 return
+        
+        sum_x += ret_x;
+        sum_y += ret_y;
+        sum_xy += ret_x * ret_y;
+        sum_xx += ret_x * ret_x;
+        valid_count++;
     }
     
-    double denom = n * sum_xx - sum_x * sum_x;
+    if (valid_count < _config.min_samples)
+        return 1.0;
+    
+    double denom = valid_count * sum_xx - sum_x * sum_x;
     if (std::abs(denom) < 1e-10)
         return 1.0;
     
-    double beta = (n * sum_xy - sum_x * sum_y) / denom;
-    _alpha = (sum_y - beta * sum_x) / n;
+    double beta = (valid_count * sum_xy - sum_x * sum_y) / denom;
+    _alpha = (sum_y - beta * sum_x) / valid_count;
+    
+    // Beta 解释：
+    // beta ≈ 1.0 表示两合约收益率高度同步（同品种跨期）
+    // beta > 1.0 表示 leg1 收益率波动更大
+    // beta < 1.0 表示 leg2 收益率波动更大
     
     return beta;
 }
@@ -463,6 +397,7 @@ void SpreadCalculator::reset()
     _ema_spread = 0;
     _correlation = 0;
     _beta = 1.0;
+    _smoothed_beta = 1.0;
     _alpha = 0;
     _half_life = 0;
     _initialized = false;

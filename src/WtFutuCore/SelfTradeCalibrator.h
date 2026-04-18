@@ -13,10 +13,9 @@
 #pragma once
 
 #include <string>
-#include <map>
-#include <deque>
 #include <cstdint>
 #include "../Includes/WTSMarcos.h"
+#include "../Includes/FasterDefs.h"
 #include "../Share/RingBuffer.hpp"
 
 namespace futu {
@@ -183,8 +182,9 @@ public:
     // Statistics
     //==========================================================================
     
-    /// Get fill history for a contract
-    const std::deque<SelfFillRecord>* getFillHistory(const std::string& code) const;
+    /// Get fill history for a contract (returns pointer to RingBuffer data)
+    /// Note: Returns nullptr if contract not found
+    const RingBuffer<SelfFillRecord, 128>* getFillHistory(const std::string& code) const;
     
     /// Get sample count for a contract
     uint32_t getSampleCount(const std::string& code) const;
@@ -196,22 +196,26 @@ public:
     void reset();
     void resetContract(const std::string& code);
     
+    /// Reset calibration for a contract (clear history, allow fresh start after toxicity cooloff)
+    void resetCalibration(const std::string& code);
+    
+    /// Apply time-based decay - reduce weight of old fills
+    void decayCalibration(const std::string& code, uint64_t current_time, uint64_t decay_window_ms = 30000);
+    
 private:
     SelfTradeCalibratorConfig _config;
     
-    // Fill history per contract
-    std::map<std::string, std::deque<SelfFillRecord>> _fill_history;
-    
-    // Current market state per contract
-    struct MarketState {
+    // Fill history per contract (using RingBuffer for performance)
+    struct ContractFillState {
+        RingBuffer<SelfFillRecord, 128> fill_history;  // capacity must be power of 2
         double mid_price;
         uint64_t timestamp;
+        mutable CalibrationResult cached_result;
+        mutable bool cache_dirty;
+        
+        ContractFillState() : mid_price(0), timestamp(0), cache_dirty(true) {}
     };
-    std::map<std::string, MarketState> _current_market;
-    
-    // Cached results
-    mutable std::map<std::string, CalibrationResult> _cached_calibration;
-    mutable std::map<std::string, bool> _cache_dirty;
+    wtp::wt_hashmap<std::string, ContractFillState> _contract_states;
     
     //==========================================================================
     // Internal Methods

@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <atomic>
 
 NS_WTP_BEGIN
 class WTSTickData;
@@ -118,6 +119,11 @@ public:
     
     void setConfig(const SpreadArbitrageConfig& config) { _config = config; }
     const SpreadArbitrageConfig& getConfig() const { return _config; }
+    
+    /// Load configuration from YAML file
+    /// @param config_file Path to spread_arbitrage.yaml
+    /// @return true if successful, false otherwise
+    bool loadConfig(const std::string& config_file);
     
     void setCalculatorConfig(const SpreadCalculatorConfig& config);
     void setRiskConfig(const SpreadRiskConfig& config);
@@ -259,14 +265,15 @@ private:
     // Position Tracking
     //==========================================================================
     
-    wtp::wt_hashmap<std::string, SpreadState> _pair_states;
-    
+    wtp::wt_hashmap<std::string, SpreadState> _pair_states;  ///< Spread state per pair
+    mutable std::atomic_flag _pair_states_spin = ATOMIC_FLAG_INIT;  ///< Protects _pair_states
+     
     //==========================================================================
     // Signal State
-    //==========================================================================
-    
-    wtp::wt_hashmap<std::string, uint64_t> _last_signal_time;
-    wtp::wt_hashmap<std::string, SpreadSignal> _last_signals;
+     //==========================================================================
+     
+     wtp::wt_hashmap<std::string, uint64_t> _last_signal_time;
+     wtp::wt_hashmap<std::string, SpreadSignal> _last_signals;
     
     //==========================================================================
     // Callbacks

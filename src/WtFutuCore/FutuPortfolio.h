@@ -18,6 +18,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdint>
+#include <atomic>
 #include "../Includes/FasterDefs.h"
 #include "../Includes/WTSMarcos.h"
 
@@ -32,14 +33,23 @@ struct PortfolioParams
 {
     double      skew_factor;        ///< Skew intensity per unit of inventory
     double      max_skew;           ///< Maximum skew in price units
-    double      delta_limit;        ///< Delta threshold for hedging
     double      hedge_ratio;        ///< Fraction of delta to hedge (0.0-1.0)
     double      target_inventory;   ///< Target inventory level (usually 0)
-    double      max_delta;          ///< Maximum absolute portfolio delta
-    double      max_exposure;       ///< Maximum total exposure
-    double      max_loss;           ///< Maximum daily loss tolerance
     
-    // 分级响应阈值 (占 max_delta 的比例)
+    //==========================================================================
+    // 软指标：组合级 Delta（用于组合级 skew 和对冲决策，不触发风控动作）
+    //==========================================================================
+    double      portfolio_max_delta;  ///< 组合级 Delta 软限制，用于组合级 skew 计算
+                                      ///< 当组合 delta 接近此值时，所有合约 skew 加速回归
+                                      ///< 这是软指标，不触发风控 block
+    
+    //==========================================================================
+    // 硬指标：不得突破（严格风控）
+    //==========================================================================
+    double      max_exposure;       ///< Maximum total exposure (硬限制)
+    double      max_loss;           ///< Maximum daily loss tolerance (硬限制)
+    
+    // 分级响应阈值 (占 portfolio_max_delta 的比例，用于日志和 skew 强度)
     double      warn_threshold;     ///< 警告阈值 (默认 0.7 = 70%)
     double      reduce_threshold;   ///< 减仓阈值 (默认 0.85 = 85%)
     double      halt_threshold;     ///< 暂停阈值 (默认 0.95 = 95%)
@@ -53,12 +63,11 @@ struct PortfolioParams
     PortfolioParams()
         : skew_factor(0.0001)
         , max_skew(5.0)
-        , delta_limit(50.0)
         , hedge_ratio(0.5)
         , target_inventory(0)
-        , max_delta(100.0)
-        , max_exposure(500.0)
-        , max_loss(100000.0)
+        , portfolio_max_delta(50.0)  // 组合级 Delta 软限制 (改为手数，默认50手)
+        , max_exposure(50000000.0)
+        , max_loss(50000.0)
         , warn_threshold(0.7)
         , reduce_threshold(0.85)
         , halt_threshold(0.95)
@@ -91,34 +100,47 @@ struct ContractState
     bool        is_active;      ///< Whether actively quoting
     uint64_t    last_update;    ///< Last update timestamp
     
-    // Per-contract limits
+    // Per-contract limits (硬限制)
     double      max_position;   ///< Max position for this contract (0 = no limit)
-    double      max_delta;      ///< Max delta for this contract (0 = no limit)
+    double      target_position;///< Target position for this contract (default 0 = balanced)
+    
+    // Per-contract soft indicators (软指标)
+    double      contract_max_delta;  ///< 单合约 delta 软限制，用于单合约 skew 计算 (0 = no limit)
     
     ContractState()
         : multiplier(1), tick_size(1), hedge_ratio(1.0)
         , position(0), avg_cost(0), unrealized_pnl(0)
         , last_price(0), bid1(0), ask1(0)
         , daily_pnl(0), is_active(true), last_update(0)
-        , max_position(0), max_delta(0)
+        , max_position(0), target_position(0), contract_max_delta(0)
     {}
     
-    /// Compute delta contribution (Delta Cash)
-    /// Returns 0 if last_price is invalid (<= 0) to avoid incorrect calculations
-    inline double delta() const 
-    { 
-        if (last_price <= 0)
-            return 0;  // 行情无效时返回 0，避免使用 fallback 值导致计算错误
-        return position * multiplier * hedge_ratio * last_price; 
-    }
-    
-    /// Compute exposure (Exposure Cash)
+    /// Compute delta contribution (等效手数)
+    /// 风险管理角度：delta 回归最纯粹的手数概念，避免乘数带来的失真
+    inline double delta() const
+    {
+        return position * hedge_ratio;
+    }    
+    /// Compute exposure (Exposure Cash) - 扣除目标持仓后的风险暴露
+    /// 风险暴露 = |当前持仓 - 目标持仓| * 合约乘数 * 价格
+    /// 目标持仓为 0 时退化为传统的 |position| * multiplier * price
     /// Returns 0 if last_price is invalid (<= 0)
     inline double exposure() const 
     { 
         if (last_price <= 0)
             return 0;
-        return std::abs(position) * multiplier * last_price; 
+        // 扣除目标持仓后的风险暴露
+        double excess_position = position - target_position;
+        return std::abs(excess_position) * multiplier * last_price; 
+    }
+    
+    /// Compute raw exposure without target adjustment (for reference)
+    /// 原始暴露 = |当前持仓| * 合约乘数 * 价格
+    inline double raw_exposure() const
+    {
+        if (last_price <= 0)
+            return 0;
+        return std::abs(position) * multiplier * last_price;
     }
     
     /// Check if position limit breached
@@ -127,10 +149,47 @@ struct ContractState
         return max_position > 0 && std::abs(position) > max_position; 
     }
     
-    /// Check if delta limit breached
-    inline bool isDeltaLimitBreached() const 
+    /// Check if contract delta is high (软指标，用于单合约 skew 计算)
+    /// 注意：这不是风控违规，只是用于判断是否需要增强 skew
+    inline bool isContractDeltaHigh() const 
     { 
-        return max_delta > 0 && std::abs(delta()) > max_delta; 
+        return contract_max_delta > 0 && std::abs(delta()) > contract_max_delta * 0.8; 
+    }
+    
+    /// Get contract delta utilization for skew calculation
+    inline double getContractDeltaUtilization() const
+    {
+        if (contract_max_delta <= 0) return 0;
+        return std::abs(delta()) / contract_max_delta;
+    }
+    
+    /// Check if position exceeds target (need to reduce)
+    /// @param threshold 超过目标持仓的比例阈值 (默认0.0表示超过即需平仓)
+    /// @return true 表示需要减仓
+    inline bool needsPositionReduction(double threshold = 0.0) const
+    {
+        if (target_position == 0)
+        {
+            // 目标为0，任何持仓偏离都需要减仓
+            return std::abs(position) > threshold;
+        }
+        // 检查是否偏离目标持仓
+        double deviation = std::abs(position - target_position);
+        double allowed_deviation = std::abs(target_position) * threshold;
+        return deviation > allowed_deviation;
+    }
+    
+    /// Get position reduction quantity (positive = need to sell, negative = need to buy)
+    /// @return 需要平仓的数量：正数表示需要卖出，负数表示需要买入
+    inline double getPositionReductionQty() const
+    {
+        if (target_position == 0)
+        {
+            // 目标为0，返回当前持仓的相反数
+            return position; // position>0 返回正数(需卖出)，position<0 返回负数(需买入)
+        }
+        // 返回超出目标的部分
+        return position - target_position;
     }
 };
 
@@ -168,7 +227,7 @@ public:
     
     /// Add a contract to the portfolio (O(1))
     void addContract(const std::string& code, double multiplier, double tickSize, 
-                     double hedgeRatio = 1.0, double maxPosition = 0, double maxDelta = 0);
+                     double hedgeRatio = 1.0, double maxPosition = 0, double maxDelta = 0, double targetPosition = 0);
     
     /// Remove a contract (O(1))
     void removeContract(const std::string& code);
@@ -177,13 +236,13 @@ public:
     inline ContractState* getContract(const std::string& code)
     {
         auto it = _code_to_state.find(code);
-        return (it != _code_to_state.end()) ? it->second : nullptr;
+        return (it != _code_to_state.end()) ? &_contracts[it->second] : nullptr;
     }
     
     inline const ContractState* getContract(const std::string& code) const
     {
         auto it = _code_to_state.find(code);
-        return (it != _code_to_state.end()) ? it->second : nullptr;
+        return (it != _code_to_state.end()) ? &_contracts[it->second] : nullptr;
     }
     
     /// Get all contracts
@@ -213,26 +272,51 @@ public:
     // Portfolio Risk Metrics (inline, no allocation)
     //==========================================================================
     
-    /// Total portfolio delta
+    /// Total portfolio delta (原始持仓 delta)
+    /// Thread-safe: uses atomic operations for cache management
     inline double getTotalDelta() const
     {
-        if (!_delta_dirty)
+        if (!_delta_dirty.load(std::memory_order_acquire))
             return _cached_delta;
         
         _cached_delta = 0;
         for (const auto& c : _contracts)
             _cached_delta += c.delta();
-        _delta_dirty = false;
+        _delta_dirty.store(false, std::memory_order_release);
         return _cached_delta;
     }
     
-    /// Total absolute exposure
+    /// Total portfolio delta 扣除目标持仓后的净 delta
+    /// 用于 skew 计算和风险暴露评估
+    inline double getNetDelta() const
+    {
+        double net_delta = 0;
+        for (const auto& c : _contracts)
+        {
+            // 扣除目标持仓后的净 delta 贡献
+            double excess_pos = c.position - c.target_position;
+            net_delta += excess_pos * c.hedge_ratio;
+        }
+        return net_delta;
+    }
+    
+    /// Total absolute exposure (扣除目标持仓，考虑多空对冲)
+    /// 计算逻辑：分开统计多头暴露和空头暴露，取较大值
+    /// 原因：多空方向相反可以相互对冲，净暴露风险更小
     inline double getTotalExposure() const
     {
-        double exposure = 0;
+        double long_exposure = 0;
+        double short_exposure = 0;
         for (const auto& c : _contracts)
-            exposure += c.exposure();
-        return exposure;
+        {
+            double exp = c.exposure();
+            double net_pos = c.position - c.target_position;
+            if (net_pos > 0)
+                long_exposure += exp;
+            else if (net_pos < 0)
+                short_exposure += exp;
+        }
+        return std::max(long_exposure, short_exposure);
     }
     
     /// Total unrealized P&L
@@ -253,10 +337,12 @@ public:
         return pnl;
     }
     
-    /// Net inventory deviation from target
+    /// Net inventory deviation from target (扣除单合约目标持仓)
+    /// 用于 skew 计算：偏离目标的程度
     inline double getInventoryDeviation() const
     {
-        return getTotalDelta() - _params.target_inventory;
+        // 使用净 delta 扣除组合级目标库存
+        return getNetDelta() - _params.target_inventory;
     }
     
     /// Get position for specific contract - O(1)
@@ -266,13 +352,28 @@ public:
         return cs ? cs->position : 0;
     }
     
+    /// Get net position for specific contract (扣除目标持仓) - O(1)
+    inline double getNetPosition(const std::string& code) const
+    {
+        const ContractState* cs = getContract(code);
+        return cs ? (cs->position - cs->target_position) : 0;
+    }
+    
     //==========================================================================
     // Risk Limits
     //==========================================================================
     
-    inline bool isDeltaBreached() const 
+    /// Check if portfolio delta is high (软指标，用于组合级 skew 计算)
+    /// 不作为硬风控条件，仅用于判断是否需要加强 skew
+    inline bool isPortfolioDeltaHigh() const 
     { 
-        return std::abs(getTotalDelta()) > _params.delta_limit; 
+        return _params.portfolio_max_delta > 0 && std::abs(getTotalDelta()) > _params.portfolio_max_delta * 0.8; 
+    }
+    
+    /// Check if portfolio delta is critical (软指标，用于日志警告)
+    inline bool isPortfolioDeltaCritical() const 
+    { 
+        return _params.portfolio_max_delta > 0 && std::abs(getTotalDelta()) > _params.portfolio_max_delta; 
     }
     
     inline bool isExposureBreached() const
@@ -280,23 +381,28 @@ public:
         return getTotalExposure() > _params.max_exposure;
     }
     
+    inline double getMaxExposure() const
+    {
+        return _params.max_exposure;
+    }
+    
     inline bool isLossBreached() const
     {
         return getTotalPnL() < -_params.max_loss;
     }
     
-    /// Check if any single contract limit is breached
+    /// Check if any single contract limit is breached (硬指标)
     inline bool isAnyContractLimitBreached() const
     {
         for (const auto& c : _contracts)
         {
-            if (c.isPositionLimitBreached() || c.isDeltaLimitBreached())
+            if (c.isPositionLimitBreached())
                 return true;
         }
         return false;
     }
     
-    /// Get the first contract that breached its POSITION limit (持仓手数限制)
+    /// Get the first contract that breached its POSITION limit (持仓手数限制，硬指标)
     inline const ContractState* getPositionBreachedContract() const
     {
         for (const auto& c : _contracts)
@@ -307,38 +413,51 @@ public:
         return nullptr;
     }
     
-    /// Get the first contract that breached its DELTA limit (Delta Cash 限制)
-    inline const ContractState* getDeltaBreachedContract() const
+    /// Get position reduction quantity to bring position within limit
+    /// @return 正数表示需要卖出，负数表示需要买入，0表示无需平仓
+    inline int32_t getPositionReductionToLimit(const ContractState& c) const
     {
-        for (const auto& c : _contracts)
-        {
-            if (c.isDeltaLimitBreached())
-                return &c;
+        if (!c.isPositionLimitBreached())
+            return 0;
+        
+        int32_t pos = c.position;
+        int32_t max_pos = c.max_position;
+        
+        if (pos > max_pos) {
+            // 多头超限，需要卖出
+            return pos - max_pos;
+        } else if (pos < -max_pos) {
+            // 空头超限，需要买入（返回负数）
+            return pos + max_pos;  // 负数
         }
-        return nullptr;
+        return 0;
     }
     
-    /// Get the first contract that breached any limit (for backward compatibility)
-    /// @deprecated Use getPositionBreachedContract() or getDeltaBreachedContract() instead
-    inline const ContractState* getBreachedContract() const
-    {
-        for (const auto& c : _contracts)
-        {
-            if (c.isPositionLimitBreached() || c.isDeltaLimitBreached())
-                return &c;
-        }
-        return nullptr;
-    }
+    /// Get all contracts that need position reduction (exceed target position)
+    /// @param threshold 超过目标持仓的比例阈值
+    /// @return 需要减仓的合约列表
+    std::vector<const ContractState*> getContractsNeedingReduction(double threshold = 0.0) const;
     
+    /// Check if any hard limit is breached (position, exposure, loss)
     inline bool isAnyLimitBreached() const
     {
-        return isDeltaBreached() || isExposureBreached() || isLossBreached() || isAnyContractLimitBreached();
+        return isExposureBreached() || isLossBreached() || isAnyContractLimitBreached();
     }
     
-    inline double getDeltaUtilization() const
+    /// Portfolio delta utilization based on net delta (扣除目标持仓)
+    /// 用于组合级 skew 激进度计算
+    inline double getPortfolioDeltaUtilization() const
     {
-        if (_params.delta_limit <= 0) return 1;
-        return std::abs(getTotalDelta()) / _params.delta_limit;
+        if (_params.portfolio_max_delta <= 0) return 0;
+        return std::abs(getNetDelta()) / _params.portfolio_max_delta;
+    }
+    
+    /// Raw portfolio delta utilization (原始持仓)
+    /// 用于组合级 skew 计算和对冲决策
+    inline double getRawPortfolioDeltaUtilization() const
+    {
+        if (_params.portfolio_max_delta <= 0) return 0;
+        return std::abs(getTotalDelta()) / _params.portfolio_max_delta;
     }
     
     //==========================================================================
@@ -358,7 +477,7 @@ public:
     /// Get current risk level based on delta utilization
     inline RiskLevel getRiskLevel() const
     {
-        double util = getDeltaUtilization();
+        double util = getPortfolioDeltaUtilization();
         if (util < 0.5) return RiskLevel::NORMAL;
         if (util < 0.7) return RiskLevel::WARNING;
         if (util < 0.85) return RiskLevel::ELEVATED;
@@ -407,33 +526,6 @@ public:
     }
     
     //==========================================================================
-    // Quote Adjustment (Legacy - deprecated)
-    //==========================================================================
-    
-    /// Calculate quote skew based on inventory
-    /// @deprecated Use SpreadOptimizer::computePortfolioSkew instead
-    /// This method is kept for backward compatibility but will be removed
-    double computeQuoteSkew(const std::string& code = "") const;
-    
-    //==========================================================================
-    // Enhanced Quote Adjustment
-    //==========================================================================
-    
-    /// 计算增强的 skew - 使用非线性调整，更激进地减小库存
-    /// @param code 合约代码（可选，用于单合约 skew）
-    /// @return 偏移量（正数向上，负数向下）
-    double computeEnhancedSkew(const std::string& code = "") const;
-    
-    /// 检查是否应该只报有利于减仓的一边
-    /// @param is_buy_side 是否是买边（true=报买单，false=报卖单）
-    /// @return true 表示应该报这一边，false 表示应该跳过
-    bool shouldQuoteSide(bool is_buy_side) const;
-    
-    /// 获取单向报价建议
-    /// @return 0=双边报价，1=只报买（减空头），-1=只报卖（减多头）
-    int getOneSidedQuoteSuggestion() const;
-    
-    //==========================================================================
     // Hedging
     //==========================================================================
     
@@ -449,14 +541,14 @@ private:
     
     std::vector<ContractState> _contracts;
     
-    /// O(1) contract lookup map
-    wtp::wt_hashmap<std::string, ContractState*> _code_to_state;
+    /// O(1) contract lookup map (stores index, not pointer, to avoid dangling pointer on vector resize)
+    wtp::wt_hashmap<std::string, size_t> _code_to_state;
     
-    // Cached delta
+    // Cached delta (thread-safe)
     mutable double _cached_delta;
-    mutable bool _delta_dirty;
+    mutable std::atomic<bool> _delta_dirty;
     
-    inline void invalidateCache() { _delta_dirty = true; }
+    inline void invalidateCache() { _delta_dirty.store(true, std::memory_order_release); }
 };
 
 } // namespace futu

@@ -106,8 +106,11 @@ public:
     /// Get correlation between legs
     double getCorrelation() const { return _correlation; }
     
-    /// Get beta (hedge ratio)
-    double getBeta() const { return _beta; }
+    /// Get beta (hedge ratio) - smoothed by EMA for stability
+    double getBeta() const { return _smoothed_beta; }
+    
+    /// Get raw beta (without EMA smoothing)
+    double getRawBeta() const { return _beta; }
     
     /// Get half-life of mean reversion (in updates)
     double getHalfLife() const { return _half_life; }
@@ -191,6 +194,7 @@ private:
     RingBuffer<double, 256> _leg2_history;
     double _correlation;
     double _beta;
+    double _smoothed_beta;      ///< EMA smoothed beta for stable hedge ratio
     mutable double _alpha;  // mutable for modification in const calculateBeta()
     double _half_life;
     

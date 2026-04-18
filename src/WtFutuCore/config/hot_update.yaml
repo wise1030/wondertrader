@@ -1,0 +1,79 @@
+# ============================================================
+# 热更新参数配置
+# 定义可热更新的参数及其范围
+# ============================================================
+
+# 热更新开关
+enabled: true
+
+# 检查间隔（毫秒）
+check_interval_ms: 5000
+
+# 热更新参数列表
+params:
+  # 报价参数
+  baseSpread:
+    type: double
+    default: 3.0
+    min: 0.5
+    max: 20.0
+    hot_update: true
+    
+  baseQty:
+    type: double
+    default: 3.0
+    min: 1.0
+    max: 100.0
+    hot_update: true
+    
+  skewFactor:
+    type: double
+    default: 0.01
+    min: 0.001
+    max: 0.1
+    hot_update: true
+    
+  maxInventory:
+    type: double
+    default: 100.0
+    min: 10.0
+    max: 1000.0
+    hot_update: true
+    
+  # 风控参数
+  deltaLimit:
+    type: double
+    default: 5000000.0
+    min: 100000.0
+    max: 100000000.0
+    hot_update: true
+    
+  maxDailyLoss:
+    type: double
+    default: -200000.0
+    min: -1000000.0
+    max: 0
+    hot_update: true
+    
+  # Alpha参数
+  alphaSensitivity:
+    type: double
+    default: 0.5
+    min: 0.0
+    max: 2.0
+    hot_update: true
+    
+  # 毒性参数
+  toxicityThreshold:
+    type: double
+    default: 0.7
+    min: 0.3
+    max: 1.0
+    hot_update: true
+    
+  toxicityCooloffMs:
+    type: int
+    default: 5000
+    min: 1000
+    max: 60000
+    hot_update: true

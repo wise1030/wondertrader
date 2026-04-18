@@ -242,13 +242,13 @@ public:
 	 *	@askPrice	卖价
 	 *	@askQty		卖量
 	 *	@userTag	用户标签
-	 *	@return		买单本地单号（卖单为买单+1，由TraderAdapter保证）
+	 *	@return		std::pair<bidOrderId, askOrderId>买单和卖单的本地单号
 	 *	
 	 *	注意：库存偏离度、Delta、波动率等业务指标由策略层计算，
 	 *	可使用 InventoryManager、SpreadOptimizer、FutuPortfolio 等模块
 	 */
-	virtual uint32_t	stra_quote(const char* stdCode, double bidPrice, double bidQty, 
-								double askPrice, double askQty, const char* userTag = "") { return 0; }
+	virtual std::pair<uint32_t, uint32_t> stra_quote(const char* stdCode, double bidPrice, double bidQty, 
+								double askPrice, double askQty, const char* userTag = "") { return {0, 0}; }
 
 	/*
 	 *	撤销双边报价

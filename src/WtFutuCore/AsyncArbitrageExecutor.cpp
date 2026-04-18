@@ -5,8 +5,10 @@
 #include "AsyncArbitrageExecutor.h"
 #include "SpreadArbitrageManager.h"
 #include "../WTSTools/WTSLogger.h"
+#include "SpinLockGuard.h"
 
 #include <chrono>
+#include <thread>
 
 namespace futu {
 
@@ -60,7 +62,6 @@ void AsyncArbitrageExecutor::stop()
     
     // 唤醒线程以便快速退出
     _tick_available.store(true, std::memory_order_release);
-    _cv.notify_one();
     
     if (_arb_thread.joinable())
     {
@@ -88,9 +89,8 @@ bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price,
         // 增加tick计数
         _tick_count.fetch_add(1, std::memory_order_relaxed);
         
-        // 唤醒套利线程
+        // 唤醒套利线程 (busy polling 将检测到此标志)
         _tick_available.store(true, std::memory_order_release);
-        _cv.notify_one();
     }
     
     return success;
@@ -115,14 +115,14 @@ void AsyncArbitrageExecutor::updateMMOrders(const std::string& code,
                                              const std::vector<ActiveOrder>& buy_orders,
                                              const std::vector<ActiveOrder>& sell_orders)
 {
-    std::lock_guard<std::mutex> lock(_mm_orders_mutex);
+    SpinLockGuard lock(_mm_orders_spin);
     _mm_buy_orders[code] = buy_orders;
     _mm_sell_orders[code] = sell_orders;
 }
 
 void AsyncArbitrageExecutor::updateTickSize(const std::string& code, double tickSize)
 {
-    std::lock_guard<std::mutex> lock(_tick_size_mutex);
+    SpinLockGuard lock(_tick_size_spin);
     _tick_sizes[code] = tickSize;
 }
 
@@ -143,19 +143,28 @@ void AsyncArbitrageExecutor::arbThreadFunc()
     while (!_stop_requested.load(std::memory_order_acquire))
     {
         // ================================================================
-        // 使用条件变量等待新 tick 数据（超时保护）
+        // 自适应自旋轮询 (Adaptive Spin-Polling) 替代 condition_variable
         // ================================================================
+        uint32_t spin_count = 0;
+        while (!_tick_available.load(std::memory_order_acquire) && 
+               !_stop_requested.load(std::memory_order_acquire))
         {
-            std::unique_lock<std::mutex> lock(_cv_mutex);
-            _cv.wait_for(lock, std::chrono::microseconds(max_wait_us), 
-                [this] { 
-                    return _tick_available.load(std::memory_order_acquire) || 
-                           _stop_requested.load(std::memory_order_acquire); 
-                });
-            
-            // 重置标志
-            _tick_available.store(false, std::memory_order_release);
+            if (spin_count < 1000) {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+                _mm_pause();
+#endif
+                spin_count++;
+            } else if (spin_count < 2000) {
+                std::this_thread::yield();
+                spin_count++;
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                spin_count = 0;
+            }
         }
+        
+        // 重置标志
+        _tick_available.store(false, std::memory_order_release);
         
         // ================================================================
         // 处理所有待处理的 tick 数据
@@ -244,7 +253,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     double leg1_tick_size = 0.2;  // Default
     double leg2_tick_size = 0.2;
     {
-        std::lock_guard<std::mutex> lock(_tick_size_mutex);
+        SpinLockGuard lock(_tick_size_spin);
         auto it1 = _tick_sizes.find(signal.leg1_code);
         if (it1 != _tick_sizes.end()) leg1_tick_size = it1->second;
         auto it2 = _tick_sizes.find(signal.leg2_code);
@@ -258,7 +267,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     
     // Self-trade check (using local copy of MM orders)
     {
-        std::lock_guard<std::mutex> lock(_mm_orders_mutex);
+        SpinLockGuard lock(_mm_orders_spin);
         
         // Check leg1
         auto buy_it = _mm_buy_orders.find(signal.leg1_code);

@@ -6,12 +6,12 @@
  *   - Configurable number of levels and per-level quantity
  *   - Auto-adjustment of widths based on portfolio risk (via FutuPortfolio)
  *   - Efficient O(1) cancel-and-replace for quote refreshes
- *   - Order tracking per level for targeted modifications
+ *   - Unified order tracking with AutoCancelPolicy via UnifiedOrderTracker
  * 
  * Designed for inline synchronous use within on_tick callback.
  * 
  * Performance optimizations:
- *   - O(1) order lookup via hash map
+ *   - Uses UnifiedOrderTracker for zero-copy order state access
  *   - Pre-allocated level vectors
  *   - Inline price computation
  */
@@ -32,16 +32,22 @@ NS_WTP_END
 namespace futu {
 
 class FutuPortfolio;
+class UnifiedOrderTracker;
+class BilateralQuoteStats;  // 前向声明
 
-/// A single price level in the quote ladder
+/// 有效报价快照（用于统计，定义在 BilateralQuoteStats.h）
+struct ValidQuoteSnapshot;
+
+/// A single price level in the quote ladder (lightweight, no order state)
 struct QuoteLevel
 {
-    double      price;          ///< Quote price
-    double      qty;            ///< Quote quantity
+    double      price;          ///< Current quote price
+    double      qty;            ///< Current quote quantity
     uint32_t    order_id;       ///< Active order ID (0 = no active order)
+    uint8_t     level_index;    ///< Level index for O(1) lookup
     bool        is_bid;         ///< true=bid, false=ask
-
-    QuoteLevel() : price(0), qty(0), order_id(0), is_bid(true) {}
+    
+    QuoteLevel() : price(0), qty(0), order_id(0), level_index(0), is_bid(true) {}
 };
 
 /// Configuration for multi-level quoting on a single contract
@@ -57,12 +63,29 @@ struct QuoterConfig
     
     // Sticky 策略参数
     double      sticky_threshold; ///< Price stickiness threshold in ticks
-                                  ///< 当新计算价格与当前挂单价格偏离不超过此阈值时，保留原订单不撤单重报
+    double      improve_retreat_ratio; ///< Ratio for asymmetric sticky: improve price容忍更大, retreat更敏感 (default: 2.0)
+    
+    // 价格验证参数
+    double      max_price_deviation; ///< Max allowed price deviation from mid (in ticks), 0 = no limit
+    
+    // 做市报价价格保护参数
+    // 防止报价穿过市场最优价格：bid不能超过最优买价+protect_ticks，ask不能低于最优卖价-protect_ticks
+    bool        price_protection;    ///< 是否启用价格保护 (default: true)
+    double      protect_ticks;       ///< 价格保护tick数 (default: 1.0)
+    
+    // 双边报价配置
+    bool        use_bilateral_quote;  ///< 是否使用双边报价接口 stra_quote() (default: false)
+    double      min_valid_qty;        ///< 有效挂单最小数量，用于统计 (default: 1.0)
+    
+    // 做市义务配置
+    double      max_obligation_spread; ///< 做市义务最大报价宽度（ticks），用于单边受限时和双边报价统计 (default: 100.0)
     
     QuoterConfig()
         : num_levels(3), base_spread(2.0), level_step(1.0)
         , base_qty(1.0), qty_decay(0.7), tick_size(1.0)
-        , sticky_threshold(1.0) {}  // 默认1个tick的粘性阈值
+        , sticky_threshold(1.0), improve_retreat_ratio(2.0), max_price_deviation(20.0)
+        , price_protection(true), protect_ticks(1.0)
+        , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(100.0) {}
 };
 
 /// Multi-level quoter for a single contract
@@ -74,6 +97,10 @@ public:
 
     /// Initialize with config
     void init(const QuoterConfig& cfg);
+    
+    /// Set shared order tracker (must be called before refreshQuotes)
+    void setOrderTracker(UnifiedOrderTracker* tracker) { _tracker = tracker; }
+    UnifiedOrderTracker* getOrderTracker() const { return _tracker; }
 
     /// Get configuration
     const QuoterConfig& config() const { return _cfg; }
@@ -85,21 +112,32 @@ public:
     /// Refresh all quote levels based on current market data
     /// @param ctx     Strategy context for placing/cancelling orders
     /// @param mid     Current mid-price or fair value
-    /// @param skew    Price skew from portfolio risk (shifts all levels)
-    /// @param spread_mult  Spread multiplier from portfolio risk (widens levels)
-    /// @param allow_bid   Whether bidding is allowed (e.g. not if at max long)
-    /// @param allow_ask   Whether asking is allowed (e.g. not if at max short)
+    /// @param skew    Price skew from portfolio risk in TICKS (shifts all levels)
+    /// @param allow_bid   Whether bidding is allowed
+    /// @param allow_ask   Whether asking is allowed
+    /// @param now     Current timestamp (ms) for order tracking
+    /// @param upper_limit  Upper price limit (涨停价), 0 = no limit
+    /// @param lower_limit  Lower price limit (跌停价), 0 = no limit
+    /// @param best_bid    Market best bid price (for price protection), 0 = no protection
+    /// @param best_ask    Market best ask price (for price protection), 0 = no protection
     /// @return       Number of new orders placed (for rate limiting)
-    uint32_t refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double skew = 0,
-                           double spread_mult = 1.0, bool allow_bid = true, bool allow_ask = true);
+    uint32_t refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_bid_price, double l0_ask_price,
+                           double spread_mult = 1.0, bool allow_bid = true, 
+                           bool allow_ask = true, uint64_t now = 0,
+                           double upper_limit = 0, double lower_limit = 0,
+                           double best_bid = 0, double best_ask = 0);
 
     /// Cancel all outstanding quotes
     void cancelAll(wtp::IUftStraCtx* ctx);
 
-    /// Handle order update — update tracked order IDs (O(1) lookup)
-    void onOrder(uint32_t localid, bool isCanceled, double leftQty);
+    /// Handle order update — clear level order ID, trigger stats update
+    /// @param localid    本地订单号
+    /// @param isCanceled 是否撤销
+    /// @param leftQty    剩余数量
+    /// @param now_ms     当前时间戳（毫秒），由调用方从 ctx 获取
+    void onOrder(uint32_t localid, bool isCanceled, double leftQty, uint64_t now_ms = 0);
 
-    /// Handle fill — clear the filled level's order ID (O(1) lookup)
+    /// Handle fill — clear the filled level's order ID
     void onTrade(uint32_t localid, double vol, double price);
 
     //==========================================================================
@@ -111,6 +149,10 @@ public:
     
     /// Get all active ask levels
     const std::vector<QuoteLevel>& getAskLevels() const { return _ask_levels; }
+    
+    /// Get modifiable bid levels (for direct updates)
+    std::vector<QuoteLevel>& getBidLevelsMut() { return _bid_levels; }
+    std::vector<QuoteLevel>& getAskLevelsMut() { return _ask_levels; }
 
     /// Total bid quantity outstanding
     double totalBidQty() const;
@@ -118,28 +160,42 @@ public:
     /// Total ask quantity outstanding
     double totalAskQty() const;
 
-    /// Check if a given order ID belongs to this quoter - O(1) lookup
-    inline bool isMyOrder(uint32_t localid) const
-    {
-        return _order_to_level.find(localid) != _order_to_level.end();
-    }
+    /// Check if a given order ID belongs to this quoter - O(1) via tracker
+    bool isMyOrder(uint32_t localid) const;
 
-    /// Get the quote level for a given order ID - O(1) lookup, returns nullptr if not found
-    inline QuoteLevel* getLevelByOrder(uint32_t localid)
-    {
-        auto it = _order_to_level.find(localid);
-        if (it != _order_to_level.end())
-            return it->second;
-        return nullptr;
-    }
+    /// Get the quote level for a given order ID
+    QuoteLevel* getLevelByOrder(uint32_t localid);
+    
+    //==========================================================================
+    // 双边报价统计接口（新增）
+    //==========================================================================
+    
+    /// 设置双边报价统计模块
+    void setBilateralStats(BilateralQuoteStats* stats) { _bilateral_stats = stats; }
+    
+    /// 获取统计模块
+    BilateralQuoteStats* getBilateralStats() const { return _bilateral_stats; }
+    
+    /// 获取是否使用双边报价接口
+    bool useBilateralQuote() const { return _cfg.use_bilateral_quote; }
+    
+    /// 获取有效报价快照（用于统计）
+    /// 有效挂单定义：满足 min_valid_qty 要求的最优 level（level 0）
+    ValidQuoteSnapshot getValidQuoteSnapshot() const;
 
 private:
     /// Compute price for a given level
+    /// @param mid        Current mid-price
+    /// @param skew       Price skew in TICKS (will be multiplied by tick_size)
+    /// @param spread_mult Spread multiplier
+    /// @param level      Quote level index
     __attribute__((always_inline)) 
     inline double computeBidPrice(double mid, double skew, double spread_mult, uint32_t level) const
     {
         double offset = (_cfg.base_spread + level * _cfg.level_step) * spread_mult * _cfg.tick_size;
-        double raw = mid + skew - offset;
+        // skew is in ticks, convert to price
+        double skew_price = skew * _cfg.tick_size;
+        double raw = mid + skew_price - offset;
         return floor(raw / _cfg.tick_size) * _cfg.tick_size;
     }
 
@@ -147,47 +203,85 @@ private:
     inline double computeAskPrice(double mid, double skew, double spread_mult, uint32_t level) const
     {
         double offset = (_cfg.base_spread + level * _cfg.level_step) * spread_mult * _cfg.tick_size;
-        double raw = mid + skew + offset;
+        // skew is in ticks, convert to price
+        double skew_price = skew * _cfg.tick_size;
+        double raw = mid + skew_price + offset;
         return ceil(raw / _cfg.tick_size) * _cfg.tick_size;
     }
 
     /// Compute quantity for a given level
-    /// Returns integer quantity (minimum 1)
     __attribute__((always_inline))
     inline double computeQty(uint32_t level) const
     {
         double qty = _cfg.base_qty * pow(_cfg.qty_decay, level);
-        // Ensure minimum 1 lot and round to integer
         return std::max(1.0, std::round(qty));
     }
 
-    /// Check if a price has changed enough to warrant re-quoting
+    /// Validate computed price before placing order
+    /// @param price   Computed price to validate
+    /// @param mid     Current mid-price
+    /// @param upper_limit Upper price limit (0 = no check)
+    /// @param lower_limit Lower price limit (0 = no check)
+    /// @return true if price is valid, false if invalid
     __attribute__((always_inline))
-    inline bool priceChanged(double oldPrice, double newPrice) const
+    inline bool validatePrice(double price, double mid, 
+                              double upper_limit, double lower_limit) const
     {
-        return std::abs(oldPrice - newPrice) >= _cfg.tick_size * 0.5;
+        // Check for NaN or Inf
+        if (std::isnan(price) || std::isinf(price))
+            return false;
+        
+        // Check for non-positive price
+        if (price <= 0)
+            return false;
+        
+        // Check against limits
+        if (upper_limit > 0 && price > upper_limit)
+            return false;
+        if (lower_limit > 0 && price < lower_limit)
+            return false;
+        
+        // Check for extreme deviation from mid (potential calculation error)
+        if (_cfg.max_price_deviation > 0 && mid > 0 && _cfg.tick_size > 0)
+        {
+            double deviation_ticks = std::abs(price - mid) / _cfg.tick_size;
+            if (deviation_ticks > _cfg.max_price_deviation)
+                return false;
+        }
+        
+        return true;
     }
 
-    /// Register an order in the lookup map
-    inline void registerOrder(uint32_t localid, QuoteLevel* level)
+    /// 检查是否需要更新订单（不对称粘性阈值）
+    /// @param newPrice     新计算的价格
+    /// @param currentPrice 当前订单价格
+    /// @param is_bid       是否为 bid 方向
+    /// @return true 表示需要更新订单
+    bool checkStickyUpdate(double newPrice, double currentPrice, bool is_bid) const
     {
-        if (localid != 0 && level != nullptr)
-            _order_to_level[localid] = level;
-    }
-
-    /// Unregister an order from the lookup map
-    inline void unregisterOrder(uint32_t localid)
-    {
-        _order_to_level.erase(localid);
+        // BID方向：向上(价格提高=改善)容忍更大，向下(价格降低=撤退)更敏感
+        // ASK方向：向下(价格降低=改善)容忍更大，向上(价格提高=撤退)更敏感
+        double upper_ratio = is_bid ? _cfg.improve_retreat_ratio : 1.0;
+        double lower_ratio = is_bid ? 1.0 : _cfg.improve_retreat_ratio;
+        double threshold = _cfg.sticky_threshold * _cfg.tick_size;
+        double upper_bound = currentPrice + upper_ratio * threshold;
+        double lower_bound = currentPrice - lower_ratio * threshold;
+        return (newPrice > upper_bound || newPrice < lower_bound);
     }
 
 private:
     QuoterConfig _cfg;
     std::vector<QuoteLevel> _bid_levels;
     std::vector<QuoteLevel> _ask_levels;
-
-    /// O(1) order lookup map: order_id -> QuoteLevel*
-    wtp::wt_hashmap<uint32_t, QuoteLevel*> _order_to_level;
+    
+    /// Unified order tracker (owned by UftFutuMmStrategy)
+    UnifiedOrderTracker* _tracker;
+    
+    /// 双边报价统计模块（独立模块，可选）
+    BilateralQuoteStats* _bilateral_stats = nullptr;
+    
+    /// O(1) order ID to level index lookup - avoids pointer dangling
+    wtp::wt_hashmap<uint32_t, uint8_t> _order_id_to_level;
 };
 
 } // namespace futu

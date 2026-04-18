@@ -1,14 +1,14 @@
 /*!
  * \file ToxicFlowDetector.cpp
- * \brief Toxic Order Flow Detection Implementation
+ * \brief Toxic Order Flow Detection Implementation (Facade)
  * 
- * Note: Self-trade fill tracking is delegated to SelfTradeCalibrator.
- *       This detector focuses on combining predictive signals with realized toxicity.
+ * Combines PredictiveToxicity and RealizedToxicity for unified interface.
  */
 #include "ToxicFlowDetector.h"
 #include "SyntheticSignalFusion.h"
 #include "SelfTradeCalibrator.h"
-#include "OrderBookAnalyzer.h"
+#include "MarketDataContext.h"
+#include "../Includes/WTSDataDef.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -19,11 +19,40 @@ namespace futu {
 //------------------------------------------------------------------------------
 
 ToxicFlowDetector::ToxicFlowDetector()
-    : _has_alpha_data(false)
+    : _calibrator(nullptr)
     , _has_book_data(false)
-    , _has_calibration_data(false)
     , _cache_dirty(true)
 {
+}
+
+//------------------------------------------------------------------------------
+// Configuration
+//------------------------------------------------------------------------------
+
+void ToxicFlowDetector::setParams(const ToxicityParams& params)
+{
+    _params = params;
+    
+    // Configure sub-components
+    PredictiveToxicityConfig pred_cfg;
+    pred_cfg.vpin_threshold = params.vpin_threshold;
+    pred_cfg.vpin_window = params.vpin_window;
+    pred_cfg.vpin_bucket_size = params.vpin_bucket_size;
+    pred_cfg.alpha_threshold = params.adverse_threshold;
+    pred_cfg.ofi_weight = params.alpha_weight;
+    pred_cfg.trade_weight = params.book_weight;
+    _predictive.setConfig(pred_cfg);
+    
+    RealizedToxicityConfig real_cfg;
+    real_cfg.weight = params.self_trade_weight;
+    real_cfg.min_samples = 3;
+    _realized.setConfig(real_cfg);
+}
+
+void ToxicFlowDetector::setSelfTradeCalibrator(SelfTradeCalibrator* calibrator)
+{
+    _calibrator = calibrator;
+    _realized.setSelfTradeCalibrator(calibrator);
 }
 
 //------------------------------------------------------------------------------
@@ -32,11 +61,12 @@ ToxicFlowDetector::ToxicFlowDetector()
 
 void ToxicFlowDetector::reset()
 {
-    _has_alpha_data = false;
     _has_book_data = false;
-    _has_calibration_data = false;
     _cache_dirty = true;
     _cached_metrics = ToxicityMetrics();
+    
+    _predictive.reset();
+    _realized.reset();
 }
 
 //------------------------------------------------------------------------------
@@ -45,30 +75,14 @@ void ToxicFlowDetector::reset()
 
 void ToxicFlowDetector::updateMarketAlpha(const AlphaResult& alpha, const TradeImbalanceResult& tradeImb)
 {
-    _latest_alpha = alpha;
-    _latest_trade_imb = tradeImb;
-    _has_alpha_data = true;
+    _predictive.updateAlpha(alpha, tradeImb);
     _cache_dirty = true;
 }
 
-//------------------------------------------------------------------------------
-// Enhanced Detection Methods
-//------------------------------------------------------------------------------
-
 void ToxicFlowDetector::onSyntheticAlpha(const SyntheticTransactionData& synth_trans, const AlphaResult& alpha)
 {
-    // Update alpha data
-    _latest_alpha = alpha;
-    _has_alpha_data = true;
-    
-    // Create a synthetic trade imbalance from the transaction
-    _latest_trade_imb.net_flow = synth_trans.is_buy_initiated ? 
-        synth_trans.volume : -synth_trans.volume;
-    _latest_trade_imb.imbalance_ratio = synth_trans.direction_signal;
-    // Note: TradeImbalanceResult doesn't have confidence field
-    // Use large_trade_ratio as a proxy for signal quality
-    _latest_trade_imb.large_trade_ratio = synth_trans.confidence;
-    
+    // Update predictive with synthetic data
+    _predictive.updateAlpha(alpha, TradeImbalanceResult{});
     _cache_dirty = true;
 }
 
@@ -76,14 +90,33 @@ void ToxicFlowDetector::onBookAnalysis(const BookAnalysisResult& book_analysis)
 {
     _latest_book_analysis = book_analysis;
     _has_book_data = true;
+    _realized.onBookAnalysis(book_analysis.imbalance_score);
     _cache_dirty = true;
 }
 
 void ToxicFlowDetector::onSelfTradeCalibration(const CalibrationResult& calibration)
 {
-    _latest_calibration = calibration;
-    _has_calibration_data = true;
+    _realized.onCalibration(calibration);
     _cache_dirty = true;
+}
+
+//------------------------------------------------------------------------------
+// VPIN - Delegated to PredictiveToxicity
+//------------------------------------------------------------------------------
+
+void ToxicFlowDetector::setBucketSize(double bucket_size)
+{
+    _predictive.setBucketSize(bucket_size);
+}
+
+void ToxicFlowDetector::onTrade(double price, double qty, bool isBuy, uint64_t timestamp)
+{
+    _predictive.onTrade(price, qty, isBuy, timestamp);
+}
+
+void ToxicFlowDetector::onTickVolume(const char* stdCode, const wtp::WTSTickData* tick)
+{
+    _predictive.onTickVolume(stdCode, tick);
 }
 
 //------------------------------------------------------------------------------
@@ -96,80 +129,38 @@ void ToxicFlowDetector::updateCache() const
     
     _cached_metrics = ToxicityMetrics();
     
-    //==========================================================================
-    // 1. Predictive Toxicity (from Alpha signals)
-    //==========================================================================
+    // Get results from sub-components
+    auto pred_result = _predictive.analyze();
+    auto real_result = _realized.analyze();
     
-    double t_ofi = 0.0;
-    double t_trade = 0.0;
-    double predictive_toxicity = 0.0;
-    double alpha_extreme = 0.0;
+    // Fill metrics
+    _cached_metrics.predictive_toxicity = pred_result.combined_score;
+    _cached_metrics.realized_adverse_ratio = real_result.adverse_ratio;
+    _cached_metrics.total_fills = real_result.total_fills;
+    _cached_metrics.adverse_fills = real_result.adverse_fills;
+    _cached_metrics.avg_adverse_move = real_result.avg_adverse_move;
     
-    if (_has_alpha_data)
+    // Combined score: weighted average with realized getting higher weight when confident
+    double realized_weight = real_result.confidence;
+    double predictive_weight = 1.0 - realized_weight;
+    
+    _cached_metrics.toxic_score = 
+        predictive_weight * pred_result.combined_score +
+        realized_weight * real_result.decayed_score;
+    
+    // Use max for extreme signals
+    if (pred_result.extreme_signal > 0)
     {
-        // OFI Toxicity
-        t_ofi = std::abs(_latest_alpha.ofi_component);
-        
-        // Trade Imbalance Toxicity
-        t_trade = std::abs(_latest_trade_imb.imbalance_ratio) * 
-                  (0.5 + 0.5 * _latest_trade_imb.large_trade_ratio);
-                  
-        predictive_toxicity = (t_ofi + t_trade) / 2.0;
-        
-        // 只有当预测性指标超过极端阈值 (例如 0.90) 时，才具备"一票否决权"
-        if (t_ofi > 0.90 || t_trade > 0.90)
-        {
-            alpha_extreme = std::max(t_ofi, t_trade);
-        }
+        _cached_metrics.toxic_score = std::max(_cached_metrics.toxic_score, pred_result.extreme_signal * 0.8);
     }
     
-    _cached_metrics.predictive_toxicity = predictive_toxicity;
-    
-    //==========================================================================
-    // 2. Realized Toxicity (from SelfTradeCalibrator)
-    //==========================================================================
-    
-    double realized_adverse_ratio = 0.0;
-    
-    // 优先使用传入的 calibration 数据
-    if (_has_calibration_data)
-    {
-        realized_adverse_ratio = _latest_calibration.toxicity_level;
-        _cached_metrics.realized_adverse_ratio = realized_adverse_ratio;
-        _cached_metrics.total_fills = static_cast<uint32_t>(_latest_calibration.sample_size);
-        _cached_metrics.adverse_fills = static_cast<uint32_t>(
-            _latest_calibration.sample_size * _latest_calibration.toxicity_level
-        );
-    }
-    
-    //==========================================================================
-    // 3. Combined Toxicity Score
-    //==========================================================================
-    
-    // 自身真实成交亏损作为最重要的 Ground Truth (第一防线)
-    // 极端 Alpha 信号作为并行的并集触发器 (第二防线)
-    // 采用 max 代替线性平权，防止 Alpha 轻微抖动造成的过度防御
-    _cached_metrics.toxic_score = std::max(realized_adverse_ratio, alpha_extreme);
-        
+    // Is toxic?
     _cached_metrics.is_toxic = _cached_metrics.toxic_score > _params.adverse_threshold;
     
-    //==========================================================================
-    // 4. Determine Toxic Side
-    //==========================================================================
-    
-    if (_cached_metrics.is_toxic && _has_alpha_data)
+    // Toxic side
+    if (_cached_metrics.is_toxic)
     {
-        // 毒性方向与大单和OFI方向一致
-        if (_latest_alpha.ofi_component > 0 && _latest_trade_imb.imbalance_ratio > 0)
-            _cached_metrics.toxic_side = 1;  // 买盘毒性（正在暴涨，不要挂空单）
-        else if (_latest_alpha.ofi_component < 0 && _latest_trade_imb.imbalance_ratio < 0)
-            _cached_metrics.toxic_side = -1; // 卖盘毒性（正在暴跌，不要挂多单）
-        else
-            _cached_metrics.toxic_side = 0;  // 冲突情况，无方向
-    }
-    else
-    {
-        _cached_metrics.toxic_side = 0;
+        _cached_metrics.toxic_side = pred_result.toxic_side;
     }
     
     _cache_dirty = false;
@@ -193,13 +184,8 @@ double ToxicFlowDetector::getToxicityScore() const
 
 double ToxicFlowDetector::getAvgAdverseMove() const
 {
-    // 如果有 calibration 数据，返回平均逆向跳动
-    if (_has_calibration_data)
-    {
-        // 从 calibration 的毒性水平和样本数估算
-        return _latest_calibration.toxicity_level * 2.0;  // 简化估算
-    }
-    return _cached_metrics.avg_adverse_move;
+    auto real_result = _realized.analyze();
+    return real_result.avg_adverse_move;
 }
 
 //------------------------------------------------------------------------------
@@ -209,80 +195,15 @@ double ToxicFlowDetector::getAvgAdverseMove() const
 ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(
     const BookAnalysisResult& book_sig,
     const CalibrationResult& self_calib,
-    const AlphaResult& alpha) const
+    const AlphaResult& alpha)
 {
-    ToxicityMetrics result;
+    // Update components
+    _predictive.updateAlpha(alpha, TradeImbalanceResult{});
+    _realized.onCalibration(self_calib);
+    _realized.onBookAnalysis(book_sig.imbalance_score);
     
-    // 1. Alpha-based toxicity (predictive)
-    double alpha_toxicity = 0.0;
-    double t_ofi = std::abs(alpha.ofi_component);
-    double t_trade = std::abs(alpha.trade_component);
-    
-    // Non-linear combination: use maximum of OFI and trade
-    alpha_toxicity = std::max(t_ofi, t_trade);
-    
-    // 2. Order book toxicity
-    double book_toxicity = 0.0;
-    book_toxicity = std::abs(book_sig.imbalance_score) * book_sig.toxicity_score;
-    
-    // 3. Self-trade toxicity (ground truth, realized)
-    double self_toxicity = self_calib.toxicity_level;
-    
-    // 4. Weighted combination
-    result.predictive_toxicity = alpha_toxicity * _params.alpha_weight + 
-                                  book_toxicity * _params.book_weight;
-    result.realized_adverse_ratio = self_toxicity;
-    
-    // Final toxicity score: max of realized and predictive
-    result.toxic_score = std::max(
-        self_toxicity * _params.self_trade_weight,
-        result.predictive_toxicity
-    );
-    
-    // If we have calibration data with sufficient samples, boost the realized component
-    if (self_calib.sample_size >= 5) {
-        double calib_confidence = self_calib.confidence;
-        result.toxic_score = std::max(
-            result.toxic_score,
-            self_toxicity * _params.self_trade_weight * calib_confidence
-        );
-    }
-    
-    // Determine if toxic
-    result.is_toxic = result.toxic_score > _params.adverse_threshold;
-    
-    // Determine toxic side
-    if (result.is_toxic) {
-        // Combine direction signals
-        double direction = 0.0;
-        
-        // Alpha direction
-        direction += _params.alpha_weight * alpha.alpha;
-        
-        // Book direction
-        direction += _params.book_weight * book_sig.imbalance_score;
-        
-        // Self-trade bias (inverted: avoid the toxic side)
-        direction -= _params.self_trade_weight * self_calib.direction_bias;
-        
-        // Positive = buy toxicity (market going up, avoid sell quotes)
-        // Negative = sell toxicity (market going down, avoid buy quotes)
-        if (direction > 0.2) {
-            result.toxic_side = 1;
-        } else if (direction < -0.2) {
-            result.toxic_side = -1;
-        } else {
-            result.toxic_side = 0;
-        }
-    }
-    
-    // Copy statistics from self-calibration
-    result.total_fills = static_cast<uint32_t>(self_calib.sample_size);
-    result.adverse_fills = static_cast<uint32_t>(
-        self_calib.sample_size * self_calib.toxicity_level
-    );
-    
-    return result;
+    // Return combined analysis
+    return analyze();
 }
 
 } // namespace futu

@@ -1,0 +1,198 @@
+# ============================================================
+# Strategy Coordinator Configuration
+# ============================================================
+# 新架构 (SignalAggregator) 默认启用
+# 
+# 配置优先级:
+#   1. 默认值 (代码定义)
+#   2. coordinator.yaml (本文件)
+#   3. config.yaml (覆盖 coordinator)
+#
+# 命名规范: 统一使用 camelCase
+# ============================================================
+
+coordinator:
+  # ============================================================
+  # 处理模式
+  # ============================================================
+  mode: pipeline
+  
+  # ============================================================
+  # 策略模式开关 (可被 config.yaml 覆盖)
+  # ============================================================
+  modules:
+    useMarketMaking: true
+    useSpreadArbitrage: false
+    
+    # ------------------------------------------------------------
+    # SignalAggregator 信号聚合器 (新架构核心)
+    # ------------------------------------------------------------
+    signalAggregator:
+      # 信号源开关
+      useVolatility: true
+      useOfi: true
+      useTradeFlow: true
+      useAlpha: true
+      useMomentum: true
+      useLeadLag: false
+      
+      # 波动率参数
+      volatilityWindow: 100
+      
+      # OFI 参数
+      ofiWindow: 50
+      
+      # 交易流参数
+      tradeFlowWindow: 100
+      largeTradeThreshold: 50.0
+      
+      # 动量参数
+      momentumWindow: 50
+      momentumEmaAlpha: 0.1
+      
+      # 领先-滞后参数
+      leadLagWindow: 50
+      leadLagLagMs: 50
+      
+      # Alpha 权重
+      ofiWeight: 0.4
+      tradeWeight: 0.3
+      leadLagWeight: 0.3
+      momentumWeight: 0.0
+      strongThreshold: 0.7
+      
+      # 市场状态阈值
+      volThreshold: 0.003
+      spreadThreshold: 5.0
+      moveThreshold: 0.005
+    
+    # ------------------------------------------------------------
+    # ToxicityDetector 毒性检测器
+    # ------------------------------------------------------------
+    toxicityDetector:
+      enabled: true
+      vpinThreshold: 0.7
+      window: 50
+      cooloffMs: 5000
+    
+    # ------------------------------------------------------------
+    # OrderBook 订单簿分析
+    # ------------------------------------------------------------
+    orderBook:
+      enabled: true
+    
+    # ------------------------------------------------------------
+    # SpreadOptimizer GLFT价差优化器
+    # ------------------------------------------------------------
+    spreadOptimizer:
+      enabled: true
+      
+      # GLFT 核心参数
+      volSensitivity: 1.0
+      depthSensitivity: 0.5
+      volWindow: 100
+      minSpreadMult: 0.5
+      phi: 2.0              # 库存惩罚系数（从 0.01 提升到 2.0）
+      portfolioSkewWeight: 0.5
+      minCorrelation: 0.5
+      
+      # Delta-aware skew 参数
+      maxSkew: 3.0              # 最大 skew 限制（ticks）
+      deltaSkewThreshold: 0.1   # Delta skew 触发阈值（利用率，从 0.3 降到 0.1）
+      deltaSkewFactor: 3.0      # Delta skew 强度系数（从 2.0 提升到 3.0）
+      
+      # 市场状态检测参数
+      marketState:
+        volThreshold: 0.003
+        moveThreshold: 0.005
+        spreadThreshold: 5.0
+        volumeThreshold: 10.0
+        cooldownTicks: 20
+    
+    # ------------------------------------------------------------
+    # AutoCancel 自动撤单策略
+    # ------------------------------------------------------------
+    autoCancel:
+      enabled: true
+      maxAgeMs: 10000
+      priceDeviation: 3.0
+      cancelOnStateChange: true
+      cancelOnInventoryLimit: true
+      inventoryCooldownMs: 2000
+    
+    # ------------------------------------------------------------
+    # CorrelationManager 相关性管理
+    # ------------------------------------------------------------
+    correlationManager:
+      windowSize: 100
+      minCorrelation: 0.5
+      spreadZThreshold: 2.0
+    
+    # ------------------------------------------------------------
+    # SelfTradeCalibrator 自身成交校准
+    # ------------------------------------------------------------
+    selfTradeCalibrator:
+      lookbackTrades: 50
+      toxicityWindowMs: 5000
+      adverseThreshold: 0.6
+    
+    # ------------------------------------------------------------
+    # SyntheticTransaction 综合信号融合
+    # ------------------------------------------------------------
+    syntheticTransaction:
+      enabled: true
+      tickWeight: 0.4
+      bookWeight: 0.4
+      selfTradeWeight: 0.2
+      minSamples: 5
+    
+    # ------------------------------------------------------------
+    # TickInferer 逐笔推断
+    # ------------------------------------------------------------
+    tickInferer:
+      imbalanceWindowMs: 5000
+      largeTradeThreshold: 50.0
+      minConfidence: 0.3
+    
+    # ------------------------------------------------------------
+    # AdaptiveParam 自适应参数
+    # ------------------------------------------------------------
+    adaptiveParam:
+      enabled: false
+      updateInterval: 100
+      learningRate: 0.01
+      minPhi: 0.001
+      maxPhi: 0.1
+    
+    # ------------------------------------------------------------
+    # SelfTradePrevention 自成交防护
+    # ------------------------------------------------------------
+    selfTradePrevention:
+      enabled: true
+      strategy: cancelMM
+      minPriceGap: 1.0
+      allowSamePrice: false
+      priceAdjustTicks: 1.0
+
+  # ============================================================
+  # Pipeline 处理流程参数
+  # ============================================================
+  pipeline:
+    paramUpdateInterval: 100
+    globalToxicityCooldownMs: 3000
+
+  # ============================================================
+  # Performance 性能监控配置
+  # ============================================================
+  performance:
+    enabled: true
+    logInterval: 1000
+    latencyThresholdNs: 100000
+    warnThresholdNs: 10000
+    criticalThresholdNs: 50000
+
+  # ============================================================
+  # Risk 风险控制检查间隔
+  # ============================================================
+  risk:
+    checkInterval: 10

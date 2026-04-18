@@ -113,6 +113,28 @@ void SyntheticSignalFusion::onTick(const std::string& code, double mid_price, ui
     // Simple rolling volatility estimate based on price changes
     (void)code;  // Unused for now
     
+    // Evaluate previous predictions
+    if (_last_recorded_price > 0 && std::abs(mid_price - _last_recorded_price) >= 0.5) // Adjust minimum move threshold as needed, 0.5 is half a tick typically
+    {
+        bool actual_up = (mid_price > _last_recorded_price);
+        
+        if (std::abs(_last_tick_direction) > 0.1) {
+            _tick_accuracy.addPrediction(_last_tick_direction > 0, actual_up);
+        }
+        if (std::abs(_last_book_direction) > 0.1) {
+            _book_accuracy.addPrediction(_last_book_direction > 0, actual_up);
+        }
+        if (std::abs(_last_self_trade_direction) > 0.1) {
+            // self_trade_direction is negative of bias, so > 0 means bullish
+            _self_trade_accuracy.addPrediction(_last_self_trade_direction > 0, actual_up);
+        }
+        _last_recorded_price = mid_price;
+    }
+    else if (_last_recorded_price <= 0)
+    {
+        _last_recorded_price = mid_price;
+    }
+    
     // Store price history for volatility calculation
     static thread_local double last_price = 0;
     static thread_local uint64_t last_timestamp = 0;
@@ -198,6 +220,16 @@ AdaptiveWeights SyntheticSignalFusion::calculateAdaptiveWeights() const
         }
     }
     
+    // 5. Accuracy-based adjustment
+    // Weight goes up if accuracy > 0.5, down if < 0.5
+    double tick_acc_adj = (_tick_accuracy.accuracy - 0.5) * 0.2; // Max +/- 10%
+    double book_acc_adj = (_book_accuracy.accuracy - 0.5) * 0.2;
+    double self_trade_acc_adj = (_self_trade_accuracy.accuracy - 0.5) * 0.2;
+    
+    w.tick *= (1.0 + tick_acc_adj);
+    w.book *= (1.0 + book_acc_adj);
+    w.self_trade *= (1.0 + self_trade_acc_adj);
+    
     // Normalize to sum to 1.0
     double total = w.tick + w.book + w.self_trade;
     if (total > 0) {
@@ -238,6 +270,7 @@ SyntheticTransactionData SyntheticSignalFusion::fuse()
             tick_dir = -1.0;
         }
         
+        _last_tick_direction = tick_dir;
         direction += w.tick * tick_dir * _latest_tick_inf.confidence;
         total_confidence += w.tick * _latest_tick_inf.confidence;
         
@@ -255,6 +288,7 @@ SyntheticTransactionData SyntheticSignalFusion::fuse()
             book_dir = -1.0;
         }
         
+        _last_book_direction = book_dir;
         direction += w.book * book_dir * _latest_book_sig.confidence;
         total_confidence += w.book * _latest_book_sig.confidence;
         
@@ -270,6 +304,7 @@ SyntheticTransactionData SyntheticSignalFusion::fuse()
         // Negative bias = sell side is more toxic (we lose on sells)
         double self_dir = -_latest_calibration.direction_bias;  // Invert: avoid toxic side
         
+        _last_self_trade_direction = self_dir;
         direction += w.self_trade * self_dir * _latest_calibration.confidence;
         total_confidence += w.self_trade * _latest_calibration.confidence;
         

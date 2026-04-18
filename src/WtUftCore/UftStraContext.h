@@ -209,8 +209,9 @@ public:
 	
 	/*
 	 *	双边报价：同时下买单和卖单
+	 *	@return std::pair<bidOrderId, askOrderId>
 	 */
-	virtual uint32_t	stra_quote(const char* stdCode, double bidPrice, double bidQty,
+	virtual std::pair<uint32_t, uint32_t> stra_quote(const char* stdCode, double bidPrice, double bidQty,
 								double askPrice, double askQty, const char* userTag = "") override;
 
 	/*
