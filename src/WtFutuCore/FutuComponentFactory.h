@@ -6,7 +6,6 @@
 #include "ToxicFlowDetector.h"
 #include "SelfTradeCalibrator.h"
 #include "SelfTradePrevention.h"
-#include "AdaptiveParamManager.h"
 #include "PerformanceMonitor.h"
 #include "PerformanceAnalyzer.h"
 #include "AsyncArbitrageExecutor.h"
@@ -60,10 +59,6 @@ public:
     //==========================================================================
     // Adaptive & Performance Components
     //==========================================================================
-    
-    /// Create AdaptiveParamManager with AdaptiveConfig from CoordinatorConfig
-    static std::unique_ptr<AdaptiveParamManager> createAdaptiveParamManager(
-        const CoordinatorConfig& config);
     
     /// Create PerformanceMonitor (no config needed, uses defaults)
     static std::unique_ptr<PerformanceMonitor> createPerformanceMonitor(

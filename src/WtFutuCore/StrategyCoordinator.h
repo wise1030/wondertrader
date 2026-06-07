@@ -15,6 +15,7 @@
 // 必须包含此头文件以获取 PortfolioContext 和 ModuleParams 的定义
 #include "SpreadOptimizer.h"
 #include "AsyncArbitrageExecutor.h"
+#include "TradingState.h"
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -35,9 +36,10 @@ class CorrelationManager;
 class MarketDataContext;
 class SelfTradeCalibrator;
 class PerformanceMonitor;
-class AdaptiveParamManager;
 class SignalAggregator;
 struct ContractState;
+class OrderRouter;
+// TradingState is included via TradingState.h
 
 /// Processing context for a single tick
 struct TickContext
@@ -69,14 +71,15 @@ struct ProcessingResult
     bool quote_placed;
     bool order_canceled;
     bool hedge_triggered;
+    bool reduce_triggered;      // (deprecated: position reduction now via skew)
     bool params_updated;
     bool closeout_executed;
     bool market_state_cancelled;
     uint64_t processing_time_ns;
-    
+
     ProcessingResult()
         : processed(false), quote_placed(false), order_canceled(false)
-        , hedge_triggered(false), params_updated(false)
+        , hedge_triggered(false), reduce_triggered(false), params_updated(false)
         , closeout_executed(false), market_state_cancelled(false)
         , processing_time_ns(0) {}
 };
@@ -84,96 +87,25 @@ struct ProcessingResult
 /// Module parameters (read from coordinator.yaml)
 struct ModuleParams
 {
-    double toxicity_vpin_threshold = 0.7;
-    uint32_t toxicity_window = 50;
+    // SpreadOptimizer: 已迁移到 GLFTParams::fromVariant
+    double portfolio_max_delta = 0.0;
+    
+    // ToxicFlowDetector: 已迁移到 ToxicityParams::fromVariant
     uint32_t toxicity_cooloff_ms = 5000;
     
-    double spread_vol_sensitivity = 1.0;
-    double spread_depth_sensitivity = 0.5;
-    uint32_t spread_vol_window = 100;
-    double spread_min_mult = 0.5;
-    double spread_phi = 0.01;
-    double spread_portfolio_skew_weight = 0.5;
-    double spread_min_correlation = 0.5;
-    double spread_max_skew = 5.0;  // 新增：最大偏置限制
-    
-    double portfolio_max_delta = 0.0;
-    double delta_skew_threshold = 0.1;  // 从 0.3 降到 0.1，更早触发 skew
-    double delta_skew_factor = 3.0;      // 从 2.0 提升到 3.0，增强 skew 效果
-    
-    double market_vol_threshold = 0.003;
-    double market_move_threshold = 0.005;
-    double market_spread_threshold = 5.0;
-    double market_volume_threshold = 10.0;
-    uint32_t market_lookback_ticks = 50;
-    uint32_t market_cooldown_ticks = 20;
-    
-    uint32_t auto_cancel_max_age_ms = 5000;
+    // AutoCancel (仍需保留)
+    uint32_t auto_cancel_max_age_ms = 10000;
     double auto_cancel_price_deviation = 3.0;
-    bool auto_cancel_on_state_change = true;
-    bool auto_cancel_on_inventory_limit = true;
     uint32_t auto_cancel_inventory_cooldown_ms = 2000;
     
-    bool stp_enabled = true;
-    double stp_min_price_gap = 1.0;
-    bool stp_allow_same_price = false;
-    double stp_price_adjust_ticks = 1.0;
-    
-    bool synthetic_enabled = true;
-    double synthetic_tick_weight = 0.4;
-    double synthetic_book_weight = 0.4;
-    double synthetic_self_trade_weight = 0.2;
-    uint32_t synthetic_min_samples = 5;
-    
-    uint32_t calibrator_lookback_trades = 50;
-    uint32_t calibrator_toxicity_window_ms = 5000;
-    double calibrator_adverse_threshold = 0.6;
-    
-    uint32_t inferer_imbalance_window_ms = 5000;
-    double inferer_large_trade_threshold = 50.0;
-    double inferer_min_confidence = 0.3;
-    
-    uint32_t adaptive_update_interval = 60;
-    double adaptive_learning_rate = 0.01;
+    // AdaptiveParam (仍需保留)
+    uint32_t adaptive_update_interval = 100;
     double adaptive_min_phi = 0.001;
-    double adaptive_max_phi = 0.05;
+double adaptive_max_phi = 0.1;
     
-    uint32_t correlation_window_size = 100;
-    double correlation_min_correlation = 0.5;
-    double correlation_spread_z_threshold = 2.0;
-
-    // SignalAggregator 信号聚合器配置
-    uint32_t signal_volatility_window = 100;
-    uint32_t signal_ofi_window = 50;
-    uint32_t signal_trade_flow_window = 100;
-    uint32_t signal_momentum_window = 50;
-    uint32_t signal_lead_lag_window = 50;
-    
-    // 信号源开关
-    bool signal_use_volatility = true;
-    bool signal_use_ofi = true;
-    bool signal_use_trade_flow = true;
-    bool signal_use_book_imbalance = true;
-    bool signal_use_momentum = true;
-    bool signal_use_lead_lag = false;
-    
-    // 信号权重
-    double signal_ofi_weight = 0.35;
-    double signal_trade_weight = 0.25;
-    double signal_book_imbalance_weight = 0.20;
-    double signal_momentum_weight = 0.15;
-    double signal_lead_lag_weight = 0.05;
-    
-    // 信号阈值
-    double signal_strong_threshold = 0.7;
-    double signal_vol_threshold = 0.003;
-    double signal_spread_threshold = 5.0;
-    double signal_book_imbalance_threshold = 0.2;
-    double signal_large_trade_threshold = 50.0;
-    double signal_momentum_ema_alpha = 0.1;
-    
-    // Alpha 影响
-    double alpha_sensitivity = 5.0;  ///< Alpha impact on fair value (ticks per alpha unit)
+    // Alpha influence (仍需保留，由 StrategyCoordinator 使用)
+    double alpha_sensitivity = 2.0;
+    double cold_start_confidence_factor = 0.005;
 };
 
 /// Coordinator configuration
@@ -185,35 +117,42 @@ struct CoordinatorConfig
     // use_alpha_engine 已移除 - Alpha 信号由 SignalAggregator 管理
     bool use_toxicity_detector;
     bool use_spread_optimizer;
-    // use_market_state 已移除 - 市场状态由 SignalAggregator 管理
-    bool use_auto_cancel;
     bool use_self_trade_prevention;
-    bool use_synthetic_transaction;
     bool use_adaptive_params;
     
     uint32_t param_update_interval;
     uint32_t closeout_minutes_before;
     uint32_t close_time;
     bool closeout_flatten_position;
-    uint32_t toxicity_cooloff_ms;
+    uint32_t night_close_time;         // 夜盘收盘时间 (HHMM格式，0=无夜盘)
+    uint32_t night_minutes_before;     // 夜盘收盘前N分钟触发
     
     bool perf_enabled;
-    uint32_t perf_log_interval;
-    uint32_t perf_warn_threshold_ns;
-    uint32_t perf_critical_threshold_ns;
+    uint32_t perf_log_interval;       // propagated from config.yaml via FutuMmConfig
+    uint32_t perf_warn_threshold_ns;  // propagated from config.yaml via FutuMmConfig
+    uint32_t perf_critical_threshold_ns; // propagated from config.yaml via FutuMmConfig
+    
+    // perf fields: propagated from config.yaml via FutuMmConfig, not read by StrategyCoordinator itself
+    uint64_t perf_monitor_latency_threshold;
+    
+    bool use_hedging = true;
+    double hedge_delta_threshold = 0.8;
+    uint32_t hedge_cooldown_ms = 5000;
     
     ModuleParams modules;
+    wtp::WTSVariant* _raw_variant = nullptr;
     
     CoordinatorConfig()
         : use_market_making(true), use_spread_arbitrage(false)
         , use_signal_aggregator(true), use_toxicity_detector(true)
         , use_spread_optimizer(true)
-        , use_auto_cancel(true), use_self_trade_prevention(true)
-        , use_synthetic_transaction(true), use_adaptive_params(false)
+        , use_self_trade_prevention(true)
+        , use_adaptive_params(false)
         , param_update_interval(100), closeout_minutes_before(5), close_time(150000)
-        , closeout_flatten_position(true), toxicity_cooloff_ms(30000)
+        , closeout_flatten_position(true), night_close_time(0), night_minutes_before(5)
         , perf_enabled(true), perf_log_interval(1000)
-        , perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000) {}
+        , perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000)
+        , perf_monitor_latency_threshold(100000) {}
 };
 
 class StrategyCoordinator
@@ -224,6 +163,8 @@ public:
     
     void setConfig(const CoordinatorConfig& cfg) { _cfg = cfg; }
     const CoordinatorConfig& getConfig() const { return _cfg; }
+    void setAlphaSensitivity(double val) { _cfg.modules.alpha_sensitivity = val; }
+    void setPortfolioMaxDelta(double val) { _cfg.modules.portfolio_max_delta = val; }
     
     bool loadConfig(const std::string& config_file);
     void loadConfigFromVariant(wtp::WTSVariant* cfg);
@@ -236,8 +177,15 @@ public:
     void setArbExecutor(AsyncArbitrageExecutor* arb) { _arb_executor = arb; }
     void setPerformanceMonitor(PerformanceMonitor* monitor) { _perf_monitor = monitor; }
     void setSelfTradeCalibrator(SelfTradeCalibrator* calibrator) { _self_trade_calibrator = calibrator; }
-    void setAdaptiveParamManager(AdaptiveParamManager* manager) { _param_manager = manager; }
     void setCorrelationManager(CorrelationManager* manager) { _correlation_manager = manager; }
+    void setOrderRouter(OrderRouter* router) { _order_router = router; }
+    
+    /// Get trading state (read-only for external queries)
+    const TradingState& tradingState() const { return *_trading_state; }
+    /// Get trading state (mutable for direct manipulation by risk/toxicity modules)
+    TradingState& tradingStateMut() { return *_trading_state; }
+    /// Set shared trading state pointer (owned by UftFutuMmStrategy)
+    void setTradingState(TradingState* state) { _trading_state = state; }
     
     void setQuoters(wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters) { _quoters = quoters; }
     void setSessionInfo(const std::string& code, wtp::WTSSessionInfo* sessInfo) { _session_info[code] = sessInfo; }
@@ -257,16 +205,17 @@ public:
     bool processQuoting(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
     bool processAutoCancel(wtp::IUftStraCtx* ctx, const TickContext& tc);
     bool checkAndHedge(wtp::IUftStraCtx* ctx);
+    // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_scale)
     void updateAdaptiveParams(wtp::IUftStraCtx* ctx, const TickContext& tc);
     
-    inline bool isTradingHalted() const { return _trading_halted; }
-    inline bool isQuotingPaused() const { return _quoting_paused; }
-    inline bool isLongBlocked() const { return _long_blocked; }
-    inline bool isShortBlocked() const { return _short_blocked; }
-    inline bool isMarketStatePaused() const { return _market_state_paused; }
-    inline bool isToxicityPaused() const { return _toxicity_paused; }
+    inline bool isTradingHalted() const { return _trading_state ? _trading_state->trading_halted : false; }
+    inline bool isQuotingPaused() const { return _trading_state ? _trading_state->quoting_paused : false; }
+    inline bool isLongBlocked() const { return _trading_state ? _trading_state->long_blocked : false; }
+    inline bool isShortBlocked() const { return _trading_state ? _trading_state->short_blocked : false; }
+    inline bool isMarketStatePaused() const { return _trading_state ? _trading_state->market_paused : false; }
+    inline bool isToxicityPaused() const { return _trading_state ? _trading_state->toxicity_paused : false; }
     
-    void setTradingHalted(bool halted) { _trading_halted = halted; }
+    void setTradingHalted(bool halted) { if (_trading_state) _trading_state->trading_halted = halted; }
     void resetSession();
     void resetDaily();
     
@@ -278,21 +227,17 @@ private:
     ToxicFlowDetector* _toxicity = nullptr;
     PerformanceMonitor* _perf_monitor = nullptr;
     SelfTradeCalibrator* _self_trade_calibrator = nullptr;
-    AdaptiveParamManager* _param_manager = nullptr;
     CorrelationManager* _correlation_manager = nullptr;
     AsyncArbitrageExecutor* _arb_executor = nullptr;
+    OrderRouter* _order_router = nullptr;
 
     wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* _quoters = nullptr;
     wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* _spread_opts = nullptr;
     std::unordered_map<std::string, std::unique_ptr<MarketDataContext>>* _market_data = nullptr;
     std::unordered_map<std::string, std::unique_ptr<SignalAggregator>>* _signal_aggregators = nullptr;
 
-    bool _trading_halted = false;
-    bool _quoting_paused = false;
-    bool _long_blocked = false;
-    bool _short_blocked = false;
-    bool _market_state_paused = false;
-    bool _toxicity_paused = false;
+    /// Unified trading state (replaces _trading_halted, _quoting_paused, etc.)
+    TradingState* _trading_state = nullptr;  // Shared pointer — owned by UftFutuMmStrategy
     bool _channel_ready = true;
     
     uint64_t _toxicity_resume_time = 0;
@@ -304,6 +249,17 @@ private:
     
     std::unordered_map<std::string, wtp::WTSSessionInfo*> _session_info;
     wtp::wt_hashmap<std::string, double> _last_mid;
+    
+    // 对冲防震荡状态
+    uint64_t _last_hedge_time = 0;        // 上次对冲时间戳(ms)
+    int _last_hedge_direction = 0;         // 上次对冲方向: +1=BUY, -1=SELL, 0=none
+    double _last_hedge_delta = 0.0;        // 上次对冲前的delta值
+    
+    // 减仓防重复触发 — removed (attemptPositionReduction deleted)
+    
+    // 日志限频
+    uint64_t _last_halt_log_ms = 0;        // 上次halted日志时间戳(ms)
+    uint64_t _last_pause_diag_ms = 0;     // 上次shouldPause诊断日志时间戳(ms)
 };
 
 } // namespace futu

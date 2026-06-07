@@ -17,6 +17,7 @@
 #include "../Includes/FasterDefs.h"
 #include "SpreadArbitrageTypes.h"
 #include "SpreadOptimizer.h"
+#include "TradingState.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -34,13 +35,13 @@ namespace futu {
 class FutuPortfolio;
 class FutuQuoter;
 class SpreadOptimizer;
+class OrderRouter;
 
 class MarketDataContext;
 class FutuRiskMonitor;
 class ToxicFlowDetector;
 class CorrelationManager;
 class PerformanceMonitor;
-class AdaptiveParamManager;
 class PerformanceAnalyzer;
 
 class SpreadArbitrageManager;
@@ -68,203 +69,117 @@ class BilateralQuoteStats;
 ///   - SelfTradePrevention 参数在 coordinator.yaml 的 modules 节点
 struct FutuMmConfig
 {
-    //==========================================================================
-    // 合约配置
-    //==========================================================================
-    std::string anchor_code;        // 主力合约（对冲用）
-    std::vector<std::string> codes; // 做市合约列表
+    std::string anchor_code;
+    std::string coordinator_config;
+    std::string spread_arbitrage_config;
     
-    //==========================================================================
-    // 配置文件路径
-    //==========================================================================
-    std::string coordinator_config;     // Coordinator 配置文件路径
-    std::string spread_arbitrage_config; // 套利模块配置文件路径
+    struct Portfolio {
+        double max_delta;
+        double hedge_ratio;
+        double hedge_delta_threshold;  ///< 对冲触发Delta利用率阈值 (0.0-1.0)
+        uint32_t hedge_cooldown_ms;    ///< 对冲冷却时间(ms)
+        Portfolio() : max_delta(50.0), hedge_ratio(1.0), hedge_delta_threshold(0.8), hedge_cooldown_ms(5000) {}
+    } portfolio;
     
-    //==========================================================================
-    // 组合级 Delta 软指标（用于组合级 skew 和对冲决策，不触发风控动作）
-    // 注意：这是所有合约的 delta 之和的限制
-    //==========================================================================
-    double max_delta;               // 组合级 Delta 软限制（用于组合级 skew 计算基准）
-    double hedge_threshold;         // 对冲触发阈值
-    double max_spread_mult;         // 最大价差倍数
+    struct Quoting {
+        uint32_t num_levels;
+        double base_spread;
+        double base_qty;
+        double qty_decay;
+        double level_step;
+        double sticky_threshold;
+        double improve_retreat_ratio;
+        double max_price_deviation;
+        bool price_protection;
+        double protect_ticks;
+        bool use_bilateral_quote;
+        double max_obligation_spread;
+        Quoting()
+            : num_levels(1), base_spread(2.0), base_qty(5.0), qty_decay(0.7)
+            , level_step(1.0), sticky_threshold(1.0)
+            , improve_retreat_ratio(2.0), max_price_deviation(20.0)
+            , price_protection(true), protect_ticks(1.0)
+            , use_bilateral_quote(false), max_obligation_spread(10.0) {}
+    } quoting;
     
-    //==========================================================================
-    // 报价参数
-    //==========================================================================
-    uint32_t num_levels;            // 档位数量
-    double base_spread;             // 基础价差(tick)
-    double base_qty;                // 基础量
-    double qty_decay;               // 外层衰减
-    double level_step;              // 档位间距
+    struct Risk {
+        double max_exposure;
+        double max_daily_loss;
+        uint32_t max_orders_per_sec;
+        uint32_t max_cancels_per_sec;
+        uint32_t max_trades_per_sec;
+        uint32_t cooldown_ms;
+        uint32_t check_interval_ms;
+        double recovery_threshold;
+        double max_delta_change_per_sec;
+        uint32_t max_recovery_count;
+        double pnl_recovery_ratio;
+        double max_loss_for_recovery;
+        double position_breach_pause_threshold;
+        double delta_critical_mult;
+        double delta_warning_mult;
+        uint32_t widen_threshold;
+        uint32_t pause_threshold;
+        uint32_t flatten_threshold;
+        uint32_t delta_rate_window_sec;
+        uint32_t delta_rate_cooldown_ms;
+        Risk()
+            : max_exposure(35000000.0), max_daily_loss(-200000.0)
+            , max_orders_per_sec(50), max_cancels_per_sec(30), max_trades_per_sec(20)
+            , cooldown_ms(30000), check_interval_ms(5000), recovery_threshold(0.8)
+            , max_delta_change_per_sec(3.0), max_recovery_count(3)
+            , pnl_recovery_ratio(0.5), max_loss_for_recovery(0)
+            , position_breach_pause_threshold(1.2), delta_critical_mult(1.5)
+            , delta_warning_mult(0.8), widen_threshold(1), pause_threshold(2)
+            , flatten_threshold(3), delta_rate_window_sec(2), delta_rate_cooldown_ms(15000) {}
+    } risk;
     
-    //==========================================================================
-    // 库存管理参数
-    //==========================================================================
-    double max_inventory;           // 最大库存
-    double skew_factor;             // 库存倾斜因子 (φ in GLFT model)
-    double max_skew;                // 最大倾斜值
-    double hedge_ratio;             // 对冲比例
-    double target_inventory;        // 目标库存
+    struct Closeout {
+        uint32_t minutes_before;       // 全天收盘前N分钟触发平仓
+        bool flatten_position;
+        uint32_t max_retries;
+        uint32_t retry_interval_ms;
+        uint32_t close_time;           // 全天收盘时间 (HHMMSS格式，白盘收盘)
+        uint32_t night_close_time;     // 夜盘收盘时间 (HHMM格式，0=无夜盘)
+        uint32_t night_minutes_before; // 夜盘收盘前N分钟触发平仓 (默认同minutes_before)
+        Closeout()
+            : minutes_before(5), flatten_position(true)
+            , max_retries(3), retry_interval_ms(5000), close_time(150000)
+            , night_close_time(0), night_minutes_before(5) {}
+    } closeout;
     
-    //==========================================================================
-    // 硬风控指标（不得突破）
-    //==========================================================================
-    double max_exposure;            // 最大暴露（硬限制）
+    struct Perf {
+        uint64_t monitor_latency_threshold;
+        bool enabled;
+        uint32_t log_interval;
+        uint32_t warn_threshold_ns;
+        uint32_t critical_threshold_ns;
+        Perf()
+            : monitor_latency_threshold(100000), enabled(true)
+            , log_interval(1000), warn_threshold_ns(10000), critical_threshold_ns(50000) {}
+    } perf;
     
-    //==========================================================================
-    // Sticky 策略参数 (减少频繁撤单重报)
-    //==========================================================================
-    double sticky_threshold;        // 价格粘性阈值(tick)
-    double improve_retreat_ratio;   // 改善/撤退容忍比 (不对称粘性, default: 2.0)
+    struct Modules {
+        bool use_spread_optimizer;
+        bool use_toxicity_detector;
+        bool use_adaptive_param;
+        bool use_performance_monitor;
+        bool use_performance_analyzer;
+        bool use_market_making;
+        bool use_spread_arbitrage;
+        Modules()
+            : use_spread_optimizer(true), use_toxicity_detector(true)
+            , use_adaptive_param(false), use_performance_monitor(false)
+            , use_performance_analyzer(false), use_market_making(true)
+            , use_spread_arbitrage(false) {}
+    } modules;
     
-    //==========================================================================
-    // 价格验证参数 (防止异常报价)
-    //==========================================================================
-    double max_price_deviation;     // 最大价格偏离(tick), 0=不限制
-    
-    //==========================================================================
-    // 做市报价价格保护参数（传递给 FutuQuoter）
-    //==========================================================================
-    bool price_protection;          // 是否启用价格保护 (default: true)
-    double protect_ticks;           // 价格保护tick数 (default: 1.0)
-    
-    //==========================================================================
-    // 增强 Skew 参数 (更激进的库存回归)
-    //==========================================================================
-    double skew_sensitivity;        // Skew 灵敏度系数 (非线性增强)
-    double aggressive_skew_threshold;  // 激进 Skew 阈值 (delta利用率)
-    double one_sided_threshold;     // 单向报价阈值 (delta利用率)
-    
-    //==========================================================================
-    // 下单错误处理参数
-    //==========================================================================
-    uint32_t order_error_threshold; // 触发暂停的连续下单错误次数
-    
-    //==========================================================================
-    // 收盘前平仓参数
-    //==========================================================================
-    uint32_t closeout_minutes_before;   // 收盘前多少分钟停止报价 (0=不启用)
-    bool closeout_flatten_position;     // 收盘前是否平掉所有敞口
-    uint32_t close_time;                // 收盘时间 (HHMMSS格式)
-    
-    //==========================================================================
-    // 风控参数
-    //==========================================================================
-    double max_daily_loss;          // 最大日内亏损
-    
-    //==========================================================================
-    // 模块开关 (已废弃 - 从 CoordinatorConfig 同步)
-    // 注: 以下字段仅为向后兼容保留，实际值从 coordinator 获取
-    // 注：use_alpha_engine 和 use_market_state 已移除，由 SignalAggregator 管理
-    //==========================================================================
-    bool use_spread_optimizer;      // [deprecated] 从 coordinator 同步
-    bool use_auto_cancel;           // [deprecated] 从 coordinator 同步
-    // use_market_state 已移除 - 由 SignalAggregator 管理
-    // use_alpha_engine 已移除 - 由 SignalAggregator 管理
-    bool use_toxicity_detector;     // [deprecated] 从 coordinator 同步
-    bool use_synthetic_transaction; // [deprecated] 从 coordinator 同步
-    bool use_adaptive_param;        // [deprecated] 从 coordinator 同步
-    bool use_performance_monitor;   // 使用性能监控
-    bool use_performance_analyzer;  // 使用绩效分析
-    
-    //==========================================================================
-    // GLFT 核心参数已移至 ModuleParams (spread_phi)
-    // 注: spread_phi 现在从 coordinator.yaml 的 spreadOptimizer.phi 读取
-    
-    //==========================================================================
-    // 毒性检测参数 (策略级运行时使用)
-    //==========================================================================
-    uint32_t toxicity_cooloff_ms;   // 毒性冷却时间(ms)
-    
-    //==========================================================================
-    // 风控参数 (放在 config.yaml)
-    //==========================================================================
-    // FutuRiskMonitor 参数
-    uint32_t risk_max_orders_per_sec;
-    uint32_t risk_max_cancels_per_sec;
-    uint32_t risk_max_trades_per_sec;
-    uint32_t risk_cooldown_ms;
-    uint32_t risk_check_interval_ms;
-    double   risk_recovery_threshold;
-    
-    //==========================================================================
-    // 性能监控参数 (放在 config.yaml)
-    //==========================================================================
-    // PerformanceAnalyzer 参数
-    uint32_t perf_analyzer_window_size;
-    double perf_analyzer_risk_free_rate;
-    
-    // PerformanceMonitor 参数
-    uint64_t perf_monitor_latency_threshold;
-    
-    //==========================================================================
-    // 策略模式开关 (独立控制)
-    //==========================================================================
-    bool use_market_making;          // 启用做市策略
-    bool use_spread_arbitrage;       // 启用跨期价差套利
-
-    //==========================================================================
-    // 双边报价参数
-    //==========================================================================
-    bool   use_bilateral_quote;      // 是否使用双边报价接口
-    double max_obligation_spread;    // 最大做市义务价差(ticks)
-    
-    //==========================================================================
-    // 构造函数 - 默认值
-    //==========================================================================
-    FutuMmConfig()
-        : coordinator_config("coordinator.yaml")
-        , spread_arbitrage_config("spread_arbitrage.yaml")
-        , max_delta(5000000.0)         // Delta 软限制（用于 skew 计算基准）
-        , hedge_threshold(3000000.0)
-        , max_spread_mult(3.0)
-        , num_levels(3)
-        , base_spread(2.0)
-        , base_qty(1.0)
-        , qty_decay(0.7)
-        , level_step(1.0)
-        , max_inventory(100.0)
-        , skew_factor(0.01)
-        , max_skew(5.0)
-        , hedge_ratio(0.5)
-        , target_inventory(0)
-        , max_exposure(300000000.0)    // 硬风控指标
-        , sticky_threshold(1.0)
-        , improve_retreat_ratio(2.0)
-        , max_price_deviation(20.0)
-        , price_protection(true)
-        , protect_ticks(1.0)
-        , skew_sensitivity(2.0)
-        , aggressive_skew_threshold(0.5)
-        , one_sided_threshold(0.8)
-        , order_error_threshold(3)
-        , closeout_minutes_before(5)
-        , closeout_flatten_position(true)
-        , max_daily_loss(-50000.0)
-        , use_spread_optimizer(true)
-        , use_auto_cancel(true)
-        // use_market_state 已移除
-        // use_alpha_engine 已移除
-        , use_toxicity_detector(true)
-        , use_synthetic_transaction(true)
-        , use_adaptive_param(false)
-        , use_performance_monitor(false)
-        , use_performance_analyzer(false)
-        , toxicity_cooloff_ms(5000)
-        , risk_max_orders_per_sec(50)
-        , risk_max_cancels_per_sec(30)
-        , risk_max_trades_per_sec(20)
-        , risk_cooldown_ms(30000)
-        , risk_check_interval_ms(5000)
-        , risk_recovery_threshold(0.8)
-        , perf_analyzer_window_size(1000)
-        , perf_analyzer_risk_free_rate(0.02)
-        , perf_monitor_latency_threshold(100000)  // 100us
-        , use_market_making(true)
-        , use_spread_arbitrage(false)
-        , use_bilateral_quote(false)
-        , max_obligation_spread(100.0)
-    {}
+    struct OrderControl {
+        uint32_t order_error_threshold;
+        uint32_t max_orders;
+        double stp_min_price_gap;
+        OrderControl() : order_error_threshold(3), max_orders(32), stp_min_price_gap(1.0) {}
+    } order_control;
 };
 
 /// 期货做市策略 - 作为 UFT 策略运行
@@ -381,9 +296,6 @@ private:
     /// 性能监控
     std::unique_ptr<PerformanceMonitor> _performance_monitor;
     
-    /// 自适应参数管理器
-    std::unique_ptr<AdaptiveParamManager> _param_manager;
-    
     /// 绩效分析器
     std::unique_ptr<PerformanceAnalyzer> _perf_analyzer;
     
@@ -394,6 +306,9 @@ private:
     
     /// 自成交防护模块
     std::unique_ptr<SelfTradePrevention> _stp;
+    
+    /// 统一下单路由器 (套利/对冲/平仓)
+    std::unique_ptr<OrderRouter> _order_router;
     
     /// 异步套利执行器
     std::unique_ptr<AsyncArbitrageExecutor> _async_arb;
@@ -416,7 +331,8 @@ private:
         double max_position;      // 单合约最大持仓（硬限制）
         double max_delta;         // 单合约 Delta 软限制（用于单合约 skew 计算）
         double target_position;   // 单合约目标持仓 (默认0，超过时主动平仓)
-        uint32_t close_time;      // 收盘时间 (HHMMSS格式，用于收盘前平仓)
+        uint32_t close_time;      // 全天收盘时间 (HHMMSS格式，白盘收盘)
+        uint32_t night_close_time;// 夜盘收盘时间 (HHMM格式，0=无夜盘，如230=02:30, 100=01:00, 2300=23:00)
     };
     std::vector<ContractInfo> _contract_infos;
     
@@ -439,16 +355,13 @@ private:
     
     // 运行状态
     bool _channel_ready;
-    bool _trading_halted;
-    bool _use_coordinator_mode;  // true = 使用 StrategyCoordinator (模式B), false = 原有逻辑 (模式A)
-    bool _toxicity_paused;       // 毒性熔断状态
+    TradingState _trading_state;           // 统一交易状态（替代5个bool）
     uint64_t _toxicity_resume_time; // 熔断恢复时间
     
+    // FIX P0-9: 保存ctx指针，供on_entrust等无ctx回调使用
+    IUftStraCtx* _main_ctx = nullptr;
+    
     // 风险控制状态（由 FutuRiskMonitor 管理）
-    bool _long_blocked;          // 禁止开多
-    bool _short_blocked;         // 禁止开空
-    bool _quoting_paused;        // 报价暂停
-    bool _market_state_paused;   // 市场状态检测暂停报价
     std::unordered_map<std::string, bool> _blocked_contracts; // 单合约封锁
     
     // 当前 tick 数据缓存（避免重复计算）
@@ -457,7 +370,8 @@ private:
     
     // 下单错误处理（统一处理所有下单错误）
     uint32_t _order_error_count;     // 连续下单错误计数
-    uint32_t _order_error_threshold; // 触发暂停的连续错误阈值
+    // order_error_threshold: use _config.order_control.order_error_threshold directly
+    uint64_t _quoting_paused_since;  // quoting_paused 开始时间戳(ms)，0=未暂停
     
     // 收盘前平仓状态 (now managed by FutuRiskMonitor state machine)
     
@@ -467,28 +381,51 @@ private:
     
     //==========================================================================
     // 热更新参数（运行时可修改，无需重启）
+    // 仅包含直接影响报价价格计算的参数
+    // 仓位管理/风控/对冲等参数需重启生效
+//==========================================================================
+    // 热更新参数 (数组化)
     //==========================================================================
+    enum HotParamIndex : uint32_t {
+        HP_BASE_SPREAD = 0,
+        HP_BASE_QTY,
+        HP_QTY_DECAY,
+        HP_LEVEL_STEP,
+        HP_MAX_DELTA,
+        HP_ALPHA_SENSITIVITY,
+        HP_OFI_WEIGHT,
+        HP_TRADE_WEIGHT,
+        HP_BOOK_IMBALANCE_WEIGHT,
+        HP_MOMENTUM_WEIGHT,
+        HP_LEAD_LAG_WEIGHT,
+        HP_STRONG_THRESHOLD,
+        HP_CONFIDENCE_WEIGHT_MIN,
+        HP_CONFIDENCE_WEIGHT_MAX,
+        HP_PHI,
+        HP_DELTA_SKEW_THRESHOLD,
+        HP_DELTA_SKEW_FACTOR,
+        HP_MAX_SPREAD_MULT,
+        HP_MIN_SPREAD_MULT,
+        HP_DEPTH_SENSITIVITY,
+        HP_TOXICITY_SPREAD_FACTOR,
+        HP_LOW_CONFIDENCE_SPREAD_FACTOR,
+        HP_STICKY_THRESHOLD,
+        HP_IMPROVE_RETREAT_RATIO,
+        HP_PROTECT_TICKS,
+        HP_MAX_PRICE_DEVIATION,
+        HP_COUNT
+    };
     
-    // 报价参数
-    double* _hot_base_spread;        // 基础价差
-    double* _hot_spread_mult;        // 价差倍数
-    double* _hot_base_qty;           // 基础数量
-    double* _hot_skew_factor;        // 库存倾斜因子
-    double* _hot_max_skew;           // 最大倾斜
-    double* _hot_max_inventory;      // 最大库存
-    double* _hot_target_inventory;   // 目标库存
+    struct HotParamEntry {
+        const char* name;
+        double default_val;
+        double* ptr;
+    };
     
-    // Delta 软指标
-    double* _hot_max_delta;          // 最大Delta（软指标）
-    double* _hot_hedge_threshold;    // 对冲阈值
+    HotParamEntry _hot_params[HP_COUNT];
     
-    // 硬风控参数
-    double* _hot_max_daily_loss;     // 最大日内亏损
-    uint32_t* _hot_order_error_threshold; // 下单错误阈值
-    
-    // 毒性检测参数
-    double* _hot_toxicity_threshold; // 毒性阈值
-    uint32_t* _hot_toxicity_cooloff_ms; // 毒性冷却期
+    bool isHotChanged(HotParamIndex idx) const { return _hot_params[idx].ptr != nullptr; }
+    double hotVal(HotParamIndex idx) const { return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val; }
 };
 
 } // namespace futu
