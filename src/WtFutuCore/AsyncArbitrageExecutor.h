@@ -28,7 +28,6 @@
 #include <atomic>
 #include <functional>
 #include <memory>
-#include <memory>
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -96,7 +95,7 @@ struct AsyncArbConfig
     uint32_t signal_interval_us;    ///< Signal generation interval (microseconds)
     uint32_t max_wait_us;           ///< Max wait time for condition variable (microseconds)
     uint32_t ticks_per_signal;      ///< Generate signal every N ticks
-    bool enabled;
+    std::atomic<bool> enabled{true}; ///< FIX: atomic — arb线程读, 主线程写(setConfig)
     
     AsyncArbConfig()
         : tick_queue_size(1024)
@@ -104,8 +103,28 @@ struct AsyncArbConfig
         , signal_interval_us(5000)      // 5ms 信号检查间隔
         , max_wait_us(10000)            // 10ms 最大等待
         , ticks_per_signal(5)           // 每5个tick检查一次信号
-        , enabled(true)
     {}
+
+    // FIX: copy/move需特殊处理atomic字段
+    AsyncArbConfig(const AsyncArbConfig& other)
+        : tick_queue_size(other.tick_queue_size)
+        , order_queue_size(other.order_queue_size)
+        , signal_interval_us(other.signal_interval_us)
+        , max_wait_us(other.max_wait_us)
+        , ticks_per_signal(other.ticks_per_signal)
+        , enabled(other.enabled.load())
+    {}
+
+    AsyncArbConfig& operator=(const AsyncArbConfig& other)
+    {
+        tick_queue_size = other.tick_queue_size;
+        order_queue_size = other.order_queue_size;
+        signal_interval_us = other.signal_interval_us;
+        max_wait_us = other.max_wait_us;
+        ticks_per_signal = other.ticks_per_signal;
+        enabled.store(other.enabled.load());
+        return *this;
+    }
 };
 
 //==============================================================================
@@ -179,6 +198,33 @@ public:
     void setMinProfitThreshold(double threshold) { _min_profit_threshold = threshold; }
     
     //==========================================================================
+    // Orphan Leg Auto-Hedge (Main Thread Interface)
+    //==========================================================================
+    
+    /// Callback for orphan leg hedge orders
+    /// @param code     Contract code to hedge (leg2_code)
+    /// @param is_buy   Hedge direction (opposite of leg1)
+    /// @param price    Hedge price (aggressive: counter-price)
+    /// @param qty      Hedge quantity (same as leg1_qty)
+    /// @param urgent   True if timeout exceeded → force market order
+    using OrphanHedgeCallback = std::function<void(const std::string& code,
+                                                    bool is_buy,
+                                                    double price,
+                                                    double qty,
+                                                    bool urgent)>;
+    
+    /// Process orphan legs and generate hedge orders (called from main thread)
+    /// @param callback  Called for each orphan leg that needs hedging
+    /// @param timeout_ms  Grace period before forcing aggressive hedge (default 5000ms)
+    /// @param force_ms   Force market-order deadline (default 30000ms)
+    /// @param current_delta_ratio  Current portfolio delta ratio (abs(delta)/max_delta), 0=no limit
+    /// @return Number of orphan legs processed
+    size_t processOrphanLegs(OrphanHedgeCallback callback,
+                              uint64_t timeout_ms = 5000,
+                              uint64_t force_ms = 30000,
+                              double current_delta_ratio = 0.0);
+    
+    //==========================================================================
     // Statistics
     //==========================================================================
     
@@ -221,6 +267,29 @@ private:
     // Order request queue (arb thread → main thread)
     using OrderQueue = LockFreeQueue<ArbOrderRequest, 256>;
     std::unique_ptr<OrderQueue> _order_queue;
+    
+    //==========================================================================
+    // FIX P0-4: Orphan leg tracking for auto-hedge (dual-queue for SPSC safety)
+    //==========================================================================
+    struct OrphanLeg {
+        std::string pair_id;
+        uint32_t leg1_req_id;
+        std::string leg1_code;
+        std::string leg2_code;
+        bool leg1_is_buy;
+        double leg1_qty;
+        double leg1_price;
+        std::chrono::steady_clock::time_point timestamp;
+        // FIX P2-7: delta_ratio用于动态调整对冲超时
+        // = abs(current_delta / max_delta), 0表示无delta限制
+        double delta_ratio = 0.0;
+    };
+    
+    // Queue from arb thread → main thread (SPSC: arb pushes, main pops)
+    LockFreeQueue<OrphanLeg, 64> _orphan_legs_from_arb;
+    
+    // Deferred legs (main-thread-only, no contention)
+    std::vector<OrphanLeg> _orphan_legs_deferred;
     
     //==========================================================================
     // Thread

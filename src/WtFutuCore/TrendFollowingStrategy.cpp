@@ -187,6 +187,26 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
     // Has position - check for exit
     else
     {
+        // Stop loss check (highest priority)
+        if (_trend_state.entry_price > 0 && _config.stop_loss_pct > 0 && state.current_price > 0)
+        {
+            double pnl_pct = (state.current_price - _trend_state.entry_price) / _trend_state.entry_price;
+            bool should_stop = false;
+            if (state.spread_position > 0 && pnl_pct < -_config.stop_loss_pct)
+                should_stop = true;
+            else if (state.spread_position < 0 && pnl_pct > _config.stop_loss_pct)
+                should_stop = true;
+            
+            if (should_stop)
+            {
+                signal.type = SpreadSignalType::STOP_LOSS;
+                signal.confidence = 1.0;
+                signal.suggested_size = std::abs(state.spread_position);
+                signal.reason = "Stop loss: price moved against position";
+                return signal;
+            }
+        }
+        
         // Exit on trend reversal
         if (_trend_state.is_trend_reversal)
         {
@@ -206,7 +226,7 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
             }
         }
         // Exit on trend exhaustion
-        else if (_trend_state.bars_in_trend > 50)
+        else if (_trend_state.bars_in_trend > _config.max_trend_bars)
         {
             // Trend may be exhausted
             if (state.spread_position > 0 && _trend_state.trend_direction <= 0)

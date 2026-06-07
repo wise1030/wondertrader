@@ -121,6 +121,13 @@ public:
             // Update cumulative OFI
             _cumulative_ofi += ofi;
             
+            // FIX P0-5: 移除0.999乘法衰减，仅用ring buffer弹出做衰减
+            // 原代码同时使用 *=0.999(乘法衰减) 和 -=front()(窗口弹出)，双重衰减导致信号偏小。
+            // 方案A: 仅用ring buffer弹出做衰减，_cumulative_ofi始终等于sum(_ofi_history)，数学一致。
+            // 方案B(已弃用): *=0.999 会在窗口内OFI=0时仍残留累积偏移，但该偏移量级极小
+            //   (0.999^50≈0.95, 5%误差)，而ring buffer弹出已足够处理窗口外数据。
+            //   双重衰减则使信号被过度压制(0.999^50 * 弹出 ≈ 信号偏小5%+)。
+            
             // Remove old samples (5 second window approximation)
             while (_ofi_history.size() > _cfg.window)
             {
@@ -227,10 +234,14 @@ private:
         double variance = sum_sq / n - mean * mean;
         double std_dev = std::sqrt(std::max(0.0, variance));
         
-        // Use 2 * std_dev as normalization factor
+        // FIX P1-1: 移除魔法数字*10.0，改用2*std_dev作为归一化因子
+        // 2*std_dev是95%置信区间宽度，物理含义清晰。
+        // 原*10.0无解释且过度压制信号：若std_dev=5，原normalization_factor=clamp(100,50,1000)=100，
+        //   而无*10.0时normalization_factor=clamp(10,5,200)=10，tanh输入大10倍，信号灵敏度合理。
+        // clamp范围从[50,1000]调整为[5,200]：下限5防止除零/极小值，上限200防止信号消失。
         if (std_dev > 0)
         {
-            _cfg.normalization_factor = std::clamp(2.0 * std_dev * 10.0, 50.0, 1000.0);
+            _cfg.normalization_factor = std::clamp(2.0 * std_dev, 5.0, 200.0);
         }
     }
 };

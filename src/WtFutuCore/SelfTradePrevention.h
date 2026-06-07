@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include "FutuConfig.h"
 #include "UnifiedOrderTracker.h"
 #include <string>
 #include <vector>
@@ -66,6 +67,15 @@ struct StpConfig
     StpConfig()
         : enabled(true), allow_same_price(false), min_price_gap(1.0),
           strategy(Strategy::CANCEL_MM), price_adjust_ticks(1.0) {}
+    
+    static StpConfig fromVariant(wtp::WTSVariant* v) {
+        StpConfig c;
+        c.enabled = FutuConfig::readBool(v, "enabled", true);
+        c.min_price_gap = FutuConfig::readDouble(v, "minPriceGap", 1.0);
+        c.allow_same_price = FutuConfig::readBool(v, "allowSamePrice", false);
+        c.price_adjust_ticks = FutuConfig::readDouble(v, "priceAdjustTicks", 1.0);
+        return c;
+    }
 };
 
 //==============================================================================

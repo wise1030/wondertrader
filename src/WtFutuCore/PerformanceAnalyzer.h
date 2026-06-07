@@ -205,14 +205,10 @@ struct ConditionPerformance
 /// Performance Analyzer Configuration
 struct AnalyzerConfig
 {
-    uint32_t history_size;      ///< Trade history size
-    double adverse_threshold;   ///< Threshold for adverse selection detection
-    double strong_alpha_threshold; ///< Threshold for strong alpha signal
+    double strong_alpha_threshold;
     
     AnalyzerConfig()
-        : history_size(10000)
-        , adverse_threshold(0.5)
-        , strong_alpha_threshold(0.7)
+        : strong_alpha_threshold(0.7)
     {}
 };
 

@@ -33,13 +33,18 @@ void CorrelationManager::addRelation(const std::string& code1, const std::string
 void CorrelationManager::removeContract(const std::string& code) {
     _contracts.erase(code);
     for (auto it = _calculators.begin(); it != _calculators.end();) {
-        if (it->first.find(code) != std::string::npos) {
-            _relation_types.erase(it->first);
-            _expected_betas.erase(it->first);
-            it = _calculators.erase(it);
-        } else {
-            ++it;
+        size_t slash_pos = it->first.find('/');
+        if (slash_pos != std::string::npos) {
+            std::string leg1 = it->first.substr(0, slash_pos);
+            std::string leg2 = it->first.substr(slash_pos + 1);
+            if (leg1 == code || leg2 == code) {
+                _relation_types.erase(it->first);
+                _expected_betas.erase(it->first);
+                it = _calculators.erase(it);
+                continue;
+            }
         }
+        ++it;
     }
 }
 

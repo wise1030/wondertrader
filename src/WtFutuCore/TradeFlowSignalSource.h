@@ -67,27 +67,39 @@ public:
     
     void update(const MarketDataContext& book) override
     {
-        // Get trade flow analysis from MarketDataContext
-        auto flow = book.getTradeFlowAnalysis();
-        
-        // Update result
-        _result.net_flow = flow.net_flow;
-        _result.buy_volume = (_total_volume + _net_flow) / 2.0;
-        _result.sell_volume = (_total_volume - _net_flow) / 2.0;
-        
-        // Normalize net flow
-        if (_total_volume > 0)
-        {
-            _result.net_flow_normalized = _net_flow / _total_volume;
-            _result.large_trade_ratio = _large_volume / _total_volume;
+        // FIX P1: TradeFlow双路径数据不一致修复
+        // 优先使用onTrade()维护的内部状态(SSOT)，仅当onTrade未被调用时回退到MarketDataContext
+        if (_trade_count > 0) {
+            // 使用onTrade()路径的内部状态
+            _result.net_flow = _net_flow;
+            double total = _total_volume;
+            if (total > 0) {
+                _result.buy_volume = (_net_flow + total) / 2.0;
+                _result.sell_volume = total - _result.buy_volume;
+                _result.net_flow_normalized = std::clamp(_net_flow / total, -1.0, 1.0);
+            } else {
+                _result.buy_volume = 0;
+                _result.sell_volume = 0;
+                _result.net_flow_normalized = 0;
+            }
+            _result.large_trade_ratio = (_total_volume > 0) ? _large_volume / _total_volume : 0;
+            _result.avg_trade_size = (_trade_count > 0) ? _total_volume / _trade_count : 0;
+            _result.confidence = 1.0;
+        } else {
+            // 回退: 无onTrade数据时使用MarketDataContext
+            auto flow = book.getTradeFlowAnalysis();
+            _result.net_flow = flow.net_flow;
+            _result.buy_volume = flow.buy_pressure * std::abs(flow.net_flow);
+            _result.sell_volume = flow.sell_pressure * std::abs(flow.net_flow);
+            _result.large_trade_ratio = flow.large_trade_ratio;
+            _result.avg_trade_size = flow.avg_trade_size;
+            if (flow.buy_pressure + flow.sell_pressure > 0)
+                _result.net_flow_normalized = (flow.buy_pressure - flow.sell_pressure) / (flow.buy_pressure + flow.sell_pressure);
+            else
+                _result.net_flow_normalized = 0;
+            _result.net_flow_normalized = std::clamp(_result.net_flow_normalized, -1.0, 1.0);
+            _result.confidence = (flow.buy_pressure + flow.sell_pressure > 0) ? 1.0 : 0.5;
         }
-        
-        _result.avg_trade_size = _trade_count > 0 ? _total_volume / _trade_count : 0;
-        
-        // Clamp normalized flow
-        _result.net_flow_normalized = std::clamp(_result.net_flow_normalized, -1.0, 1.0);
-        
-        _result.confidence = _trade_count >= 5 ? 1.0 : 0.5;
         _result.valid = true;
         _result.timestamp = book.getTimestamp();
     }
@@ -148,7 +160,12 @@ public:
             {
                 _large_volume -= old.qty;
             }
-            _trade_count--;
+            // FIX P1-8: 防止_trade_count下溢 — uint32_t的0-1会回绕到4294967295
+            // 改为条件判断保护，仅当_trade_count>0时才递减
+            if (_trade_count > 0)
+            {
+                _trade_count--;
+            }
             _trade_history.pop();
         }
     }

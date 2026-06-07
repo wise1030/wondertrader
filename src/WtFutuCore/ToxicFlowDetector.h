@@ -17,8 +17,8 @@
 
 #include <string>
 #include <cstdint>
-#include "../Includes/WTSMarcos.h"
-#include "MicroAlphaEngine.h"
+#include "FutuConfig.h"
+#include "AlphaTypes.h"
 #include "SelfTradeCalibrator.h"
 #include "MarketDataContext.h"
 #include "SyntheticSignalFusion.h"
@@ -34,23 +34,36 @@ struct SyntheticTransactionData;
 struct ToxicityParams
 {
     double      adverse_threshold;
-    double      informed_prob_threshold;
     double      alpha_weight;
     double      book_weight;
     double      self_trade_weight;
+    double      extreme_signal_weight;  ///< Extreme signal discount weight (default 0.8)
     double      vpin_threshold;
     uint32_t    vpin_window;
     double      vpin_bucket_size;
     
     ToxicityParams()
-        : adverse_threshold(0.6)
-        , informed_prob_threshold(0.7)
+        : adverse_threshold(0.10)
         , alpha_weight(0.3)
         , book_weight(0.3)
         , self_trade_weight(0.4)
-        , vpin_threshold(0.85)
+        , extreme_signal_weight(0.8)
+        , vpin_threshold(0.7)
         , vpin_window(50)
         , vpin_bucket_size(1000) {}
+    
+    static ToxicityParams fromVariant(wtp::WTSVariant* v) {
+        ToxicityParams p;
+        p.adverse_threshold = FutuConfig::readDouble(v, "adverseThreshold", 0.10);
+        p.vpin_threshold = FutuConfig::readDouble(v, "vpinThreshold", 0.10);
+        p.vpin_window = FutuConfig::readUInt32(v, "window", 50);
+        p.vpin_bucket_size = FutuConfig::readDouble(v, "bucketSize", 1000);
+        p.alpha_weight = FutuConfig::readDouble(v, "alphaWeight", 0.3);
+        p.book_weight = FutuConfig::readDouble(v, "bookWeight", 0.3);
+        p.self_trade_weight = FutuConfig::readDouble(v, "selfTradeWeight", 0.4);
+        p.extreme_signal_weight = FutuConfig::readDouble(v, "extremeSignalWeight", 0.8);
+        return p;
+    }
 };
 
 /// Toxicity analysis result
@@ -103,6 +116,24 @@ public:
     void onSyntheticAlpha(const SyntheticTransactionData& synth_trans, const AlphaResult& alpha);
     void onBookAnalysis(const BookAnalysisResult& book_analysis);
     void onSelfTradeCalibration(const CalibrationResult& calibration);
+    
+    //==========================================================================
+    // Synthetic Signal Fusion (integrated)
+    //==========================================================================
+    
+    /// Feed tick inference data into the internal fusion engine
+    void feedTickInference(const InferredTransaction& tick_inf);
+    
+    /// Feed book signal into the internal fusion engine
+    void feedBookSignal(const DepthImbalanceSignal& book_sig);
+    
+    /// Enable/disable fusion engine
+    void setFusionEnabled(bool enabled) { _fusion_enabled = enabled; }
+    bool isFusionEnabled() const { return _fusion_enabled; }
+    
+    /// Access the internal fusion engine for advanced configuration
+    SyntheticSignalFusion& getFusion() { return _signal_fusion; }
+    const SyntheticSignalFusion& getFusion() const { return _signal_fusion; }
     
     /// Enhanced toxicity detection combining all sources
     ToxicityMetrics detectEnhancedToxicity(
@@ -157,6 +188,13 @@ public:
     void reset();
     
     //==========================================================================
+    // Fusion Cycle (called by UftFutuMmStrategy per tick)
+    //==========================================================================
+    
+    /// Run fusion and feed results back into toxicity detection
+    void runFusionCycle();
+    
+    //==========================================================================
     // Component Access (for advanced use)
     //==========================================================================
     
@@ -173,6 +211,10 @@ private:
     // Sub-components
     PredictiveToxicity _predictive;
     RealizedToxicity _realized;
+    
+    // Synthetic signal fusion (integrated from standalone module)
+    SyntheticSignalFusion _signal_fusion;
+    bool _fusion_enabled = true;
     
     // Legacy data (for backward compatibility)
     BookAnalysisResult _latest_book_analysis;

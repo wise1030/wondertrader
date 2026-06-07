@@ -57,6 +57,7 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
     feat.volatility_ratio = calculateVolatilityFeature(state);
     feat.correlation_trend = calculateCorrelationFeature(state);
     feat.mspread_imbalance = calculateMSpreadFeature(state);
+    feat.volume_imbalance = (state.total_volume > 0) ? std::max(-1.0, std::min(1.0, (state.buy_volume - state.sell_volume) / state.total_volume)) : 0;
     
     // Calculate composite signal using weights
     double w_z = _config.use_adaptive_weights ? _adaptive_weight_zscore : _config.weight_zscore;
@@ -88,7 +89,7 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
     feat.composite_signal = std::max(-1.0, std::min(1.0, feat.composite_signal));
     
     // Calculate confidence based on feature stability
-    feat.feature_stability = 1.0 - std::abs(feat.zscore_momentum) * 0.5;
+    feat.feature_stability = std::max(0.0, std::min(1.0, 1.0 - std::abs(feat.zscore_momentum) * 0.5));
     feat.signal_confidence = std::abs(feat.composite_signal) * feat.feature_stability;
     
     feat.is_valid = true;
@@ -171,16 +172,20 @@ double StatisticalArbStrategy::calculateCorrelationFeature(const SpreadState& st
 
 double StatisticalArbStrategy::calculateMSpreadFeature(const SpreadState& state) const
 {
-    // Microstructure spread feature based on bid-ask imbalance
-    // This is a placeholder - in real implementation, would use actual market data
-    // For now, use a heuristic based on spread position
-    if (!state.hasPosition())
-        return 0;
+    if (state.mid_price <= 0) return 0;
     
-    // If position is profitable, reduce microstructure weight
-    // If losing, increase microstructure caution
-    double pnl_ratio = state.unrealized_pnl / (std::abs(state.spread_position) + 1);
-    return std::max(-1.0, std::min(1.0, -pnl_ratio * 0.1));
+    double raw_spread = state.ask_price - state.bid_price;
+    double relative_spread = raw_spread / state.mid_price;
+    
+    double volume_weight = 1.0;
+    if (state.total_volume > 0 && state.average_trade_size > 0)
+    {
+        double trade_intensity = state.total_volume / state.average_trade_size;
+        volume_weight = std::min(1.0 + trade_intensity * 0.01, 2.0);
+    }
+    
+    double mspread = relative_spread * volume_weight;
+    return std::max(-1.0, std::min(1.0, mspread * 100.0));
 }
 
 void StatisticalArbStrategy::updateAdaptiveWeights()

@@ -46,6 +46,8 @@ enum class SignalType : uint8_t
     ALPHA,          ///< Composite Alpha Signal
     MARKET_STATE,   ///< Market State Detection
     TOXICITY,       ///< Toxicity Detection
+    MOMENTUM,       ///< Momentum Signal
+    LEAD_LAG,       ///< Lead-Lag Signal
     CUSTOM          ///< User-defined signal
 };
 
@@ -155,13 +157,14 @@ struct AlphaSignalResult : public SignalResult
     double ofi_component;          ///< OFI contribution
     double trade_component;        ///< Trade flow contribution
     double book_imbalance_component; ///< Book imbalance contribution
+    double momentum_component;     ///< Momentum contribution
     double lead_lag_component;     ///< Lead-lag contribution
     bool is_strong_signal;         ///< Strong signal flag
     
     AlphaSignalResult() 
         : SignalResult(SignalType::ALPHA)
         , alpha(0), ofi_component(0), trade_component(0)
-        , book_imbalance_component(0), lead_lag_component(0)
+        , book_imbalance_component(0), momentum_component(0), lead_lag_component(0)
         , is_strong_signal(false) {}
 };
 
@@ -188,10 +191,11 @@ struct ToxicitySignalResult : public SignalResult
     double toxicity_score;      ///< Toxicity score [0, 1]
     bool toxic_detected;        ///< Toxic flow detected
     double vpin;                ///< VPIN value
+    int toxic_side;             ///< Toxic side (1=buy toxic, -1=sell toxic, 0=both/none)
     
     ToxicitySignalResult() 
         : SignalResult(SignalType::TOXICITY)
-        , toxicity_score(0), toxic_detected(false), vpin(0) {}
+        , toxicity_score(0), toxic_detected(false), vpin(0), toxic_side(0) {}
 };
 
 //==============================================================================
@@ -264,6 +268,7 @@ struct SignalContext
         ofi = OFISignalResult();
         volatility = VolatilitySignalResult();
         trade_flow = TradeFlowSignalResult();
+        book_imbalance = BookImbalanceSignalResult();  // FIX P0-4: 修复reset()遗漏book_imbalance
         alpha = AlphaSignalResult();
         market_state = MarketStateSignalResult();
         toxicity = ToxicitySignalResult();
@@ -294,6 +299,9 @@ public:
     
     /// Get current signal result
     virtual const SignalResult& result() const = 0;
+    
+    /// Get alpha value directly (avoids dynamic_cast in hot path)
+    virtual double getAlphaValue() const { return 0.0; }
     
     /// Status management
     virtual bool enabled() const = 0;

@@ -20,8 +20,9 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
+#include <array>
 #include "../Includes/FasterDefs.h"
-#include "../Includes/WTSMarcos.h"
+#include "FutuConfig.h"
 #include "../Share/LockFreeRingBuffer.hpp"
 
 NS_WTP_BEGIN
@@ -31,6 +32,7 @@ NS_WTP_END
 namespace futu {
 
 class FutuPortfolio;  // Forward declaration
+class UnifiedOrderTracker;  // Forward declaration
 
 /// Risk limit types
 enum class RiskLimitType
@@ -102,12 +104,51 @@ struct RateLimits
     uint32_t max_orders_per_sec;
     uint32_t max_cancels_per_sec;
     uint32_t max_trades_per_sec;
+    double max_delta_change_per_sec;
+    uint32_t delta_rate_window_sec;
+    uint32_t delta_rate_cooldown_ms;
+    
+    // 分级响应阈值
+    double position_breach_pause_threshold;  ///< POSITION_NET 利用率触发 PAUSE_QUOTING (default 1.2)
+    double delta_critical_mult;              ///< Delta critical 倍数 (default 1.5)
+    double delta_warning_mult;              ///< Delta warning 倍数 (default 0.8)
+    
+    // 升级响应阈值
+    uint32_t widen_threshold;               ///< breachCount 触发 WIDEN_SPREAD (default 1)
+    uint32_t pause_threshold;               ///< breachCount 触发 PAUSE_QUOTING (default 2)
+    uint32_t flatten_threshold;             ///< breachCount 触发 FLATTEN_POSITION (default 3)
     
     RateLimits()
         : max_orders_per_sec(50)
         , max_cancels_per_sec(30)
         , max_trades_per_sec(20)
+    , max_delta_change_per_sec(10.0)
+    , delta_rate_window_sec(5)
+    , delta_rate_cooldown_ms(5000)
+        , position_breach_pause_threshold(1.2)
+        , delta_critical_mult(1.5)
+        , delta_warning_mult(0.8)
+        , widen_threshold(1)
+        , pause_threshold(2)
+        , flatten_threshold(3)
     {}
+    
+    static RateLimits fromVariant(wtp::WTSVariant* v) {
+        RateLimits r;
+        r.max_orders_per_sec = FutuConfig::readUInt32(v, "maxOrdersPerSec", 50);
+        r.max_cancels_per_sec = FutuConfig::readUInt32(v, "maxCancelsPerSec", 30);
+        r.max_trades_per_sec = FutuConfig::readUInt32(v, "maxTradesPerSec", 20);
+        r.max_delta_change_per_sec =        FutuConfig::readDouble(v, "maxDeltaChangePerSec", 10.0);
+        r.delta_rate_window_sec = FutuConfig::readUInt32(v, "deltaRateWindowSec", 5);
+        r.delta_rate_cooldown_ms = FutuConfig::readUInt32(v, "deltaRateCooldownMs", 5000);
+        r.position_breach_pause_threshold = FutuConfig::readDouble(v, "positionBreachPauseThreshold", 1.2);
+        r.delta_critical_mult = FutuConfig::readDouble(v, "deltaCriticalMult", 1.5);
+        r.delta_warning_mult = FutuConfig::readDouble(v, "deltaWarningMult", 0.8);
+        r.widen_threshold = FutuConfig::readUInt32(v, "widenThreshold", 1);
+        r.pause_threshold = FutuConfig::readUInt32(v, "pauseThreshold", 2);
+        r.flatten_threshold = FutuConfig::readUInt32(v, "flattenThreshold", 3);
+        return r;
+    }
 };
 
 /// Recovery configuration for reversible risks - P1-3.3 enhanced
@@ -123,25 +164,52 @@ struct RecoveryConfig
     double   max_loss_for_recovery; ///< Max absolute loss at halt to allow auto-recovery (0=disabled)
     
     RecoveryConfig()
-        : cooldown_ms(30000)        // 30 seconds default cooldown
-        , check_interval_ms(5000)   // 5 seconds default check interval
-        , recovery_threshold(0.8)   // 80% utilization threshold
-        , max_recovery_count(3)     // Max 3 auto-recoveries per session
-        , pnl_recovery_ratio(0.5)   // Must recover 50% of loss before resuming
-        , max_loss_for_recovery(0)  // Disabled by default
+        : cooldown_ms(30000)
+        , check_interval_ms(5000)
+        , recovery_threshold(0.8)
+        , max_recovery_count(3)
+        , pnl_recovery_ratio(0.5)
+        , max_loss_for_recovery(0)
     {}
+    
+    static RecoveryConfig fromVariant(wtp::WTSVariant* v) {
+        RecoveryConfig c;
+        c.cooldown_ms = FutuConfig::readUInt32(v, "cooldownMs", 30000);
+        c.check_interval_ms = FutuConfig::readUInt32(v, "checkIntervalMs", 5000);
+        c.recovery_threshold = FutuConfig::readDouble(v, "recoveryThreshold", 0.8);
+        c.max_recovery_count = FutuConfig::readUInt32(v, "maxRecoveryCount", 3);
+        c.pnl_recovery_ratio = FutuConfig::readDouble(v, "pnlRecoveryRatio", 0.5);
+        c.max_loss_for_recovery = FutuConfig::readDouble(v, "maxLossForRecovery", 0);
+        return c;
+    }
 };
 
 /// Closeout configuration for session end
 struct CloseoutConfig
 {
-    uint32_t minutes_before;        ///< Minutes before close to stop quoting (0=disabled)
-    bool flatten_position;          ///< Whether to flatten position at closeout
+    uint32_t minutes_before;        ///< Minutes before day close to stop quoting (0=disabled)
+    uint32_t max_retries;           ///< Max retries for closeout orders
+    uint32_t retry_interval_ms;     ///< Retry interval in ms
+    uint32_t night_close_time;      ///< Night session close time (HHMM format, 0=no night session)
+    uint32_t night_minutes_before;  ///< Minutes before night close to stop quoting
     
     CloseoutConfig()
-        : minutes_before(5)         // 5 minutes before close
-        , flatten_position(true)    // Flatten by default
+        : minutes_before(5)
+        , max_retries(3)
+        , retry_interval_ms(5000)
+        , night_close_time(0)
+        , night_minutes_before(5)
     {}
+    
+    static CloseoutConfig fromVariant(wtp::WTSVariant* v) {
+        CloseoutConfig c;
+        c.minutes_before = FutuConfig::readUInt32(v, "minutesBefore", 5);
+        c.max_retries = FutuConfig::readUInt32(v, "maxRetries", 3);
+        c.retry_interval_ms = FutuConfig::readUInt32(v, "retryIntervalMs", 5000);
+        c.night_close_time = FutuConfig::readUInt32(v, "nightCloseTime", 0);
+        c.night_minutes_before = FutuConfig::readUInt32(v, "nightMinutesBefore", c.minutes_before);
+        return c;
+    }
 };
 
 /// Closeout state machine states
@@ -150,7 +218,9 @@ enum class CloseoutState
     IDLE,           ///< Not triggered, normal trading
     TRIGGERED,      ///< Triggered, waiting to execute closeout
     FLATTENING,     ///< Executing flatten orders
-    COMPLETED       ///< Closeout completed
+    COMPLETED,      ///< Closeout completed
+    FAILED,         ///< Closeout failed (e.g., partial fill, no liquidity)
+    RETRYING        ///< Retrying closeout after failure
 };
 
 /// Closeout state with transition tracking
@@ -160,10 +230,15 @@ struct CloseoutStateInfo
     uint64_t trigger_time;      ///< When state was triggered
     uint64_t flatten_start;     ///< When flattening started
     uint64_t complete_time;     ///< When completed
+    uint64_t fail_time;         ///< When last failure occurred
+    uint32_t retry_count;       ///< Number of retries attempted
+    uint32_t max_retries;       ///< Maximum retries before giving up (default 3)
+    uint64_t retry_interval_ms; ///< Interval between retries in ms (default 5000)
     
     CloseoutStateInfo()
         : state(CloseoutState::IDLE)
-        , trigger_time(0), flatten_start(0), complete_time(0)
+        , trigger_time(0), flatten_start(0), complete_time(0), fail_time(0)
+        , retry_count(0), max_retries(3), retry_interval_ms(5000)
     {}
     
     inline bool canTransitionTo(CloseoutState next) const
@@ -175,9 +250,15 @@ struct CloseoutStateInfo
             case CloseoutState::TRIGGERED:
                 return next == CloseoutState::FLATTENING || next == CloseoutState::COMPLETED;
             case CloseoutState::FLATTENING:
-                return next == CloseoutState::COMPLETED;
+                return next == CloseoutState::COMPLETED || next == CloseoutState::FAILED;
             case CloseoutState::COMPLETED:
-                return false;  // Terminal state, must reset to IDLE
+                // FIX P2-5: Allow COMPLETED→IDLE for night session reset
+                // (白盘时段需重置夜盘的COMPLETED状态以恢复交易)
+                return next == CloseoutState::IDLE;
+            case CloseoutState::FAILED:
+                return next == CloseoutState::RETRYING || next == CloseoutState::COMPLETED;
+            case CloseoutState::RETRYING:
+                return next == CloseoutState::FLATTENING || next == CloseoutState::FAILED || next == CloseoutState::COMPLETED;
             default:
                 return false;
         }
@@ -201,7 +282,11 @@ public:
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
     const RecoveryConfig& getRecoveryConfig() const { return _recovery_config; }
     
-    void setCloseoutConfig(const CloseoutConfig& config) { _closeout_config = config; }
+    void setCloseoutConfig(const CloseoutConfig& config) { 
+        _closeout_config = config; 
+        _closeout_state.max_retries = config.max_retries;
+        _closeout_state.retry_interval_ms = config.retry_interval_ms;
+    }
     const CloseoutConfig& getCloseoutConfig() const { return _closeout_config; }
     
     void setCurrentTime(uint64_t time) { _current_time.store(time, std::memory_order_relaxed); }
@@ -224,18 +309,28 @@ public:
     /// Check all risk limits using Portfolio data
     std::vector<RiskViolation> checkRiskLimits(const FutuPortfolio* portfolio);
     
+    /// Pre-trade position limit check: can we place bid/ask for this contract?
+    /// Checks current position + pending orders against max_position
+    struct PreTradeResult {
+        bool allow_bid;
+        bool allow_ask;
+    };
+    PreTradeResult checkPreTradePosition(const std::string& code,
+                                          const FutuPortfolio* portfolio,
+                                          const UnifiedOrderTracker* tracker) const;
+    
     /// Check rate limits only
     bool checkRateLimits() const;
     
     /// Get current rate counts (atomic reads)
     inline uint32_t getOrdersPerSec() const { 
-        return _orders_last_sec.load(std::memory_order_relaxed); 
+        return static_cast<uint32_t>(std::max(0, _orders_last_sec.load(std::memory_order_relaxed))); 
     }
     inline uint32_t getCancelsPerSec() const { 
-        return _cancels_last_sec.load(std::memory_order_relaxed); 
+        return static_cast<uint32_t>(std::max(0, _cancels_last_sec.load(std::memory_order_relaxed))); 
     }
     inline uint32_t getTradesPerSec() const { 
-        return _trades_last_sec.load(std::memory_order_relaxed); 
+        return static_cast<uint32_t>(std::max(0, _trades_last_sec.load(std::memory_order_relaxed))); 
     }
     
     //==========================================================================
@@ -282,7 +377,8 @@ public:
     void haltTrading(RiskCategory category = RiskCategory::REVERSIBLE, double pnl_snapshot = 0);
     
     /// Resume trading (only for reversible risks)
-    void resumeTrading();
+    /// FIX P1-10: Returns true if successfully resumed, false if IRREVERSIBLE
+    bool resumeTrading();
     
     /// Block opening long positions
     void blockLong() {
@@ -360,8 +456,36 @@ public:
     /// Mark closeout as completed
     void markCloseoutCompleted(uint64_t timestamp = 0);
     
+    /// Mark closeout as failed (e.g., partial fill, no liquidity)
+    void markCloseoutFailed(uint64_t timestamp = 0);
+    
+    /// Check if closeout retry is due and transition to RETRYING
+    /// @param current_time_ms Current time in milliseconds
+    /// @return true if retry should be attempted
+    bool checkCloseoutRetry(uint64_t current_time_ms);
+    
     /// Reset closeout state (for new trading day)
     void resetCloseout();
+    
+    //==========================================================================
+    // Delta Rate Tracking (Delta变化速率监控)
+    //==========================================================================
+    
+    /// Record current delta snapshot for rate tracking
+    /// @param currentDelta Current portfolio delta
+    /// @param timestampMs Current timestamp in milliseconds
+    void recordDeltaSnapshot(double currentDelta, uint64_t timestampMs);
+    
+    /// Check if delta change rate exceeds limit
+    /// @return true if delta rate breached, false otherwise
+    bool checkDeltaRate() const;
+    
+    /// Get current delta change rate (absolute value per second)
+    double getDeltaChangeRate() const;
+    
+    /// Check and handle delta rate breach (pause quoting if needed)
+    /// @return true if quoting was paused due to delta rate breach
+    bool checkAndHandleDeltaRateBreach();
     
     //==========================================================================
     // Recovery
@@ -381,15 +505,19 @@ public:
     
     void resetDaily();
     void resetSession();
+    
+    /// FIX P2-6: Manually clear IRREVERSIBLE halt (requires human confirmation)
+    /// Returns true if successfully cleared, false if not in IRREVERSIBLE state
+    bool clearIrreversible();
 
 private:
     RateLimits _rate_limits;
     RecoveryConfig _recovery_config;
     
     // Lock-free atomic counters for rate tracking
-    std::atomic<uint32_t> _orders_last_sec{0};
-    std::atomic<uint32_t> _cancels_last_sec{0};
-    std::atomic<uint32_t> _trades_last_sec{0};
+    std::atomic<int32_t> _orders_last_sec{0};
+    std::atomic<int32_t> _cancels_last_sec{0};
+    std::atomic<int32_t> _trades_last_sec{0};
     
     // Timestamp tracking using fixed-size RingBuffer (no dynamic allocation)
     // This prevents memory reallocation and potential data races
@@ -421,6 +549,20 @@ private:
     // Closeout state (收盘前平仓) - State Machine
     CloseoutConfig _closeout_config;
     CloseoutStateInfo _closeout_state;
+    
+    // Delta rate tracking
+    struct DeltaSnapshot {
+        double delta;
+        uint64_t timestamp_ms;
+        DeltaSnapshot() : delta(0), timestamp_ms(0) {}
+        DeltaSnapshot(double d, uint64_t t) : delta(d), timestamp_ms(t) {}
+    };
+    static constexpr size_t DELTA_SNAPSHOT_CAPACITY = 32;
+    std::array<DeltaSnapshot, DELTA_SNAPSHOT_CAPACITY> _delta_snapshots;
+    size_t _delta_snapshot_count;
+    size_t _delta_snapshot_head;
+    std::atomic<bool> _delta_rate_breached{false};
+    uint64_t _delta_rate_breach_time{0};
     
     // Event notifier (optional)
     wtp::EventNotifier* _event_notifier = nullptr;

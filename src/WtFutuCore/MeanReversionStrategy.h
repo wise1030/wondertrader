@@ -38,6 +38,10 @@ struct MeanReversionConfig
     bool use_half_life_filter;      ///< Filter by half-life
     double max_half_life;           ///< Maximum acceptable half-life
     
+    double add_safety_ratio;        ///< 加仓安全比率，加仓上限 = stop_loss_z * ratio
+                                    ///< 默认0.75，即加仓区间不超过止损阈值的75%
+                                    ///< 避免在接近止损区域时加仓
+    
     MeanReversionConfig()
         : entry_z_threshold(2.0)
         , exit_z_threshold(0.5)
@@ -49,6 +53,7 @@ struct MeanReversionConfig
         , position_scale(0.5)
         , use_half_life_filter(true)
         , max_half_life(500)
+        , add_safety_ratio(0.75)
     {}
 };
 
@@ -98,9 +103,6 @@ private:
     // Internal Methods
     //==========================================================================
     
-    bool checkEntryConditions(const SpreadState& state) const;
-    bool checkExitConditions(const SpreadState& state, uint64_t current_time) const;
-    bool checkStopLoss(const SpreadState& state) const;
     bool checkTimeout(const SpreadState& state, uint64_t current_time) const;
     double calculateConfidence(double zscore) const;
     

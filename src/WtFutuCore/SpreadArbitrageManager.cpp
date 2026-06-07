@@ -86,6 +86,28 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
     // Read MM enhancement weight
     _config.mm_enhancement_weight = readDouble(arb, "mmEnhancementWeight", 0.5);
     
+    // Read statistical sub-strategy parameters (global defaults, per-pair overrides in pairs section)
+    WTSVariant* statistical = arb->get("statistical");
+    if (statistical) {
+        WTSVariant* mr_node = statistical->get("meanReversion");
+        if (mr_node) {
+            _default_mr_half_life = readUInt32(mr_node, "halfLife", 100);
+            _default_mr_entry_threshold = readDouble(mr_node, "entryThreshold", 2.0);
+            _default_mr_exit_threshold = readDouble(mr_node, "exitThreshold", 0.5);
+        }
+        WTSVariant* pt_node = statistical->get("pairsTrading");
+        if (pt_node) {
+            _default_pt_correlation_window = readUInt32(pt_node, "correlationWindow", 100);
+            _default_pt_min_correlation = readDouble(pt_node, "minCorrelation", 0.7);
+            _default_pt_spread_window = readUInt32(pt_node, "spreadWindow", 50);
+        }
+        WTSVariant* tf_node = statistical->get("trendFollowing");
+        if (tf_node) {
+            _default_tf_ma_period = readUInt32(tf_node, "maPeriod", 20);
+            _default_tf_breakout_threshold = readDouble(tf_node, "breakoutThreshold", 1.5);
+        }
+    }
+    
     // Read pairs configuration
     WTSVariant* pairs = arb->get("pairs");
     if (pairs && pairs->isArray()) {
@@ -104,6 +126,9 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
             pair.exit_z_threshold = readDouble(pair_cfg, "exitZScore", 0.5);
             pair.lookback_window = readUInt32(pair_cfg, "windowSize", 200);
             pair.primary_strategy = _config.primary_strategy;
+            pair.stop_loss_pct = readDouble(pair_cfg, "stopLossPct", 0.02);
+            pair.max_trend_bars = readUInt32(pair_cfg, "maxTrendBars", 50);
+            pair.add_safety_ratio = readDouble(pair_cfg, "addSafetyRatio", 0.75);
             
             if (!pair.pair_id.empty() && !pair.leg1_code.empty() && !pair.leg2_code.empty()) {
                 addSpreadPair(pair);
@@ -209,6 +234,7 @@ void SpreadArbitrageManager::initializeStrategy(StrategyInstance& instance,
             mr_config.stop_loss_z = config.stop_loss_z;
             mr_config.max_position = config.max_spread_position;
             mr_config.convergence_timeout = config.convergence_timeout;
+            mr_config.add_safety_ratio = config.add_safety_ratio;
             instance.mean_reversion->setConfig(mr_config);
         }
         break;
@@ -220,6 +246,8 @@ void SpreadArbitrageManager::initializeStrategy(StrategyInstance& instance,
             tf_config.fast_ma_period = config.trend_ma_fast;
             tf_config.slow_ma_period = config.trend_ma_slow;
             tf_config.max_position = config.max_spread_position;
+            tf_config.stop_loss_pct = config.stop_loss_pct;
+            tf_config.max_trend_bars = config.max_trend_bars;
             instance.trend_following->setConfig(tf_config);
         }
         break;
@@ -317,8 +345,17 @@ void SpreadArbitrageManager::onWtTick(wtp::WTSTickData* tick)
     // Extract data from WTSTickData
     std::string code = tick->code();
     double price = tick->price();
-    // Note: multiplier would need to be looked up from contract info
-    double multiplier = 1.0;  // Placeholder
+    // Look up multiplier from configured contract multipliers
+    double multiplier = 1.0;
+    auto mult_it = _contract_multipliers.find(code);
+    if (mult_it != _contract_multipliers.end())
+    {
+        multiplier = mult_it->second;
+    }
+    else
+    {
+        WTSLogger::warn("SpreadArbManager: no multiplier configured for {}, using default 1.0", code);
+    }
     uint64_t timestamp = tick->actiontime();
     
     onTick(code, price, multiplier, timestamp);
@@ -356,14 +393,17 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     if (!_config.enabled)
         return signal;
     
-    // Check cooldown
-    auto time_it = _last_signal_time.find(pair_id);
-    if (time_it != _last_signal_time.end())
+    // FIX P1-5: Check cooldown under spinlock (_last_signal_time written by arb thread)
+    uint64_t last_time = 0;
     {
-        if (current_time - time_it->second < _config.signal_cooldown_ms)
-        {
-            return signal;  // Still in cooldown
-        }
+        SpinLockGuard lock(_pair_states_spin);
+        auto time_it = _last_signal_time.find(pair_id);
+        if (time_it != _last_signal_time.end())
+            last_time = time_it->second;
+    }
+    if (current_time - last_time < _config.signal_cooldown_ms)
+    {
+        return signal;  // Still in cooldown
     }
     
     // Get state (read lock - arb thread also writes to this map)
@@ -413,9 +453,11 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         signal.type = SpreadSignalType::NONE;
     }
     
-    // Store last signal time
+    // FIX P1-5: Store last signal time/signal under spinlock
+    // (arb thread writes here, main thread reads in getQuotingAdjustment)
     if (signal.isActionable())
     {
+        SpinLockGuard lock(_pair_states_spin);
         _last_signal_time[pair_id] = current_time;
         _last_signals[pair_id] = signal;
     }
@@ -443,9 +485,14 @@ QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustment(const std::string
     
     auto signal_it = _last_signals.find(pair_id);
     SpreadSignal signal;
-    if (signal_it != _last_signals.end())
+    // FIX P0-7: _last_signals与generateSignals在arb线程写入，需spinlock保护
     {
-        signal = signal_it->second;
+        SpinLockGuard lock(_pair_states_spin);
+        signal_it = _last_signals.find(pair_id);
+        if (signal_it != _last_signals.end())
+        {
+            signal = signal_it->second;
+        }
     }
     
     adj = _mm_enhancer->calculateAdjustment(state_copy, signal, current_time);
@@ -633,6 +680,82 @@ void SpreadArbitrageManager::checkRiskAlerts()
             _alert_callback(alert);
         }
     }
+}
+
+SpreadSignal SpreadArbitrageManager::combineSignals(
+    const std::vector<SpreadSignal>& signals,
+    const SpreadState& state,
+    uint64_t current_time)
+{
+    if (signals.empty())
+    {
+        SpreadSignal none;
+        none.type = SpreadSignalType::NONE;
+        none.pair_id = state.pair_id;
+        none.timestamp = current_time;
+        return none;
+    }
+    
+    if (signals.size() == 1)
+        return signals[0];
+    
+    double long_weight = 0, short_weight = 0;
+    double long_conf = 0, short_conf = 0;
+    double long_size = 0, short_size = 0;
+    
+    for (const auto& sig : signals)
+    {
+        if (sig.type == SpreadSignalType::NONE) continue;
+        
+        bool is_long = (sig.type == SpreadSignalType::OPEN_LONG_SPREAD || 
+                        sig.type == SpreadSignalType::CLOSE_SHORT_SPREAD);
+        
+        if (is_long)
+        {
+            long_weight += sig.confidence;
+            long_conf = std::max(long_conf, sig.confidence);
+            long_size += sig.suggested_size;
+        }
+        else
+        {
+            short_weight += sig.confidence;
+            short_conf = std::max(short_conf, sig.confidence);
+            short_size += sig.suggested_size;
+        }
+    }
+    
+    SpreadSignal result;
+    result.pair_id = state.pair_id;
+    result.timestamp = current_time;
+    
+    double total_weight = long_weight + short_weight;
+    if (total_weight <= 0)
+    {
+        result.type = SpreadSignalType::NONE;
+        return result;
+    }
+    
+    if (long_weight > short_weight && long_conf > 0.5)
+    {
+        result.type = SpreadSignalType::OPEN_LONG_SPREAD;
+        result.confidence = long_weight / total_weight;
+        result.suggested_size = long_size / static_cast<double>(signals.size());
+        result.reason = "Combined signal: long consensus";
+    }
+    else if (short_weight > long_weight && short_conf > 0.5)
+    {
+        result.type = SpreadSignalType::OPEN_SHORT_SPREAD;
+        result.confidence = short_weight / total_weight;
+        result.suggested_size = short_size / static_cast<double>(signals.size());
+        result.reason = "Combined signal: short consensus";
+    }
+    else
+    {
+        result.type = SpreadSignalType::NONE;
+        result.reason = "Conflicting signals, no consensus";
+    }
+    
+    return result;
 }
 
 void SpreadArbitrageManager::reset()

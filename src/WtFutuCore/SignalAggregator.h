@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include "FutuConfig.h"
 #include "ISignalSource.h"
 #include "MarketDataContext.h"
 #include "VolatilitySignalSource.h"
@@ -28,30 +29,61 @@ struct SignalAggregatorConfig
     bool use_trade_flow = true;
     bool use_book_imbalance = true;    // 新增：订单簿不平衡
     bool use_momentum = true;
-    bool use_lead_lag = false;
+    bool use_lead_lag = true;
     
     // 信号源参数
     uint32_t volatility_window = 100;
     uint32_t ofi_window = 50;
     uint32_t trade_flow_window = 100;
-    uint32_t momentum_window = 20;
-    uint32_t lead_lag_window = 100;
+    uint32_t momentum_window = 50;
+    uint32_t lead_lag_window = 50;
     
     // 阈值参数
     double vol_threshold = 0.003;
-    double spread_threshold = 5.0;
-    double large_trade_threshold = 50.0;
-    double momentum_ema_alpha = 0.1;
-    double lead_lag_lag_ms = 500;
-    double book_imbalance_threshold = 0.2;  // 新增：主导阈值
     
-    // Alpha 权重参数（用于信号整合）
-    double ofi_weight = 0.35;           // OFI 信号权重
-    double trade_weight = 0.25;         // 交易流信号权重
-    double book_imbalance_weight = 0.20;// 新增：订单簿不平衡权重
-    double momentum_weight = 0.15;      // 动量信号权重
-    double lead_lag_weight = 0.05;      // 领先滞后信号权重
-    double strong_threshold = 0.7;      // 强信号阈值
+    // Alpha 权重配置
+    double ofi_weight = 0.35;
+    double trade_weight = 0.25;
+    double book_imbalance_weight = 0.20;
+    double momentum_weight = 0.15;
+    double lead_lag_weight = 0.05;
+    double strong_threshold = 0.7;
+    
+    // 交易流/订单簿/动量/领先滞后子参数
+    double large_trade_threshold = 50.0;
+    double book_imbalance_threshold = 0.2;
+    double momentum_ema_alpha = 0.1;
+    uint32_t lead_lag_lag_ms = 50;
+    
+    uint32_t warmup_ticks = 50;
+    
+    static SignalAggregatorConfig fromVariant(wtp::WTSVariant* v) {
+        SignalAggregatorConfig c;
+        c.use_volatility = FutuConfig::readBool(v, "useVolatility", true);
+        c.use_ofi = FutuConfig::readBool(v, "useOfi", true);
+        c.use_trade_flow = FutuConfig::readBool(v, "useTradeFlow", true);
+        c.use_book_imbalance = FutuConfig::readBool(v, "useBookImbalance", true);
+        c.use_momentum = FutuConfig::readBool(v, "useMomentum", true);
+        c.use_lead_lag = FutuConfig::readBool(v, "useLeadLag", true);
+        c.volatility_window = FutuConfig::readUInt32(v, "volatilityWindow", 100);
+        c.ofi_window = FutuConfig::readUInt32(v, "ofiWindow", 50);
+        c.trade_flow_window = FutuConfig::readUInt32(v, "tradeFlowWindow", 100);
+        c.momentum_window = FutuConfig::readUInt32(v, "momentumWindow", 50);
+        c.lead_lag_window = FutuConfig::readUInt32(v, "leadLagWindow", 50);
+c.vol_threshold = FutuConfig::readDouble(v, "volThreshold", 0.003);
+        c.ofi_weight = FutuConfig::readDouble(v, "ofiWeight", 0.35);
+        c.trade_weight = FutuConfig::readDouble(v, "tradeWeight", 0.25);
+        c.book_imbalance_weight = FutuConfig::readDouble(v, "bookImbalanceWeight", 0.20);
+        c.momentum_weight = FutuConfig::readDouble(v, "momentumWeight", 0.15);
+        c.lead_lag_weight = FutuConfig::readDouble(v, "leadLagWeight", 0.05);
+        c.strong_threshold = FutuConfig::readDouble(v, "strongThreshold", 0.7);
+        c.large_trade_threshold = FutuConfig::readDouble(v, "largeTradeThreshold", 50.0);
+        c.book_imbalance_threshold = FutuConfig::readDouble(v, "bookImbalanceThreshold", 0.2);
+        c.momentum_ema_alpha = FutuConfig::readDouble(v, "momentumEmaAlpha", 0.1);
+        c.lead_lag_lag_ms = FutuConfig::readUInt32(v, "leadLagLagMs", 50);
+        c.warmup_ticks = FutuConfig::readUInt32(v, "warmupTicks", 50);
+        return c;
+    }
 };
 
 class SignalAggregator
@@ -68,8 +100,20 @@ public:
     
     void setConfig(const SignalAggregatorConfig& cfg) {
         _cfg = cfg;
+        _warmup_ticks = cfg.warmup_ticks;
         initializeSignalSources();
     }
+    
+    void updateWeights(const SignalAggregatorConfig& cfg) {
+        _cfg.ofi_weight = cfg.ofi_weight;
+        _cfg.trade_weight = cfg.trade_weight;
+        _cfg.book_imbalance_weight = cfg.book_imbalance_weight;
+        _cfg.momentum_weight = cfg.momentum_weight;
+        _cfg.lead_lag_weight = cfg.lead_lag_weight;
+        _cfg.strong_threshold = cfg.strong_threshold;
+    }
+    
+    const SignalAggregatorConfig& getConfig() const { return _cfg; }
     
     const SignalContext& update(const MarketDataContext& book) {
         _tick_count++;
@@ -111,6 +155,43 @@ public:
     }
     
     const SignalContext& getContext() const { return _ctx; }
+    SignalContext& getContext() { return _ctx; }
+    
+    //==========================================================================
+    // Lead-Lag Cross-Contract Data Feed
+    //==========================================================================
+    
+    /// Update lead contract price data for the LeadLag signal source.
+    /// Called when a lead/anchor contract tick arrives, feeding its mid price
+    /// to this aggregator's LeadLagSignalSource so it can compute cross-contract
+    /// predictive signals.
+    void updateLeadContract(const std::string& code, double mid, uint64_t timestamp)
+    {
+        auto ll_it = _sources.find(SignalType::LEAD_LAG);
+        if (ll_it != _sources.end() && ll_it->second)
+        {
+            auto* ll = dynamic_cast<LeadLagSignalSource*>(ll_it->second.get());
+            if (ll)
+            {
+                ll->updateLeadContract(code, mid, timestamp);
+            }
+        }
+    }
+    
+    /// Add a lead contract to the LeadLag signal source.
+    /// Must be called before ticks arrive (during initialization).
+    void addLeadContract(const std::string& code, double correlation = 1.0)
+    {
+        auto ll_it = _sources.find(SignalType::LEAD_LAG);
+        if (ll_it != _sources.end() && ll_it->second)
+        {
+            auto* ll = dynamic_cast<LeadLagSignalSource*>(ll_it->second.get());
+            if (ll)
+            {
+                ll->addLeadContract(code, correlation);
+            }
+        }
+    }
     
     bool is_ready() const { return _tick_count >= _warmup_ticks; }
     
@@ -162,15 +243,14 @@ private:
             MomentumSignalSource::Config mom_cfg;
             mom_cfg.window = _cfg.momentum_window;
             mom_cfg.ema_alpha = _cfg.momentum_ema_alpha;
-            _sources[SignalType::CUSTOM] = std::make_unique<MomentumSignalSource>(mom_cfg);
+            _sources[SignalType::MOMENTUM] = std::make_unique<MomentumSignalSource>(mom_cfg);
         }
         
-        // Lead-lag signal source
         if (_cfg.use_lead_lag) {
             LeadLagSignalSource::Config ll_cfg;
             ll_cfg.window = _cfg.lead_lag_window;
             ll_cfg.lag_ms = _cfg.lead_lag_lag_ms;
-            _sources[SignalType::CUSTOM] = std::make_unique<LeadLagSignalSource>(ll_cfg);
+            _sources[SignalType::LEAD_LAG] = std::make_unique<LeadLagSignalSource>(ll_cfg);
         }
     }
     
@@ -178,9 +258,10 @@ private:
         // 修正字段名：volatility -> realized_vol
         _ctx.market_state.vol_estimate = _ctx.volatility.realized_vol;
         _ctx.market_state.should_widen = (_ctx.volatility.realized_vol > _cfg.vol_threshold);
-        if (_ctx.volatility.vol_tier == VolTier::EXTREME) {
-            _ctx.market_state.should_pause = true;
-        }
+        // FIX BUG-15: should_pause每tick重算，不复位锁存
+        // 原代码只在vol_tier==EXTREME时设true，无else分支复位false
+        // 导致should_pause一旦被设就永久锁死，报价永远被阻止
+        _ctx.market_state.should_pause = (_ctx.volatility.vol_tier == VolTier::EXTREME);
     }
     
     /// Extract signal results from signal sources
@@ -261,47 +342,46 @@ private:
         
         // Momentum component (if enabled)
         if (_cfg.use_momentum) {
-            auto mom_it = _sources.find(SignalType::CUSTOM);
+            auto mom_it = _sources.find(SignalType::MOMENTUM);
             if (mom_it != _sources.end() && mom_it->second) {
                 const auto& result = mom_it->second->result();
                 if (result.valid) {
-                    // Momentum signal source returns AlphaSignalResult
-                    const auto* alpha_result = dynamic_cast<const AlphaSignalResult*>(&result);
-                    if (alpha_result) {
-                        _ctx.alpha.lead_lag_component = alpha_result->alpha;
-                        alpha_sum += _cfg.momentum_weight * alpha_result->alpha;
-                        weight_sum += _cfg.momentum_weight;
-                        _valid_signals.push_back(alpha_result->alpha);
-                        _valid_weights.push_back(_cfg.momentum_weight);
-                    }
+                    double alpha = mom_it->second->getAlphaValue();
+                    _ctx.alpha.momentum_component = alpha;
+                    alpha_sum += _cfg.momentum_weight * alpha;
+                    weight_sum += _cfg.momentum_weight;
+                    _valid_signals.push_back(alpha);
+                    _valid_weights.push_back(_cfg.momentum_weight);
                 }
             }
         }
         
-        // Lead-lag component
         if (_cfg.use_lead_lag) {
-            auto ll_it = _sources.find(SignalType::CUSTOM); // Adjust if CUSTOM is used by LeadLag
+            auto ll_it = _sources.find(SignalType::LEAD_LAG);
             if (ll_it != _sources.end() && ll_it->second) {
                 const auto& result = ll_it->second->result();
                 if (result.valid) {
-                    const auto* alpha_result = dynamic_cast<const AlphaSignalResult*>(&result);
-                    if (alpha_result) {
-                        alpha_sum += _cfg.lead_lag_weight * alpha_result->alpha;
-                        weight_sum += _cfg.lead_lag_weight;
-                        _valid_signals.push_back(alpha_result->alpha);
-                        _valid_weights.push_back(_cfg.lead_lag_weight);
-                    }
+                    double alpha = ll_it->second->getAlphaValue();
+                    alpha_sum += _cfg.lead_lag_weight * alpha;
+                    weight_sum += _cfg.lead_lag_weight;
+                    _valid_signals.push_back(alpha);
+                    _valid_weights.push_back(_cfg.lead_lag_weight);
                 }
             }
         }
         
-        // Fallback Mechanism: If no primary signals are valid, try falling back to just book imbalance
-        if (weight_sum <= 0.0 && _ctx.book_imbalance.valid) {
-            alpha_sum = _ctx.book_imbalance.simple_imbalance;
-            weight_sum = 1.0;
-            _valid_signals.push_back(_ctx.book_imbalance.simple_imbalance);
-            _valid_weights.push_back(1.0);
-        }
+// Fallback Mechanism: If no primary signals are valid, try falling back to just book imbalance
+    // 修复：使用 EWMA 衰减而非直接跳转，避免 alpha 值瞬间跳变导致报价震荡
+    if (weight_sum <= 0.0 && _ctx.book_imbalance.valid) {
+        double prev_alpha = _prev_alpha;  // 上一次的 alpha 值
+        double target = _ctx.book_imbalance.simple_imbalance;
+        double ewma_decay = 0.3;  // 衰减因子，越小越平滑
+        
+        alpha_sum = prev_alpha * (1.0 - ewma_decay) + target * ewma_decay;
+        weight_sum = 1.0;
+        _valid_signals.push_back(alpha_sum);
+        _valid_weights.push_back(1.0);
+    }
 
         // Normalize and set valid flag
         _ctx.alpha.valid = is_ready() && (weight_sum > 0);
@@ -349,6 +429,11 @@ private:
         
         // Determine strong signal
         _ctx.alpha.is_strong_signal = std::abs(_ctx.alpha.alpha) > _cfg.strong_threshold;
+        
+        // 保存当前 alpha 用于下次 EWMA 衰减
+        if (_ctx.alpha.valid) {
+            _prev_alpha = _ctx.alpha.alpha;
+        }
     }
 
     SignalAggregatorConfig _cfg;
@@ -359,6 +444,9 @@ private:
     // Pre-allocated vectors for zero-allocation hotpath
     std::vector<double> _valid_signals;
     std::vector<double> _valid_weights;
+    
+    // 上一次的 alpha 值，用于 EWMA 衰减（Alpha 跳跃修复）
+    double _prev_alpha = 0.0;
 };
 
 } // namespace futu

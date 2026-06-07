@@ -8,6 +8,17 @@
 
 namespace futu {
 
+static uint64_t timestampToMs(uint64_t ts)
+{
+    uint32_t date = static_cast<uint32_t>(ts / 1000000ULL);
+    uint32_t time_secs = static_cast<uint32_t>((ts / 100ULL) % 10000);
+    uint32_t ms_part = static_cast<uint32_t>(ts % 100);
+    uint32_t h = time_secs / 10000;
+    uint32_t m = (time_secs / 100) % 100;
+    uint32_t s = time_secs % 100;
+    return (static_cast<uint64_t>(date) * 86400ULL + h * 3600 + m * 60 + s) * 1000ULL + ms_part;
+}
+
 //------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
@@ -125,6 +136,15 @@ void SelfTradeCalibrator::recordFill(
     
     // Add to history (RingBuffer auto-manages size)
     state.fill_history.push(record);
+    
+    // Update last fill price for retreat mechanism
+    if (is_buy) {
+        state.last_buy_fill_price = price;
+        state.last_buy_fill_time = timestamp;
+    } else {
+        state.last_sell_fill_price = price;
+        state.last_sell_fill_time = timestamp;
+    }
     
     // Mark cache as dirty
     state.cache_dirty = true;
@@ -279,20 +299,6 @@ bool SelfTradeCalibrator::checkAdverse(const SelfFillRecord& fill, double curren
     }
 }
 
-double SelfTradeCalibrator::calculateRealizedToxicity(const SelfFillRecord& fill, double current_mid) const
-{
-    double move = current_mid - fill.mid_at_fill;
-    double move_ticks = move / _config.tick_size;
-    
-    // For buys: toxicity is proportional to negative move
-    // For sells: toxicity is proportional to positive move
-    if (fill.is_buy) {
-        return std::max(0.0, -move_ticks / 5.0);  // Normalize to ~[0, 1]
-    } else {
-        return std::max(0.0, move_ticks / 5.0);
-    }
-}
-
 void SelfTradeCalibrator::pruneHistory(const std::string& code, uint64_t current_time)
 {
     auto it = _contract_states.find(code);
@@ -301,12 +307,38 @@ void SelfTradeCalibrator::pruneHistory(const std::string& code, uint64_t current
     }
     
     auto& state = it->second;
-    uint64_t expiry = current_time - (_config.toxicity_window_ms * 10);  // Keep longer for analysis
     
-    // Note: RingBuffer doesn't support selective removal from front
-    // We rely on its fixed-size nature to auto-prune oldest entries
-    // For time-based pruning, we would need a different approach
-    // For now, the RingBuffer's fixed size (128) serves as the pruning mechanism
+    if (_config.toxicity_window_ms <= 0) return;
+    
+    // Calculate cutoff time: keep fills within 10x the toxicity window
+    uint64_t cutoff = 0;
+    uint64_t window = static_cast<uint64_t>(_config.toxicity_window_ms) * 10;
+    if (current_time > window)
+    {
+        cutoff = current_time - window;
+    }
+    
+    // Remove expired fills from the front of the RingBuffer
+    // Since fills are pushed in time order, expired ones are at the front
+    while (!state.fill_history.empty())
+    {
+        if (state.fill_history.front().fill_time < cutoff)
+        {
+            state.fill_history.pop();
+            state.cache_dirty = true;
+        }
+        else
+        {
+            break;  // Remaining fills are still within window
+        }
+    }
+    
+    // If all fills were pruned, reset the cached result
+    if (state.fill_history.empty())
+    {
+        state.cached_result = CalibrationResult();
+        state.cache_dirty = false;
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -395,6 +427,44 @@ uint32_t SelfTradeCalibrator::getSampleCount(const std::string& code) const
         return static_cast<uint32_t>(it->second.fill_history.size());
     }
     return 0;
+}
+
+//------------------------------------------------------------------------------
+// Fill Retreat
+//------------------------------------------------------------------------------
+
+FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_t current_time) const
+{
+    FillRetreat retreat;
+    
+    auto it = _contract_states.find(code);
+    if (it == _contract_states.end()) {
+        return retreat;
+    }
+    
+    const auto& state = it->second;
+    double retreat_price_offset = _config.retreat_ticks * _config.tick_size;
+    uint64_t now_ms = timestampToMs(current_time);
+    
+    if (state.last_buy_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
+        uint64_t fill_ms = timestampToMs(state.last_buy_fill_time);
+        uint64_t elapsed_ms = now_ms - fill_ms;
+        if (elapsed_ms < _config.retreat_cooldown_ms) {
+            retreat.bid_retreat_price = state.last_buy_fill_price - retreat_price_offset;
+            retreat.bid_retreat_active = true;
+        }
+    }
+    
+    if (state.last_sell_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
+        uint64_t fill_ms = timestampToMs(state.last_sell_fill_time);
+        uint64_t elapsed_ms = now_ms - fill_ms;
+        if (elapsed_ms < _config.retreat_cooldown_ms) {
+            retreat.ask_retreat_price = state.last_sell_fill_price + retreat_price_offset;
+            retreat.ask_retreat_active = true;
+        }
+    }
+    
+    return retreat;
 }
 
 } // namespace futu

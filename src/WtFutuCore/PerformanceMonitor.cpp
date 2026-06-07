@@ -191,12 +191,23 @@ void PerformanceMonitor::updatePerSecondCounters()
     uint64_t current_cancels = _throughput.cancels_sent;
     uint64_t current_fills = _throughput.fills_received;
     
-    // Calculate per-second rates
-    _throughput.last_second_ticks = current_ticks - _throughput.last_second_ticks;
-    _throughput.last_second_quotes = current_quotes - _throughput.last_second_quotes;
-    _throughput.last_second_orders = current_orders - _throughput.last_second_orders;
-    _throughput.last_second_cancels = current_cancels - _throughput.last_second_cancels;
-    _throughput.last_second_fills = current_fills - _throughput.last_second_fills;
+    uint64_t prev_ticks = _throughput.prev_cumulative_ticks;
+    uint64_t prev_quotes = _throughput.prev_cumulative_quotes;
+    uint64_t prev_orders = _throughput.prev_cumulative_orders;
+    uint64_t prev_cancels = _throughput.prev_cumulative_cancels;
+    uint64_t prev_fills = _throughput.prev_cumulative_fills;
+    
+    _throughput.last_second_ticks = current_ticks - prev_ticks;
+    _throughput.last_second_quotes = current_quotes - prev_quotes;
+    _throughput.last_second_orders = current_orders - prev_orders;
+    _throughput.last_second_cancels = current_cancels - prev_cancels;
+    _throughput.last_second_fills = current_fills - prev_fills;
+    
+    _throughput.prev_cumulative_ticks = current_ticks;
+    _throughput.prev_cumulative_quotes = current_quotes;
+    _throughput.prev_cumulative_orders = current_orders;
+    _throughput.prev_cumulative_cancels = current_cancels;
+    _throughput.prev_cumulative_fills = current_fills;
 }
 
 std::string PerformanceMonitor::getSummary() const

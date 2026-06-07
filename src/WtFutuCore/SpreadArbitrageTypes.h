@@ -91,6 +91,11 @@ struct SpreadPairConfig
     uint32_t trend_ma_fast;         ///< Fast MA period
     uint32_t trend_ma_slow;         ///< Slow MA period
     double min_trend_strength;      ///< Minimum trend strength
+    double stop_loss_pct;           ///< Stop loss percentage (e.g. 0.02 = 2%)
+    uint32_t max_trend_bars;        ///< Max bars before trend exhaustion exit
+    
+    // Mean reversion safety
+    double add_safety_ratio;        ///< Add-position safety ratio (0,1), fraction of stop_loss_z
     
     // Position limits
     double max_spread_position;     ///< Maximum spread position
@@ -122,6 +127,9 @@ struct SpreadPairConfig
         , trend_ma_fast(20)
         , trend_ma_slow(60)
         , min_trend_strength(0.001)
+        , stop_loss_pct(0.02)
+        , max_trend_bars(50)
+        , add_safety_ratio(0.75)
         , max_spread_position(20.0)
         , max_single_leg(30.0)
         , lookback_window(200)
@@ -152,6 +160,16 @@ struct SpreadState
     double leg1_price;              ///< Current leg1 price
     double leg2_price;              ///< Current leg2 price
     double current_spread;          ///< Current spread value
+    double current_price;           ///< Current spread price (for stop loss)
+    
+    // Market data for microstructure features
+    double mid_price;               ///< Mid price
+    double bid_price;               ///< Best bid price
+    double ask_price;               ///< Best ask price
+    double total_volume;            ///< Total volume
+    double average_trade_size;      ///< Average trade size
+    double buy_volume;              ///< Buy volume
+    double sell_volume;             ///< Sell volume
     
     // Statistics
     double spread_mean;             ///< Rolling mean
@@ -183,7 +201,10 @@ struct SpreadState
     
     SpreadState()
         : leg1_price(0), leg2_price(0)
-        , current_spread(0)
+        , current_spread(0), current_price(0)
+        , mid_price(0), bid_price(0), ask_price(0)
+        , total_volume(0), average_trade_size(0)
+        , buy_volume(0), sell_volume(0)
         , spread_mean(0), spread_std(0), zscore(0)
         , correlation(0), beta(1.0), half_life(0)
         , leg1_position(0), leg2_position(0), spread_position(0)

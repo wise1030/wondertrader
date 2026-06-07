@@ -14,7 +14,7 @@
 
 #include <string>
 #include <cstdint>
-#include "../Includes/WTSMarcos.h"
+#include "FutuConfig.h"
 #include "../Includes/FasterDefs.h"
 #include "../Share/RingBuffer.hpp"
 
@@ -111,20 +111,52 @@ struct SelfTradeToxicityMetrics
 
 struct SelfTradeCalibratorConfig
 {
-    uint32_t lookback_trades;       ///< Number of trades to look back
-    uint32_t toxicity_window_ms;    ///< Time window for toxicity calculation
-    double adverse_threshold;       ///< Threshold for adverse selection
-    uint32_t min_samples;           ///< Minimum samples for calibration
-    double tick_size;               ///< Contract tick size
-    double move_threshold_ticks;    ///< Price move threshold in ticks
+    uint32_t toxicity_window_ms;
+    double   adverse_threshold;
+    uint32_t min_samples;
+    double   move_threshold_ticks;
+    double   tick_size;
+    
+    double   retreat_ticks;          ///< 成交后退后tick数 (default 2)
+    uint32_t retreat_cooldown_ms;    ///< 后退冷却时间ms (default 3000)
     
     SelfTradeCalibratorConfig()
-        : lookback_trades(50)
-        , toxicity_window_ms(5000)
+        : toxicity_window_ms(5000)
         , adverse_threshold(0.6)
         , min_samples(5)
-        , tick_size(1.0)
         , move_threshold_ticks(1.0)
+        , tick_size(1.0)
+        , retreat_ticks(2.0)
+        , retreat_cooldown_ms(3000)
+    {}
+    
+    static SelfTradeCalibratorConfig fromVariant(wtp::WTSVariant* v) {
+        SelfTradeCalibratorConfig c;
+        c.toxicity_window_ms = FutuConfig::readUInt32(v, "toxicityWindowMs", 5000);
+        c.adverse_threshold = FutuConfig::readDouble(v, "adverseThreshold", 0.6);
+        c.min_samples = FutuConfig::readUInt32(v, "minSamples", 5);
+        c.move_threshold_ticks = FutuConfig::readDouble(v, "moveThresholdTicks", 1.0);
+        c.retreat_ticks = FutuConfig::readDouble(v, "retreatTicks", 2.0);
+        c.retreat_cooldown_ms = FutuConfig::readUInt32(v, "retreatCooldownMs", 3000);
+        return c;
+    }
+};
+
+//==============================================================================
+// Fill Retreat Result (成交后退机制)
+//==============================================================================
+
+/// 成交后退机制结果：最近成交导致的 bid/ask 价格后退量
+struct FillRetreat
+{
+    double bid_retreat_price;    ///< bid 不得高于此价格 (0=无限制)
+    double ask_retreat_price;    ///< ask 不得低于此价格 (0=无限制)
+    bool   bid_retreat_active;   ///< bid 后退是否生效
+    bool   ask_retreat_active;   ///< ask 后退是否生效
+    
+    FillRetreat()
+        : bid_retreat_price(0), ask_retreat_price(0)
+        , bid_retreat_active(false), ask_retreat_active(false)
     {}
 };
 
@@ -179,6 +211,16 @@ public:
     bool isHighToxicity(const std::string& code) const;
     
     //==========================================================================
+    // Fill Retreat (成交后退机制)
+    //==========================================================================
+    
+    /// 获取当前成交后退限制
+    /// @param code 合约代码
+    /// @param current_time 当前时间戳
+    /// @return 后退结果，包含 bid/ask 价格限制
+    FillRetreat getFillRetreat(const std::string& code, uint64_t current_time) const;
+    
+    //==========================================================================
     // Statistics
     //==========================================================================
     
@@ -213,7 +255,15 @@ private:
         mutable CalibrationResult cached_result;
         mutable bool cache_dirty;
         
-        ContractFillState() : mid_price(0), timestamp(0), cache_dirty(true) {}
+        double last_buy_fill_price;       ///< 最近买单成交价
+        uint64_t last_buy_fill_time;      ///< 最近买单成交时间
+        double last_sell_fill_price;      ///< 最近卖单成交价
+        uint64_t last_sell_fill_time;     ///< 最近卖单成交时间
+        
+        ContractFillState() : mid_price(0), timestamp(0), cache_dirty(true)
+            , last_buy_fill_price(0), last_buy_fill_time(0)
+            , last_sell_fill_price(0), last_sell_fill_time(0)
+        {}
     };
     wtp::wt_hashmap<std::string, ContractFillState> _contract_states;
     
@@ -225,7 +275,7 @@ private:
     void analyzeFills(const std::string& code) const;
     
     /// Calculate realized toxicity for a single fill
-    double calculateRealizedToxicity(const SelfFillRecord& fill, double current_mid) const;
+    
     
     /// Check if fill was adverse selection
     bool checkAdverse(const SelfFillRecord& fill, double current_mid) const;

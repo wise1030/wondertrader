@@ -81,11 +81,11 @@ struct QuoterConfig
     double      max_obligation_spread; ///< 做市义务最大报价宽度（ticks），用于单边受限时和双边报价统计 (default: 100.0)
     
     QuoterConfig()
-        : num_levels(3), base_spread(2.0), level_step(1.0)
-        , base_qty(1.0), qty_decay(0.7), tick_size(1.0)
+        : num_levels(1), base_spread(2.0), level_step(1.0)
+        , base_qty(5.0), qty_decay(0.7), tick_size(1.0)
         , sticky_threshold(1.0), improve_retreat_ratio(2.0), max_price_deviation(20.0)
         , price_protection(true), protect_ticks(1.0)
-        , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(100.0) {}
+        , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0) {}
 };
 
 /// Multi-level quoter for a single contract
@@ -104,6 +104,24 @@ public:
 
     /// Get configuration
     const QuoterConfig& config() const { return _cfg; }
+    void updateQuotingParams(double base_spread, double base_qty, double qty_decay, double level_step) {
+        _cfg.base_spread = base_spread;
+        _cfg.base_qty = base_qty;
+        _cfg.qty_decay = qty_decay;
+        _cfg.level_step = level_step;
+    }
+    void updateStickyParams(double sticky_threshold, double improve_retreat_ratio) {
+        _cfg.sticky_threshold = sticky_threshold;
+        _cfg.improve_retreat_ratio = improve_retreat_ratio;
+    }
+    void updateProtectionParams(bool price_protection, double protect_ticks, double max_obligation_spread) {
+        _cfg.price_protection = price_protection;
+        _cfg.protect_ticks = protect_ticks;
+        _cfg.max_obligation_spread = max_obligation_spread;
+    }
+    void updateMaxPriceDeviation(double max_price_deviation) {
+        _cfg.max_price_deviation = max_price_deviation;
+    }
 
     //==========================================================================
     // Quote management (called within on_tick, all synchronous)
@@ -213,6 +231,8 @@ private:
     __attribute__((always_inline))
     inline double computeQty(uint32_t level) const
     {
+        if (level < _level_qtys.size())
+            return _level_qtys[level];
         double qty = _cfg.base_qty * pow(_cfg.qty_decay, level);
         return std::max(1.0, std::round(qty));
     }
@@ -273,15 +293,21 @@ private:
     QuoterConfig _cfg;
     std::vector<QuoteLevel> _bid_levels;
     std::vector<QuoteLevel> _ask_levels;
+    std::vector<double> _level_qtys;
     
-    /// Unified order tracker (owned by UftFutuMmStrategy)
     UnifiedOrderTracker* _tracker;
+    wtp::IUftStraCtx* _ctx = nullptr;
+    bool _allow_bid = true;
+    bool _allow_ask = true;
     
-    /// 双边报价统计模块（独立模块，可选）
     BilateralQuoteStats* _bilateral_stats = nullptr;
     
-    /// O(1) order ID to level index lookup - avoids pointer dangling
-    wtp::wt_hashmap<uint32_t, uint8_t> _order_id_to_level;
+    // FIX P2-8: 存储level索引+方向，避免bid/ask共用索引时查找冲突
+    struct OrderLevelInfo {
+        uint8_t level;    ///< Level index
+        bool is_bid;      ///< true=bid, false=ask
+    };
+    wtp::wt_hashmap<uint32_t, OrderLevelInfo> _order_id_to_level;
 };
 
 } // namespace futu

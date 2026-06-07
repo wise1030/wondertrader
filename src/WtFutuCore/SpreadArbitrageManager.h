@@ -214,6 +214,9 @@ public:
     void setAlertCallback(RiskAlertCallback callback) { _alert_callback = callback; }
     void setQuotingCallback(QuotingAdjustCallback callback) { _quoting_callback = callback; }
     
+    /// Set contract multiplier for a specific contract code
+    void setContractMultiplier(const std::string& code, double multiplier) { _contract_multipliers[code] = multiplier; }
+    
     //==========================================================================
     // Management
     //==========================================================================
@@ -245,6 +248,16 @@ private:
     SpreadCalculatorConfig _calc_config;
     SpreadRiskConfig _risk_config;
     MmEnhancerConfig _mm_config;
+    
+    // Statistical sub-strategy default parameters (from config file)
+    uint32_t _default_mr_half_life = 100;
+    double   _default_mr_entry_threshold = 2.0;
+    double   _default_mr_exit_threshold = 0.5;
+    uint32_t _default_pt_correlation_window = 100;
+    double   _default_pt_min_correlation = 0.7;
+    uint32_t _default_pt_spread_window = 50;
+    uint32_t _default_tf_ma_period = 20;
+    double   _default_tf_breakout_threshold = 1.5;
     
     //==========================================================================
     // Components
@@ -282,6 +295,12 @@ private:
     SpreadSignalCallback _signal_callback;
     RiskAlertCallback _alert_callback;
     QuotingAdjustCallback _quoting_callback;
+    
+    //==========================================================================
+    // Contract Multipliers
+    //==========================================================================
+    
+    wtp::wt_hashmap<std::string, double> _contract_multipliers;  ///< Per-contract multiplier lookup
 };
 
 } // namespace futu

@@ -38,6 +38,9 @@ struct TrendFollowingConfig
     double max_position;            ///< Maximum position size
     double base_qty;                ///< Base position size
     
+    double stop_loss_pct;           ///< Stop loss percentage, default 2%
+    uint32_t max_trend_bars;        ///< Max bars in trend before exhaustion exit
+    
     uint32_t confirmation_bars;     ///< Bars to confirm trend
     bool use_volume_filter;         ///< Filter by volume
     
@@ -51,6 +54,8 @@ struct TrendFollowingConfig
         , exit_threshold(0.0)
         , max_position(15.0)
         , base_qty(1.0)
+        , stop_loss_pct(0.02)
+        , max_trend_bars(50)
         , confirmation_bars(3)
         , use_volume_filter(false)
     {}
@@ -72,6 +77,8 @@ struct TrendState
     int trend_direction;            ///< 1 = uptrend, -1 = downtrend, 0 = neutral
     int bars_in_trend;              ///< Number of bars in current trend
     
+    double entry_price;             ///< Entry price for stop loss calculation
+    
     bool is_strong_trend;           ///< Is trend strong enough for entry
     bool is_trend_reversal;         ///< Is trend reversing
     
@@ -81,6 +88,7 @@ struct TrendState
         , trend_strength(0), momentum(0)
         , trend_direction(0)
         , bars_in_trend(0)
+        , entry_price(0)
         , is_strong_trend(false)
         , is_trend_reversal(false)
     {}

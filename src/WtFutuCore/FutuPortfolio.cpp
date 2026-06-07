@@ -11,8 +11,6 @@
 namespace futu {
 
 FutuPortfolio::FutuPortfolio()
-    : _cached_delta(0)
-    , _delta_dirty(true)
 {
 }
 
@@ -29,9 +27,8 @@ void FutuPortfolio::addContract(const std::string& code, double multiplier, doub
         cs.tick_size = tickSize;
         cs.hedge_ratio = hedgeRatio;
         cs.max_position = maxPosition;
-        cs.contract_max_delta = contractMaxDelta;  // 单合约 delta 软指标
+        cs.contract_max_delta = contractMaxDelta;
         cs.target_position = targetPosition;
-        invalidateCache();  // 必须刷新缓存
         return;
     }
 
@@ -53,7 +50,6 @@ void FutuPortfolio::addContract(const std::string& code, double multiplier, doub
     if (_anchor_code.empty())
         _anchor_code = code;
     
-    invalidateCache();
 }
 
 void FutuPortfolio::removeContract(const std::string& code)
@@ -75,7 +71,6 @@ void FutuPortfolio::removeContract(const std::string& code)
     _contracts.pop_back();
     
     _code_to_state.erase(it);
-    invalidateCache();
 }
 
 void FutuPortfolio::onTick(const char* stdCode, wtp::WTSTickData* tick)
@@ -103,8 +98,17 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
         cs->unrealized_pnl = (lastPrice - cs->avg_cost) * cs->position * cs->multiplier;
     }
     
-    // 价格更新后需要刷新 delta 缓存
-    invalidateCache();
+    // FIX P0-1: Update daily_pnl whenever markToMarket is called
+    updateDailyPnL(code);
+}
+
+void FutuPortfolio::updateDailyPnL(const std::string& code)
+{
+    ContractState* cs = getContract(code);
+    if (!cs) return;
+    
+    // FIX P0-1: daily_pnl = unrealized_pnl + realized_pnl
+    cs->daily_pnl = cs->unrealized_pnl + cs->realized_pnl;
 }
 
 void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
@@ -113,8 +117,9 @@ void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
     ContractState* cs = getContract(stdCode);
     if (!cs) return;
 
+    // BUG-10: 记录前一个position用于成交效果日志
+    cs->prev_position = cs->position;
     cs->position = newPos;
-    invalidateCache();
 }
 
 void FutuPortfolio::updatePosition(const std::string& code, double position, double avgCost)
@@ -126,7 +131,6 @@ void FutuPortfolio::updatePosition(const std::string& code, double position, dou
     if (avgCost > 0)
         cs->avg_cost = avgCost;
     
-    invalidateCache();
 }
 
 //==========================================================================
@@ -135,8 +139,10 @@ void FutuPortfolio::updatePosition(const std::string& code, double position, dou
 
 bool FutuPortfolio::needsHedging() const
 {
-    // 使用 portfolio_max_delta 作为对冲触发阈值（软指标）
-    return _params.portfolio_max_delta > 0 && std::abs(getTotalDelta()) > _params.portfolio_max_delta;
+    // 使用 hedge_delta_threshold * portfolio_max_delta 作为对冲触发阈值
+    // hedge_delta_threshold 是利用率比例 (默认0.8)，即达到80% max_delta时触发对冲
+    double trigger_delta = _params.portfolio_max_delta * _params.hedge_delta_threshold;
+    return _params.portfolio_max_delta > 0 && trigger_delta > 0 && std::abs(getTotalDelta()) > trigger_delta;
 }
 
 HedgeAction FutuPortfolio::computeHedge(double target_delta) const
@@ -152,13 +158,13 @@ HedgeAction FutuPortfolio::computeHedge(double target_delta) const
 
     // O(1) lookup
     const ContractState* anchor = getContract(_anchor_code);
-    if (!anchor || anchor->multiplier == 0)
+    if (!anchor || anchor->multiplier == 0 || anchor->hedge_ratio == 0)
         return action;
 
     double currentDelta = getTotalDelta();
     
     // Calculate hedge quantity to reduce delta toward target
-    double deltaToHedge = (currentDelta - _params.target_inventory) * _params.hedge_ratio;
+    double deltaToHedge = (currentDelta - target_delta) * _params.hedge_ratio;
 
     // Convert delta to contracts
     double hedgeQty = -deltaToHedge / anchor->hedge_ratio;

@@ -107,8 +107,11 @@ public:
     
     /**
      * @brief Push an element, overwrite oldest if full
-     * @param item Element to push
-     * @return true if an element was overwritten
+     * 
+     * 修复方案：生产者不再直接修改 _head（消费者索引），
+     * 而是通过 _drop_count 原子计数器通知消费者跳过元素。
+     * 消费者在 tryPop 时检查 _drop_count 并跳过对应数量的元素。
+     * 这保证了 SPSC 语义：_head 只由消费者写，_tail 只由生产者写。
      */
     bool pushOverwrite(const T& item)
     {
@@ -119,9 +122,9 @@ public:
         
         if (next_tail == _head.load(std::memory_order_acquire))
         {
-            // Queue is full, advance head to drop oldest
-            _head.store((_head.load(std::memory_order_relaxed) + 1) & (Capacity - 1), 
-                        std::memory_order_release);
+            // 队列满：增加 drop 计数器，消费者会跳过对应数量的元素
+            // 不再由生产者修改 _head，避免数据竞争
+            _drop_count.fetch_add(1, std::memory_order_release);
             overwritten = true;
         }
         
@@ -142,6 +145,27 @@ public:
      */
     bool tryPop(T& item)
     {
+        // 先处理 drop：消费者跳过被覆盖的元素
+        // 这保证了 SPSC 语义：只有消费者修改 _head
+        size_t drops = _drop_count.load(std::memory_order_acquire);
+        if (drops > 0)
+        {
+            size_t skipped = 0;
+            for (size_t i = 0; i < drops; ++i)
+            {
+                const size_t current_head = _head.load(std::memory_order_relaxed);
+                // 检查队列是否为空（可能 drop 数量超过实际元素）
+                if (current_head == _tail.load(std::memory_order_acquire))
+                    break;
+                // 析构被跳过的元素
+                reinterpret_cast<T*>(&_buffer[current_head])->~T();
+                _head.store((current_head + 1) & (Capacity - 1), std::memory_order_release);
+                ++skipped;
+            }
+            // 减去已跳过的数量
+            _drop_count.fetch_sub(skipped, std::memory_order_release);
+        }
+        
         const size_t current_head = _head.load(std::memory_order_relaxed);
         
         // Check if queue is empty
@@ -226,6 +250,7 @@ private:
     // Align to cache line to prevent false sharing
     alignas(64) std::atomic<size_t> _head;
     alignas(64) std::atomic<size_t> _tail;
+    alignas(64) std::atomic<size_t> _drop_count{0};  // drop计数器，用于pushOverwrite
     
     // Buffer storage
     alignas(alignof(T)) char _buffer[Capacity * sizeof(T)];

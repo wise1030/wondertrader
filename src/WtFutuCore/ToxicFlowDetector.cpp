@@ -129,35 +129,39 @@ void ToxicFlowDetector::updateCache() const
     
     _cached_metrics = ToxicityMetrics();
     
-    // Get results from sub-components
     auto pred_result = _predictive.analyze();
-    auto real_result = _realized.analyze();
     
-    // Fill metrics
     _cached_metrics.predictive_toxicity = pred_result.combined_score;
+    _cached_metrics.toxic_score = pred_result.combined_score;
+    
+    // FIX P2-9: extreme_signal作为独立保护层，在最终加权后叠加
+    // 原代码在realized加权之前就把extreme_signal混入toxic_score，然后realized_weight
+    // 会稀释extreme_signal的保护效果。例如:
+    //   extreme_signal=0.9, combined_score=0.3, self_trade_weight=0.4
+    //   原代码: toxic_score = max(0.3, 0.9*0.8)=0.72, 然后 0.6*0.72+0.4*realized = 被稀释
+    //   修复后: 先算weighted_score = 0.6*0.3+0.4*realized, 再取max(weighted, 0.9*0.8)
+    // extreme_signal是硬性保护信号，不应被realized稀释。
+    
+    // Integrate realized toxicity into combined score
+    // self_trade_weight controls how much realized adverse ratio contributes
+    auto real_result = _realized.analyze();
     _cached_metrics.realized_adverse_ratio = real_result.adverse_ratio;
-    _cached_metrics.total_fills = real_result.total_fills;
-    _cached_metrics.adverse_fills = real_result.adverse_fills;
-    _cached_metrics.avg_adverse_move = real_result.avg_adverse_move;
-    
-    // Combined score: weighted average with realized getting higher weight when confident
-    double realized_weight = real_result.confidence;
-    double predictive_weight = 1.0 - realized_weight;
-    
-    _cached_metrics.toxic_score = 
-        predictive_weight * pred_result.combined_score +
-        realized_weight * real_result.decayed_score;
-    
-    // Use max for extreme signals
-    if (pred_result.extreme_signal > 0)
+    if (real_result.total_fills >= 3)  // Need minimum sample size
     {
-        _cached_metrics.toxic_score = std::max(_cached_metrics.toxic_score, pred_result.extreme_signal * 0.8);
+        double realized_weight = _params.self_trade_weight;
+        _cached_metrics.toxic_score = (1.0 - realized_weight) * _cached_metrics.toxic_score
+                                    + realized_weight * real_result.decayed_score;
     }
     
-    // Is toxic?
+    // Apply extreme_signal as independent protection layer AFTER realized weighting
+    if (pred_result.extreme_signal > 0)
+    {
+        _cached_metrics.toxic_score = std::max(_cached_metrics.toxic_score, 
+                                               pred_result.extreme_signal * _params.extreme_signal_weight);
+    }
+    
     _cached_metrics.is_toxic = _cached_metrics.toxic_score > _params.adverse_threshold;
     
-    // Toxic side
     if (_cached_metrics.is_toxic)
     {
         _cached_metrics.toxic_side = pred_result.toxic_side;
@@ -204,6 +208,44 @@ ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(
     
     // Return combined analysis
     return analyze();
+}
+
+//==============================================================================
+// Synthetic Signal Fusion Integration
+//==============================================================================
+
+void ToxicFlowDetector::feedTickInference(const InferredTransaction& tick_inf)
+{
+    if (_fusion_enabled)
+    {
+        _signal_fusion.addTickInference(tick_inf);
+        _cache_dirty = true;
+    }
+}
+
+void ToxicFlowDetector::feedBookSignal(const DepthImbalanceSignal& book_sig)
+{
+    if (_fusion_enabled)
+    {
+        _signal_fusion.addBookSignal(book_sig);
+        _cache_dirty = true;
+    }
+}
+
+void ToxicFlowDetector::runFusionCycle()
+{
+    if (!_fusion_enabled) return;
+    
+    // Fuse all available signals into synthetic transaction data
+    SyntheticTransactionData synth = _signal_fusion.fuse();
+    
+    // Feed fused result back into toxicity detection
+    AlphaResult alpha;
+    alpha.alpha = synth.direction_signal;
+    alpha.confidence = synth.confidence;
+    alpha.timestamp = synth.timestamp;
+    
+    onSyntheticAlpha(synth, alpha);
 }
 
 } // namespace futu

@@ -103,8 +103,22 @@ size_t AsyncArbitrageExecutor::processPendingOrders(OrderCallback callback)
     ArbOrderRequest order;
     while (_order_queue->tryPop(order))
     {
-        callback(order);
-        ++count;
+        // FIX P2-14: Wrap callback in try-catch to prevent one exception
+        // from blocking processing of subsequent orders in the queue
+        try {
+            callback(order);
+            ++count;
+        } catch (const std::exception& e) {
+            WTSLogger::error("AsyncArb: order callback exception for pair={}, "
+                             "code={}, price={}, qty={}: {}",
+                order.pair_id, order.code, order.price, order.qty, e.what());
+            // Still count as executed (order was popped from queue)
+            ++count;
+        } catch (...) {
+            WTSLogger::error("AsyncArb: order callback unknown exception for pair={}, code={}",
+                order.pair_id, order.code);
+            ++count;
+        }
         _orders_executed.fetch_add(1, std::memory_order_relaxed);
     }
     
@@ -220,7 +234,7 @@ void AsyncArbitrageExecutor::processTick(const ArbTickData& tick)
 
 void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
 {
-    if (!_arb_manager || !_config.enabled)
+    if (!_arb_manager || !_config.enabled.load(std::memory_order_relaxed))
         return;
     
     // Generate signals
@@ -380,7 +394,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     }
     
     // Create order requests
-    uint32_t req_id = _next_request_id.fetch_add(1, std::memory_order_relaxed);
+    uint32_t req_id = _next_request_id.fetch_add(2, std::memory_order_relaxed);
     
     // Leg 1 order
     ArbOrderRequest order1;
@@ -400,16 +414,165 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     order2.price = leg2_price;
     order2.qty = leg2_qty;
     order2.timestamp = signal.timestamp;
-    order2.request_id = req_id + 1;
+    order2.request_id = req_id + 1;  // 同一对两腿使用连续ID
     
-    // Push to order queue (non-blocking)
-    _order_queue->tryPush(order1);
-    _order_queue->tryPush(order2);
+    // 原子提交：先检查队列是否有足够空间放两腿
+    const size_t needed_slots = 2;
+    const size_t available = _order_queue->capacity() - _order_queue->size();
+    
+    if (available < needed_slots)
+    {
+        WTSLogger::warn("AsyncArb signal DROPPED: order queue full "
+                         "(need={}, avail={}), pair={}",
+            needed_slots, available, signal.pair_id);
+        return;  // 两腿都不提交，避免单腿风险
+    }
+    
+    // 先push第一腿
+    bool push1 = _order_queue->tryPush(order1);
+    if (!push1)
+    {
+        WTSLogger::error("AsyncArb: leg1 push failed after pre-check! pair={}",
+            signal.pair_id);
+        return;  // 第一腿失败，不提交第二腿
+    }
+    
+    // 再push第二腿
+    bool push2 = _order_queue->tryPush(order2);
+    if (!push2)
+    {
+        // 极端情况：预检通过但第二腿push失败
+        // 第一腿已在队列中无法撤回，记录严重告警
+        WTSLogger::error("AsyncArb CRITICAL: leg2 push failed after leg1 "
+                         "succeeded! pair={}, leg1_req_id={}",
+            signal.pair_id, req_id);
+        
+        // FIX P0-4: 记录单腿敞口，供processPendingOrders检测并自动对冲
+        // Arb线程push到_from_arb队列(SPSC安全)，主线程pop
+        // FIX P2-7: 传入delta_ratio=0(arb线程无法获取portfolio delta，主线程回调时补充)
+        _orphan_legs_from_arb.tryPush({signal.pair_id, req_id, signal.leg1_code,
+            signal.leg2_code, leg1_is_buy, leg1_qty, leg1_price,
+            std::chrono::steady_clock::now(), 0.0});
+        WTSLogger::warn("AsyncArb: orphan leg recorded for auto-hedge, "
+                         "pair={}, leg1={}", signal.pair_id, signal.leg1_code);
+    }
     
     WTSLogger::info("AsyncArb signal: pair={}, leg1={}{}@{}, leg2={}{}@{}",
         signal.pair_id,
         leg1_is_buy ? "BUY" : "SELL", signal.leg1_code, leg1_qty, leg1_price,
         leg2_is_buy ? "BUY" : "SELL", signal.leg2_code, leg2_qty, leg2_price);
+}
+
+//==============================================================================
+// Orphan Leg Auto-Hedge
+//==============================================================================
+
+size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
+                                                   uint64_t timeout_ms,
+                                                   uint64_t force_ms,
+                                                   double current_delta_ratio)
+{
+    size_t processed = 0;
+    auto now = std::chrono::steady_clock::now();
+    
+    // FIX P0-4: Dual-queue SPSC-safe design:
+    // 1. Pop all new orphan legs from arb thread (SPSC queue)
+    // 2. Merge with existing deferred legs
+    // 3. Process all: hedge if timeout, defer if not
+    // This avoids the old bug where main thread tryPush back into SPSC queue
+    // violated single-consumer invariant.
+    
+    OrphanLeg orphan;
+    while (_orphan_legs_from_arb.tryPop(orphan))
+    {
+        // FIX P2-7: arb线程无法获取portfolio delta，主线程传入current_delta_ratio
+        if (orphan.delta_ratio == 0.0 && current_delta_ratio > 0.0) {
+            orphan.delta_ratio = current_delta_ratio;
+        }
+        _orphan_legs_deferred.push_back(std::move(orphan));
+    }
+    
+    // Process all deferred legs
+    std::vector<OrphanLeg> still_deferred;
+    for (auto& leg : _orphan_legs_deferred)
+    {
+        auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - leg.timestamp).count();
+        
+        // FIX P2-7: 根据delta_ratio动态调整超时
+        // delta_ratio越高(接近或超过max_delta)，超时越短，对冲越积极
+        // delta_ratio=0: 无delta限制，使用原始超时
+        // delta_ratio>=1.0: 已超delta限制，立即强制对冲
+        uint64_t effective_timeout = timeout_ms;
+        uint64_t effective_force = force_ms;
+        if (leg.delta_ratio > 0) {
+            if (leg.delta_ratio >= 1.0) {
+                // 已超delta限制: 立即强制对冲
+                effective_timeout = 0;
+                effective_force = 0;
+            } else {
+                // delta_ratio在(0,1): 线性缩短超时
+                // ratio=0.5时timeout减半, ratio=0.8时timeout只剩20%
+                double shrink = 1.0 - leg.delta_ratio;
+                effective_timeout = static_cast<uint64_t>(timeout_ms * shrink);
+                effective_force = static_cast<uint64_t>(force_ms * shrink);
+                // 最低保证1秒grace period
+                if (effective_timeout < 1000) effective_timeout = 1000;
+                if (effective_force < 2000) effective_force = 2000;
+            }
+        }
+        
+        if (age_ms >= static_cast<int64_t>(effective_force))
+        {
+            // Level 3: 超过force_ms → 强制市价对冲（最紧急）
+            bool hedge_is_buy = !leg.leg1_is_buy;
+            double hedge_price = leg.leg1_price;  // fallback, callback会覆盖
+            
+            WTSLogger::error("OrphanLeg URGENT: pair={}, leg1={}{}@{}, "
+                             "age={}ms > force={}ms (delta_ratio={:.2f}) → force market hedge on {}",
+                leg.pair_id,
+                leg.leg1_is_buy ? "BUY" : "SELL", leg.leg1_code,
+                leg.leg1_qty, leg.leg1_price,
+                age_ms, effective_force, leg.delta_ratio, leg.leg2_code);
+            
+            callback(leg.leg2_code, hedge_is_buy, hedge_price,
+                     leg.leg1_qty, /*urgent=*/true);
+            ++processed;
+        }
+        else if (age_ms >= static_cast<int64_t>(effective_timeout))
+        {
+            // Level 2: 超过timeout_ms → 对手价对冲（积极减仓）
+            bool hedge_is_buy = !leg.leg1_is_buy;
+            double hedge_price = leg.leg1_price;  // fallback, callback会覆盖
+            
+            WTSLogger::warn("OrphanLeg HEDGE: pair={}, leg1={}{}@{}, "
+                            "age={}ms > timeout={}ms (delta_ratio={:.2f}) → aggressive hedge on {}",
+                leg.pair_id,
+                leg.leg1_is_buy ? "BUY" : "SELL", leg.leg1_code,
+                leg.leg1_qty, leg.leg1_price,
+                age_ms, effective_timeout, leg.delta_ratio, leg.leg2_code);
+            
+            callback(leg.leg2_code, hedge_is_buy, hedge_price,
+                     leg.leg1_qty, /*urgent=*/false);
+            ++processed;
+        }
+        else
+        {
+            // Level 1: 未超时 → 保留等待（给leg2重试机会）
+            WTSLogger::debug("OrphanLeg DEFERRED: pair={}, leg1={}{}@{}, "
+                             "age={}ms < timeout_ms={}ms, waiting",
+                leg.pair_id,
+                leg.leg1_is_buy ? "BUY" : "SELL", leg.leg1_code,
+                leg.leg1_qty, leg.leg1_price,
+                age_ms, timeout_ms);
+            still_deferred.push_back(std::move(leg));
+        }
+    }
+    
+    // Swap: keep only still-deferred legs for next call
+    _orphan_legs_deferred = std::move(still_deferred);
+    
+    return processed;
 }
 
 } // namespace futu

@@ -227,6 +227,8 @@ private:
     // Market state
     double _volatility;
     double _liquidity;
+    double _last_vol_price;
+    uint64_t _last_vol_timestamp;
     
     // Signal history for imbalance calculation
     struct FusedSample {

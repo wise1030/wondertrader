@@ -6,6 +6,7 @@
 #include <memory>
 #include <map>
 #include "../Includes/FasterDefs.h"
+#include "FutuConfig.h"
 #include "SpreadCalculator.h"
 
 NS_WTP_BEGIN
@@ -46,6 +47,14 @@ struct CorrelationConfig
     bool auto_calculate_beta;
     
     CorrelationConfig() : window_size(100), min_correlation(0.5), spread_z_threshold(2.0), auto_calculate_beta(true) {}
+    
+    static CorrelationConfig fromVariant(wtp::WTSVariant* v) {
+        CorrelationConfig c;
+        c.window_size = FutuConfig::readUInt32(v, "windowSize", 100);
+        c.min_correlation = FutuConfig::readDouble(v, "minCorrelation", 0.5);
+        c.spread_z_threshold = FutuConfig::readDouble(v, "spreadZThreshold", 2.0);
+        return c;
+    }
 };
 
 class CorrelationManager

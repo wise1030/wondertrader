@@ -7,6 +7,7 @@
  */
 #include "FutuRiskMonitor.h"
 #include "FutuPortfolio.h"
+#include "UnifiedOrderTracker.h"
 #include "../WTSTools/WTSLogger.h"
 #include "../WtUftCore/EventNotifier.h"
 #include <algorithm>
@@ -15,6 +16,8 @@ namespace futu {
 
 FutuRiskMonitor::FutuRiskMonitor()
     : _event_notifier(nullptr)
+    , _delta_snapshot_count(0)
+    , _delta_snapshot_head(0)
 {
 }
 
@@ -29,7 +32,11 @@ void FutuRiskMonitor::recordOrder()
         if (*item < cutoff)
         {
             _order_times.try_pop();
-            _orders_last_sec.fetch_sub(1, std::memory_order_relaxed);
+            // FIX P0-8: 防止计数器下溢 — 只有当计数>0时才减
+            int32_t cur = _orders_last_sec.load(std::memory_order_relaxed);
+            if (cur > 0) {
+                _orders_last_sec.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
         else
         {
@@ -38,10 +45,12 @@ void FutuRiskMonitor::recordOrder()
     }
     
     // Add new timestamp
-    if (_order_times.try_push(now))
-    {
-        _orders_last_sec.fetch_add(1, std::memory_order_relaxed);
-    }
+    // FIX P2-2: try_push失败时仍然增加计数器
+    // 原代码只在try_push成功时增加_orders_last_sec，但ring buffer满时订单仍然发生了，
+    // 计数偏低会导致流控判断失误（以为订单频率低，实际已超限）。
+    // try_push失败仅意味着旧时间戳无法被覆盖存储，不代表订单不存在。
+    _order_times.try_push(now);
+    _orders_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FutuRiskMonitor::recordCancel()
@@ -55,7 +64,11 @@ void FutuRiskMonitor::recordCancel()
         if (*item < cutoff)
         {
             _cancel_times.try_pop();
-            _cancels_last_sec.fetch_sub(1, std::memory_order_relaxed);
+            // FIX P0-8: 防止计数器下溢
+            int32_t cur = _cancels_last_sec.load(std::memory_order_relaxed);
+            if (cur > 0) {
+                _cancels_last_sec.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
         else
         {
@@ -64,10 +77,9 @@ void FutuRiskMonitor::recordCancel()
     }
     
     // Add new timestamp
-    if (_cancel_times.try_push(now))
-    {
-        _cancels_last_sec.fetch_add(1, std::memory_order_relaxed);
-    }
+    // FIX P2-2: try_push失败时仍然增加计数器(与recordOrder同理)
+    _cancel_times.try_push(now);
+    _cancels_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FutuRiskMonitor::recordTrade()
@@ -81,7 +93,11 @@ void FutuRiskMonitor::recordTrade()
         if (*item < cutoff)
         {
             _trade_times.try_pop();
-            _trades_last_sec.fetch_sub(1, std::memory_order_relaxed);
+            // FIX P0-8: 防止计数器下溢
+            int32_t cur = _trades_last_sec.load(std::memory_order_relaxed);
+            if (cur > 0) {
+                _trades_last_sec.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
         else
         {
@@ -90,10 +106,9 @@ void FutuRiskMonitor::recordTrade()
     }
     
     // Add new timestamp
-    if (_trade_times.try_push(now))
-    {
-        _trades_last_sec.fetch_add(1, std::memory_order_relaxed);
-    }
+    // FIX P2-2: try_push失败时仍然增加计数器(与recordOrder同理)
+    _trade_times.try_push(now);
+    _trades_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::string& message)
@@ -111,6 +126,7 @@ void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::st
 std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio)
 {
     std::vector<RiskViolation> violations;
+    violations.reserve(6);  // P-5: 预分配，避免6次push_back的重分配
     
     if (!portfolio)
         return violations;
@@ -119,19 +135,23 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     uint64_t ts = _current_time.load(std::memory_order_relaxed);
     
     //==========================================================================
-    // 软指标：Delta 相关（用于 skew 偏移和对冲决策，不触发风控动作）
+    // Delta 相关：软指标 + 硬限制
+    // 软指标(<=delta_critical_mult)：用于 skew 偏移和对冲决策，仅日志
+    // 硬限制(>delta_critical_mult)：产生 DELTA BREACH violation，触发风控动作
     // 利用率通过 SpreadOptimizer 的 computeDeltaAwareSkew 自动调整报价
     //==========================================================================
     double delta = portfolio->getTotalDelta();
     double absDelta = std::abs(delta);
     
-    // Delta utilization warning (软指标，仅日志)
+    recordDeltaSnapshot(delta, ts);
+    checkAndHandleDeltaRateBreach();
+    
     if (params.portfolio_max_delta > 0)
     {
         double delta_utilization = absDelta / params.portfolio_max_delta;
         
         // 高利用率警告（>= 80%）
-        if (delta_utilization >= 0.8)
+        if (delta_utilization >= _rate_limits.delta_warning_mult)
         {
             WTSLogger::warn("[RISK] Delta utilization high: {:.1f}% ({:.2f} / {:.2f}) - skew will adjust quotes",
                 delta_utilization * 100, absDelta, params.portfolio_max_delta);
@@ -144,19 +164,22 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
                 absDelta, params.portfolio_max_delta);
         }
         
-        // portfolio_max_delta 是绝对上限，超过时输出严重警告但仍不 block
-        // 让 skew 和对冲机制尝试回归
-        if (absDelta > params.portfolio_max_delta * 1.5)  // 严重超限
+        // 软指标：超过 delta_critical_mult 倍时输出严重警告
+        // max_delta 是软风控，仅用于调节 skew 和对冲决策，不触发硬风控动作
+        // 真正的硬限制由 Exposure 和 Daily Loss 承担
+        if (absDelta > params.portfolio_max_delta * _rate_limits.delta_critical_mult)
         {
-            WTSLogger::error("[RISK] Delta critically high: {:.2f} > {:.2f} (portfolio_max_delta * 1.5, urgent skew/hedge needed)",
-                absDelta, params.portfolio_max_delta * 1.5);
+            WTSLogger::error("[RISK] Delta critically high: {:.2f} > {:.2f} (portfolio_max_delta * {:.1f}, skew/hedge handling)",
+                absDelta, params.portfolio_max_delta * _rate_limits.delta_critical_mult, _rate_limits.delta_critical_mult);
         }
     }
     
     //==========================================================================
     // 硬指标：Exposure（不得突破，严格风控）
+    // FIX P1-3: 使用getTotalGrossExposure替代getTotalExposure
+    // 跨品种多空不能简单对冲，毛暴露更准确反映实际风险
     //==========================================================================
-    double exposure = portfolio->getTotalExposure();
+    double exposure = portfolio->getTotalGrossExposure();
     if (exposure > params.max_exposure)
     {
         RiskViolation v;
@@ -334,13 +357,16 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
         }
         else if (v.type == RiskLimitType::POSITION_NET)
         {
-            // Single contract position breach - distinguish direction by position sign
-            // v.current_value contains the signed position (positive=long, negative=short)
+            if (v.utilization >= _rate_limits.position_breach_pause_threshold)
+            {
+                outCategory = RiskCategory::REVERSIBLE;
+                return RiskAction::PAUSE_QUOTING;
+            }
             if (v.current_value > 0)
-                long_breach = true;   // 多头超限，block 开多
+                long_breach = true;
             else
-                short_breach = true;  // 空头超限，block 开空
-            contract_breach = true;   // Also mark for potential contract-specific handling
+                short_breach = true;
+            contract_breach = true;
         }
     }
     
@@ -378,17 +404,17 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
             breachCount++;
     }
     
-    if (breachCount >= 3)
+    if (breachCount >= _rate_limits.flatten_threshold)
     {
         outCategory = RiskCategory::REVERSIBLE;
         return RiskAction::FLATTEN_POSITION;
     }
-    if (breachCount >= 2)
+    if (breachCount >= _rate_limits.pause_threshold)
     {
         outCategory = RiskCategory::REVERSIBLE;
         return RiskAction::PAUSE_QUOTING;
     }
-    if (breachCount >= 1)
+    if (breachCount >= _rate_limits.widen_threshold)
     {
         outCategory = RiskCategory::REVERSIBLE;
         return RiskAction::WIDEN_SPREAD;
@@ -413,30 +439,45 @@ void FutuRiskMonitor::haltTrading(RiskCategory category, double pnl_snapshot)
         fmt::format("Trading halted ({}) due to risk limits", category_str));
 }
 
-void FutuRiskMonitor::resumeTrading()
+bool FutuRiskMonitor::resumeTrading()
 {
     // Only allow resume for reversible risks
     if (_halt_category == RiskCategory::IRREVERSIBLE)
     {
         WTSLogger::warn("[RISK] Cannot resume trading: halt is IRREVERSIBLE (requires manual intervention)");
-        return;
+        return false;
     }
     
     _trading_halted.store(false, std::memory_order_relaxed);
     _halt_timestamp = 0;
     broadcastAlert("TRADING_RESUMED", "Trading resumed after risk normalized");
+    return true;
 }
 
 void FutuRiskMonitor::pauseQuoting()
 {
-    _quoting_paused.store(true, std::memory_order_relaxed);
+    // BUG-9 修复：避免重复触发QUOTING_PAUSED（与resumeQuoting对称）
+    bool expected = false;
+    if (!_quoting_paused.compare_exchange_strong(expected, true,
+            std::memory_order_relaxed, std::memory_order_relaxed)) {
+        // 已经是paused状态，无需重复操作
+        return;
+    }
     _pause_timestamp = _current_time.load(std::memory_order_relaxed);
     broadcastAlert("QUOTING_PAUSED", "Quoting paused due to risk limits");
 }
 
 void FutuRiskMonitor::resumeQuoting()
 {
-    _quoting_paused.store(false, std::memory_order_relaxed);
+    // BUG-9 修复：避免重复触发QUOTING_RESUMED
+    // 之前没有检查当前状态，多个合约tick回调都会触发resumeQuoting
+    // 导致同一秒内出现多次QUOTING_RESUMED日志
+    bool expected = true;
+    if (!_quoting_paused.compare_exchange_strong(expected, false, 
+            std::memory_order_relaxed, std::memory_order_relaxed)) {
+        // 已经是resumed状态，无需重复操作
+        return;
+    }
     _pause_timestamp = 0;
     broadcastAlert("QUOTING_RESUMED", "Quoting resumed after risk normalized");
 }
@@ -481,8 +522,8 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     if (delta_util > _recovery_config.recovery_threshold)
         return false;
     
-    // Check exposure utilization
-    double exposure = portfolio->getTotalExposure();
+    // Check exposure utilization (FIX P1-3: use gross exposure)
+    double exposure = portfolio->getTotalGrossExposure();
     if (params.max_exposure > 0)
     {
         double exposure_util = exposure / params.max_exposure;
@@ -580,11 +621,17 @@ bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)
 
 void FutuRiskMonitor::resetDaily()
 {
-    _trading_halted.store(false, std::memory_order_relaxed);
+    // FIX P2-6: Preserve IRREVERSIBLE halt category across daily reset.
+    // IRREVERSIBLE risks (e.g. daily loss) must not auto-recover on new day.
+    // Only clearIrreversible() (called with human confirmation) can reset it.
+    RiskCategory saved_halt_category = _halt_category;
+    bool was_irreversible = (saved_halt_category == RiskCategory::IRREVERSIBLE);
+    
+    _trading_halted.store(was_irreversible, std::memory_order_relaxed);  // Stay halted if IRREVERSIBLE
     _long_blocked.store(false, std::memory_order_relaxed);
     _short_blocked.store(false, std::memory_order_relaxed);
-    _quoting_paused.store(false, std::memory_order_relaxed);
-    _halt_category = RiskCategory::REVERSIBLE;
+    _quoting_paused.store(was_irreversible, std::memory_order_relaxed);  // Stay paused if IRREVERSIBLE
+    // _halt_category is preserved (not reset to REVERSIBLE)
     _halt_timestamp = 0;
     _pause_timestamp = 0;
     _last_recovery_check = 0;
@@ -595,11 +642,146 @@ void FutuRiskMonitor::resetDaily()
     _orders_last_sec.store(0, std::memory_order_relaxed);
     _cancels_last_sec.store(0, std::memory_order_relaxed);
     _trades_last_sec.store(0, std::memory_order_relaxed);
+    
+    _delta_snapshots.fill(DeltaSnapshot());
+    _delta_snapshot_count = 0;
+    _delta_snapshot_head = 0;
+    _delta_rate_breached.store(false, std::memory_order_relaxed);
+    _delta_rate_breach_time = 0;
+    
+    if (was_irreversible)
+    {
+        WTSLogger::warn("[RISK] resetDaily: IRREVERSIBLE halt preserved, trading remains halted until clearIrreversible() is called");
+    }
+}
+
+bool FutuRiskMonitor::clearIrreversible()
+{
+    if (_halt_category != RiskCategory::IRREVERSIBLE)
+    {
+        WTSLogger::debug("[RISK] clearIrreversible: not in IRREVERSIBLE state, nothing to clear");
+        return false;
+    }
+    
+    WTSLogger::info("[RISK] clearIrreversible: manually clearing IRREVERSIBLE halt (human confirmation)");
+    _halt_category = RiskCategory::REVERSIBLE;
+    _trading_halted.store(false, std::memory_order_relaxed);
+    _quoting_paused.store(false, std::memory_order_relaxed);
+    _halt_timestamp = 0;
+    _pause_timestamp = 0;
+    _was_loss_triggered = false;
+    _halt_pnl_snapshot = 0;
+    broadcastAlert("IRREVERSIBLE_CLEARED", "IRREVERSIBLE halt manually cleared, trading can resume");
+    return true;
 }
 
 void FutuRiskMonitor::resetSession()
 {
     resetDaily();
+}
+
+//==========================================================================
+// Delta Rate Tracking Implementation
+//==========================================================================
+
+void FutuRiskMonitor::recordDeltaSnapshot(double currentDelta, uint64_t timestampMs)
+{
+    _delta_snapshots[_delta_snapshot_head] = DeltaSnapshot(currentDelta, timestampMs);
+    _delta_snapshot_head = (_delta_snapshot_head + 1) % DELTA_SNAPSHOT_CAPACITY;
+    if (_delta_snapshot_count < DELTA_SNAPSHOT_CAPACITY)
+        _delta_snapshot_count++;
+}
+
+bool FutuRiskMonitor::checkDeltaRate() const
+{
+    return _delta_rate_breached.load(std::memory_order_relaxed);
+}
+
+double FutuRiskMonitor::getDeltaChangeRate() const
+{
+    if (_delta_snapshot_count < 2)
+        return 0.0;
+    
+    uint64_t now = _current_time.load(std::memory_order_relaxed);
+    uint32_t windowMs = _rate_limits.delta_rate_window_sec * 1000;
+    uint64_t cutoff = (now > windowMs) ? (now - windowMs) : 0;
+    
+    double oldestDelta = 0;
+    double newestDelta = 0;
+    uint64_t oldestTime = UINT64_MAX;
+    uint64_t newestTime = 0;
+    
+    for (size_t i = 0; i < _delta_snapshot_count; ++i)
+    {
+        size_t idx;
+        if (_delta_snapshot_count < DELTA_SNAPSHOT_CAPACITY)
+            idx = i;
+        else
+            idx = (_delta_snapshot_head + i) % DELTA_SNAPSHOT_CAPACITY;
+        
+        const DeltaSnapshot& snap = _delta_snapshots[idx];
+        if (snap.timestamp_ms < cutoff || snap.timestamp_ms == 0)
+            continue;
+        
+        if (snap.timestamp_ms < oldestTime)
+        {
+            oldestDelta = snap.delta;
+            oldestTime = snap.timestamp_ms;
+        }
+        if (snap.timestamp_ms > newestTime)
+        {
+            newestDelta = snap.delta;
+            newestTime = snap.timestamp_ms;
+        }
+    }
+    
+    if (oldestTime == UINT64_MAX || oldestTime == newestTime)
+        return 0.0;
+    
+    double elapsedSec = static_cast<double>(newestTime - oldestTime) / 1000.0;
+    if (elapsedSec <= 0)
+        return 0.0;
+    
+    return std::abs(newestDelta - oldestDelta) / elapsedSec;
+}
+
+bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
+{
+    if (_rate_limits.max_delta_change_per_sec <= 0)
+        return false;
+    
+    double rate = getDeltaChangeRate();
+    bool breached = rate > _rate_limits.max_delta_change_per_sec;
+    
+    if (breached && !_delta_rate_breached.load(std::memory_order_relaxed))
+    {
+        _delta_rate_breached.store(true, std::memory_order_relaxed);
+        _delta_rate_breach_time = _current_time.load(std::memory_order_relaxed);
+        pauseQuoting();
+        broadcastAlert("DELTA_RATE_BREACH",
+            fmt::format("Delta change rate {:.2f}/s exceeds limit {:.2f}/s, quoting paused",
+                rate, _rate_limits.max_delta_change_per_sec));
+        WTSLogger::warn("[RISK] Delta rate breach: {:.2f}/s > {:.2f}/s, quoting paused",
+            rate, _rate_limits.max_delta_change_per_sec);
+        return true;
+    }
+    
+    if (_delta_rate_breached.load(std::memory_order_relaxed))
+    {
+        uint64_t now = _current_time.load(std::memory_order_relaxed);
+        uint64_t cooldownMs = _rate_limits.delta_rate_cooldown_ms;
+        if (!breached && (now - _delta_rate_breach_time) >= cooldownMs)
+        {
+            _delta_rate_breached.store(false, std::memory_order_relaxed);
+            if (_quoting_paused.load(std::memory_order_relaxed))
+            {
+                resumeQuoting();
+                WTSLogger::info("[RISK] Delta rate recovered, quoting resumed");
+            }
+        }
+    }
+    
+    return false;
 }
 
 //==========================================================================
@@ -628,6 +810,12 @@ bool FutuRiskMonitor::transitionCloseoutState(CloseoutState next_state, uint64_t
         case CloseoutState::COMPLETED:
             _closeout_state.complete_time = timestamp;
             break;
+        case CloseoutState::FAILED:
+            _closeout_state.fail_time = timestamp;
+            _closeout_state.retry_count++;
+            break;
+        case CloseoutState::RETRYING:
+            break;
         default:
             break;
     }
@@ -639,7 +827,7 @@ void FutuRiskMonitor::markCloseoutTriggered(uint64_t timestamp)
 {
     if (transitionCloseoutState(CloseoutState::TRIGGERED, timestamp))
     {
-        pauseQuoting();  // 停止报价
+        pauseQuoting();
         broadcastAlert("CLOSEOUT_TRIGGERED", 
             fmt::format("Closeout state: TRIGGERED at {}", timestamp));
     }
@@ -663,68 +851,248 @@ void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
     }
 }
 
+void FutuRiskMonitor::markCloseoutFailed(uint64_t timestamp)
+{
+    if (transitionCloseoutState(CloseoutState::FAILED, timestamp))
+    {
+        if (_closeout_state.retry_count >= _closeout_state.max_retries)
+        {
+            broadcastAlert("CLOSEOUT_FAILED", 
+                fmt::format("Closeout FAILED at {} (retries exhausted: {}/{}), manual intervention required",
+                    timestamp, _closeout_state.retry_count, _closeout_state.max_retries));
+        }
+        else
+        {
+            broadcastAlert("CLOSEOUT_FAILED", 
+                fmt::format("Closeout FAILED at {} (retry {}/{}), will retry in {}ms",
+                    timestamp, _closeout_state.retry_count, _closeout_state.max_retries,
+                    _closeout_state.retry_interval_ms));
+        }
+    }
+}
+
+bool FutuRiskMonitor::checkCloseoutRetry(uint64_t current_time_ms)
+{
+    if (_closeout_state.state != CloseoutState::FAILED)
+        return false;
+    
+    if (_closeout_state.retry_count >= _closeout_state.max_retries)
+    {
+        WTSLogger::error("[CLOSEOUT] Max retries ({}) exhausted, manual intervention required",
+            _closeout_state.max_retries);
+        return false;
+    }
+    
+    if (current_time_ms - _closeout_state.fail_time < _closeout_state.retry_interval_ms)
+        return false;
+    
+    if (transitionCloseoutState(CloseoutState::RETRYING, current_time_ms))
+    {
+        broadcastAlert("CLOSEOUT_RETRYING",
+            fmt::format("Closeout retry {}/{} at {}", 
+                _closeout_state.retry_count, _closeout_state.max_retries, current_time_ms));
+        return true;
+    }
+    
+    return false;
+}
+
 bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
 {
-    // 如果未启用收盘前平仓
-    if (_closeout_config.minutes_before == 0)
+    if (_closeout_state.state == CloseoutState::COMPLETED ||
+        _closeout_state.state == CloseoutState::FAILED)
         return false;
     
-    // 如果已完成，不再触发
-    if (_closeout_state.state == CloseoutState::COMPLETED)
-        return false;
-    
-    // 计算收盘时间 (转换为分钟数)
-    uint32_t closeHour, closeMin;
-    if (closeTime < 10000)
-    {
-        // HHMM format (e.g., 1515)
-        closeHour = closeTime / 100;
-        closeMin = closeTime % 100;
-    }
-    else
-    {
-        // HHMMSS format (e.g., 150000), extract HHMM
-        closeHour = closeTime / 10000;
-        closeMin = (closeTime / 100) % 100;
-    }
-    
-    // Validate format
-    if (closeHour > 23 || closeMin > 59)
-    {
-        WTSLogger::warn("[RISK] Invalid close time format: {}, using default 15:15", closeTime);
-        closeHour = 15;
-        closeMin = 15;
-    }
-    
-    // 计算收盘总分钟数
-    uint32_t closeTotalMin = closeHour * 60 + closeMin;
-    
-    // 计算触发时间 (总分钟数)
-    uint32_t triggerTotalMin = closeTotalMin - _closeout_config.minutes_before;
-    
-    // 当前时间 (HHMMSS -> 总分钟数)
     uint32_t currentHour = currentTime / 10000;
     uint32_t currentMin = (currentTime / 100) % 100;
+    
+    if (currentHour > 23 || currentMin > 59)
+    {
+        WTSLogger::warn("[RISK] Invalid current time format: {}", currentTime);
+        return false;
+    }
+    
     uint32_t currentTotalMin = currentHour * 60 + currentMin;
     
-    // 检查是否到达触发时间 (only from IDLE state)
-    if (currentTotalMin >= triggerTotalMin && _closeout_state.state == CloseoutState::IDLE)
+    //==========================================================================
+    // 双触发点平仓逻辑
+    //
+    // 有夜盘的品种有两个平仓触发点:
+    //   1. 夜盘收盘前 night_minutes_before 分钟 (如 02:25)
+    //   2. 全天收盘前 minutes_before 分钟 (如 15:10)
+    //
+    // 夜盘收盘时间格式 (HHMM):
+    //   跨日品种: 230 (02:30), 100 (01:00) — 收盘在凌晨
+    //   不跨日品种: 2300 (23:00), 2330 (23:30) — 收盘在当晚
+    //   无夜盘: 0
+    //
+    // 全天收盘时间格式 (HHMMSS):
+    //   150000 (15:00), 151500 (15:15)
+    //==========================================================================
+    
+    // --- 触发点1: 夜盘收盘 ---
+    // 只在夜盘时段 (21:00-05:59) 检查，避免白盘时段误触发
+    if (_closeout_config.night_close_time > 0 && _closeout_config.night_minutes_before > 0
+        && (currentHour >= 21 || currentHour < 6))
     {
-        markCloseoutTriggered(currentTime * 100);  // Convert to timestamp format
+        uint32_t nightClose = _closeout_config.night_close_time;
+        uint32_t nightCloseHour = nightClose / 100;
+        uint32_t nightCloseMin = nightClose % 100;
         
-        broadcastAlert("CLOSEOUT_TRIGGERED", 
-            fmt::format("Closeout triggered at {}:{:02d}, close time {}:{:02d}, {} minutes before",
-                currentHour, currentMin, closeHour, closeMin, _closeout_config.minutes_before));
+        // FIX P2-1: 夜盘收盘时间合法性校验，防止八进制误配
+        // C++中以0开头的整数字面量被解析为八进制，如0230→八进制=十进制152(01:52)而非23:00。
+        // 配置文件也可能误配为非法值。校验hour<=23, minute<=59。
+        if (nightCloseHour > 23 || nightCloseMin > 59)
+        {
+            WTSLogger::warn("[RISK] Invalid night_close_time format: {} (hour={}, min={}), "
+                           "possible octal misconfiguration. Expected HHMM format.",
+                           nightClose, nightCloseHour, nightCloseMin);
+            // Skip night session closeout check for invalid time
+        }
+        else
+        {
+        uint32_t nightCloseTotalMin = nightCloseHour * 60 + nightCloseMin;
         
-        return true;
+        bool is_overnight = (nightCloseHour < 6);  // 收盘在凌晨 → 跨日品种
+        
+        if (is_overnight)
+        {
+            // 跨日品种: 统一时间轴映射
+            // 21:00-23:59 → 保持原值 (1260-1439)
+            // 00:00-05:59 → +1440    (0-359 → 1440-1799)
+            // close=02:30 → 150+1440 = 1590
+            int32_t closeAbs = static_cast<int32_t>(nightCloseTotalMin) + 1440;
+            int32_t triggerAbs = closeAbs - static_cast<int32_t>(_closeout_config.night_minutes_before);
+            
+            int32_t currentAbs;
+            if (currentTotalMin >= 1260) {
+                currentAbs = static_cast<int32_t>(currentTotalMin);  // 21:00-23:59
+            } else {
+                currentAbs = static_cast<int32_t>(currentTotalMin) + 1440;  // 00:00-05:59
+            }
+            
+            if (currentAbs >= triggerAbs && _closeout_state.state == CloseoutState::IDLE)
+            {
+                markCloseoutTriggered(currentTime * 100);
+                broadcastAlert("CLOSEOUT_TRIGGERED", 
+                    fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}+1d, {} minutes before",
+                        currentHour, currentMin, nightCloseHour, nightCloseMin, _closeout_config.night_minutes_before));
+                return true;
+            }
+        }
+        else
+        {
+            // 不跨日品种: 夜盘收盘在当晚 (23:00, 23:30)
+            int32_t triggerTotalMin = static_cast<int32_t>(nightCloseTotalMin) 
+                                    - static_cast<int32_t>(_closeout_config.night_minutes_before);
+            if (triggerTotalMin < 0) triggerTotalMin = 0;
+            
+            if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
+                && _closeout_state.state == CloseoutState::IDLE)
+            {
+                markCloseoutTriggered(currentTime * 100);
+                broadcastAlert("CLOSEOUT_TRIGGERED", 
+                    fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}, {} minutes before",
+                        currentHour, currentMin, nightCloseHour, nightCloseMin, _closeout_config.night_minutes_before));
+                return true;
+            }
+        }
+        } // end FIX P2-1 else (valid night_close_time)
+    }
+    
+    // --- 触发点2: 全天收盘 (白盘) ---
+    // 只在白盘时段 (06:00-20:59) 检查，避免夜盘时段误触发
+    if (_closeout_config.minutes_before > 0
+        && currentHour >= 6 && currentHour <= 20)
+    {
+        uint32_t closeHour, closeMin;
+        if (closeTime < 10000)
+        {
+            closeHour = closeTime / 100;
+            closeMin = closeTime % 100;
+        }
+        else
+        {
+            closeHour = closeTime / 10000;
+            closeMin = (closeTime / 100) % 100;
+        }
+        
+        if (closeHour > 23 || closeMin > 59)
+        {
+            WTSLogger::warn("[RISK] Invalid close time format: {}, using default 15:15", closeTime);
+            closeHour = 15;
+            closeMin = 15;
+        }
+        
+        uint32_t closeTotalMin = closeHour * 60 + closeMin;
+        int32_t triggerTotalMin = static_cast<int32_t>(closeTotalMin) 
+                                - static_cast<int32_t>(_closeout_config.minutes_before);
+        if (triggerTotalMin < 0) triggerTotalMin = 0;
+        
+        if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
+            && _closeout_state.state == CloseoutState::IDLE)
+        {
+            markCloseoutTriggered(currentTime * 100);
+            broadcastAlert("CLOSEOUT_TRIGGERED", 
+                fmt::format("Day closeout triggered at {}:{:02d}, close time {}:{:02d}, {} minutes before",
+                    currentHour, currentMin, closeHour, closeMin, _closeout_config.minutes_before));
+            return true;
+        }
     }
     
     return _closeout_state.state != CloseoutState::IDLE;
 }
 
+// FIX P2-5: resetCloseout改为通过状态机转换而非直接构造
+// 直接构造新对象绕过canTransitionTo检查，可能导致非法状态转换
 void FutuRiskMonitor::resetCloseout()
 {
-    _closeout_state = CloseoutStateInfo();  // Reset to IDLE state
+    if (_closeout_state.canTransitionTo(CloseoutState::IDLE))
+    {
+        _closeout_state.state = CloseoutState::IDLE;
+        _closeout_state.trigger_time = 0;
+        _closeout_state.flatten_start = 0;
+        _closeout_state.complete_time = 0;
+        _closeout_state.fail_time = 0;
+        _closeout_state.retry_count = 0;
+    }
+    else
+    {
+        WTSLogger::warn("FutuRiskMonitor: resetCloseout blocked by state machine, "
+                         "current state={} — cannot transition to IDLE",
+            static_cast<int>(_closeout_state.state));
+    }
+}
+
+FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(
+    const std::string& code,
+    const FutuPortfolio* portfolio,
+    const UnifiedOrderTracker* tracker) const
+{
+    PreTradeResult result{true, true};
+    
+    if (!portfolio) return result;
+    
+    const ContractState* cs = portfolio->getContract(code);
+    if (!cs || cs->max_position <= 0) return result;
+    
+    double pending_buy = tracker ? tracker->getPendingBuyQty(code) : 0;
+    double pending_sell = tracker ? tracker->getPendingSellQty(code) : 0;
+    double projected_long = (cs->position > 0 ? cs->position : 0) + pending_buy;
+    double projected_short = (cs->position < 0 ? std::abs(cs->position) : 0) + pending_sell;
+    
+    if (projected_long >= cs->max_position) {
+        result.allow_bid = false;
+        WTSLogger::debug("[RISK] PreTrade BLOCK bid: {} pos={:.0f} pending_buy={:.0f} projected_long={:.0f} >= max={:.0f}",
+            code, cs->position, pending_buy, projected_long, cs->max_position);
+    }
+    if (projected_short >= cs->max_position) {
+        result.allow_ask = false;
+        WTSLogger::debug("[RISK] PreTrade BLOCK ask: {} pos={:.0f} pending_sell={:.0f} projected_short={:.0f} >= max={:.0f}",
+            code, cs->position, pending_sell, projected_short, cs->max_position);
+    }
+    
+    return result;
 }
 
 } // namespace futu

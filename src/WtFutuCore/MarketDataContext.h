@@ -125,8 +125,15 @@ public:
     inline double getTickSize() const { return _tick_size; }
     inline const OrderBookSnapshot& getSnapshot() const { return _snapshot; }
     inline double estimateLiquidity() const {
-        double avg_depth = (_snapshot.bid_depth + _snapshot.ask_depth) / 2.0;
-        return std::min(1.0, avg_depth / 100.0);
+        if (_snapshot.spread <= 0 || _tick_size <= 0) return 0;
+        
+        double spread_ticks = _snapshot.spread / _tick_size;
+        if (spread_ticks < 1.0) spread_ticks = 1.0;
+        
+        double min_depth = std::min(_snapshot.bid_depth, _snapshot.ask_depth);
+        double score = min_depth / (spread_ticks * 10.0);
+        
+        return std::min(score, 1.0);
     }
     
     void reset();

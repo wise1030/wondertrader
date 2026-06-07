@@ -65,7 +65,7 @@ void PredictiveToxicity::onTrade(double price, double qty, bool isBuy, uint64_t 
         
         // Maintain fixed window
         if (_order_imbalances.size() > _cfg.vpin_window) {
-            _order_imbalances.erase(_order_imbalances.begin());
+            _order_imbalances.pop_front();
         }
         
         // Calculate VPIN
@@ -81,7 +81,7 @@ void PredictiveToxicity::onTrade(double price, double qty, bool isBuy, uint64_t 
         // Save and reset bucket
         _buckets.push_back(_current_bucket);
         if (_buckets.size() > _cfg.vpin_window) {
-            _buckets.erase(_buckets.begin());
+            _buckets.pop_front();
         }
         
         _current_bucket = VolumeBucket();
@@ -161,15 +161,15 @@ void PredictiveToxicity::updateCache() const
             _cfg.ofi_weight * _cached_result.ofi_toxicity +
             _cfg.trade_weight * _cached_result.trade_toxicity;
         
-        // Check for extreme signals (> 0.9)
-        if (_cached_result.ofi_toxicity > 0.9 || _cached_result.trade_toxicity > 0.9)
+        // Check for extreme signals (> 0.6, lowered from 0.9 for futures MM)
+        if (_cached_result.ofi_toxicity > 0.6 || _cached_result.trade_toxicity > 0.6)
         {
             _cached_result.extreme_signal = std::max(_cached_result.ofi_toxicity, _cached_result.trade_toxicity);
         }
     }
     
-    // Combined score: max of VPIN and alpha
-    _cached_result.combined_score = std::max(_cached_result.vpin, _cached_result.alpha_toxicity);
+    // Combined score: weighted combination of VPIN and alpha (not max)
+    _cached_result.combined_score = 0.5 * _cached_result.vpin + 0.5 * _cached_result.alpha_toxicity;
     
     // Apply extreme signal boost
     if (_cached_result.extreme_signal > 0)

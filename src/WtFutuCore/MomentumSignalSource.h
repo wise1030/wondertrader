@@ -59,7 +59,7 @@ public:
     
     SignalType type() const override 
     { 
-        return SignalType::CUSTOM; 
+        return SignalType::MOMENTUM; 
     }
     
     void update(const MarketDataContext& book) override
@@ -80,14 +80,20 @@ public:
         if (_price_history.size() >= 10)
         {
             calculateMomentum();
+            _result.timestamp = ts;
+            _result.valid = true;   // FIX P0-5: valid=true移到if内部，样本不足时不标记valid
+        }
+        else
+        {
+            _result.valid = false;  // 样本不足，不纳入加权计算
         }
         
         _last_mid = mid;
-        _result.timestamp = ts;
-        _result.valid = true;
     }
     
     const SignalResult& result() const override { return _result; }
+    
+    double getAlphaValue() const override { return _result.alpha; }
     
     bool enabled() const override { return _enabled; }
     void setEnabled(bool e) override { _enabled = e; }
@@ -126,29 +132,33 @@ private:
     {
         size_t n = _price_history.size();
         
-        // Calculate average of recent half and earlier half
-        double recent_sum = 0, earlier_sum = 0;
-        size_t half = n / 2;
+        // FIX P1-2: 改用对数收益率替代百分比变化率
+        // 百分比变化率 (P_t - P_{t-1})/P_{t-1} * 100 对高价合约信号被压制：
+        //   同样1个tick变动，价格3000的合约变化率0.033%，价格30000的合约仅0.0033%。
+        // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异，数学性质更优：
+        //   - 可加性: log(P3/P1) = log(P3/P2) + log(P2/P1)
+        //   - 对称性: 涨跌相同幅度，对数收益率绝对值相同
+        // 乘以1000作为缩放因子(对数收益率通常很小，如0.0001级别)
         
-        for (size_t i = half; i < n; ++i)
+        // Calculate log returns
+        double log_return_sum = 0;
+        size_t return_count = 0;
+        
+        for (size_t i = 1; i < n; ++i)
         {
-            recent_sum += _price_history[i];
+            if (_price_history[i - 1] > 0 && _price_history[i] > 0)
+            {
+                log_return_sum += std::log(_price_history[i] / _price_history[i - 1]);
+                return_count++;
+            }
         }
-        double recent_avg = recent_sum / (n - half);
         
-        for (size_t i = 0; i < half; ++i)
+        if (return_count > 0)
         {
-            earlier_sum += _price_history[i];
-        }
-        double earlier_avg = earlier_sum / half;
-        
-        // Calculate momentum
-        if (earlier_avg > 0)
-        {
-            double raw_momentum = (recent_avg - earlier_avg) / earlier_avg;
+            double raw_momentum = log_return_sum / return_count * 1000.0;
             
             // Scale and clamp to [-1, 1]
-            double momentum = std::tanh(raw_momentum * 100.0);
+            double momentum = std::tanh(raw_momentum);
             
             _result.alpha = momentum;
             

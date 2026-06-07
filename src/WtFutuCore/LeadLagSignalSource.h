@@ -43,7 +43,7 @@ class LeadLagSignalSource : public ISignalSource
 public:
     struct Config
     {
-        uint32_t window;
+        uint32_t window;       ///< Mid-change smoothing window size
         double weight;
         uint32_t lag_ms;
         
@@ -73,7 +73,7 @@ public:
     
     SignalType type() const override 
     { 
-        return SignalType::CUSTOM; 
+        return SignalType::LEAD_LAG; 
     }
     
     void update(const MarketDataContext& book) override
@@ -86,12 +86,15 @@ public:
     
     const SignalResult& result() const override { return _result; }
     
+    double getAlphaValue() const override { return _result.alpha; }
+    
     bool enabled() const override { return _enabled; }
     void setEnabled(bool e) override { _enabled = e; }
     
     void reset() override
     {
         _lead_contracts.clear();
+        _mid_change_histories.clear();
         _cumulative_signal = 0;
         _result = AlphaSignalResult();
     }
@@ -121,7 +124,28 @@ public:
         
         if (info.last_mid > 0)
         {
-            info.mid_change = (mid - info.last_mid) / info.last_mid;
+            double mid_change = (mid - info.last_mid) / info.last_mid;
+            
+            // FIX P2-13: 新增RingBuffer存储mid_change历史，计算窗口内加权平均
+            // 原代码仅存储单次mid_change，window/lag_ms配置未使用。
+            // 单次mid_change噪声大，容易被单笔大单或瞬时波动误导。
+            // 现在用RingBuffer存储最近window次mid_change，计算加权平均：
+            //   越新的数据权重越大(线性衰减)，越旧的数据权重越小。
+            auto& history = _mid_change_histories[code];
+            history.push(mid_change);
+            
+            // Compute weighted average of mid_change history
+            double weighted_sum = 0;
+            double weight_sum = 0;
+            size_t n = history.size();
+            for (size_t i = 0; i < n; ++i)
+            {
+                // Linear decay: newest gets weight n, oldest gets weight 1
+                double w = static_cast<double>(i + 1);
+                weighted_sum += history[i] * w;
+                weight_sum += w;
+            }
+            info.mid_change = (weight_sum > 0) ? (weighted_sum / weight_sum) : 0.0;
         }
         
         info.last_mid = mid;
@@ -147,6 +171,11 @@ private:
     AlphaSignalResult _result;
     
     std::unordered_map<std::string, LeadContractInfo> _lead_contracts;
+    
+    // FIX P2-13: RingBuffer存储mid_change历史，用于窗口内加权平均
+    using MidChangeHistory = RingBuffer<double, 64>;  // power of 2 for optimal performance
+    std::unordered_map<std::string, MidChangeHistory> _mid_change_histories;
+    
     double _cumulative_signal;
     double _current_mid;
     uint64_t _current_timestamp;

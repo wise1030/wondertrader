@@ -22,13 +22,17 @@ void FutuQuoter::init(const QuoterConfig& cfg)
     _cfg = cfg;
     _bid_levels.resize(cfg.num_levels);
     _ask_levels.resize(cfg.num_levels);
+    _level_qtys.resize(cfg.num_levels);
 
     for (uint32_t i = 0; i < cfg.num_levels; i++)
     {
         _bid_levels[i].is_bid = true;
         _bid_levels[i].level_index = static_cast<uint8_t>(i);
         _ask_levels[i].is_bid = false;
-        _ask_levels[i].level_index = static_cast<uint8_t>(i); // Bilateral components share index 0
+        _ask_levels[i].level_index = static_cast<uint8_t>(i);
+        
+        double qty = cfg.base_qty * std::pow(cfg.qty_decay, i);
+        _level_qtys[i] = std::max(1.0, std::round(qty));
     }
 }
 
@@ -38,6 +42,9 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                                     double best_bid, double best_ask)
 {
     uint32_t orders_placed = 0;
+    _ctx = ctx;
+    _allow_bid = allow_bid;
+    _allow_ask = allow_ask;
     if (!ctx) return 0;
 
     for (uint32_t i = 0; i < _cfg.num_levels; i++)
@@ -125,18 +132,64 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
         // 6. 执行报单更新
         if (is_bilateral)
         {
-            // 双边必须同时报入，若任意一侧挂单量为 0（因限制或价格不合法），则撤销双边
-            if (bidQty == 0 || askQty == 0)
+            // 双边报价逻辑：单侧被BLOCK时保留减仓侧独立报价，避免仓位死锁
+            if (bidQty == 0 && askQty == 0)
             {
+                // 双侧都被BLOCK，撤销双边
                 if (bid_level.order_id != 0) {
                     ctx->stra_cancel(bid_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
+                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
                     bid_level.order_id = 0;
                 }
                 if (ask_level.order_id != 0) {
                     ctx->stra_cancel(ask_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
+                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
                     ask_level.order_id = 0;
+                }
+            }
+            else if (bidQty == 0 || askQty == 0)
+            {
+                // 单侧被BLOCK：撤销被BLOCK侧，保留有量侧独立报价
+                if (bidQty == 0 && bid_level.order_id != 0) {
+                    ctx->stra_cancel(bid_level.order_id);
+                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
+                    bid_level.order_id = 0;
+                }
+                if (askQty == 0 && ask_level.order_id != 0) {
+                    ctx->stra_cancel(ask_level.order_id);
+                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
+                    ask_level.order_id = 0;
+                }
+                // 有量侧独立下单（减仓方向）
+                if (bidQty > 0 && bid_need_update) {
+                    if (bid_level.order_id != 0) {
+                        if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
+                        bid_level.order_id = 0;
+                    }
+                    auto ids = ctx->stra_buy(_cfg.code.c_str(), bidPrice, bidQty);
+                    if (!ids.empty()) {
+                        uint32_t bidId = ids[0];
+                        bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
+                        // FIX P2-8: Store level+is_bid direction
+                        _order_id_to_level[bidId] = {i, true};
+                        if (_tracker && now > 0) _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
+                        orders_placed += 1;
+                    }
+                }
+                if (askQty > 0 && ask_need_update) {
+                    if (ask_level.order_id != 0) {
+                        if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
+                        ask_level.order_id = 0;
+                    }
+                    auto ids = ctx->stra_sell(_cfg.code.c_str(), askPrice, askQty);
+                    if (!ids.empty()) {
+                        uint32_t askId = ids[0];
+                        ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
+                        // FIX P2-8: Store level+is_bid direction
+                        _order_id_to_level[askId] = {i, false};
+                        if (_tracker && now > 0) _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
+                        orders_placed += 1;
+                    }
                 }
             }
             else if (bid_need_update || ask_need_update)
@@ -161,7 +214,8 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 {
                     bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
                     ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                    _order_id_to_level[bidId] = i; _order_id_to_level[askId] = i;
+                    // FIX P2-8: Store level+is_bid direction
+                    _order_id_to_level[bidId] = {i, true}; _order_id_to_level[askId] = {i, false};
                     if (_tracker && now > 0) {
                         _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
                         _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
@@ -193,7 +247,8 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 if (!ids.empty()) {
                     uint32_t bidId = ids[0];
                     bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
-                    _order_id_to_level[bidId] = i;
+                    // FIX P2-8: Store level+is_bid direction
+                    _order_id_to_level[bidId] = {i, true};
                     if (_tracker && now > 0) _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
                     orders_placed += 1;
                 }
@@ -219,7 +274,8 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 if (!ids.empty()) {
                     uint32_t askId = ids[0];
                     ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                    _order_id_to_level[askId] = i;
+                    // FIX P2-8: Store level+is_bid direction
+                    _order_id_to_level[askId] = {i, false};
                     if (_tracker && now > 0) _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
                     orders_placed += 1;
                 }
@@ -251,6 +307,7 @@ void FutuQuoter::cancelAll(wtp::IUftStraCtx* ctx)
         {
             if (_tracker) _tracker->markPendingCancel(level.order_id, CancelReason::MANUAL);
             ctx->stra_cancel(level.order_id);
+            _order_id_to_level.erase(level.order_id);
             level.order_id = 0;
         }
     }
@@ -285,7 +342,6 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint
     {
         if (isCanceled || leftQty == 0)
         {
-            // 只有当当前 level.order_id 与回报的订单一致时，才清空，防止顶单撤销旧单时抹掉新挂单号
             if (level->order_id == localid) {
                 level->order_id = 0;
             }
@@ -298,6 +354,27 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint
                 level->qty = leftQty;
             }
             if (_tracker) _tracker->updateOrderQty(localid, leftQty);
+            
+            if (_tracker)
+            {
+                auto* orderInfo = _tracker->getOrderByOrderId(localid);
+                if (orderInfo && !orderInfo->isPendingCancel())
+                {
+                    bool should_cancel = false;
+                    if (orderInfo->isBid() && !_allow_bid)
+                        should_cancel = true;
+                    else if (!orderInfo->isBid() && !_allow_ask)
+                        should_cancel = true;
+                    
+                    if (should_cancel && _ctx)
+                    {
+                        WTSLogger::warn("[QUOTER] Post-submit cancel: {} order {} entered UnTrd but side blocked, cancelling",
+                            _cfg.code, localid);
+                        _ctx->stra_cancel(localid);
+                        _tracker->markPendingCancel(localid, CancelReason::INVENTORY_LIMIT);
+                    }
+                }
+            }
         }
         
         if (_bilateral_stats && now_ms > 0)
@@ -339,10 +416,12 @@ QuoteLevel* FutuQuoter::getLevelByOrder(uint32_t localid)
     auto it = _order_id_to_level.find(localid);
     if (it != _order_id_to_level.end())
     {
-        uint8_t idx = it->second;
-        if (idx < _bid_levels.size() && _bid_levels[idx].order_id == localid)
+        // FIX P2-8: Use is_bid to directly locate the correct level
+        uint8_t idx = it->second.level;
+        bool is_bid = it->second.is_bid;
+        if (is_bid && idx < _bid_levels.size())
             return &_bid_levels[idx];
-        if (idx < _ask_levels.size() && _ask_levels[idx].order_id == localid)
+        if (!is_bid && idx < _ask_levels.size())
             return &_ask_levels[idx];
     }
     return nullptr;

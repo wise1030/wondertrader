@@ -183,7 +183,7 @@ private:
     //==========================================================================
     
     bool _is_valid_pair;
-    double _current_correlation;
+    mutable double _current_correlation;  // updated in const testCointegration()
     
     //==========================================================================
     // Signal State

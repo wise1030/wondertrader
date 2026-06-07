@@ -32,6 +32,8 @@ SpreadCalculator::SpreadCalculator()
     , _leg2_multiplier(1.0)
     , _last_leg1_update(0)
     , _last_leg2_update(0)
+    , _leg1_fresh(false)
+    , _leg2_fresh(false)
     , _current_spread(0)
     , _spread_mean(0)
     , _spread_std(0)
@@ -60,14 +62,21 @@ void SpreadCalculator::onLeg1Tick(double price, uint64_t timestamp)
 {
     _leg1_price = price;
     _last_leg1_update = timestamp;
+    _leg1_fresh = true;  // 标记leg1有新数据
     
-    if (_leg2_price > 0)
+    // BUG-7 修复：同步tick配对机制
+    // 之前每次收到任一合约tick都push，导致另一合约用旧价格
+    // 大量log_return=0稀释了beta计算，使同品种跨期beta降到BETA_MIN
+    // 现在改为：只在leg2也有新数据（_leg2_fresh=true）时才push
+    // push后清除_leg2_fresh标记，避免重复push
+    if (_leg2_price > 0 && _leg2_fresh)
     {
         _current_spread = calculateSpread(_leg1_price, _leg2_price);
         _spread_history.push(_current_spread);
         _leg1_history.push(_leg1_price);
         _leg2_history.push(_leg2_price);
         _last_update = timestamp;
+        _leg2_fresh = false;  // 消费leg2的新鲜标记
         
         updateStatistics();
     }
@@ -77,14 +86,18 @@ void SpreadCalculator::onLeg2Tick(double price, uint64_t timestamp)
 {
     _leg2_price = price;
     _last_leg2_update = timestamp;
+    _leg2_fresh = true;  // 标记leg2有新数据
     
-    if (_leg1_price > 0)
+    // BUG-7 修复：对称处理 — leg2新数据到达时标记为fresh
+    // 下次leg1 tick到来时检查_leg2_fresh，确保两个合约价格同步
+    if (_leg1_price > 0 && _leg1_fresh)
     {
         _current_spread = calculateSpread(_leg1_price, _leg2_price);
         _spread_history.push(_current_spread);
         _leg1_history.push(_leg1_price);
         _leg2_history.push(_leg2_price);
         _last_update = timestamp;
+        _leg1_fresh = false;  // 消费leg1的新鲜标记
         
         updateStatistics();
     }
@@ -93,6 +106,7 @@ void SpreadCalculator::onLeg2Tick(double price, uint64_t timestamp)
 double SpreadCalculator::calculateSpread(double price1, double price2) const
 {
     if (price2 <= 0) return 0;
+    if (price1 <= 0) return 0;  // FIX: LOG_DIFF/RATIO模式下price1<=0也会产生NaN/Inf
     
     switch (_spread_type)
     {
@@ -174,11 +188,13 @@ void SpreadCalculator::updateStatistics()
         // smoothed_beta = α × new_beta + (1-α) × prev_smoothed_beta
         _smoothed_beta = _config.ema_alpha * _beta + (1 - _config.ema_alpha) * _smoothed_beta;
         
-        // Beta 边界约束 [0.5, 2.0]
+        // Beta 边界约束
         // 防止极端值导致 delta 计算异常
-        // 对于同品种跨期，beta 应该接近 1.0
-        constexpr double BETA_MIN = 0.5;
-        constexpr double BETA_MAX = 2.0;
+        // BUG-7 修复：收紧范围从 [0.5, 2.0] 到 [0.7, 1.5]
+        // 同品种跨期beta应该≈1.0，[0.5, 2.0]太宽导致delta被低估
+        // 跨品种可以由CorrelationManager的addRelation传入更宽的范围
+        constexpr double BETA_MIN = 0.7;
+        constexpr double BETA_MAX = 1.5;
         if (_smoothed_beta < BETA_MIN) _smoothed_beta = BETA_MIN;
         if (_smoothed_beta > BETA_MAX) _smoothed_beta = BETA_MAX;
     }

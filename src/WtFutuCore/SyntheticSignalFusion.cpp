@@ -15,6 +15,8 @@ namespace futu {
 SyntheticSignalFusion::SyntheticSignalFusion()
     : _volatility(0.5)
     , _liquidity(0.5)
+    , _last_vol_price(0)
+    , _last_vol_timestamp(0)
     , _accumulated_buy_vol(0)
     , _accumulated_sell_vol(0)
     , _large_volume(0)
@@ -29,6 +31,8 @@ SyntheticSignalFusion::SyntheticSignalFusion(const FusionConfig& config)
     : _config(config)
     , _volatility(0.5)
     , _liquidity(0.5)
+    , _last_vol_price(0)
+    , _last_vol_timestamp(0)
     , _accumulated_buy_vol(0)
     , _accumulated_sell_vol(0)
     , _large_volume(0)
@@ -136,18 +140,14 @@ void SyntheticSignalFusion::onTick(const std::string& code, double mid_price, ui
     }
     
     // Store price history for volatility calculation
-    static thread_local double last_price = 0;
-    static thread_local uint64_t last_timestamp = 0;
-    
-    if (last_price > 0 && last_timestamp > 0) {
-        double price_change = std::abs(mid_price - last_price) / mid_price;
-        // EMA smoothing of volatility estimate
-        _volatility = 0.9 * _volatility + 0.1 * price_change * 100;  // Scale to 0-1 range
+    if (_last_vol_price > 0 && _last_vol_timestamp > 0) {
+        double price_change = std::abs(mid_price - _last_vol_price) / mid_price;
+        _volatility = 0.9 * _volatility + 0.1 * price_change * 100;
         _volatility = std::min(1.0, std::max(0.0, _volatility));
     }
     
-    last_price = mid_price;
-    last_timestamp = timestamp;
+    _last_vol_price = mid_price;
+    _last_vol_timestamp = timestamp;
 }
 
 //------------------------------------------------------------------------------

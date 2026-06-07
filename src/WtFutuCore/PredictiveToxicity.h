@@ -16,11 +16,12 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <cstdint>
 #include <cmath>
 #include <unordered_map>
 #include "../Includes/WTSMarcos.h"
-#include "MicroAlphaEngine.h"
+#include "AlphaTypes.h"
 
 NS_WTP_BEGIN
 class WTSTickData;
@@ -138,10 +139,10 @@ private:
     };
     
     double _bucket_size{0};
-    std::vector<VolumeBucket> _buckets;
+    std::deque<VolumeBucket> _buckets;
     VolumeBucket _current_bucket;
     double _vpin{0};
-    std::vector<double> _order_imbalances;
+    std::deque<double> _order_imbalances;
     std::unordered_map<std::string, LastTickInfo> _last_ticks;
     
     // Cached result

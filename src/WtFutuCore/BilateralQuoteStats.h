@@ -112,12 +112,15 @@ public:
     void onSessionEnd(uint64_t now)
     {
         // 如果当前是双边状态，需要计入
-        if (_is_bilateral && _bilateral_start_time > 0)
+        if (_is_bilateral && _bilateral_start_time > 0 && now >= _bilateral_start_time)
         {
             _total_bilateral_time += (now - _bilateral_start_time);
-            _bilateral_start_time = now;  // 避免重复计入
+            _bilateral_start_time = now;
         }
-        _session_time = now - _session_start_time;
+        if (now >= _session_start_time)
+        {
+            _session_time = now - _session_start_time;
+        }
     }
     
     /// 检查是否为有效双边挂单（满足数量和做市义务宽度要求）
@@ -157,7 +160,7 @@ public:
             _bilateral_start_time = now;
             _bilateral_switch_count++;
         }
-        else if (!new_bilateral && _is_bilateral && _bilateral_start_time > 0)
+        else if (!new_bilateral && _is_bilateral && _bilateral_start_time > 0 && now >= _bilateral_start_time)
         {
             // 结束双边挂单
             _total_bilateral_time += (now - _bilateral_start_time);
@@ -166,7 +169,7 @@ public:
         _is_bilateral = new_bilateral;
         
         // 2. 更新 session 时间
-        if (_session_start_time > 0)
+        if (_session_start_time > 0 && now >= _session_start_time)
         {
             _session_time = now - _session_start_time;
         }

@@ -91,6 +91,12 @@ struct ThroughputStats
     uint64_t last_second_cancels{0};
     uint64_t last_second_fills{0};
     
+    uint64_t prev_cumulative_ticks{0};
+    uint64_t prev_cumulative_quotes{0};
+    uint64_t prev_cumulative_orders{0};
+    uint64_t prev_cumulative_cancels{0};
+    uint64_t prev_cumulative_fills{0};
+    
     uint64_t start_time_ms{0};
     uint64_t last_update_ms{0};
     
@@ -106,6 +112,11 @@ struct ThroughputStats
         last_second_orders = 0;
         last_second_cancels = 0;
         last_second_fills = 0;
+        prev_cumulative_ticks = 0;
+        prev_cumulative_quotes = 0;
+        prev_cumulative_orders = 0;
+        prev_cumulative_cancels = 0;
+        prev_cumulative_fills = 0;
         start_time_ms = 0;
         last_update_ms = 0;
     }
@@ -127,6 +138,16 @@ public:
     
     void setEnabled(bool enabled) { _enabled = enabled; }
     bool isEnabled() const { return _enabled; }
+    
+    void setLatencyThresholdNs(uint64_t thresholdNs) { _latency_threshold_ns = thresholdNs; }
+    uint64_t getLatencyThresholdNs() const { return _latency_threshold_ns; }
+    
+    void setWarnThresholdNs(uint64_t ns) { _warn_threshold_ns = ns; }
+    void setCriticalThresholdNs(uint64_t ns) { _critical_threshold_ns = ns; }
+    void setLogInterval(uint32_t ms) { _log_interval_ms = ms; }
+    uint64_t getWarnThresholdNs() const { return _warn_threshold_ns; }
+    uint64_t getCriticalThresholdNs() const { return _critical_threshold_ns; }
+    uint32_t getLogInterval() const { return _log_interval_ms; }
     
     //==========================================================================
     // Latency Recording (nanosecond precision)
@@ -202,6 +223,10 @@ public:
     
 private:
     bool _enabled = true;
+    uint64_t _latency_threshold_ns = 100000;
+    uint64_t _warn_threshold_ns = 10000;
+    uint64_t _critical_threshold_ns = 50000;
+    uint32_t _log_interval_ms = 1000;
     
     // Latency history (using RingBuffer for O(1) operations)
     RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _tick_to_quote_history;
