@@ -460,11 +460,13 @@ auto sess_it = _session_info.find(tc.code);
 if (sess_it != _session_info.end() && sess_it->second)
 {
 wtp::WTSSessionInfo* sessInfo = sess_it->second;
-uint32_t currentTime = ctx->stra_get_time();  // HHMMSS 格式
-tc.is_trading_session = sessInfo->isInTradingTime(currentTime / 100);  // 需要HHMM格式
+// FIX: stra_get_time() 全栈约定返回 HHMM(4位), 不是 HHMMSS(6位)
+// 之前 /100 → HH, 把 23:14 误判成 00:23, 导致回测全 skip
+uint32_t currentTime = ctx->stra_get_time();  // HHMM 格式
+tc.is_trading_session = sessInfo->isInTradingTime(currentTime);
 
 if (!tc.is_trading_session)
-{            WTSLogger::debug("StrategyCoordinator: {} not in trading session at {:06d}, skipping", 
+{            WTSLogger::debug("StrategyCoordinator: {} not in trading session at {:04d}, skipping", 
 tc.code, currentTime);
 }
 }
