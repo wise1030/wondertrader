@@ -54,7 +54,7 @@ private:
 	} CacheBlockPair;
 
 	CacheBlockPair	_cache;
-	SpinMutex		_lock;
+	mutable SpinMutex	_lock;
 	wt_hashmap<std::string, uint32_t> _indice;
 
 private:
@@ -87,8 +87,7 @@ private:
 			return false;
 		}
 
-
-		_cache._file.reset();
+		//先映射新文件，成功后再释放旧的，避免resize失败时_block变成野指针
 		BoostMappingFile* pNewMf = new BoostMappingFile();
 		try
 		{
@@ -96,15 +95,17 @@ private:
 			{
 				delete pNewMf;
 				if (logger) logger("Mapping cache file failed");
-				return false;
+				return false;	//旧mmap仍然有效，安全返回
 			}
 		}
 		catch (std::exception&)
 		{
+			delete pNewMf;
 			if (logger) logger("Got an exception while mapping cache file");
-			return false;
+			return false;	//旧mmap仍然有效，安全返回
 		}
 
+		//新mmap成功，现在才释放旧的
 		_cache._file.reset(pNewMf);
 
 		_cache._block = (CacheBlock*)_cache._file->addr();
@@ -200,11 +201,16 @@ public:
 		if (_cache._block == NULL)
 			return "";
 
+		_lock.lock();
 		auto it = _indice.find(key);
 		if (it == _indice.end())
+		{
+			_lock.unlock();
 			return "";
-
-		return _cache._block->_items[it->second]._val;
+		}
+		const char* ret = _cache._block->_items[it->second]._val;
+		_lock.unlock();
+		return ret;
 	}
 
 	void	put(const char* key, const char*val, std::size_t len = 0, CacheLogger logger = nullptr)
@@ -221,7 +227,15 @@ public:
 		{
 			_lock.lock();
 			if(_cache._block->_size == _cache._block->_capacity)
-				resize(_cache._block->_capacity*2, logger);
+			{
+				if(!resize(_cache._block->_capacity*2, logger))
+				{
+					//resize失败，放弃本次写入，避免访问无效内存
+					_lock.unlock();
+					if(logger) logger("resize failed, put discarded");
+					return;
+				}
+			}
 
 			_indice[key] = _cache._block->_size;
 			wt_strcpy(_cache._block->_items[_cache._block->_size]._key, key);
