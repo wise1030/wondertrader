@@ -1,1 +1,3 @@
 dist/*
+# IDE/agent local state
+.antigravitycli/
