@@ -41,6 +41,7 @@ struct ToxicityParams
     double      vpin_threshold;
     uint32_t    vpin_window;
     double      vpin_bucket_size;
+    uint32_t    vpin_min_warmup_buckets;  ///< Warmup gate: skip VPIN scoring until N full buckets
     
     ToxicityParams()
         : adverse_threshold(0.10)
@@ -50,7 +51,8 @@ struct ToxicityParams
         , extreme_signal_weight(0.8)
         , vpin_threshold(0.7)
         , vpin_window(50)
-        , vpin_bucket_size(1000) {}
+        , vpin_bucket_size(1000)
+        , vpin_min_warmup_buckets(5) {}
     
     static ToxicityParams fromVariant(wtp::WTSVariant* v) {
         ToxicityParams p;
@@ -58,6 +60,7 @@ struct ToxicityParams
         p.vpin_threshold = FutuConfig::readDouble(v, "vpinThreshold", 0.10);
         p.vpin_window = FutuConfig::readUInt32(v, "window", 50);
         p.vpin_bucket_size = FutuConfig::readDouble(v, "bucketSize", 1000);
+        p.vpin_min_warmup_buckets = FutuConfig::readUInt32(v, "minWarmupBuckets", 5);
         p.alpha_weight = FutuConfig::readDouble(v, "alphaWeight", 0.3);
         p.book_weight = FutuConfig::readDouble(v, "bookWeight", 0.3);
         p.self_trade_weight = FutuConfig::readDouble(v, "selfTradeWeight", 0.4);

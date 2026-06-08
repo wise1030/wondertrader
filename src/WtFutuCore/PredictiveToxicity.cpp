@@ -144,6 +144,17 @@ void PredictiveToxicity::updateCache() const
     
     _cached_result = PredictiveToxicityResult();
     
+    // FIX BUG-15c: Warmup gate
+    // 冷启动 _buckets 累积不足时 VPIN 噪声极大(单 bucket 就能算出非零值),
+    // 导致 is_toxic 抖动锁死策略。要求至少 min_warmup_buckets 个完整桶后才输出毒性。
+    // 期间 vpin=0, is_toxic=false, alpha 通道仍生效(走 _has_alpha_data 分支)。
+    if (_buckets.size() < _cfg.min_warmup_buckets) {
+        _cached_result.vpin = 0.0;
+        _cached_result.is_toxic = false;
+        _cache_dirty = false;
+        return;
+    }
+    
     // VPIN
     _cached_result.vpin = _vpin;
     

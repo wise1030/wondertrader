@@ -41,6 +41,7 @@ void ToxicFlowDetector::setParams(const ToxicityParams& params)
     pred_cfg.alpha_threshold = params.adverse_threshold;
     pred_cfg.ofi_weight = params.alpha_weight;
     pred_cfg.trade_weight = params.book_weight;
+    pred_cfg.min_warmup_buckets = params.vpin_min_warmup_buckets;
     _predictive.setConfig(pred_cfg);
     
     RealizedToxicityConfig real_cfg;

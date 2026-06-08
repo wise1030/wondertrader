@@ -38,6 +38,7 @@ struct PredictiveToxicityConfig
     double      alpha_threshold;        ///< Alpha signal threshold
     double      ofi_weight;             ///< Weight for OFI component
     double      trade_weight;           ///< Weight for trade imbalance component
+    uint32_t    min_warmup_buckets;     ///< Minimum buckets before VPIN is reliable (warmup gate)
     
     PredictiveToxicityConfig()
         : vpin_threshold(0.85)
@@ -45,7 +46,8 @@ struct PredictiveToxicityConfig
         , vpin_bucket_size(1000)
         , alpha_threshold(0.7)
         , ofi_weight(0.5)
-        , trade_weight(0.5) {}
+        , trade_weight(0.5)
+        , min_warmup_buckets(5) {}
 };
 
 /// Predictive toxicity result
