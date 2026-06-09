@@ -369,9 +369,10 @@ case CloseoutState::COMPLETED:
 //======================================================================
 if (_cfg.night_close_time > 0)
 {
-uint32_t currentHour = tc.time_hms / 10000;
-// 白盘时段 (06:00-20:00): 夜盘平仓已完成，重置状态让白盘平仓可触发
-if (currentHour >= 6 && currentHour <= 20)
+// FIX A-step: HHMM/HHMMSS 兼容
+uint32_t currentHour = (tc.time_hms >= 10000) ? (tc.time_hms / 10000) : (tc.time_hms / 100);
+// 白盘时段 (06:00-15:00): 夜盘平仓已完成，重置状态让白盘平仓可触发
+if (currentHour >= 6 && currentHour <= 15)
 {
 _risk_monitor->resetCloseout();
 // 恢复TradingState，让白盘可以正常做市直到白盘收盘触发

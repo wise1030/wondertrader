@@ -929,8 +929,16 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         _closeout_state.state == CloseoutState::FAILED)
         return false;
     
-    uint32_t currentHour = currentTime / 10000;
-    uint32_t currentMin = (currentTime / 100) % 100;
+    // FIX A-step: ctx->stra_get_time() 返回 HHMM (4位), 不是 HHMMSS。
+    // 兼容两种格式：>= 10000 视为 HHMMSS, 否则 HHMM。
+    uint32_t currentHour, currentMin;
+    if (currentTime >= 10000) {
+        currentHour = currentTime / 10000;
+        currentMin = (currentTime / 100) % 100;
+    } else {
+        currentHour = currentTime / 100;
+        currentMin = currentTime % 100;
+    }
     
     if (currentHour > 23 || currentMin > 59)
     {
@@ -1027,9 +1035,10 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
     }
     
     // --- 触发点2: 全天收盘 (白盘) ---
-    // 只在白盘时段 (06:00-20:59) 检查，避免夜盘时段误触发
+    // 只在白盘时段 (06:00-15:59) 检查，避免夜盘 21:00+ 误触发
+    // (原 currentHour<=20 把 20:59 也吃进来导致夜盘开盘前就平仓)
     if (_closeout_config.minutes_before > 0
-        && currentHour >= 6 && currentHour <= 20)
+        && currentHour >= 6 && currentHour <= 15)
     {
         uint32_t closeHour, closeMin;
         if (closeTime < 10000)
