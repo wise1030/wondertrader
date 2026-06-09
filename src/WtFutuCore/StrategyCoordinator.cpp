@@ -848,6 +848,16 @@ auto pre_trade = _risk_monitor->checkPreTradePosition(
 tc.code, _portfolio, _order_tracker);
 if (!pre_trade.allow_bid) allow_bid = false;
 if (!pre_trade.allow_ask) allow_ask = false;
+// v3 软风控字段透传到 quoter（util + obligation 标志）
+_v3_long_util = pre_trade.long_utilization;
+_v3_short_util = pre_trade.short_utilization;
+_v3_force_ask_obligation = pre_trade.force_ask_obligation;
+_v3_force_bid_obligation = pre_trade.force_bid_obligation;
+} else {
+_v3_long_util = 0.0;
+_v3_short_util = 0.0;
+_v3_force_ask_obligation = false;
+_v3_force_bid_obligation = false;
 }
 
 if (_cfg.use_toxicity_detector && _toxicity) {
@@ -921,7 +931,9 @@ l0_ask = std::ceil(retreat.ask_retreat_price / tc.tick_size) * tc.tick_size;
 //==========================================================================
 it->second->refreshQuotes(ctx, tc.mid, l0_bid, l0_ask, spread_mult,
 allow_bid, allow_ask, tc.timestamp,
-tick->upperlimit(), tick->lowerlimit(), tick->bidprice(0), tick->askprice(0));
+tick->upperlimit(), tick->lowerlimit(), tick->bidprice(0), tick->askprice(0),
+_v3_long_util, _v3_short_util,
+_v3_force_ask_obligation, _v3_force_bid_obligation);
 
 return true;
 }

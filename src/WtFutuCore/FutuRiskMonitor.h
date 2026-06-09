@@ -310,10 +310,16 @@ public:
     std::vector<RiskViolation> checkRiskLimits(const FutuPortfolio* portfolio);
     
     /// Pre-trade position limit check: can we place bid/ask for this contract?
-    /// Checks current position + pending orders against max_position
+    /// v3 软风控：不再硬 BLOCK，返回 utilization 让 Quoter 做 qty 衰减；
+    ///           util>=1.0 时设 obligation 标志，强制减仓侧义务报价（≥10手/≤10ticks）
+    /// 旧 allow_bid/allow_ask 保留兼容（v3 默认始终 true，仅 Toxicity/TradingState 可关）
     struct PreTradeResult {
         bool allow_bid;
         bool allow_ask;
+        double long_utilization;       ///< projected_long  / max_position，>=1 → ask 义务
+        double short_utilization;      ///< projected_short / max_position，>=1 → bid 义务
+        bool force_ask_obligation;     ///< 多头打满 → ask 必须保持义务报价
+        bool force_bid_obligation;     ///< 空头打满 → bid 必须保持义务报价
     };
     PreTradeResult checkPreTradePosition(const std::string& code,
                                           const FutuPortfolio* portfolio,

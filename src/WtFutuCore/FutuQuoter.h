@@ -80,12 +80,20 @@ struct QuoterConfig
     // 做市义务配置
     double      max_obligation_spread; ///< 做市义务最大报价宽度（ticks），用于单边受限时和双边报价统计 (default: 100.0)
     
+    // v3 软风控参数（use_bilateral_quote=false 路径专用，bilateral 路径不受影响）
+    double      qty_decay_factor;          ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_util)
+    double      obligation_min_qty;        ///< 软 obligation 报价最小手数 (default: 10)
+    double      obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10)
+    bool        obligation_only_l0;        ///< 软 obligation 是否仅 L0 (default: true)
+    
     QuoterConfig()
         : num_levels(1), base_spread(2.0), level_step(1.0)
         , base_qty(5.0), qty_decay(0.7), tick_size(1.0)
         , sticky_threshold(1.0), improve_retreat_ratio(2.0), max_price_deviation(20.0)
         , price_protection(true), protect_ticks(1.0)
-        , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0) {}
+        , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0)
+        , qty_decay_factor(2.0), obligation_min_qty(10.0)
+        , obligation_max_spread_ticks(10.0), obligation_only_l0(true) {}
 };
 
 /// Multi-level quoter for a single contract
@@ -138,12 +146,18 @@ public:
     /// @param lower_limit  Lower price limit (跌停价), 0 = no limit
     /// @param best_bid    Market best bid price (for price protection), 0 = no protection
     /// @param best_ask    Market best ask price (for price protection), 0 = no protection
+    /// @param long_util   v3: 多头利用率 proj_long/max_position (default 0 = 兼容旧调用)
+    /// @param short_util  v3: 空头利用率 proj_short/max_position (default 0 = 兼容旧调用)
+    /// @param force_ask_obligation  v3: 多头打满，强制 ask 软义务报价 (default false)
+    /// @param force_bid_obligation  v3: 空头打满，强制 bid 软义务报价 (default false)
     /// @return       Number of new orders placed (for rate limiting)
     uint32_t refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_bid_price, double l0_ask_price,
                            double spread_mult = 1.0, bool allow_bid = true, 
                            bool allow_ask = true, uint64_t now = 0,
                            double upper_limit = 0, double lower_limit = 0,
-                           double best_bid = 0, double best_ask = 0);
+                           double best_bid = 0, double best_ask = 0,
+                           double long_util = 0.0, double short_util = 0.0,
+                           bool force_ask_obligation = false, bool force_bid_obligation = false);
 
     /// Cancel all outstanding quotes
     void cancelAll(wtp::IUftStraCtx* ctx);

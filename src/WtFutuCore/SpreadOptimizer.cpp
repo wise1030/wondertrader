@@ -118,8 +118,18 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     double contract_skew = computeContractDeltaSkew(contractDelta, contractMaxDelta);
     double portfolio_skew = computePortfolioDeltaSkew(totalDelta);
     
-    double delta_skew = (std::abs(portfolio_skew) > std::abs(contract_skew)) 
-                        ? portfolio_skew : contract_skew;
+    // v3 双维 skew：从"取较大者"改为加权求和（权重在 GLFTParams）
+    // - portfolio_skew_weight=0.5: portfolio 维度（控总敞口，温和影响）
+    // - contract_skew_weight=1.0:  contract 维度（控单合约+pos，主导力）
+    // 旧路径(max)保留：若两个权重之和<=0则退回 max 模式（向前兼容）
+    double delta_skew;
+    if (_params.portfolio_skew_weight + _params.contract_skew_weight > 1e-9) {
+        delta_skew = _params.portfolio_skew_weight * portfolio_skew 
+                   + _params.contract_skew_weight * contract_skew;
+    } else {
+        delta_skew = (std::abs(portfolio_skew) > std::abs(contract_skew)) 
+                     ? portfolio_skew : contract_skew;
+    }
     
     //==========================================================================
     // 5. 综合偏移计算

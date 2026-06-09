@@ -39,13 +39,18 @@ void FutuQuoter::init(const QuoterConfig& cfg)
 uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_bid_price, double l0_ask_price,
                                     double spread_mult, bool allow_bid, bool allow_ask,
                                     uint64_t now, double upper_limit, double lower_limit,
-                                    double best_bid, double best_ask)
+                                    double best_bid, double best_ask,
+                                    double long_util, double short_util,
+                                    bool force_ask_obligation, bool force_bid_obligation)
 {
     uint32_t orders_placed = 0;
     _ctx = ctx;
     _allow_bid = allow_bid;
     _allow_ask = allow_ask;
     if (!ctx) return 0;
+
+    // v3 软风控：是否走新路径（仅当 use_bilateral_quote=false 时启用）
+    const bool v3_mode = !_cfg.use_bilateral_quote;
 
     for (uint32_t i = 0; i < _cfg.num_levels; i++)
     {
@@ -66,6 +71,7 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
 
         if (is_bilateral)
         {
+            // ===== 旧路径（use_bilateral_quote=true）：硬 allow + 双边义务，原样保留 =====
             if (!allow_bid && _cfg.max_obligation_spread > 0) {
                 bidPrice = floor((mid - _cfg.max_obligation_spread * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
                 is_obligation_bid = true;
@@ -75,8 +81,39 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 is_obligation_ask = true;
             }
         }
+        else if (v3_mode)
+        {
+            // ===== v3 新路径：utilization → qty 指数衰减 + 软 obligation =====
+            // 2a. qty 指数衰减（仅 L0 强势衰减，深档保留 baseline；这里对所有层级一致衰减，更保守）
+            //     bidQty 受 long_util 影响（多头打满 → 减少 bid）
+            //     askQty 受 short_util 影响（空头打满 → 减少 ask）
+            if (long_util > 0.0) {
+                double decay = std::exp(-_cfg.qty_decay_factor * long_util);
+                bidQty = std::max(0.0, std::round(bidQty * decay));
+            }
+            if (short_util > 0.0) {
+                double decay = std::exp(-_cfg.qty_decay_factor * short_util);
+                askQty = std::max(0.0, std::round(askQty * decay));
+            }
+            
+            // 2b. 软 obligation：达到 hard cap 时强制反向减仓报价（仅 L0 或全档）
+            const bool apply_obligation = (!_cfg.obligation_only_l0 || i == 0);
+            if (force_ask_obligation && apply_obligation) {
+                // 多头打满 → 必须挂 ask 让自己被减仓
+                askPrice = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+                askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
+                is_obligation_ask = true;
+            }
+            if (force_bid_obligation && apply_obligation) {
+                // 空头打满 → 必须挂 bid 让自己被减仓
+                bidPrice = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+                bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
+                is_obligation_bid = true;
+            }
+        }
 
         // 强制风控：如果不允许且不是义务报价，则数量置 0
+        // v3 模式下 allow_bid/allow_ask 仍保留兼容（Toxicity/TradingState 可关闭）
         if (!allow_bid && !is_obligation_bid) bidQty = 0;
         if (!allow_ask && !is_obligation_ask) askQty = 0;
 

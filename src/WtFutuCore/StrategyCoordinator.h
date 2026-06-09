@@ -241,6 +241,12 @@ private:
     bool _channel_ready = true;
     
     uint64_t _toxicity_resume_time = 0;
+    
+    // v3 软风控字段：从 RiskMonitor.checkPreTradePosition 透传到 FutuQuoter.refreshQuotes
+    double _v3_long_util = 0.0;
+    double _v3_short_util = 0.0;
+    bool   _v3_force_ask_obligation = false;
+    bool   _v3_force_bid_obligation = false;
     uint64_t _tick_count = 0;
     
     // P0-2.3: Global cache for portfolio metrics

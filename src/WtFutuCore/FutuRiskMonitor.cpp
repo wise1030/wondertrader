@@ -699,17 +699,28 @@ bool FutuRiskMonitor::checkDeltaRate() const
 
 double FutuRiskMonitor::getDeltaChangeRate() const
 {
+    // ========================================================================
+    // 时间加权累积变化算法 (方案 A 修法, 2026-06-08)
+    // 旧算法: |端点差|/(newestTime-oldestTime)
+    //   ms 级 tick 间隔下分母 0.001-0.01s, 单笔 5 手成交算成 500-5000/s
+    //   导致 _delta_rate_breached 标志被持续刷新, recovery 永久卡死
+    // 新算法: window 内所有相邻 snapshot 的 |Δdelta| 累积 / 时间分母
+    //   时间分母 = max(实际跨度, window配置的一半)
+    //   反映"累积扰动强度", 单笔瞬时跳变被分摊, 不再卡死
+    // ========================================================================
     if (_delta_snapshot_count < 2)
         return 0.0;
     
     uint64_t now = _current_time.load(std::memory_order_relaxed);
     uint32_t windowMs = _rate_limits.delta_rate_window_sec * 1000;
+    if (windowMs == 0)
+        return 0.0;
     uint64_t cutoff = (now > windowMs) ? (now - windowMs) : 0;
     
-    double oldestDelta = 0;
-    double newestDelta = 0;
-    uint64_t oldestTime = UINT64_MAX;
-    uint64_t newestTime = 0;
+    // 收集 window 内 snapshot 按时间排序 (环形缓冲已按写入顺序排, 但物理 idx 不连续)
+    struct TimedSnap { uint64_t t; double d; };
+    TimedSnap window_snaps[DELTA_SNAPSHOT_CAPACITY];
+    size_t n = 0;
     
     for (size_t i = 0; i < _delta_snapshot_count; ++i)
     {
@@ -723,26 +734,41 @@ double FutuRiskMonitor::getDeltaChangeRate() const
         if (snap.timestamp_ms < cutoff || snap.timestamp_ms == 0)
             continue;
         
-        if (snap.timestamp_ms < oldestTime)
-        {
-            oldestDelta = snap.delta;
-            oldestTime = snap.timestamp_ms;
-        }
-        if (snap.timestamp_ms > newestTime)
-        {
-            newestDelta = snap.delta;
-            newestTime = snap.timestamp_ms;
-        }
+        window_snaps[n++] = { snap.timestamp_ms, snap.delta };
     }
     
-    if (oldestTime == UINT64_MAX || oldestTime == newestTime)
+    if (n < 2)
         return 0.0;
     
-    double elapsedSec = static_cast<double>(newestTime - oldestTime) / 1000.0;
-    if (elapsedSec <= 0)
+    // 按时间升序排序 (n<=32, 插入排序足够)
+    for (size_t i = 1; i < n; ++i)
+    {
+        TimedSnap key = window_snaps[i];
+        size_t j = i;
+        while (j > 0 && window_snaps[j-1].t > key.t)
+        {
+            window_snaps[j] = window_snaps[j-1];
+            --j;
+        }
+        window_snaps[j] = key;
+    }
+    
+    // 累积 |Δdelta|
+    double cumulative_change = 0.0;
+    for (size_t i = 1; i < n; ++i)
+    {
+        cumulative_change += std::abs(window_snaps[i].d - window_snaps[i-1].d);
+    }
+    
+    // 时间分母: 取实际跨度 vs window 配置一半的较大值, 避免短期采样集中导致分母过小
+    uint64_t actualSpanMs = window_snaps[n-1].t - window_snaps[0].t;
+    uint64_t minDenomMs = windowMs / 2;
+    uint64_t denomMs = (actualSpanMs > minDenomMs) ? actualSpanMs : minDenomMs;
+    if (denomMs == 0)
         return 0.0;
     
-    return std::abs(newestDelta - oldestDelta) / elapsedSec;
+    double denomSec = static_cast<double>(denomMs) / 1000.0;
+    return cumulative_change / denomSec;
 }
 
 bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
@@ -1069,7 +1095,8 @@ FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(
     const FutuPortfolio* portfolio,
     const UnifiedOrderTracker* tracker) const
 {
-    PreTradeResult result{true, true};
+    // v3 软风控：不再 BLOCK，返回 utilization 让 Quoter 做 qty 衰减
+    PreTradeResult result{true, true, 0.0, 0.0, false, false};
     
     if (!portfolio) return result;
     
@@ -1081,15 +1108,21 @@ FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(
     double projected_long = (cs->position > 0 ? cs->position : 0) + pending_buy;
     double projected_short = (cs->position < 0 ? std::abs(cs->position) : 0) + pending_sell;
     
-    if (projected_long >= cs->max_position) {
-        result.allow_bid = false;
-        WTSLogger::debug("[RISK] PreTrade BLOCK bid: {} pos={:.0f} pending_buy={:.0f} projected_long={:.0f} >= max={:.0f}",
-            code, cs->position, pending_buy, projected_long, cs->max_position);
+    result.long_utilization  = projected_long  / cs->max_position;
+    result.short_utilization = projected_short / cs->max_position;
+    
+    // v3: util >= 1.0 时只设 obligation 标志，不阻断；Quoter 负责
+    //     (A) 加仓侧 qty 指数衰减 (util接近1时qty→0)
+    //     (B) 减仓侧强制义务报价 (≥10手/≤10ticks)
+    if (result.long_utilization >= 1.0) {
+        result.force_ask_obligation = true;
+        WTSLogger::warn("[RISK_V3] {} LONG cap reached: pos={:.0f} pending_buy={:.0f} proj_long={:.0f}/{:.0f} (util={:.2f}) → ASK obligation",
+            code, cs->position, pending_buy, projected_long, cs->max_position, result.long_utilization);
     }
-    if (projected_short >= cs->max_position) {
-        result.allow_ask = false;
-        WTSLogger::debug("[RISK] PreTrade BLOCK ask: {} pos={:.0f} pending_sell={:.0f} projected_short={:.0f} >= max={:.0f}",
-            code, cs->position, pending_sell, projected_short, cs->max_position);
+    if (result.short_utilization >= 1.0) {
+        result.force_bid_obligation = true;
+        WTSLogger::warn("[RISK_V3] {} SHORT cap reached: pos={:.0f} pending_sell={:.0f} proj_short={:.0f}/{:.0f} (util={:.2f}) → BID obligation",
+            code, cs->position, pending_sell, projected_short, cs->max_position, result.short_utilization);
     }
     
     return result;

@@ -94,12 +94,19 @@ struct FutuMmConfig
         double protect_ticks;
         bool use_bilateral_quote;
         double max_obligation_spread;
+        // v3 软风控参数
+        double qty_decay_factor;
+        double obligation_min_qty;
+        double obligation_max_spread_ticks;
+        bool obligation_only_l0;
         Quoting()
             : num_levels(1), base_spread(2.0), base_qty(5.0), qty_decay(0.7)
             , level_step(1.0), sticky_threshold(1.0)
             , improve_retreat_ratio(2.0), max_price_deviation(20.0)
             , price_protection(true), protect_ticks(1.0)
-            , use_bilateral_quote(false), max_obligation_spread(10.0) {}
+            , use_bilateral_quote(false), max_obligation_spread(10.0)
+            , qty_decay_factor(2.0), obligation_min_qty(10.0)
+            , obligation_max_spread_ticks(10.0), obligation_only_l0(true) {}
     } quoting;
     
     struct Risk {

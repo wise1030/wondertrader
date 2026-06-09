@@ -60,6 +60,10 @@ struct GLFTParams
     double      inventory_skew_scale;      ///< 库存skew放大系数 (default 2.0, 使中持仓时ask接近贴mid)
     double      vol_percentile_scale;       ///< 波动率百分位归一化分母 (default 50.0)
     
+    // v3 双维 skew 权重（>0 启用加权模式，=0/未设则保留旧 max 模式）
+    double      portfolio_skew_weight;     ///< portfolio delta skew 权重 (default 0.5)
+    double      contract_skew_weight;      ///< contract delta+pos skew 权重 (default 1.0)
+    
     GLFTParams()
         : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5)
         , phi(0.20)
@@ -78,6 +82,8 @@ struct GLFTParams
         , delta_skew_power(1.5)
         , inventory_skew_scale(2.0)
         , vol_percentile_scale(50.0)
+        , portfolio_skew_weight(0.5)
+        , contract_skew_weight(1.0)
     {}
     
     static GLFTParams fromVariant(wtp::WTSVariant* v, double base_spread, double tick_size, double portfolio_max_delta) {
@@ -104,6 +110,8 @@ struct GLFTParams
         p.delta_skew_power = FutuConfig::readDouble(v, "deltaSkewPower", 1.5);
         p.inventory_skew_scale = FutuConfig::readDouble(v, "inventorySkewScale", 2.0);
         p.vol_percentile_scale = FutuConfig::readDouble(v, "volPercentileScale", 50.0);
+        p.portfolio_skew_weight = FutuConfig::readDouble(v, "portfolioSkewWeight", 0.5);
+        p.contract_skew_weight = FutuConfig::readDouble(v, "contractSkewWeight", 1.0);
         return p;
     }
 };
