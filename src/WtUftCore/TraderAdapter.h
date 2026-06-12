@@ -117,6 +117,7 @@ public:
 
 private:
 	uint32_t doEntrust(WTSEntrust* entrust);
+	uint32_t doQuoteEntrust(WTSEntrust* bidEntrust, WTSEntrust* askEntrust);
 	bool	doCancel(WTSOrderInfo* ordInfo);
 
 	inline void	printPosition(const char* stdCode, const PosItem& pItem);
@@ -187,6 +188,30 @@ public:
 	 */
 	uint32_t closeShort(const char* stdCode, double price, double qty, bool isToday, int flag);
 	
+	/*
+	 *	做市双边报价接口
+	 *
+	 *	@stdCode	合约代码
+	 *	@bidPrice	买价
+	 *	@bidQty		买量
+	 *	@askPrice	卖价
+	 *	@askQty		卖量
+	 *	@flag		下单标志, 0=normal
+	 *	@return		本地单号 localid (0=失败)
+	 *
+	 *	实现走 ITraderApi::quoteInsert 抽象, 由 broker 适配层映射到具体协议
+	 *	(CTP -> ReqQuoteInsert; XTP/盈透同理). TraderAdapter 不感知 broker 类型.
+	 */
+	uint32_t quote(const char* stdCode, double bidPrice, double bidQty,
+				   double askPrice, double askQty, int flag = 0);
+
+	/*
+	 *	撤销做市报价 (走 ITraderApi::quoteAction 抽象)
+	 *	@localid	quote 本地单号
+	 *	@return		是否成功提交撤单请求
+	 */
+	bool	cancelQuote(uint32_t localid);
+
 	bool	cancel(uint32_t localid);
 	OrderIDs cancelAll(const char* stdCode);
 
@@ -217,6 +242,8 @@ public:
 	virtual void onPushOrder(WTSOrderInfo* orderInfo) override;
 
 	virtual void onPushTrade(WTSTradeInfo* tradeRecord) override;
+
+	virtual void onPushQuote(WTSEntrust* quoteInfo) override;
 
 	virtual void onTraderError(WTSError* err, void* pData = NULL) override;
 

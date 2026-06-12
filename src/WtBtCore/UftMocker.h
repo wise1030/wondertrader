@@ -102,6 +102,15 @@ public:
 	virtual OrderIDs stra_sell(const char* stdCode, double price, double qty, int flag = 0) override;
 
 	/*
+	 *	双边报价回测占位：实盘走 quoteInsert 原子双边，回测中以 stra_buy + stra_sell 二连发模拟，
+	 *	仅用于撮合与持仓核对。返回 {bidLocalId, askLocalId}。任一腿失败返 {0, 0}。
+	 */
+	virtual std::pair<uint32_t, uint32_t> stra_quote(const char* stdCode, double bidPrice, double bidQty,
+								double askPrice, double askQty, const char* userTag = "") override;
+
+	virtual bool stra_cancel_quote(uint32_t localid) override;
+
+	/*
 	 *	开多
 	 *	@stdCode	代码，格式如SSE.600000
 	 *	@price		委托价格

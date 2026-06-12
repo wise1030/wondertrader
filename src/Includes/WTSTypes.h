@@ -184,6 +184,7 @@ typedef enum tagOrderFlag
 	WOF_NOR = '0',		//普通订单
 	WOF_FAK,			//fak
 	WOF_FOK,			//fok
+	WOF_QUOTE,			//做市报价 (broker 中立通用枚举: CTP/XTP/盈透皆可映射)
 } WTSOrderFlag;
 
 /*

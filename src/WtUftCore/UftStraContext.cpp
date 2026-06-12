@@ -1380,47 +1380,34 @@ void UftStraContext::load_local_data()
 std::pair<uint32_t, uint32_t> UftStraContext::stra_quote(const char* stdCode, double bidPrice, double bidQty,
 									 double askPrice, double askQty, const char* userTag)
 {
-	// 双边报价：同时下买单和卖单
-	// 返回 {bidOrderId, askOrderId}
+	// 双边报价：原生 quoteInsert (CTP ReqQuoteInsert)
+	// 返回 {localId, localId}
 	if (!_trader)
 		return {0, 0};
 
-	// 先下买单
-	uint32_t bidLocalId = _trader->openLong(stdCode, bidPrice, bidQty, 0);
-	if (bidLocalId == 0)
+	uint32_t localId = _trader->quote(stdCode, bidPrice, bidQty, askPrice, askQty);
+	if (localId == 0)
 	{
-		log_error("Quote BUY failed: {} @ {} x {}", stdCode, bidPrice, bidQty);
+		log_error("Quote failed: {} BID {}@{} ASK {}@{}", stdCode, bidQty, bidPrice, askQty, askPrice);
 		return {0, 0};
 	}
-	_order_ids[bidLocalId] = NULL;
+	_order_ids[localId] = NULL;
 
-	// 再下卖单
-	uint32_t askLocalId = _trader->openShort(stdCode, askPrice, askQty, 0);
-	if (askLocalId == 0)
-	{
-		log_error("Quote SELL failed: {} @ {} x {}", stdCode, askPrice, askQty);
-		// 卖单失败，撤销买单
-		_trader->cancel(bidLocalId);
-		_order_ids.erase(bidLocalId);
-		return {0, 0};
-	}
-	_order_ids[askLocalId] = NULL;
+	log_info("Quote placed: {} BID {}@{} ASK {}@{} (local_id={})",
+		stdCode, bidQty, bidPrice, askQty, askPrice, localId);
 
-	log_info("Quote placed: {} BID {}@{} ASK {}@{} (bid_id={}, ask_id={})", 
-		stdCode, bidQty, bidPrice, askQty, askPrice, bidLocalId, askLocalId);
-
-	// 返回买单和卖单的订单ID
-	return {bidLocalId, askLocalId};
+	// 保持 pair 签名兼容: 两个元素返同一个 localId
+	// FutuQuoter caller 只关心非零, 不区分 bid/ask
+	return {localId, localId};
 }
 
 bool UftStraContext::stra_cancel_quote(uint32_t localid)
 {
-	// 撤销双边报价
+	// 撤销双边报价：原生 cancelQuote (CTP ReqQuoteAction)
 	if (!_trader)
 		return false;
 
-	// 撤销传入的单号
-	bool ret = _trader->cancel(localid);
+	bool ret = _trader->cancelQuote(localid);
 	if (ret)
 		_order_ids.erase(localid);
 

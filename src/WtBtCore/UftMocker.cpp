@@ -589,6 +589,43 @@ OrderIDs UftMocker::stra_sell(const char* stdCode, double price, double qty, int
 	return ids;
 }
 
+std::pair<uint32_t, uint32_t> UftMocker::stra_quote(const char* stdCode, double bidPrice, double bidQty,
+								double askPrice, double askQty, const char* userTag)
+{
+	// 回测占位：以 stra_buy + stra_sell 模拟报价，仅用于撮合与持仓核对
+	// 优先获取一支 localID，若第二腿失败则回撤第一腿
+
+	uint32_t bidId = 0, askId = 0;
+
+	// 先下买单
+	OrderIDs bidIds = stra_buy(stdCode, bidPrice, bidQty, 0);
+	if (bidIds.empty())
+	{
+		log_error("[UftMocker] Quote bid leg failed: {} @ {} x {}", stdCode, bidPrice, bidQty);
+		return {0, 0};
+	}
+	bidId = bidIds.back();
+
+	// 再下卖单
+	OrderIDs askIds = stra_sell(stdCode, askPrice, askQty, 0);
+	if (askIds.empty())
+	{
+		log_error("[UftMocker] Quote ask leg failed: {} @ {} x {}", stdCode, askPrice, askQty);
+		// 卖单失败回撤买单
+		stra_cancel(bidId);
+		return {0, 0};
+	}
+	askId = askIds.back();
+
+	return {bidId, askId};
+}
+
+bool UftMocker::stra_cancel_quote(uint32_t localid)
+{
+	// 回测占位：撤单走通用 stra_cancel
+	return stra_cancel(localid);
+}
+
 uint32_t UftMocker::stra_enter_long(const char* stdCode, double price, double qty, int flag /* = 0 */)
 {
 	WTSCommodityInfo* commInfo = _replayer->get_commodity_info(stdCode);

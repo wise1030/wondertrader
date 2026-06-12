@@ -342,6 +342,45 @@ uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 	return localid;
 }
 
+// 统一的双边 quote 入口, 与 doEntrust 对称
+// 集中处理: 共享 entrustID 生成 / 共享 usertag 编码 / 调用 _trader_api->quoteInsert
+// 完全不感知具体 broker 类型 (走 ITraderApi 抽象)
+uint32_t TraderAdapter::doQuoteEntrust(WTSEntrust* bidEntrust, WTSEntrust* askEntrust)
+{
+	// 1. 共享 entrustID (broker 适配层从中提取 orderref 复用为 QuoteRef 等)
+	_trader_api->makeEntrustID(bidEntrust->getEntrustID(), 64);
+	wt_strcpy(askEntrust->getEntrustID(), bidEntrust->getEntrustID());
+
+	// 2. 拆 stdCode 为 (exchg, code) -- 与 doEntrust L315-318 对称
+	const char* bidStdCode = bidEntrust->getCode();
+	std::size_t bpos = StrUtil::findFirst(bidStdCode, '.');
+	bidEntrust->setExchange(bidStdCode, bpos);
+	bidEntrust->setCode(bidStdCode + bpos + 1);
+
+	const char* askStdCode = askEntrust->getCode();
+	std::size_t apos = StrUtil::findFirst(askStdCode, '.');
+	askEntrust->setExchange(askStdCode, apos);
+	askEntrust->setCode(askStdCode + apos + 1);
+
+	// 3. 生成 localid + usertag (两腿共享)
+	uint32_t localid = makeLocalOrderID();
+	char* usertag = bidEntrust->getUserTag();
+	wt_strcpy(usertag, _order_pattern.c_str(), _order_pattern.size());
+	usertag[_order_pattern.size()] = '.';
+	fmtutil::format_to(usertag + _order_pattern.size() + 1, "{}", localid);
+	wt_strcpy(askEntrust->getUserTag(), bidEntrust->getUserTag());
+
+	// 4. 走 ITraderApi 虚函数, 由 broker 适配层映射到 quoteInsert
+	int32_t ret = _trader_api->quoteInsert(bidEntrust, askEntrust);
+	if (ret < 0)
+	{
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,
+			"[{}] Quote placing failed: {}", _id, ret);
+		return UINT_MAX;
+	}
+	return localid;
+}
+
 WTSContractInfo* TraderAdapter::getContract(const char* stdCode)
 {
 	char buf[64] = { 0 };
@@ -1020,6 +1059,101 @@ uint32_t TraderAdapter::openLong(const char* stdCode, double price, double qty, 
 	return ret;
 }
 
+uint32_t TraderAdapter::quote(const char* stdCode, double bidPrice, double bidQty,
+                              double askPrice, double askQty, int flag /* = 0 */)
+{
+	if (bidQty == 0 && askQty == 0)
+		return UINT_MAX;
+
+	WTSContractInfo* cInfo = getContract(stdCode);
+	if (cInfo == NULL)
+	{
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,
+			"[{}] Quote contract not found: {}", _id, stdCode);
+		return UINT_MAX;
+	}
+
+	// 买腿
+	WTSEntrust* bidEntrust = WTSEntrust::create(stdCode, bidQty, bidPrice);
+	bidEntrust->setPriceType(WPT_LIMITPRICE);
+	bidEntrust->setOrderFlag(WOF_QUOTE);   // broker 中立通用枚举
+	bidEntrust->setDirection(WDT_LONG);
+	bidEntrust->setOffsetType(WOT_OPEN);
+	bidEntrust->setContractInfo(cInfo);
+
+	// 卖腿
+	WTSEntrust* askEntrust = WTSEntrust::create(stdCode, askQty, askPrice);
+	askEntrust->setPriceType(WPT_LIMITPRICE);
+	askEntrust->setOrderFlag(WOF_QUOTE);
+	askEntrust->setDirection(WDT_SHORT);
+	askEntrust->setOffsetType(WOT_OPEN);
+	askEntrust->setContractInfo(cInfo);
+
+	// 双腿总量计入 undone (与 openLong+openShort 等价)
+	updateUndone(stdCode, bidQty + askQty);
+
+	uint32_t localid = doQuoteEntrust(bidEntrust, askEntrust);
+	if (localid == UINT_MAX)
+	{
+		// 失败回滚 undone
+		updateUndone(stdCode, -(bidQty + askQty));
+	}
+
+	bidEntrust->release();
+	askEntrust->release();
+	return localid;
+}
+
+bool TraderAdapter::cancelQuote(uint32_t localid)
+{
+	if (_orders == NULL || _orders->size() == 0)
+		return false;
+	if (_trader_api == NULL)
+		return false;
+
+	WTSOrderInfo* ordInfo = NULL;
+	{
+		SpinLock lock(_mtx_orders);
+		ordInfo = (WTSOrderInfo*)_orders->grab(localid);
+		if (ordInfo == NULL)
+			return false;
+	}
+
+	if (!ordInfo->isAlive())
+	{
+		ordInfo->release();
+		return false;
+	}
+
+	WTSContractInfo* cInfo = ordInfo->getContractInfo();
+	if (cInfo == NULL)
+		cInfo = _bd_mgr->getContract(ordInfo->getCode(), ordInfo->getExchg());
+
+	WTSEntrustAction* action = WTSEntrustAction::create(ordInfo->getCode(), cInfo->getExchg());
+	action->setEntrustID(ordInfo->getEntrustID());
+	action->setOrderID(ordInfo->getOrderID());
+
+	// 走 ITraderApi::quoteAction 抽象, broker 适配层据 OrderFlag/上下文路由到 ReqQuoteAction
+	int ret = _trader_api->quoteAction(action);
+	action->release();
+	ordInfo->release();
+	return (ret >= 0);
+}
+
+void TraderAdapter::onPushQuote(WTSEntrust* quoteInfo)
+{
+	// quote 状态推送的通用入口, 不感知 broker 来源
+	// 本轮 L0 仅记录日志; P7 phase 再扩 IUftStraCtx::on_quote_update 回调
+	if (quoteInfo == NULL)
+		return;
+	WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO,
+		"[{}] Quote pushed: {}.{} entrustID={} bid={}@{} ask={}@{}",
+		_id, quoteInfo->getExchg(), quoteInfo->getCode(),
+		quoteInfo->getEntrustID(),
+		quoteInfo->getVolume(), quoteInfo->getPrice(),
+		quoteInfo->getVolume(), quoteInfo->getPrice());
+}
+
 uint32_t TraderAdapter::openShort(const char* stdCode, double price, double qty, int flag/* = 0*/)
 {
 	//if (_risk_mon_enabled && !checkOrderLimits(stdCode))
@@ -1314,7 +1448,7 @@ void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 				}
 				else if (orderInfo->getOrderState() == WOS_Canceled)
 				{
-					if (orderInfo->getOrderFlag() == WOF_NOR)
+					if (orderInfo->getOrderFlag() == WOF_NOR || orderInfo->getOrderFlag() == WOF_QUOTE)
 					{
 						statItem.b_cancels++;
 						statItem.b_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
@@ -1342,7 +1476,7 @@ void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 				}
 				else if (orderInfo->getOrderState() == WOS_Canceled)
 				{
-					if (orderInfo->getOrderFlag() == WOF_NOR)
+					if (orderInfo->getOrderFlag() == WOF_NOR || orderInfo->getOrderFlag() == WOF_QUOTE)
 					{
 						statItem.s_cancels++;
 						statItem.s_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
@@ -1521,8 +1655,8 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 			}
 			else
 			{
-				//只有普通订单的撤单才计入统计
-				if(orderInfo->getOrderFlag() == WOF_NOR)
+				//只有普通订单的撤单才计入统计 (含做市报价撤单)
+				if(orderInfo->getOrderFlag() == WOF_NOR || orderInfo->getOrderFlag() == WOF_QUOTE)
 				{
 					statItem.b_cancels++;
 					statItem.b_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
@@ -1543,7 +1677,7 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 			}
 			else
 			{
-				if (orderInfo->getOrderFlag() == WOF_NOR)
+				if (orderInfo->getOrderFlag() == WOF_NOR || orderInfo->getOrderFlag() == WOF_QUOTE)
 				{
 					statItem.s_cancels++;
 					statItem.s_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();

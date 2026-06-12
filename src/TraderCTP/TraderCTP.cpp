@@ -501,6 +501,7 @@ int TraderCTP::quoteInsert(WTSEntrust* bidEntrust, WTSEntrust* askEntrust)
 	if (iResult != 0)
 	{
 		write_log(m_sink, LL_ERROR, "[TraderCTP] Quote inserting failed: {}", iResult);
+		return -1;
 	}
 
 	return 0;
@@ -860,6 +861,46 @@ void TraderCTP::OnRspQuoteInsert(CThostFtdcInputQuoteField *pInputQuote, CThostF
 
 void TraderCTP::OnRtnQuote(CThostFtdcQuoteField *pQuote)
 {
+	if (pQuote == NULL)
+		return;
+
+	WTSContractInfo* contract = m_bdMgr->getContract(pQuote->InstrumentID, pQuote->ExchangeID);
+	if (contract == NULL)
+		return;
+
+	WTSEntrust* quote = WTSEntrust::create(
+		pQuote->InstrumentID,
+		(double)(pQuote->BidVolume + pQuote->AskVolume),	// 总量 = bid + ask, 占位用
+		pQuote->BidPrice,									// price 字段塞 BidPrice
+		contract->getExchg());
+	quote->setContractInfo(contract);
+	quote->setOrderFlag(WOF_QUOTE);
+
+	// 生成 entrustID (同 makeOrderInfo 模式)
+	generateEntrustID(quote->getEntrustID(), pQuote->FrontID, pQuote->SessionID, atoi(pQuote->QuoteRef));
+
+	// 反查 userTag
+	const char* usertag = m_eidCache.get(quote->getEntrustID());
+	if (strlen(usertag) == 0)
+		quote->setUserTag(quote->getEntrustID());
+	else
+		quote->setUserTag(usertag);
+
+	// 业务错误 (做市报价被交易所拒)
+	if (pQuote->QuoteStatus == THOST_FTDC_OST_Canceled
+		|| pQuote->OrderSubmitStatus >= THOST_FTDC_OSS_InsertRejected)
+	{
+		// StatusMsg 已含拒单原因, ErrorMsg 透传
+		WTSError* err = WTSError::create(WEC_ORDERINSERT, pQuote->StatusMsg);
+		if (m_sink)
+			m_sink->onTraderError(err, NULL);
+		err->release();
+	}
+
+	if (m_sink)
+		m_sink->onPushQuote(quote);
+
+	quote->release();
 }
 
 void TraderCTP::OnErrRtnQuoteInsert(CThostFtdcInputQuoteField *pInputQuote, CThostFtdcRspInfoField *pRspInfo)
@@ -1327,6 +1368,12 @@ WTSOrderInfo* TraderCTP::makeOrderInfo(CThostFtdcOrderField* orderField)
 	pRet->setPriceType(wrapPriceType(orderField->OrderPriceType));
 	pRet->setOffsetType(wrapOffsetType(orderField->CombOffsetFlag[0]));
 
+	// 注:CTP quote 衍生 order 在 CThostFtdcOrderField 上 OrderSource=Participant('0'),
+	// 与普通限价单无差异(CTP API 头无 OSRC_Quote 枚举,见 PDF V3.5 §4.2.10)。
+	// 因此衍生子单走 WOF_NOR 路径,与 WOF_QUOTE 在当前消费方(TraderAdapter
+	// b_cancels/s_cancels 统计)行为完全等价。
+	// TODO: 若未来需差异化统计 quote 撤单率,在 OnRtnQuote 同步建立
+	//       AskOrderRef/BidOrderRef -> WOF_QUOTE 反查表,在此处查表标记。
 	if (orderField->TimeCondition == THOST_FTDC_TC_GFD)
 	{
 		pRet->setOrderFlag(WOF_NOR);
