@@ -816,6 +816,14 @@ bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
 
 bool FutuRiskMonitor::transitionCloseoutState(CloseoutState next_state, uint64_t timestamp)
 {
+    // FIX C: same-state 静默短路 —— 调用方(StrategyCoordinator/UftFutuMmStrategy)在
+    // closeout 窗口的 on_tick/on_calc 高频路径里反复调 markCloseoutFlattening,
+    // 不应每次都报 warning("Invalid state transition: 2 -> 2")。同 state 视为
+    // idempotent no-op 即可,真正的非法转移(如 IDLE → COMPLETED)仍走下面的告警。
+    if (_closeout_state.state == next_state)
+    {
+        return true;  // idempotent
+    }
     if (!_closeout_state.canTransitionTo(next_state))
     {
         WTSLogger::warn("[CLOSEOUT] Invalid state transition: {} -> {}",
@@ -1093,9 +1101,12 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
 
 // FIX P2-5: resetCloseout改为通过状态机转换而非直接构造
 // 直接构造新对象绕过canTransitionTo检查，可能导致非法状态转换
-void FutuRiskMonitor::resetCloseout()
+// FIX v3-multi-session: force=true 用于 session_begin —— 新交易日是硬边界,
+// 上一日 FLATTENING/TRIGGERED 等残留状态必须清掉(否则 resetCloseout 被状态机
+// 拒绝,state 永久卡死,Delta 雪崩)。force=false(默认)保留状态机保护。
+void FutuRiskMonitor::resetCloseout(bool force)
 {
-    if (_closeout_state.canTransitionTo(CloseoutState::IDLE))
+    if (force || _closeout_state.canTransitionTo(CloseoutState::IDLE))
     {
         _closeout_state.state = CloseoutState::IDLE;
         _closeout_state.trigger_time = 0;

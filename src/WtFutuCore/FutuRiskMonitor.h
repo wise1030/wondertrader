@@ -474,7 +474,12 @@ public:
     bool checkCloseoutRetry(uint64_t current_time_ms);
     
     /// Reset closeout state (for new trading day)
-    void resetCloseout();
+    /// @param force If true, bypass state machine canTransitionTo check.
+    ///              session_begin must use force=true: a new trading day is a hard
+    ///              boundary, any leftover non-IDLE state from previous session
+    ///              (e.g. stuck FLATTENING due to hedge fill not fully closing delta)
+    ///              must be wiped clean rather than blocked.
+    void resetCloseout(bool force = false);
     
     //==========================================================================
     // Delta Rate Tracking (Delta变化速率监控)

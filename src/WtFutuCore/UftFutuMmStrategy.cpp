@@ -1131,7 +1131,9 @@ void UftFutuMmStrategy::on_session_begin(IUftStraCtx* ctx, uint32_t uTDate)
 {
 // 重置日内状态
 _risk_monitor->resetDaily();
-_risk_monitor->resetCloseout();  // 重置收盘前平仓状态
+// FIX v3-multi-session: force=true —— 新交易日强制清 closeout state,
+// 否则上一日卡 FLATTENING 时 resetCloseout 会被状态机拒绝,导致 state 永久死锁
+_risk_monitor->resetCloseout(true);  // 重置收盘前平仓状态(强制)
 
 // FIX: 重置TradingState — 前一日on_session_end设置了halt/pause，
 // 新交易日必须清除所有暂停标志，否则报价无法启动
@@ -1222,6 +1224,28 @@ _bilateral_stats->onSessionEnd(now);
     
     WTSLogger::info("UftFutuMmStrategy[{}] session end: {}, Delta: {}", 
         id(), uTDate, _portfolio->getTotalDelta());
+
+    // FIX v3-multi-session: session_end closeout 状态强制收尾
+    // 根因:closeout FLATTENING → COMPLETED 仅在 on_order 回调 + getTotalDelta()<0.01
+    // 这一条路径上转移。若 hedge 单未全成、或成交后 Delta 因取整/口径残留(如 1 手)
+    // 不到阈值,state 卡 FLATTENING。session 结束是硬边界:此后不可能再有 tick/order
+    // 推动状态,必须当场强制收尾,避免下一日 resetCloseout 被状态机拒绝(canTransitionTo
+    // 仅允许 COMPLETED→IDLE)导致 state 永久死锁。
+    auto cs_at_end = _risk_monitor->getCloseoutState();
+    if (cs_at_end != CloseoutState::IDLE && cs_at_end != CloseoutState::COMPLETED)
+    {
+        WTSLogger::warn("UftFutuMmStrategy[{}] session end with non-terminal closeout state={}, force-finalizing",
+            id(), static_cast<int>(cs_at_end));
+        uint64_t now_ms = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+        // 走 markCloseoutFailed:FLATTENING/RETRYING 都允许转 FAILED;TRIGGERED 不允许,
+        // 但 TRIGGERED 在 session_end 出现属异常,仍走 force reset 兜底
+        _risk_monitor->markCloseoutFailed(now_ms);
+        // 同步清守卫(防止 stale ids 跨 session 污染 on_order 路径)
+        _closeout_pending_ids.clear();
+        _closeout_hedge_pending = false;
+        _closeout_hedge_wait_ticks = 0;
+        _closeout_hedge_executed = false;
+    }
 }
 
 void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
