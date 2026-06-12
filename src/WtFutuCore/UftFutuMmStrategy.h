@@ -22,6 +22,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 
 NS_WTP_BEGIN
 class WTSVariant;
@@ -286,6 +287,15 @@ private:
     
     /// 风险监控
     std::unique_ptr<FutuRiskMonitor> _risk_monitor;
+    
+    /// FIX Bug-C: closeout 对冲单只在 FLATTENING 状态首次执行一次
+    bool _closeout_hedge_executed = false;
+    // FIX Bug-D: track closeout hedge order ids so on_order can distinguish them from MM cancels
+    std::unordered_set<uint32_t> _closeout_pending_ids;
+    // FIX Bug-H (Plan A): defer hedge to a later tick so inflight cancel/fill回执先回流
+    bool _closeout_hedge_pending = false;
+    uint32_t _closeout_hedge_wait_ticks = 0;
+    static constexpr uint32_t CLOSEOUT_HEDGE_WAIT_TICKS = 2;
     
     /// 毒性检测器 (VPIN)
     std::unique_ptr<ToxicFlowDetector> _toxicity_detector;

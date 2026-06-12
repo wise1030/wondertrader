@@ -1137,6 +1137,13 @@ _risk_monitor->resetCloseout();  // 重置收盘前平仓状态
 // 新交易日必须清除所有暂停标志，否则报价无法启动
 _trading_state.resume();
 
+// FIX Bug-E Phase 1: reset closeout hedge guard so new day can fire hedge if needed
+_closeout_hedge_executed = false;
+// FIX Bug-D v2: clear stale hedge ids from previous session
+_closeout_pending_ids.clear();
+_closeout_hedge_pending = false;
+_closeout_hedge_wait_ticks = 0;
+
 // 重置本地状态
 _blocked_contracts.clear();
 
@@ -1352,9 +1359,53 @@ auto result = _coordinator->processTick(ctx, stdCode, tick);
         }
 
 // Execute closeout hedge if triggered
-if (result.closeout_executed && _config.closeout.flatten_position)
+// FIX Bug-C: Only execute on FLATTENING state edge (TRIGGERED→FLATTENING or RETRYING→FLATTENING),
+// not every tick. processCloseout returns true for TRIGGERED/FLATTENING/COMPLETED states,
+// which previously caused executeCloseoutHedge to be called every tick, oscillating delta.
+// FIX Bug-E (Phase 1, choice Y): halt trading on closeout trigger; only on_session_begin restores.
+// This prevents new MM fills from accumulating delta during FLATTENING/RETRYING.
+if (result.closeout_executed && _config.closeout.flatten_position
+    && _risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
 {
-executeCloseoutHedge(ctx);
+    // Halt MM BEFORE hedge so no new quotes go out concurrently
+    _trading_state.halt(TradingState::PauseReason::CLOSEOUT);
+    _trading_state.pauseQuoting(TradingState::PauseReason::CLOSEOUT);
+    // Cancel any inflight MM orders to prevent stale fills
+    for (auto& [code, quoter] : _quoters) {
+        if (quoter) quoter->cancelAll(ctx);
+    }
+    // FIX Bug-H (Plan A): defer hedge to N+CLOSEOUT_HEDGE_WAIT_TICKS so inflight
+    // cancel/fill 回执先回流，避免 hedge 后 inflight trade 反超 net_delta
+    _closeout_hedge_pending = true;
+    _closeout_hedge_wait_ticks = 0;
+    _closeout_hedge_executed = true;  // prevent re-entry on subsequent ticks
+    WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: halted + cancelAll, hedge deferred {} ticks",
+                    id(), CLOSEOUT_HEDGE_WAIT_TICKS);
+}
+// Deferred hedge execution: wait N ticks then read fresh net_delta and hedge
+if (_closeout_hedge_pending)
+{
+    _closeout_hedge_wait_ticks++;
+    if (_closeout_hedge_wait_ticks >= CLOSEOUT_HEDGE_WAIT_TICKS)
+    {
+        WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: executing deferred hedge after {} ticks",
+                        id(), _closeout_hedge_wait_ticks);
+        executeCloseoutHedge(ctx);
+        _closeout_hedge_pending = false;
+        _closeout_hedge_wait_ticks = 0;
+    }
+}
+// Reset flag on state changes that warrant a fresh hedge attempt:
+// - IDLE: closeout completed and reset (next session via on_session_begin)
+// - FAILED/RETRYING: previous attempt failed, allow retry to re-fire hedge
+// Note: when RETRYING re-enters FLATTENING, we re-halt above (idempotent).
+auto cs = _risk_monitor->getCloseoutState();
+if (cs == CloseoutState::IDLE || cs == CloseoutState::FAILED 
+    || cs == CloseoutState::RETRYING)
+{
+    _closeout_hedge_executed = false;
+    _closeout_hedge_pending = false;
+    _closeout_hedge_wait_ticks = 0;
 }
 }
 else
@@ -1389,17 +1440,25 @@ void UftFutuMmStrategy::executeCloseoutHedge(IUftStraCtx* ctx)
 {
 //============================================================
 // 收盘前对冲所有敞口
-// 1. 计算当前总 Delta
+// 1. 计算当前净 Delta (已扣除 target_position)
+//    使用 getNetDelta() 而非 getTotalDelta()：
+//    - 账户实仓可能含多策略共享持仓，本策略只对自己的记账层负责
+//    - getNetDelta() = sum((position - target_position) * hedge_ratio)
+//    - 这才是本策略 closeout 应该消除的"超出 target 的敞口"
 // 2. 使用锚定合约对冲
 //============================================================
 
-double totalDelta = _portfolio->getTotalDelta();
+double totalDelta = _portfolio->getNetDelta();
 
 if (std::abs(totalDelta) < 0.01)
 {
 WTSLogger::info("UftFutuMmStrategy[{}] Closeout: No position to hedge (Delta=0)", id());
-uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-_risk_monitor->markCloseoutCompleted(now);
+// FIX Bug-A-2: Only mark COMPLETED if not already completed (avoid Invalid transition 3→3)
+if (_risk_monitor->getCloseoutState() != CloseoutState::COMPLETED)
+{
+    uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+    _risk_monitor->markCloseoutCompleted(now);
+}
 return;
 }
 
@@ -1469,12 +1528,15 @@ if (res.rate_limited)
 WTSLogger::warn("Closeout hedge BUY rate limited: {}", _config.anchor_code);
 else if (res.self_trade_blocked)
 WTSLogger::warn("Closeout hedge BUY self-trade blocked: {}", _config.anchor_code);
+// FIX Bug-D: track hedge order ids
+for (auto id : res.localids) _closeout_pending_ids.insert(id);
 }
 else
 {
 // FIX P0-2+P1-7: Use stra_buy (net position mode) instead of stra_enter_long (open direction)
 // Framework auto-splits into open/close based on current position
-ctx->stra_buy(_config.anchor_code.c_str(), executePrice, absLots);
+auto ids = ctx->stra_buy(_config.anchor_code.c_str(), executePrice, absLots);
+for (auto id : ids) _closeout_pending_ids.insert(id);
 }
 }
 else
@@ -1486,12 +1548,15 @@ if (res.rate_limited)
 WTSLogger::warn("Closeout hedge SELL rate limited: {}", _config.anchor_code);
 else if (res.self_trade_blocked)
 WTSLogger::warn("Closeout hedge SELL self-trade blocked: {}", _config.anchor_code);
+// FIX Bug-D: track hedge order ids
+for (auto id : res.localids) _closeout_pending_ids.insert(id);
 }
 else
 {
 // FIX P0-2+P1-7: Use stra_sell (net position mode) instead of stra_enter_short (open direction)
 // Framework auto-splits into open/close based on current position
-ctx->stra_sell(_config.anchor_code.c_str(), executePrice, absLots);
+auto ids = ctx->stra_sell(_config.anchor_code.c_str(), executePrice, absLots);
+for (auto id : ids) _closeout_pending_ids.insert(id);
 }
 }
 
@@ -1716,6 +1781,16 @@ break;
 
 if (!hasHardBreach && _risk_monitor->getHaltCategory() != RiskCategory::IRREVERSIBLE)
 {
+// FIX Bug-F: do not auto-resume while closeout flattening is in progress.
+// closeout halt must persist until on_session_begin restores it.
+if (_risk_monitor->isCloseoutFlattening() ||
+    _risk_monitor->isCloseoutTriggered() ||
+    _trading_state.pause_reason == TradingState::PauseReason::CLOSEOUT)
+{
+    // skip resume — closeout in progress
+}
+else
+{
 // FIX P1-10: Call resumeTrading() first and check return value.
 // Only update TradingState if resumeTrading succeeds (not IRREVERSIBLE).
 bool resumed = _risk_monitor->resumeTrading();
@@ -1735,6 +1810,7 @@ else
 {
 // resumeTrading refused (IRREVERSIBLE) — keep TradingState halted
 WTSLogger::warn("UftFutuMmStrategy[{}] resumeTrading refused (IRREVERSIBLE), keeping halted state", id());
+}
 }
 }
 }
@@ -1780,18 +1856,22 @@ _order_router->onOrderDone(localid);
 
 // FIX P0-3: Check closeout order status in on_order callback
 // When in FLATTENING state, check if all closeout orders are done
-if (_risk_monitor && _risk_monitor->isCloseoutFlattening())
+// FIX Bug-D v2: only handle orders we know are closeout hedges (tracked in _closeout_pending_ids)
+bool is_closeout_order = (_closeout_pending_ids.find(localid) != _closeout_pending_ids.end());
+if (_risk_monitor && _risk_monitor->isCloseoutFlattening() && is_closeout_order)
 {
     if (isCanceled)
     {
         // Closeout order was rejected/canceled — mark FAILED to trigger retry
         WTSLogger::warn("[CLOSEOUT] Order canceled/rejected during flattening: code={} localid={}, marking FAILED for retry",
             stdCode, localid);
+        _closeout_pending_ids.erase(localid);
         _risk_monitor->markCloseoutFailed(now_ms);
     }
     else if (leftQty == 0)
     {
         // Order fully filled — check if position is now flat
+        _closeout_pending_ids.erase(localid);
         double totalDelta = _portfolio->getTotalDelta();
         if (std::abs(totalDelta) < 0.01)
         {

@@ -361,26 +361,27 @@ return true;
 case CloseoutState::COMPLETED:
 {
 //======================================================================
-// 夜盘平仓完成后，需要重置状态以便白盘平仓可以再次触发
+// FIX Bug-A: 区分夜盘/白盘 closeout 完成
 //
-// 判断逻辑: 如果有夜盘(night_close_time > 0)，且当前时间在白盘交易时段
-// (09:00-15:00)，说明夜盘平仓已完成，白盘即将开始或已开始，
-// 需要重置closeout状态为IDLE
+// 夜盘平仓完成后，立即重置状态+恢复做市。
+// 白盘 closeout 完成后，不再重置（终态，直到日内交易结束）。
+//
+// 旧逻辑: 等 currentHour>=6 才 reset → 凌晨完成时 hour=0 不满足
+//         → 整个白盘都不做市！
+// 新逻辑: 夜盘 closeout 完成立即 reset + resume，白盘 closeout
+//         在 minutes_before=15 时才重新触发 (14:45)，期间正常做市。
 //======================================================================
-if (_cfg.night_close_time > 0)
+const auto& closeoutInfo = _risk_monitor->getCloseoutStateInfo();
+
+if (_cfg.night_close_time > 0 && closeoutInfo.is_night_closeout)
 {
-// FIX A-step: HHMM/HHMMSS 兼容
-uint32_t currentHour = (tc.time_hms >= 10000) ? (tc.time_hms / 10000) : (tc.time_hms / 100);
-// 白盘时段 (06:00-15:00): 夜盘平仓已完成，重置状态让白盘平仓可触发
-if (currentHour >= 6 && currentHour <= 15)
-{
+// 夜盘 closeout 完成 → 立即 reset，让白盘可以正常做市
 _risk_monitor->resetCloseout();
-// 恢复TradingState，让白盘可以正常做市直到白盘收盘触发
 if (_trading_state) {
     _trading_state->resume();
 }
 WTSLogger::info("[CLOSEOUT] Night session closeout completed, resetting for day session");
-// 重新检查白盘平仓
+// 重新检查白盘 closeout (09:00 不会触发，14:45 才触发)
 bool triggered = _risk_monitor->checkCloseout(tc.time_hms, closeTime);
 if (triggered)
 {
@@ -398,9 +399,9 @@ return true;
 }
 return false;
 }
-}
 
-// FIX P0-11: 空指针保护 + P0-12: 使用TradingState方法
+// 白盘 closeout 完成 → 终态，不做市直到日内交易结束
+// FIX Bug-A-2: 只在首次进入 COMPLETED 时打日志+halt，避免每 tick 循环
 if (_trading_state) {
     _trading_state->halt(TradingState::PauseReason::CLOSEOUT);
 }

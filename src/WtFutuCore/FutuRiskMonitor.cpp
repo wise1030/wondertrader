@@ -872,6 +872,9 @@ void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
 {
     if (transitionCloseoutState(CloseoutState::COMPLETED, timestamp))
     {
+        // FIX Bug-A: 标记夜盘 closeout 已完成，防止 reset 后重触发
+        if (_closeout_state.is_night_closeout)
+            _closeout_state.night_closeout_done = true;
         broadcastAlert("CLOSEOUT_COMPLETED", 
             fmt::format("Closeout state: COMPLETED at {}", timestamp));
     }
@@ -966,8 +969,10 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
     
     // --- 触发点1: 夜盘收盘 ---
     // 只在夜盘时段 (21:00-05:59) 检查，避免白盘时段误触发
+    // FIX Bug-A: 跳过已完成的夜盘 closeout（防止 reset 后重触发）
     if (_closeout_config.night_close_time > 0 && _closeout_config.night_minutes_before > 0
-        && (currentHour >= 21 || currentHour < 6))
+        && (currentHour >= 21 || currentHour < 6)
+        && !_closeout_state.night_closeout_done)
     {
         uint32_t nightClose = _closeout_config.night_close_time;
         uint32_t nightCloseHour = nightClose / 100;
@@ -1007,6 +1012,9 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
             
             if (currentAbs >= triggerAbs && _closeout_state.state == CloseoutState::IDLE)
             {
+            // FIX Bug-A: record this is a night closeout so COMPLETED handler
+            // only resets state for night→day transition, not day closeout
+            _closeout_state.is_night_closeout = true;
                 markCloseoutTriggered(currentTime * 100);
                 broadcastAlert("CLOSEOUT_TRIGGERED", 
                     fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}+1d, {} minutes before",
@@ -1024,6 +1032,8 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
             if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
                 && _closeout_state.state == CloseoutState::IDLE)
             {
+            // FIX Bug-A: record this is a night closeout
+            _closeout_state.is_night_closeout = true;
                 markCloseoutTriggered(currentTime * 100);
                 broadcastAlert("CLOSEOUT_TRIGGERED", 
                     fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}, {} minutes before",
@@ -1067,6 +1077,9 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
             && _closeout_state.state == CloseoutState::IDLE)
         {
+            // FIX Bug-A: day closeout, not night; reset night flag for next session
+            _closeout_state.is_night_closeout = false;
+            _closeout_state.night_closeout_done = false;
             markCloseoutTriggered(currentTime * 100);
             broadcastAlert("CLOSEOUT_TRIGGERED", 
                 fmt::format("Day closeout triggered at {}:{:02d}, close time {}:{:02d}, {} minutes before",
@@ -1090,6 +1103,9 @@ void FutuRiskMonitor::resetCloseout()
         _closeout_state.complete_time = 0;
         _closeout_state.fail_time = 0;
         _closeout_state.retry_count = 0;
+        _closeout_state.is_night_closeout = false;  // FIX Bug-A: reset night flag
+        // NOTE: night_closeout_done 不在此重置，只在新白盘 closeout 触发时重置
+        // 这样 reset 后夜盘时段不会重触发夜盘 closeout
     }
     else
     {

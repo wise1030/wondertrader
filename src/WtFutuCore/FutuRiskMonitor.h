@@ -234,11 +234,14 @@ struct CloseoutStateInfo
     uint32_t retry_count;       ///< Number of retries attempted
     uint32_t max_retries;       ///< Maximum retries before giving up (default 3)
     uint64_t retry_interval_ms; ///< Interval between retries in ms (default 5000)
+    bool is_night_closeout;     ///< FIX Bug-A: was this triggered by night session closeout?
+    bool night_closeout_done;   ///< FIX Bug-A: night closeout already executed this session
     
     CloseoutStateInfo()
         : state(CloseoutState::IDLE)
         , trigger_time(0), flatten_start(0), complete_time(0), fail_time(0)
         , retry_count(0), max_retries(3), retry_interval_ms(5000)
+        , is_night_closeout(false), night_closeout_done(false)
     {}
     
     inline bool canTransitionTo(CloseoutState next) const
