@@ -1343,6 +1343,13 @@ if (mid > 0)
 {
 _portfolio->markToMarket(stdCode, mid);
 _last_mid[stdCode] = mid;
+
+// P1-4: 首个有效 tick 到达，清除价格过期标志
+if (_price_stale)
+{
+    _price_stale = false;
+    WTSLogger::info("UftFutuMmStrategy[{}] Price recovered (first tick after channel ready)", id());
+}
 }
 
 if (_correlation_manager) {
@@ -1426,7 +1433,7 @@ aggregator->updateLeadContract(_config.anchor_code, mid, ts);
 //============================================================
 // 使用 StrategyCoordinator 处理主做市业务逻辑
 //============================================================
-if (_coordinator)
+if (_coordinator && !_price_stale)  // P1-4: 价格过期时跳过 hedge/risk 决策
 {
 // TradingState now shared via pointer — no push/pull sync needed
 
@@ -1592,7 +1599,19 @@ if (!_closeout_executor)
 
 // 已经在运行（retry 重入场景），不重复 start
 if (!_closeout_executor->isIdle())
-    return;
+return;
+
+// P1-2: closeout 决策前从策略引擎同步持仓
+for (const auto& c : _portfolio->getAllContracts())
+{
+    double actual = ctx->stra_get_local_position(c.code.c_str());
+    if (std::abs(c.position - actual) > 0.01)
+    {
+        WTSLogger::info("UftFutuMmStrategy[{}] Portfolio sync before closeout: {} {:.0f}->{:.0f}",
+                        id(), c.code, c.position, actual);
+        _portfolio->onPositionUpdate(c.code.c_str(), actual);
+    }
+}
 
 double totalDelta = _portfolio->getNetDelta();
 
@@ -2008,6 +2027,7 @@ _portfolio_ctx_dirty = true;
 void UftFutuMmStrategy::on_channel_ready(IUftStraCtx* ctx)
 {
 _channel_ready = true;
+_price_stale = true;  // P1-4: 标记价格过期，直到收到首个 tick
 
 //============================================================
 // 同步持仓和未成交订单

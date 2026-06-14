@@ -385,6 +385,7 @@ private:
     
     // 运行状态
     bool _channel_ready;
+    bool _price_stale = false;  ///< P1-4: 价格过期标志（channel恢复后到首tick之间）
     TradingState _trading_state;           // 统一交易状态（替代5个bool）
     uint64_t _toxicity_resume_time; // 熔断恢复时间
     

@@ -7,6 +7,8 @@
  */
 #include "FutuPortfolio.h"
 #include "../Includes/WTSDataDef.hpp"
+#include "../WTSTools/WTSLogger.h"
+#include <cmath>
 
 namespace futu {
 
@@ -170,9 +172,31 @@ HedgeAction FutuPortfolio::computeHedge(double target_delta) const
     double hedgeQty = -deltaToHedge / anchor->hedge_ratio;
 
     // Round to nearest integer
-    action.qty = std::round(hedgeQty);    
+    action.qty = std::round(hedgeQty);
+
+    // P1-3: anchor 持仓上限 guard — 防止 hedge 导致 anchor 反向超限
+    if (anchor->max_position > 0)
+    {
+        double projected = anchor->position + action.qty;
+        double max_pos = anchor->max_position;
+        if (projected > max_pos)
+        {
+            action.qty = max_pos - anchor->position;
+            action.is_urgent = true;
+            WTSLogger::warn("computeHedge: clamped to anchor max_position (pos={:.0f}, raw_qty={:.0f}, clamped_qty={:.0f})",
+                anchor->position, std::round(hedgeQty), action.qty);
+        }
+        else if (projected < -max_pos)
+        {
+            action.qty = -max_pos - anchor->position;
+            action.is_urgent = true;
+            WTSLogger::warn("computeHedge: clamped to anchor -max_position (pos={:.0f}, raw_qty={:.0f}, clamped_qty={:.0f})",
+                anchor->position, std::round(hedgeQty), action.qty);
+        }
+    }
+
     // Mark as urgent if significantly over portfolio_max_delta (软指标)
-    action.is_urgent = _params.portfolio_max_delta > 0 && std::abs(currentDelta) > _params.portfolio_max_delta * 1.5;
+    action.is_urgent = action.is_urgent || (_params.portfolio_max_delta > 0 && std::abs(currentDelta) > _params.portfolio_max_delta * 1.5);
     
     return action;
 }

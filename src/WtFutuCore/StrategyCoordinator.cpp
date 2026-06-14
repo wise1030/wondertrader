@@ -1016,6 +1016,21 @@ bool StrategyCoordinator::checkAndHedge(wtp::IUftStraCtx* ctx)
 if (!_portfolio || !_cfg.use_hedging)
 return false;
 
+// P1-2: 决策前从策略引擎同步持仓，确保 delta 基于最新策略持仓而非滞后快照
+// 注意: 同步的是 stra_get_local_position (策略持仓)，不是账户持仓
+if (ctx && _portfolio)
+{
+    for (const auto& c : _portfolio->getAllContracts())
+    {
+        double actual = ctx->stra_get_local_position(c.code.c_str());
+        if (std::abs(c.position - actual) > 0.01)
+        {
+            WTSLogger::debug("Portfolio sync before hedge: {} {:.0f}->{:.0f}", c.code, c.position, actual);
+            _portfolio->onPositionUpdate(c.code.c_str(), actual);
+        }
+    }
+}
+
 if (!_portfolio->needsHedging())
 return false;
 

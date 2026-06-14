@@ -21,6 +21,7 @@
 #include <atomic>
 #include "../Includes/FasterDefs.h"
 #include "../Includes/WTSMarcos.h"
+#include "../WTSTools/WTSLogger.h"
 
 NS_WTP_BEGIN
 class WTSTickData;
@@ -59,6 +60,7 @@ struct ContractState
     double      multiplier;     ///< Contract multiplier
     double      tick_size;      ///< Minimum tick size
     double      hedge_ratio;    ///< Hedge ratio relative to anchor contract
+    bool        hedge_ratio_initialized;  ///< 冷启动初始化标志：false=仍是默认 1.0，需要 on_tick 用纯货值比注入；true=已用货值比或 EMA β 初始化过
     
     // Position state
     double      position;       ///< Net position (+ long, - short)
@@ -85,7 +87,7 @@ struct ContractState
     double      contract_max_delta;  ///< 单合约 delta 软限制，用于单合约 skew 计算 (0 = no limit)
     
     ContractState()
-        : multiplier(1), tick_size(1), hedge_ratio(1.0)
+        : multiplier(1), tick_size(1), hedge_ratio(1.0), hedge_ratio_initialized(false)
         , position(0), prev_position(0), avg_cost(0), unrealized_pnl(0), realized_pnl(0)
         , last_price(0), bid1(0), ask1(0)
         , daily_pnl(0), is_active(true), last_update(0)
