@@ -52,14 +52,14 @@ class SignalAggregator;  // 新增：信号聚合器
 class AsyncArbitrageExecutor;
 class SpreadArbitrageManager;
 class UnifiedOrderTracker;
+class CloseoutExecutor;
 
 // 综合信号组件
 class TickTransactionInferer;
 class SelfTradeCalibrator;
 class SyntheticSignalFusion;
 
-// 双边报价统计
-class BilateralQuoteStats;
+// R3 v2: BilateralQuoteStats 已下放到 FutuQuoter 内部，本头文件不再前向声明
 
 /// 期货做市策略配置
 /// 
@@ -150,10 +150,21 @@ struct FutuMmConfig
         uint32_t close_time;           // 全天收盘时间 (HHMMSS格式，白盘收盘)
         uint32_t night_close_time;     // 夜盘收盘时间 (HHMM格式，0=无夜盘)
         uint32_t night_minutes_before; // 夜盘收盘前N分钟触发平仓 (默认同minutes_before)
+        // CloseoutExecutor 参数
+        uint32_t drain_timeout_ms;     // Phase1 drain 超时
+        double   depth_ratio_passive;  // 被动档深度比例
+        double   depth_ratio_mid;      // 中间档深度比例
+        double   depth_ratio_aggr;     // 主动档深度比例
+        uint32_t sweep_threshold_ms;   // 距收盘多少ms进入SWEEP
+        uint32_t sweep_ticks;          // SWEEP档越过对手价tick数
+        bool     use_fak;              // 是否使用FAK下单
         Closeout()
             : minutes_before(5), flatten_position(true)
             , max_retries(3), retry_interval_ms(5000), close_time(150000)
-            , night_close_time(0), night_minutes_before(5) {}
+            , night_close_time(0), night_minutes_before(5)
+            , drain_timeout_ms(3000)
+            , depth_ratio_passive(0.3), depth_ratio_mid(0.5), depth_ratio_aggr(0.8)
+            , sweep_threshold_ms(5000), sweep_ticks(3), use_fak(true) {}
     } closeout;
     
     struct Perf {
@@ -238,7 +249,7 @@ private:
     //==========================================================================
     
     /// 初始化业务模块
-    void initBusinessModules();
+    void initBusinessModules(wtp::IUftStraCtx* ctx);
     
     /// 执行收盘前平仓对冲
     void executeCloseoutHedge(IUftStraCtx* ctx);
@@ -296,6 +307,9 @@ private:
     bool _closeout_hedge_pending = false;
     uint32_t _closeout_hedge_wait_ticks = 0;
     static constexpr uint32_t CLOSEOUT_HEDGE_WAIT_TICKS = 2;
+
+    /// 渐进式收盘对冲执行器 (urgency-driven)
+    std::unique_ptr<CloseoutExecutor> _closeout_executor;
     
     /// 毒性检测器 (VPIN)
     std::unique_ptr<ToxicFlowDetector> _toxicity_detector;
@@ -329,10 +343,9 @@ private:
     
     /// 异步套利执行器
     std::unique_ptr<AsyncArbitrageExecutor> _async_arb;
-    
-    /// 双边报价统计模块（独立模块）
-    std::unique_ptr<BilateralQuoteStats> _bilateral_stats;
-    
+
+    // R3 v2: BilateralQuoteStats 已下放到 Per-Quoter 值成员，本处不再持有单实例。
+
     /// 用于防止套利引擎无限追单（追踪最近下达的套利单价格）
     wtp::wt_hashmap<std::string, double> _arb_last_order_price;
     

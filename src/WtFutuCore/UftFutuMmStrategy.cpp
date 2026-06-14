@@ -31,6 +31,7 @@
 
 #include "UnifiedOrderTracker.h"
 #include "MarketDataContext.h"
+#include "CloseoutExecutor.h"
 #include "FutuRiskMonitor.h"
 #include "ToxicFlowDetector.h"
 #include "PerformanceAnalyzer.h"
@@ -247,6 +248,14 @@ _config.closeout.flatten_position = readBool(cfgCloseout, "flattenPosition", tru
 _config.closeout.max_retries = readUInt32(cfgCloseout, "maxRetries", 3);
 _config.closeout.retry_interval_ms = readUInt32(cfgCloseout, "retryIntervalMs", 5000);
 _config.closeout.night_minutes_before = readUInt32(cfgCloseout, "nightMinutesBefore", _config.closeout.minutes_before);
+// CloseoutExecutor 参数
+_config.closeout.drain_timeout_ms = readUInt32(cfgCloseout, "drainTimeoutMs", 3000);
+_config.closeout.depth_ratio_passive = readDouble(cfgCloseout, "depthRatioPassive", 0.3);
+_config.closeout.depth_ratio_mid = readDouble(cfgCloseout, "depthRatioMid", 0.5);
+_config.closeout.depth_ratio_aggr = readDouble(cfgCloseout, "depthRatioAggressive", 0.8);
+_config.closeout.sweep_threshold_ms = readUInt32(cfgCloseout, "sweepThresholdMs", 5000);
+_config.closeout.sweep_ticks = readUInt32(cfgCloseout, "sweepTicks", 3);
+_config.closeout.use_fak = readBool(cfgCloseout, "useFak", true);
 }
 _config.closeout.close_time = 150000;  // 默认值，on_init 中会从 anchor_code 更新
 _config.closeout.night_close_time = 0;  // 默认无夜盘，on_init 中会从 anchor_code 更新
@@ -379,7 +388,7 @@ return true;
 // 业务模块初始化
 //==========================================================================
 
-void UftFutuMmStrategy::initBusinessModules()
+void UftFutuMmStrategy::initBusinessModules(wtp::IUftStraCtx* ctx)
 {
 //------------------------------------------------------------
 // 0. 初始化 StrategyCoordinator 获取模块开关及配置
@@ -571,27 +580,23 @@ for (auto& [code, quoter] : _quoters)
 quoter->setOrderTracker(_order_tracker.get());
 }
 
-// 初始化双边报价统计模块
-_bilateral_stats = std::make_unique<BilateralQuoteStats>();
-
-// 从第一个 quoter 的配置读取双边报价统计参数（做市义务要求）
-BilateralStatsConfig bilateral_cfg;
-if (!_quoters.empty())
-{
-const auto& first_quoter_cfg = _quoters.begin()->second->config();
-bilateral_cfg.min_valid_qty = first_quoter_cfg.min_valid_qty;
-bilateral_cfg.max_obligation_spread = first_quoter_cfg.max_obligation_spread;
-}
-_bilateral_stats->setConfig(bilateral_cfg);
-
-WTSLogger::info("BilateralQuoteStats: min_valid_qty={}, max_obligation_spread={:.1f}ticks",
-bilateral_cfg.min_valid_qty, bilateral_cfg.max_obligation_spread);
-
-// 为所有 FutuQuoter 设置双边报价统计
+// R3 v2: BilateralQuoteStats 已下放到 Per-Quoter 值成员
+//   - 每个 quoter 持值成员，setConfig(min_valid_qty/max_obligation_spread) 来自 quoter 自身 cfg
+//   - sessInfo 通过 ctx->stra_get_comminfo(code)->getSessionInfo() 获取
+//   - sessInfo=nullptr 硬失败：该 quoter 统计 DISABLED（initBilateralStats 内部 WTSLogger::error）
+uint32_t stats_ok = 0;
+uint32_t stats_fail = 0;
 for (auto& [code, quoter] : _quoters)
 {
-quoter->setBilateralStats(_bilateral_stats.get());
+    WTSCommodityInfo* commInfo = ctx->stra_get_comminfo(code.c_str());
+    WTSSessionInfo* sessInfo = commInfo ? commInfo->getSessionInfo() : nullptr;
+    if (quoter->initBilateralStats(sessInfo))
+        stats_ok++;
+    else
+        stats_fail++;
 }
+WTSLogger::info("BilateralQuoteStats: Per-Quoter init done, ok={} fail={} (total={})",
+    stats_ok, stats_fail, _quoters.size());
 
 
 
@@ -626,6 +631,29 @@ _order_router->setRateLimit(Source::CLOSEOUT, 0, 1000);  // 0 = 不限速
 
 _coordinator->setOrderRouter(_order_router.get());
 WTSLogger::info("OrderRouter: initialized (arb=30/s, hedge=30/s, closeout=unlimited)");
+
+//------------------------------------------------------------
+// 5.7 CloseoutExecutor（渐进式收盘对冲执行器）
+//------------------------------------------------------------
+_closeout_executor = std::make_unique<CloseoutExecutor>();
+_closeout_executor->setOrderRouter(_order_router.get());
+_closeout_executor->setOrderTracker(_order_tracker.get());
+_closeout_executor->setPortfolio(_portfolio.get());
+{
+    CloseoutExecConfig exec_cfg;
+    exec_cfg.drain_timeout_ms    = _config.closeout.drain_timeout_ms;
+    exec_cfg.depth_ratio_passive = _config.closeout.depth_ratio_passive;
+    exec_cfg.depth_ratio_mid     = _config.closeout.depth_ratio_mid;
+    exec_cfg.depth_ratio_aggr    = _config.closeout.depth_ratio_aggr;
+    exec_cfg.sweep_threshold_ms  = _config.closeout.sweep_threshold_ms;
+    exec_cfg.sweep_ticks         = _config.closeout.sweep_ticks;
+    exec_cfg.use_fak             = _config.closeout.use_fak;
+    _closeout_executor->setConfig(exec_cfg);
+}
+WTSLogger::info("CloseoutExecutor: initialized (drain={}ms, sweep_ticks={}, fak={})",
+                _config.closeout.drain_timeout_ms,
+                _config.closeout.sweep_ticks,
+                _config.closeout.use_fak);
 
 
 // 设置交易时段信息（用于休市检查）
@@ -986,8 +1014,8 @@ id(), ci.code);
 }
 }
 
-// 初始化业务模块（需要合约参数）
-initBusinessModules();
+// 初始化业务模块（需要合约参数 + ctx 用于 BilateralStats Per-Quoter sessInfo 注入）
+initBusinessModules(ctx);
 
 //============================================================
 // 配置校验（在 initBusinessModules 之后，所有模块参数已加载）
@@ -1146,6 +1174,10 @@ _closeout_pending_ids.clear();
 _closeout_hedge_pending = false;
 _closeout_hedge_wait_ticks = 0;
 
+// Reset CloseoutExecutor for new session
+if (_closeout_executor)
+    _closeout_executor->reset();
+
 // 重置本地状态
 _blocked_contracts.clear();
 
@@ -1161,11 +1193,15 @@ if (_stp)
 _stp->clear();
 }
 
-// 初始化双边报价统计
-if (_bilateral_stats)
+// R3 v2: BilateralStats 已 Per-Quoter 化,session start 在每个 quoter 上独立触发
 {
-uint64_t now = ctx->stra_get_secs() * 1000ULL;
-_bilateral_stats->onSessionStart(now);
+    uint32_t uTime_HHMM = ctx->stra_get_time();
+    for (auto& [code, quoter] : _quoters)
+    {
+        auto& stats = quoter->getBilateralStats();
+        if (stats.hasSessionInfo())
+            stats.onSessionStart(uTime_HHMM);
+    }
 }
 
 WTSLogger::info("UftFutuMmStrategy[{}] session begin: {}", id(), uTDate);
@@ -1195,13 +1231,18 @@ if (_stp)
 _stp->clear();
 }
 
-// 输出双边报价统计结果
-if (_bilateral_stats)
+// R3 v2: BilateralStats Per-Quoter,逐合约 onSessionEnd + formatString 输出
 {
-uint64_t now = ctx->stra_get_secs() * 1000ULL;
-_bilateral_stats->onSessionEnd(now);
-        WTSLogger::info("[BILATERAL_STATS] {}", _bilateral_stats->formatString());
+    uint32_t uTime_HHMM = ctx->stra_get_time();
+    uint32_t sec_in_min = ctx->stra_get_secs();
+    for (auto& [code, quoter] : _quoters)
+    {
+        auto& stats = quoter->getBilateralStats();
+        if (!stats.hasSessionInfo()) continue;
+        stats.onSessionEnd(uTime_HHMM, sec_in_min);
+        WTSLogger::info("[BILATERAL_STATS] {} | {}", code, stats.formatString());
     }
+}
     
     // 绩效分析报告
     if (_perf_analyzer)
@@ -1257,7 +1298,7 @@ return;
 // 报价暂停自动恢复：如果仅因下单错误暂停（非trading_halted），
 // 且暂停超过10秒，自动恢复报价并重置错误计数
 //============================================================
-if (_trading_state.quoting_paused && !_trading_state.trading_halted && _quoting_paused_since > 0)
+if (_trading_state.quoting_paused && !_trading_state.trading_halted && !_trading_state.closeout_mode && _quoting_paused_since > 0)
 {
     uint64_t paused_ms = TimeUtils::getLocalTimeNow() - _quoting_paused_since;
     if (paused_ms > 10000)  // 10秒超时自动恢复
@@ -1297,41 +1338,51 @@ std::string anchor = _config.anchor_code;
 if (stdCode != anchor) {
     double beta = _correlation_manager->getHedgeRatio(stdCode, anchor);
     
-    // BUG-7 修复：beta稳定性保护 + 冷启动保护
-    // 问题：冷启动时beta不稳定，可能降到BETA_MIN=0.5
-    // 导致同品种跨期delta被严重低估
-    // 
-    // 保护措施：
-    // 1. 冷启动保护：样本数不足时保持初始hedge_ratio=1.0
-    // 2. 同品种跨期约束：beta偏离1.0过大时不更新
-    // 3. 变化率限制：单次更新不超过20%
+    // hedge_ratio 更新策略 (语义统一为"货值等价手数"后)：
+    //   beta = (p_c × m_c × price_beta_c→anchor) / (p_anchor × m_anchor)
+    //   见 CorrelationManager::getHedgeRatio
+    //
+    // 冷启动初始化 (Z=2):
+    //   首次 tick 时,无论样本数是否足够,都用纯货值比 (price_beta=1)
+    //   把 cs->hedge_ratio 从默认 1.0 拉到合理量级,避免持仓 delta 被严重低估
+    //   样本攒够后再切换到 EMA β 平滑值
+    //
+    // 保护措施 (Y=1):
+    //   1. 冷启动样本不足: 不切到 EMA β 路径,但保留货值比初始化
+    //   2. 删掉 |β-1|>0.3 保护 (跨期 EC 真实 β 范围 0.4~2.0,旧保护与货值修正语义冲突)
+    //   3. 变化率限制: 单次更新不超过 ±20%,防止异常跳变
     auto stats = _correlation_manager->getCorrelation(stdCode, anchor);
     
     if (auto* cs = _portfolio->getContract(stdCode)) {
-        bool should_update = true;
-        
-        // 冷启动保护：样本数不足100时不更新（保持初始1.0）
-        if (stats.sample_count < 100) {
-            should_update = false;
-        }
-        
-        // 同品种跨期约束：beta偏离1.0超过30%时不更新
-        // 同品种跨期beta应该≈1.0，大幅偏离说明计算有误
-        if (should_update && std::abs(beta - 1.0) > 0.3) {
-            should_update = false;
-        }
-        
-        // 变化率限制：单次更新不超过20%
-        if (should_update && cs->hedge_ratio > 0) {
-            double change_ratio = std::abs(beta - cs->hedge_ratio) / cs->hedge_ratio;
-            if (change_ratio > 0.2) {
-                // 限制在当前值的±20%范围内
-                beta = cs->hedge_ratio * (1.0 + (beta > cs->hedge_ratio ? 0.2 : -0.2));
-            }
-        }
-        
-        if (should_update) {
+        // === Z=2: 冷启动货值比初始化 ===
+        // 仅在 hedge_ratio 仍是默认值 (initialized=false) 且 beta 数值合理时执行一次
+        // CorrelationManager::getHedgeRatio 在数据未就绪时返回 1.0,我们额外要求
+        // last_price 已就绪 (cs->last_price > 0) 才认为初始化数据有效
+        if (!cs->hedge_ratio_initialized && cs->last_price > 0 && std::isfinite(beta) && beta > 0) {
             cs->hedge_ratio = beta;
+            cs->hedge_ratio_initialized = true;
+            // 冷启动初始化后立即返回,等下一 tick 走正常更新路径
+        } else {
+            // === 正常更新路径 (样本攒够后) ===
+            bool should_update = true;
+            
+            // 冷启动保护：样本数不足100时不更新 EMA β
+            if (stats.sample_count < 100) {
+                should_update = false;
+            }
+            
+            // 变化率限制：单次更新不超过20%
+            if (should_update && cs->hedge_ratio > 0) {
+                double change_ratio = std::abs(beta - cs->hedge_ratio) / cs->hedge_ratio;
+                if (change_ratio > 0.2) {
+                    // 限制在当前值的±20%范围内
+                    beta = cs->hedge_ratio * (1.0 + (beta > cs->hedge_ratio ? 0.2 : -0.2));
+                }
+            }
+            
+            if (should_update && std::isfinite(beta) && beta > 0) {
+                cs->hedge_ratio = beta;
+            }
         }
     }
 }
@@ -1406,17 +1457,58 @@ if (result.closeout_executed && _config.closeout.flatten_position
     WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: halted + cancelAll, hedge deferred {} ticks",
                     id(), CLOSEOUT_HEDGE_WAIT_TICKS);
 }
-// Deferred hedge execution: wait N ticks then read fresh net_delta and hedge
+// Deferred CloseoutExecutor start: wait N ticks then start executor
 if (_closeout_hedge_pending)
 {
     _closeout_hedge_wait_ticks++;
     if (_closeout_hedge_wait_ticks >= CLOSEOUT_HEDGE_WAIT_TICKS)
     {
-        WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: executing deferred hedge after {} ticks",
+        WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: starting CloseoutExecutor after {} ticks",
                         id(), _closeout_hedge_wait_ticks);
         executeCloseoutHedge(ctx);
         _closeout_hedge_pending = false;
         _closeout_hedge_wait_ticks = 0;
+    }
+}
+// Run CloseoutExecutor every tick if active
+if (_closeout_executor && _closeout_executor->isActive())
+{
+    const ContractState* anchorState = _portfolio->getContract(_config.anchor_code);
+    MarketSnapshot snap;
+    snap.bid1       = anchorState ? anchorState->bid1 : 0;
+    snap.ask1       = anchorState ? anchorState->ask1 : 0;
+    snap.bid1_qty   = tick->bidqty(0);
+    snap.ask1_qty   = tick->askqty(0);
+    snap.price_tick = anchorState ? anchorState->tick_size : 0;
+    // timestamp in ms-from-midnight for urgency calc
+    {
+        uint32_t at = tick->actiontime();  // HHMMSSmmm
+        uint32_t hh = at / 10000000;
+        uint32_t mm = (at / 100000) % 100;
+        uint32_t ss = (at / 1000) % 100;
+        uint32_t mmm = at % 1000;
+        snap.timestamp_ms = static_cast<uint64_t>(hh) * 3600000ULL
+                          + static_cast<uint64_t>(mm) * 60000ULL
+                          + static_cast<uint64_t>(ss) * 1000ULL
+                          + mmm;
+    }
+    _closeout_executor->run(ctx, snap);
+
+    // Check executor results
+    if (_closeout_executor->isCompleted())
+    {
+        if (_risk_monitor->getCloseoutState() != CloseoutState::COMPLETED)
+        {
+            uint64_t now = ctx->stra_get_date() * 1000000ULL
+                         + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+            _risk_monitor->markCloseoutCompleted(now);
+        }
+    }
+    else if (_closeout_executor->isFailed())
+    {
+        uint64_t now = ctx->stra_get_date() * 1000000ULL
+                     + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+        _risk_monitor->markCloseoutFailed(now);
     }
 }
 // Reset flag on state changes that warrant a fresh hedge attempt:
@@ -1430,6 +1522,9 @@ if (cs == CloseoutState::IDLE || cs == CloseoutState::FAILED
     _closeout_hedge_executed = false;
     _closeout_hedge_pending = false;
     _closeout_hedge_wait_ticks = 0;
+    // Reset CloseoutExecutor to allow fresh retry
+    if (_closeout_executor && !_closeout_executor->isCompleted())
+        _closeout_executor->reset();
 }
 }
 else
@@ -1463,131 +1558,75 @@ _tick_count++;
 void UftFutuMmStrategy::executeCloseoutHedge(IUftStraCtx* ctx)
 {
 //============================================================
-// 收盘前对冲所有敞口
-// 1. 计算当前净 Delta (已扣除 target_position)
-//    使用 getNetDelta() 而非 getTotalDelta()：
-//    - 账户实仓可能含多策略共享持仓，本策略只对自己的记账层负责
-//    - getNetDelta() = sum((position - target_position) * hedge_ratio)
-//    - 这才是本策略 closeout 应该消除的"超出 target 的敞口"
-// 2. 使用锚定合约对冲
+// CloseoutExecutor 启动入口
+// 实际执行逻辑在 CloseoutExecutor::run() 中，由 on_tick 每 tick 调用。
+// 本函数只负责一次性的 start()：计算 close_time_ms，启动执行器。
+//
+// 收盘前对冲所有敞口：
+//   1. 检查是否已 flat → 直接 COMPLETED
+//   2. 获取锚定合约 + 对冲比率
+//   3. 计算 close_time_ms（ms-from-midnight）
+//   4. 启动 CloseoutExecutor
 //============================================================
+
+if (!_closeout_executor)
+{
+    WTSLogger::error("UftFutuMmStrategy[{}] CloseoutExecutor is null!", id());
+    return;
+}
+
+// 已经在运行（retry 重入场景），不重复 start
+if (!_closeout_executor->isIdle())
+    return;
 
 double totalDelta = _portfolio->getNetDelta();
 
 if (std::abs(totalDelta) < 0.01)
 {
-WTSLogger::info("UftFutuMmStrategy[{}] Closeout: No position to hedge (Delta=0)", id());
-// FIX Bug-A-2: Only mark COMPLETED if not already completed (avoid Invalid transition 3→3)
-if (_risk_monitor->getCloseoutState() != CloseoutState::COMPLETED)
-{
-    uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-    _risk_monitor->markCloseoutCompleted(now);
-}
-return;
+    WTSLogger::info("UftFutuMmStrategy[{}] Closeout: No position to hedge (Delta=0)", id());
+    if (_risk_monitor->getCloseoutState() != CloseoutState::COMPLETED)
+    {
+        uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+        _risk_monitor->markCloseoutCompleted(now);
+    }
+    return;
 }
 
 // 获取锚定合约信息
 const ContractState* anchorState = _portfolio->getContract(_config.anchor_code);
 if (!anchorState)
 {
-WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: anchor contract {} not found",
-id(), _config.anchor_code);
-return;
+    WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: anchor contract {} not found",
+                     id(), _config.anchor_code);
+    return;
 }
 
-// 计算需要交易的手数
-// Delta = position * hedge_ratio
-// 需要的手数 = -Delta / hedge_ratio
 double hedgeRatio = anchorState->hedge_ratio;
-
 if (hedgeRatio <= 0)
 {
-WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: invalid hedgeRatio={}",
-id(), hedgeRatio);
-return;
+    WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: invalid hedgeRatio={}",
+                     id(), hedgeRatio);
+    return;
 }
 
-double hedgeQty = -totalDelta / hedgeRatio;
-int32_t lots = static_cast<int32_t>(std::round(hedgeQty));
+// 计算 close_time_ms (ms-from-midnight from HHMMSS config)
+uint32_t close_hhmmss = _config.closeout.close_time;  // e.g. 150000
+uint32_t hh = close_hhmmss / 10000;
+uint32_t mm = (close_hhmmss / 100) % 100;
+uint32_t ss = close_hhmmss % 100;
+uint64_t close_time_ms = static_cast<uint64_t>(hh) * 3600000ULL
+                       + static_cast<uint64_t>(mm) * 60000ULL
+                       + static_cast<uint64_t>(ss) * 1000ULL;
 
-if (lots == 0)
-{
-WTSLogger::info("UftFutuMmStrategy[{}] Closeout: Hedge quantity too small (lots=0)", id());
-uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-_risk_monitor->markCloseoutCompleted(now);
-return;
-}
+// 启动 CloseoutExecutor
+WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: starting CloseoutExecutor "
+                "(code={}, delta={:.2f}, hedge_ratio={:.2f}, close_ms={})",
+                id(), _config.anchor_code, totalDelta, hedgeRatio, close_time_ms);
 
-// 获取当前市场价格
-double bidPrice = anchorState->bid1;
-double askPrice = anchorState->ask1;
+_closeout_executor->start(ctx, _config.anchor_code.c_str(),
+                           close_time_ms, hedgeRatio);
 
-if (bidPrice <= 0 || askPrice <= 0)
-{
-WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: invalid market prices bid={}, ask={}",
-id(), bidPrice, askPrice);
-return;
-}
-
-// 执行对冲交易
-bool isBuy = (lots > 0);  // 正数表示需要买入来对冲空头
-int32_t absLots = std::abs(lots);
-
-// 使用对手价确保成交
-double executePrice = isBuy ? askPrice : bidPrice;
-
-WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT HEDGE: {} {} @ {} (Delta={})",
-id(), 
-isBuy ? "BUY" : "SELL",
-absLots, 
-executePrice,
-totalDelta);
-
-if (isBuy)
-{
-if (_order_router)
-{
-auto res = _order_router->submitBuy(ctx, _config.anchor_code.c_str(), executePrice, absLots, Source::CLOSEOUT);
-if (res.rate_limited)
-WTSLogger::warn("Closeout hedge BUY rate limited: {}", _config.anchor_code);
-else if (res.self_trade_blocked)
-WTSLogger::warn("Closeout hedge BUY self-trade blocked: {}", _config.anchor_code);
-// FIX Bug-D: track hedge order ids
-for (auto id : res.localids) _closeout_pending_ids.insert(id);
-}
-else
-{
-// FIX P0-2+P1-7: Use stra_buy (net position mode) instead of stra_enter_long (open direction)
-// Framework auto-splits into open/close based on current position
-auto ids = ctx->stra_buy(_config.anchor_code.c_str(), executePrice, absLots);
-for (auto id : ids) _closeout_pending_ids.insert(id);
-}
-}
-else
-{
-if (_order_router)
-{
-auto res = _order_router->submitSell(ctx, _config.anchor_code.c_str(), executePrice, absLots, Source::CLOSEOUT);
-if (res.rate_limited)
-WTSLogger::warn("Closeout hedge SELL rate limited: {}", _config.anchor_code);
-else if (res.self_trade_blocked)
-WTSLogger::warn("Closeout hedge SELL self-trade blocked: {}", _config.anchor_code);
-// FIX Bug-D: track hedge order ids
-for (auto id : res.localids) _closeout_pending_ids.insert(id);
-}
-else
-{
-// FIX P0-2+P1-7: Use stra_sell (net position mode) instead of stra_enter_short (open direction)
-// Framework auto-splits into open/close based on current position
-auto ids = ctx->stra_sell(_config.anchor_code.c_str(), executePrice, absLots);
-for (auto id : ids) _closeout_pending_ids.insert(id);
-}
-}
-
-// FIX P0-3: Don't mark COMPLETED immediately after placing order.
-// Instead mark FLATTENING (order sent, waiting for fill).
-// on_order callback will check and mark COMPLETED when all fills received,
-// or mark FAILED on reject/cancel to trigger retry.
+// 标记 FLATTENING (executor 已启动，等待渐进成交)
 uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
 _risk_monitor->markCloseoutFlattening(now);
 }
@@ -1670,13 +1709,18 @@ _portfolio_ctx_dirty = true;
 }
 
 // 更新 Quoter 订单状态
-for (auto& [code, quoter] : _quoters)
+// R3 v2: onTrade 补时间参数(UFT: stra_get_time=HHMM, stra_get_secs=SSmmm)
 {
-if (quoter->isMyOrder(localid))
-{
-quoter->onTrade(localid, vol, price);
-break;
-}
+    uint32_t uTime_HHMM = ctx->stra_get_time();
+    uint32_t sec_in_min = ctx->stra_get_secs() / 1000;
+    for (auto& [code, quoter] : _quoters)
+    {
+        if (quoter->isMyOrder(localid))
+        {
+            quoter->onTrade(localid, vol, price, uTime_HHMM, sec_in_min);
+            break;
+        }
+    }
 }
 
 // 更新 SpreadOptimizer 成交统计 (P0-2.1: Legacy onFill removed)
@@ -1848,24 +1892,30 @@ double leftQty, double price, bool isCanceled)
 if (_risk_monitor && isCanceled)
 _risk_monitor->recordCancel();
 
-// 计算当前时间戳（毫秒），使用框架时间接口
-// stra_get_time() 返回 HHMMSS，stra_get_secs() 返回毫秒部分
+// 计算当前时间戳:
+//   - now_ms (毫秒级 epoch-like) 给 RiskMonitor 用(closeout 超时判定)
+//   - uTime_HHMM / sec_in_min 给 BilateralStats 用
+// UFT 上下文: stra_get_time() 返回 HHMM, stra_get_secs() 返回 SSmmm
 uint32_t date = ctx->stra_get_date();
-uint32_t time = ctx->stra_get_time();
-uint32_t secs = ctx->stra_get_secs();
-uint32_t h = time / 10000;
-uint32_t m = (time / 100) % 100;
-uint32_t s = time % 100;
-uint64_t now_ms = (static_cast<uint64_t>(h) * 3600 + m * 60 + s) * 1000 + secs;
+uint32_t time_hhmm = ctx->stra_get_time();
+uint32_t ssmmm = ctx->stra_get_secs();
+uint32_t h = time_hhmm / 100;
+uint32_t m = time_hhmm % 100;
+uint32_t s = ssmmm / 1000;
+uint32_t ms = ssmmm % 1000;
+uint64_t now_ms = (static_cast<uint64_t>(h) * 3600 + m * 60 + s) * 1000 + ms;
 now_ms += static_cast<uint64_t>(date) * 86400000ULL;
 
-// 更新 Quoter 订单状态（内部会从 UnifiedOrderTracker 移除）
+// 更新 Quoter 订单状态(内部会从 UnifiedOrderTracker 移除)
 // 同时触发双边报价统计更新
+// R3 v2: 改用 (uTime_HHMM, sec_in_min) 签名
+uint32_t uTime_HHMM = time_hhmm;
+uint32_t sec_in_min = s;
 for (auto& [code, quoter] : _quoters)
 {
 if (quoter->isMyOrder(localid))
 {
-quoter->onOrder(localid, isCanceled, leftQty, now_ms);
+quoter->onOrder(localid, isCanceled, leftQty, uTime_HHMM, sec_in_min);
 break;
 }
 }
