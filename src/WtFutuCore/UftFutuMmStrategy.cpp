@@ -1295,20 +1295,35 @@ if (!_channel_ready || !tick)
 return;
 
 //============================================================
-// 报价暂停自动恢复：如果仅因下单错误暂停（非trading_halted），
-// 且暂停超过10秒，自动恢复报价并重置错误计数
+// P0-4: 报价暂停条件恢复（非固定定时器）
+// 暂停期间无新错误(errors==0)才恢复，否则指数退避
 //============================================================
-if (_trading_state.quoting_paused && !_trading_state.trading_halted && !_trading_state.closeout_mode && _quoting_paused_since > 0)
+if (_trading_state.quoting_paused && !_trading_state.trading_halted && _quoting_paused_since > 0)
 {
     uint64_t paused_ms = TimeUtils::getLocalTimeNow() - _quoting_paused_since;
-    if (paused_ms > 10000)  // 10秒超时自动恢复
+    uint64_t wait_threshold = 10000;  // 初始等待 10 秒
+    if (_order_error_count > 0)
     {
-        WTSLogger::info("UftFutuMmStrategy[{}] Quoting auto-resumed after {}ms timeout (error_count reset from {})",
-            id(), paused_ms, _order_error_count);
-        // FIX P0-7: Use method instead of direct assignment
-        _trading_state.resumeQuoting();
-        _quoting_paused_since = 0;
-        _order_error_count = 0;
+        uint32_t shift = (_order_error_count < 5) ? _order_error_count : 5;
+        uint64_t exp_wait = 10000ULL << shift;
+        wait_threshold = (exp_wait > 60000ULL) ? 60000ULL : exp_wait;
+    }
+
+    if (paused_ms > wait_threshold)
+    {
+        if (_order_error_count == 0)
+        {
+            WTSLogger::info("UftFutuMmStrategy[{}] Quoting auto-resumed after {}ms (errors cleared)",
+                id(), paused_ms);
+            _trading_state.resumeQuoting();
+            _quoting_paused_since = 0;
+        }
+        else
+        {
+            WTSLogger::warn("UftFutuMmStrategy[{}] Quoting still paused ({} errors), extending wait",
+                id(), _order_error_count);
+            _quoting_paused_since = TimeUtils::getLocalTimeNow();  // 重置计时器继续等
+        }
     }
 }
 
@@ -2102,43 +2117,43 @@ if (tick)
 double price = tick->price();
 if (reduction > 0)
 {
-// 多头超限，卖出平仓 — 通过 OrderRouter
+// 多头超限，平多仓 — 通过 OrderRouter (exit_long)
 if (_order_router)
 {
-auto res = _order_router->submitSell(ctx, breached->code.c_str(), price, std::abs(reduction), Source::CLOSEOUT);
+auto res = _order_router->submitExitLong(ctx, breached->code.c_str(), price, std::abs(reduction), false, Source::CLOSEOUT);
 if (res.rate_limited)
-WTSLogger::warn("Closeout SELL rate limited: {}", breached->code);
+WTSLogger::warn("AUTO REDUCE EXIT_LONG rate limited: {}", breached->code);
 else if (res.self_trade_blocked)
-WTSLogger::warn("Closeout SELL self-trade blocked: {}", breached->code);
+WTSLogger::warn("AUTO REDUCE EXIT_LONG self-trade blocked: {}", breached->code);
 else
-WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: SELL {} x {} @ {} (position breach, via OrderRouter)", 
+WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: EXIT_LONG {} x {} @ {} (position breach, via OrderRouter)", 
 id(), breached->code, reduction, price);
 }
 else
 {
-ctx->stra_sell(breached->code.c_str(), price, std::abs(reduction));
-WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: SELL {} x {} @ {} (position breach)", 
+ctx->stra_exit_long(breached->code.c_str(), price, std::abs(reduction), false);
+WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: EXIT_LONG {} x {} @ {} (position breach)", 
 id(), breached->code, reduction, price);
 }
 }
 else
 {
-// 空头超限，买入平仓 — 通过 OrderRouter
+// 空头超限，平空仓 — 通过 OrderRouter (exit_short)
 if (_order_router)
 {
-auto res = _order_router->submitBuy(ctx, breached->code.c_str(), price, std::abs(reduction), Source::CLOSEOUT);
+auto res = _order_router->submitExitShort(ctx, breached->code.c_str(), price, std::abs(reduction), false, Source::CLOSEOUT);
 if (res.rate_limited)
-WTSLogger::warn("Closeout BUY rate limited: {}", breached->code);
+WTSLogger::warn("AUTO REDUCE EXIT_SHORT rate limited: {}", breached->code);
 else if (res.self_trade_blocked)
-WTSLogger::warn("Closeout BUY self-trade blocked: {}", breached->code);
+WTSLogger::warn("AUTO REDUCE EXIT_SHORT self-trade blocked: {}", breached->code);
 else
-WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: BUY {} x {} @ {} (position breach, via OrderRouter)", 
+WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: EXIT_SHORT {} x {} @ {} (position breach, via OrderRouter)", 
 id(), breached->code, std::abs(reduction), price);
 }
 else
 {
-ctx->stra_buy(breached->code.c_str(), price, std::abs(reduction));
-WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: BUY {} x {} @ {} (position breach)", 
+ctx->stra_exit_short(breached->code.c_str(), price, std::abs(reduction), false);
+WTSLogger::warn("UftFutuMmStrategy[{}] AUTO REDUCE: EXIT_SHORT {} x {} @ {} (position breach)", 
 id(), breached->code, std::abs(reduction), price);
 }
 }
@@ -2495,130 +2510,48 @@ _portfolio_ctx_dirty = true;
 
 void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* message)
 {
+    //============================================================
+    // 策略层不做柜台特定错误分类
+    // 柜台错误(CTP平仓不足/流控等)由 TraderCTP 适配层处理
+    // 策略只做通用错误计数: 达到阈值 → halt
+    //============================================================
     if (bSuccess)
     {
-        // 报单成功，重置错误计数并恢复报价状态
-        if (_order_error_count > 0)
-        {
-            WTSLogger::info("UftFutuMmStrategy[{}] Order success, resetting error count and resuming quoting", id());
-        }
         _order_error_count = 0;
-        
-        // 恢复报价状态（如果是因为下单错误暂停的）
         if (_trading_state.quoting_paused && !_trading_state.trading_halted)
         {
-            // FIX P0-7: Use method instead of direct assignment
             _trading_state.resumeQuoting();
             _quoting_paused_since = 0;
             WTSLogger::info("UftFutuMmStrategy[{}] Quoting resumed after successful order", id());
         }
         return;
     }
-    
-    // 报单失败，统一处理所有下单错误（不论什么原因）
+
+    // 报单失败 — 通用计数
     std::string errMsg = message ? message : "";
-    
-    // 判断错误类型：区分可恢复错误和不可恢复错误
-    bool is_recoverable = true;
-    
-    // 平仓手数超过可用持仓 - 这是持仓同步问题，应该重新同步而不是暂停
-    if (errMsg.find("平仓") != std::string::npos && 
-        (errMsg.find("可用") != std::string::npos || errMsg.find("超过") != std::string::npos))
-    {
-        WTSLogger::warn("UftFutuMmStrategy[{}] Position sync error detected: {}, will re-sync position on next tick", id(), errMsg);
-        is_recoverable = true;
-        // 重置错误计数，因为这是持仓同步问题而不是系统问题
-        _order_error_count = 0;
-        
-        // 标记需要持仓重新同步（在下次 on_tick 中处理）
-        _portfolio_ctx_dirty = true;
-        
-        // 暂停报价但不停止交易，等待下次tick时恢复
-        // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
-        _trading_state.pauseQuoting(TradingState::PauseReason::ORDER_ERROR);
-        _quoting_paused_since = TimeUtils::getLocalTimeNow();
-        return;
-    }
-    
-    // 交易所报单数量限制 - 需要等待冷却
-    // 注意：CTP返回GBK编码中文，日志中可能显示为乱码，需要同时匹配UTF-8和GBK字节模式
-    bool is_rate_limit = (errMsg.find("报单数量") != std::string::npos || 
-                          errMsg.find("限制") != std::string::npos ||
-                          errMsg.find("\xb5\xa5\xca\xfd") != std::string::npos);  // GBK: 单数
-    if (is_rate_limit)
-    {
-        WTSLogger::warn("UftFutuMmStrategy[{}] Exchange order rate limit hit: {}, cooling down", id(), errMsg);
-        is_recoverable = true;
-        _order_error_count = 0;
-        // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
-        _trading_state.pauseQuoting(TradingState::PauseReason::ORDER_ERROR);
-        _quoting_paused_since = TimeUtils::getLocalTimeNow();
-        return;
-    }
-    
-    // CTP平仓量不足 - 开平仓方向错误，不影响报价逻辑
-    // CTP返回GBK编码，日志中可能显示为乱码，需要同时匹配UTF-8和GBK字节模式
-    // 实际CTP返回: "平今仓位不足(50)" / "平昨仓位不足(51)"
-    // 之前错误匹配了"平仓量不足"，字节完全不同，导致过滤失效
-    bool is_close_position_error = 
-        // GBK字节匹配: "平今仓位不足" / "平昨仓位不足" / "平仓量不足"
-        (errMsg.find("\xc6\xbd\xbd\xf1\xb2\xd6\xce\xbb\xb2\xbb\xd7\xe3") != std::string::npos) ||  // GBK: 平今仓位不足
-        (errMsg.find("\xc6\xbd\xd7\xf2\xb2\xd6\xce\xbb\xb2\xbb\xd7\xe3") != std::string::npos) ||  // GBK: 平昨仓位不足
-        (errMsg.find("\xc6\xbd\xb2\xd6\xc1\xbf\xb2\xbb\xd7\xe3") != std::string::npos) ||            // GBK: 平仓量不足
-        // GBK宽泛匹配: "平今" / "平昨" / "平仓"
-        (errMsg.find("\xc6\xbd\xbd\xf1") != std::string::npos) ||  // GBK: 平今
-        (errMsg.find("\xc6\xbd\xd7\xf2") != std::string::npos) ||  // GBK: 平昨
-        (errMsg.find("\xc6\xbd\xb2\xd6") != std::string::npos) ||  // GBK: 平仓
-        // CTP错误码匹配(最可靠): 错误码50=平今仓位不足, 51=平昨仓位不足
-        (errMsg.find("(50)") != std::string::npos) ||
-        (errMsg.find("(51)") != std::string::npos) ||
-        // 英文关键词匹配
-        (errMsg.find("closetoday") != std::string::npos) ||
-        (errMsg.find("closeyestoday") != std::string::npos) ||
-        (errMsg.find("close short") != std::string::npos) ||
-        (errMsg.find("close long") != std::string::npos);
-    
-    if (is_close_position_error)
-    {
-        WTSLogger::warn("UftFutuMmStrategy[{}] CTP close position error (non-critical): {}", id(), errMsg);
-        // 不计入错误计数，不暂停报价
-        return;
-    }
-    
-    // 所有下单错误统一处理：暂停报价，记录错误
     _order_error_count++;
-    
-        WTSLogger::error("UftFutuMmStrategy[{}] Order FAILED (count={}/{}): localid={}, error={}",
-            id(), _order_error_count, _config.order_control.order_error_threshold, localid, errMsg);
-    
-    // 连续下单错误达到阈值，暂停交易
-    // 修复：标记为可恢复风险，允许自动恢复
+
+    WTSLogger::error("UftFutuMmStrategy[{}] Order FAILED (count={}/{}): localid={}, error={}",
+        id(), _order_error_count, _config.order_control.order_error_threshold, localid, errMsg);
+
     if (_order_error_count >= _config.order_control.order_error_threshold)
     {
-        // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
         _trading_state.pauseQuoting(TradingState::PauseReason::ORDER_ERROR);
         _trading_state.halt(TradingState::PauseReason::ORDER_ERROR);
-        
+
         WTSLogger::error("UftFutuMmStrategy[{}] Trading HALTED due to consecutive order errors (count={}/threshold={})",
             id(), _order_error_count, _config.order_control.order_error_threshold);
-        
-        // 通知风控模块暂停交易（标记为可恢复风险）
+
         if (_risk_monitor)
-        {
             _risk_monitor->haltTrading(RiskCategory::REVERSIBLE);
-        }
-        
-        // 撤销所有未成交订单，防止进一步错误
-        // FIX P0-9: 使用_main_ctx替代nullptr，确保cancelAll能真正撤单
-        for (auto& [code, quoter] : _quoters)
-        {
-            quoter->cancelAll(_main_ctx);
+
+        if (_main_ctx) {
+            for (auto& [code, quoter] : _quoters)
+                quoter->cancelAll(_main_ctx);
         }
     }
     else
     {
-        // 临时暂停报价，等待下次报单成功时重置
-        // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
         _trading_state.pauseQuoting(TradingState::PauseReason::ORDER_ERROR);
         _quoting_paused_since = TimeUtils::getLocalTimeNow();
         WTSLogger::warn("UftFutuMmStrategy[{}] Quoting temporarily paused due to order error ({}/{})",

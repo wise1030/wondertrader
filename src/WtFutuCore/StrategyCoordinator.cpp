@@ -437,6 +437,18 @@ return false;
 tc.bid_px = tick->bidprice(0);
 tc.ask_px = tick->askprice(0);
 
+// FIX P0: nan/inf tick 防御 — IEEE754 下 nan<=0 == false,会绕过 <=0 校验
+// 历史教训: EC 数据存在 ts=0859... 预开盘 nan tick 污染 SpreadCalculator 的 leg_history,
+// 进而 calculateBeta()=nan → hedge_ratio=nan → delta()=position*nan=nan,蔓延全局
+if (!std::isfinite(tc.bid_px) || !std::isfinite(tc.ask_px)) {
+    static thread_local uint64_t nan_tick_cnt = 0;
+    if ((++nan_tick_cnt & 0xFFF) == 1) {  // 每 4096 次打一条,避免日志洪水
+        WTSLogger::warn("StrategyCoordinator: {} non-finite tick bid={} ask={} (cnt={}), skipping",
+            tc.code, tc.bid_px, tc.ask_px, nan_tick_cnt);
+    }
+    return false;
+}
+
 if (tc.bid_px <= 0 || tc.ask_px <= 0) {
 return false;
 }
@@ -659,6 +671,38 @@ if (_trading_state) {
     _trading_state->halt(TradingState::PauseReason::RISK_LIMIT);
 }
 _risk_monitor->haltTrading(category, _portfolio->getTotalPnL());
+
+// P0-2: halt 后动作补全 — 撤所有做市单
+if (_quoters) {
+    for (auto& [code, quoter] : *_quoters) {
+        quoter->cancelAll(ctx);
+    }
+}
+// 撤所有非做市活跃单
+if (_order_router) {
+    _order_router->cancelAllBySource(ctx, Source::CLOSEOUT);
+    _order_router->cancelAllBySource(ctx, static_cast<Source>(1));  // HEDGE
+}
+
+// IRREVERSIBLE → 强平(对手价FAK)
+if (category == RiskCategory::IRREVERSIBLE && _portfolio && _order_router) {
+    double delta = _portfolio->getTotalDelta();
+    if (std::abs(delta) > 0.01) {
+        const std::string& anchor = _portfolio->getAnchorContract();
+        const ContractState* cs = _portfolio->getContract(anchor);
+        if (cs && cs->last_price > 0) {
+            double qty = std::abs(delta);
+            if (delta > 0) {
+                _order_router->submitExitLong(ctx, anchor.c_str(), cs->bid1, qty, true, Source::CLOSEOUT, 1);
+            } else {
+                _order_router->submitExitShort(ctx, anchor.c_str(), cs->ask1, qty, true, Source::CLOSEOUT, 1);
+            }
+            WTSLogger::error("[RISK] FORCE FLAT: delta={:.1f}, anchor={}, qty={:.0f} @ {}",
+                delta, anchor, qty, delta > 0 ? cs->bid1 : cs->ask1);
+        }
+    }
+}
+
 if (_arb_executor) {
 AsyncArbConfig arbCfg = _arb_executor->getConfig();
 arbCfg.enabled.store(false);
@@ -844,7 +888,11 @@ l0_ask = res.ask_price;
 // FIX P0-12: 使用TradingState查询方法
 bool allow_bid = _trading_state ? _trading_state->canBuy() : true;
 bool allow_ask = _trading_state ? _trading_state->canSell() : true;
-
+// v3 软风控字段：从 RiskMonitor.checkPreTradePosition 透传到 FutuQuoter.refreshQuotes
+double _v3_long_util = 0.0;
+double _v3_short_util = 0.0;
+bool   _v3_force_ask_obligation = false;
+bool   _v3_force_bid_obligation = false;
 if (_risk_monitor) {
 auto pre_trade = _risk_monitor->checkPreTradePosition(
 tc.code, _portfolio, _order_tracker);
@@ -855,13 +903,7 @@ _v3_long_util = pre_trade.long_utilization;
 _v3_short_util = pre_trade.short_utilization;
 _v3_force_ask_obligation = pre_trade.force_ask_obligation;
 _v3_force_bid_obligation = pre_trade.force_bid_obligation;
-} else {
-_v3_long_util = 0.0;
-_v3_short_util = 0.0;
-_v3_force_ask_obligation = false;
-_v3_force_bid_obligation = false;
-}
-
+} 
 if (_cfg.use_toxicity_detector && _toxicity) {
 ToxicityMetrics tox = _toxicity->analyze();
 

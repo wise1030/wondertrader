@@ -25,7 +25,6 @@ struct TradingState {
     bool short_blocked = false;       ///< 禁止卖出
     bool toxicity_paused = false;     ///< 毒性暂停
     bool market_paused = false;       ///< 市场状态暂停（极端波动等）
-    bool closeout_mode = false;       ///< 收盘平仓模式
     
     /// 暂停原因追踪
     enum class PauseReason : uint8_t {
