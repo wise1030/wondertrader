@@ -67,7 +67,7 @@ struct ContractState
     double      prev_position;  ///< BUG-10: Previous position for trade effect logging
     double      avg_cost;       ///< Average cost
     double      unrealized_pnl; ///< Unrealized P&L
-    double      realized_pnl;   ///< FIX P0-1: Realized P&L (accumulated from closed positions)
+    double      realized_pnl;   ///< Realized P&L (accumulated from closed positions)
     
     // Market data
     double      last_price;     ///< Latest mid/last price
@@ -238,7 +238,7 @@ public:
     /// Mark to market with last price
     void markToMarket(const std::string& code, double lastPrice);
     
-    /// FIX P0-1: Update daily_pnl for a contract (daily_pnl = unrealized_pnl + realized_pnl)
+    /// Update daily_pnl for a contract (daily_pnl = unrealized_pnl + realized_pnl)
     void updateDailyPnL(const std::string& code);
     
     //==========================================================================
@@ -298,7 +298,7 @@ public:
         return std::max(long_exposure, short_exposure);
     }
     
-    // FIX P1-3: 新增毛暴露计算，跨品种多空不能简单对冲
+    // 新增毛暴露计算，跨品种多空不能简单对冲
     // getTotalExposure取max低估了跨品种风险(如rb多头+I空头，品种不同无法对冲)
     // getTotalGrossExposure返回sum(long+short)，用于更严格的风控检查
     inline double getTotalGrossExposure() const

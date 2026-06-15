@@ -34,7 +34,7 @@ public:
     void setWindowSize(uint32_t windowSize);
     void setVpinWeight(double weight) { _vpin_weight = weight; }
     
-    /// FIX P2-12: 可配置的百分位分箱阈值
+    /// 可配置的百分位分箱阈值
     struct PercentileBins
     {
         double vol_p10;  ///< 10th percentile threshold
@@ -68,7 +68,7 @@ private:
     
     double _vpin_weight = 0.3;
     double _last_mid = 0;
-    PercentileBins _percentile_bins;  ///< FIX P2-12: 可配置百分位阈值
+    PercentileBins _percentile_bins;  ///< 可配置百分位阈值
     
     void updateVolatility();
     VolTier determineTier(double percentile);

@@ -100,7 +100,7 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
         cs->unrealized_pnl = (lastPrice - cs->avg_cost) * cs->position * cs->multiplier;
     }
     
-    // FIX P0-1: Update daily_pnl whenever markToMarket is called
+    // Update daily_pnl whenever markToMarket is called
     updateDailyPnL(code);
 }
 
@@ -109,7 +109,7 @@ void FutuPortfolio::updateDailyPnL(const std::string& code)
     ContractState* cs = getContract(code);
     if (!cs) return;
     
-    // FIX P0-1: daily_pnl = unrealized_pnl + realized_pnl
+    // daily_pnl = unrealized_pnl + realized_pnl
     cs->daily_pnl = cs->unrealized_pnl + cs->realized_pnl;
 }
 

@@ -226,7 +226,7 @@ TickContext tc;
 tc.code = stdCode;
 tc.time_hms = ctx->stra_get_time();
 tc.date = ctx->stra_get_date();
-// FIX P0-1: 使用毫秒时间戳替代压缩时间戳，修复毒性冷却期比较
+// 使用毫秒时间戳替代压缩时间戳，修复毒性冷却期比较
 // 原代码: tc.timestamp = tc.date * 1000000ULL + tc.time_hms * 100ULL + ctx->stra_get_secs();
 // 问题: 压缩时间戳+毫秒偏移比较无意义
 tc.timestamp = TimeUtils::getLocalTimeNow();  // 毫秒时间戳，用于冷却期计算
@@ -363,7 +363,7 @@ return true;
 case CloseoutSub::COMPLETED:
 {
 //======================================================================
-// FIX Bug-A: 区分夜盘/白盘 closeout 完成
+// 区分夜盘/白盘 closeout 完成
 //
 // 夜盘平仓完成后，立即重置状态+恢复做市。
 // 白盘 closeout 完成后，不再重置（终态，直到日内交易结束）。
@@ -403,7 +403,7 @@ return false;
 }
 
 // 白盘 closeout 完成 → 终态，不做市直到日内交易结束
-// FIX Bug-A-2: 只在首次进入 COMPLETED 时打日志+halt，避免每 tick 循环
+// 只在首次进入 COMPLETED 时打日志+halt，避免每 tick 循环
 if (_trading_state) {
     _trading_state->enterCloseout();
 }
@@ -439,7 +439,7 @@ return false;
 tc.bid_px = tick->bidprice(0);
 tc.ask_px = tick->askprice(0);
 
-// FIX P0: nan/inf tick 防御 — IEEE754 下 nan<=0 == false,会绕过 <=0 校验
+// nan/inf tick 防御 — IEEE754 下 nan<=0 == false,会绕过 <=0 校验
 // 历史教训: EC 数据存在 ts=0859... 预开盘 nan tick 污染 SpreadCalculator 的 leg_history,
 // 进而 calculateBeta()=nan → hedge_ratio=nan → delta()=position*nan=nan,蔓延全局
 if (!std::isfinite(tc.bid_px) || !std::isfinite(tc.ask_px)) {
@@ -465,7 +465,7 @@ tc.tick_size = cs->tick_size;
 }
 }
 
-// FIX P2: tick_size=0保护 — 合约信息缺失时除零会导致报价计算崩溃
+// tick_size=0保护 — 合约信息缺失时除零会导致报价计算崩溃
 if (tc.tick_size <= 0) {
 WTSLogger::warn("StrategyCoordinator: {} tick_size=0 (contract info missing), skipping tick", tc.code);
 return false;
@@ -476,7 +476,7 @@ auto sess_it = _session_info.find(tc.code);
 if (sess_it != _session_info.end() && sess_it->second)
 {
 wtp::WTSSessionInfo* sessInfo = sess_it->second;
-// FIX: stra_get_time() 全栈约定返回 HHMM(4位), 不是 HHMMSS(6位)
+// stra_get_time() 全栈约定返回 HHMM(4位), 不是 HHMMSS(6位)
 // 之前 /100 → HH, 把 23:14 误判成 00:23, 导致回测全 skip
 uint32_t currentTime = ctx->stra_get_time();  // HHMM 格式
 tc.is_trading_session = sessInfo->isInTradingTime(currentTime);
@@ -548,7 +548,7 @@ const SignalContext& sig_ctx = agg_it->second->update(*book_it->second);
 SignalContext& mutable_sig_ctx = agg_it->second->getContext();
 
 // 3. 更新市场状态暂停标志
-// FIX P0-12: 使用TradingState方法
+// 使用TradingState方法
 if (sig_ctx.shouldPause()) {
     if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::MARKET);
     // DIAG: 限频诊断日志，确认shouldPause()触发原因
@@ -617,7 +617,7 @@ mutable_sig_ctx.toxicity.toxic_detected = true;
 mutable_sig_ctx.toxicity.toxic_side = tox.toxic_side;
 mutable_sig_ctx.toxicity.valid = true;
 } else {
-// FIX BUG-15b: toxic_detected每tick重算，不复位锁存
+// toxic_detected每tick重算，不复位锁存
 // 与should_pause相同的锁存BUG: 只设true不复位false
 // 导致toxic_detected一旦被设就永久锁死
 mutable_sig_ctx.toxicity.toxic_detected = false;
@@ -636,7 +636,6 @@ if (!_risk_monitor || !_portfolio) return true;
 
 // Check if previously halted (hard limit)
 if (_risk_monitor->isTradingHalted()) {
-// FIX P0-11/P0-12: 空指针保护 + 使用TradingState方法
 if (_trading_state) {
     _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
@@ -652,7 +651,7 @@ return false;
 }
 
 if (_risk_monitor->checkDeltaRate()) {
-// FIX P0-12: 使用TradingState方法
+// 使用TradingState方法
 if (_trading_state) {
     _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
@@ -668,7 +667,7 @@ RiskAction action = _risk_monitor->determineActionWithCategory(violations, categ
 switch (action)
 {
 case RiskAction::HALT_TRADING:
-// FIX P0-12: 使用TradingState方法
+// 使用TradingState方法
 if (_trading_state) {
     _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
@@ -714,7 +713,7 @@ WTSLogger::error("StrategyCoordinator[{}]: Arbitrage executor disabled due to HA
 break;
 
 case RiskAction::PAUSE_QUOTING:
-// FIX P0-12: 使用TradingState方法
+// 使用TradingState方法
 if (_trading_state) {
     _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
@@ -728,12 +727,12 @@ WTSLogger::warn("StrategyCoordinator[{}]: Arbitrage executor disabled due to PAU
 break;
 
 case RiskAction::BLOCK_SIDE_LONG:
-// FIX P0-12: 使用TradingState方法
+// 使用TradingState方法
 if (_trading_state) _trading_state->blockLong();
 break;
 
 case RiskAction::BLOCK_SIDE_SHORT:
-// FIX P0-12: 使用TradingState方法
+// 使用TradingState方法
 if (_trading_state) _trading_state->blockShort();
 break;
 
@@ -744,7 +743,6 @@ break;
 else
 {
 // Auto-recovery check (if previously paused/blocked)
-// FIX P0-11/P0-12: 空指针保护 + 使用TradingState查询
 if (_trading_state && !_trading_state->isActive())
 {
 if (_risk_monitor->canRecover(_portfolio))
@@ -770,18 +768,17 @@ WTSLogger::info("StrategyCoordinator[{}]: Risk normalized, resuming operations",
 }    }
 
 // Check toxicity cooldown
-// FIX P0-11: 空指针保护 + P0-12: 使用TradingState方法
+// 空指针保护 + P0-12: 使用TradingState方法
 if (_toxicity && tc.timestamp < _toxicity_resume_time) {
 if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::TOXICITY);
 if (_self_trade_calibrator) {
 _self_trade_calibrator->decayCalibration(tc.code, tc.timestamp, _cfg.modules.toxicity_cooloff_ms);
 }
 } else {
-// FIX P0-11/P0-12: 空指针保护 + 使用TradingState方法
 if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::NORMAL);
 }
 
-// FIX P0-11: 空指针保护
+// 空指针保护
 return !_trading_state || _trading_state->qphase != QuotingPhase::RISK_HALTED;
 }
 
@@ -792,7 +789,6 @@ return !_trading_state || _trading_state->qphase != QuotingPhase::RISK_HALTED;
 bool StrategyCoordinator::processQuoting(
 wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick)
 {
-// FIX P0-11/P0-12: 空指针保护 + 使用TradingState查询方法
 if (!_trading_state || !_trading_state->canQuote()) {
 return false;
 }
@@ -883,7 +879,7 @@ l0_ask = res.ask_price;
 //==========================================================================
 // 3.1 毒性风控检查 (Toxicity Risk Control)
 //==========================================================================
-// FIX P0-12: 使用TradingState查询方法
+// 使用TradingState查询方法
 bool allow_bid = _trading_state ? _trading_state->canBuy() : true;
 bool allow_ask = _trading_state ? _trading_state->canSell() : true;
 // v3 软风控字段：从 RiskMonitor.checkPreTradePosition 透传到 FutuQuoter.refreshQuotes
@@ -1059,7 +1055,7 @@ if (!is_emergency)
         
         if (is_reverse)
         {
-            // FIX P2-7: 反向对冲阈值基于max_delta而非上次hedge_delta
+            // 反向对冲阈值基于max_delta而非上次hedge_delta
             // 原代码用abs(_last_hedge_delta)*1.2，如果上次对冲时delta很小，
             // 阈值也很小，导致频繁反向对冲(振荡)。
             // 改为基于max_delta: reverse_threshold = max_delta * factor(默认1.2)

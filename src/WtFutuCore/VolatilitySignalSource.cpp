@@ -76,7 +76,7 @@ void RealizedVolSignalSource::updateVolatility()
 double RealizedVolSignalSource::getVolPercentile() const
 {
     double vol = _result.realized_vol;
-    // FIX P2-12: 使用可配置的百分位分箱阈值替代硬编码
+    // 使用可配置的百分位分箱阈值替代硬编码
     // 原代码硬编码阈值对不同品种不适用(如原油vs豆粕波动率差异大)。
     // 现从_percentile_bins读取，可通过setPercentileBins()或配置文件调整。
     if (vol < _percentile_bins.vol_p10) return 10.0;
@@ -107,7 +107,7 @@ void RealizedVolSignalSource::reset()
 
 //------------------------------------------------------------------------------
 
-// FIX P2-12: PercentileBins::fromVariant — 从配置文件读取百分位阈值
+// PercentileBins::fromVariant — 从配置文件读取百分位阈值
 // Note: defined outside the struct with full qualified name
 auto
 RealizedVolSignalSource::PercentileBins::fromVariant(wtp::WTSVariant* v)

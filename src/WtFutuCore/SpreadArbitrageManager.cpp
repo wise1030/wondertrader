@@ -393,7 +393,7 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     if (!_config.enabled)
         return signal;
     
-    // FIX P1-5: Check cooldown under spinlock (_last_signal_time written by arb thread)
+    // Check cooldown under spinlock (_last_signal_time written by arb thread)
     uint64_t last_time = 0;
     {
         SpinLockGuard lock(_pair_states_spin);
@@ -453,7 +453,7 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         signal.type = SpreadSignalType::NONE;
     }
     
-    // FIX P1-5: Store last signal time/signal under spinlock
+    // Store last signal time/signal under spinlock
     // (arb thread writes here, main thread reads in getQuotingAdjustment)
     if (signal.isActionable())
     {
@@ -485,7 +485,7 @@ QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustment(const std::string
     
     auto signal_it = _last_signals.find(pair_id);
     SpreadSignal signal;
-    // FIX P0-7: _last_signals与generateSignals在arb线程写入，需spinlock保护
+    // _last_signals与generateSignals在arb线程写入，需spinlock保护
     {
         SpinLockGuard lock(_pair_states_spin);
         signal_it = _last_signals.find(pair_id);

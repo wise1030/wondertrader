@@ -207,7 +207,7 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                     if (!ids.empty()) {
                         uint32_t bidId = ids[0];
                         bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
-                        // FIX P2-8: Store level+is_bid direction
+                        // Store level+is_bid direction
                         _order_id_to_level[bidId] = {i, true};
                         if (_tracker && now > 0) _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
                         orders_placed += 1;
@@ -222,7 +222,7 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                     if (!ids.empty()) {
                         uint32_t askId = ids[0];
                         ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                        // FIX P2-8: Store level+is_bid direction
+                        // Store level+is_bid direction
                         _order_id_to_level[askId] = {i, false};
                         if (_tracker && now > 0) _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
                         orders_placed += 1;
@@ -251,7 +251,7 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 {
                     bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
                     ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                    // FIX P2-8: Store level+is_bid direction
+                    // Store level+is_bid direction
                     _order_id_to_level[bidId] = {i, true}; _order_id_to_level[askId] = {i, false};
                     if (_tracker && now > 0) {
                         _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
@@ -284,7 +284,7 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 if (!ids.empty()) {
                     uint32_t bidId = ids[0];
                     bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
-                    // FIX P2-8: Store level+is_bid direction
+                    // Store level+is_bid direction
                     _order_id_to_level[bidId] = {i, true};
                     if (_tracker && now > 0) _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
                     orders_placed += 1;
@@ -311,7 +311,7 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
                 if (!ids.empty()) {
                     uint32_t askId = ids[0];
                     ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                    // FIX P2-8: Store level+is_bid direction
+                    // Store level+is_bid direction
                     _order_id_to_level[askId] = {i, false};
                     if (_tracker && now > 0) _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
                     orders_placed += 1;
@@ -350,7 +350,8 @@ void FutuQuoter::cancelAll(wtp::IUftStraCtx* ctx)
     }
 }
 
-void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint64_t now_ms)
+void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty,
+                         uint32_t uTime_HHMM, uint32_t sec_in_min)
 {
     // Find level using tracker or linear search
     QuoteLevel* level = nullptr;
@@ -414,17 +415,28 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint
             }
         }
         
-        if (_bilateral_stats && now_ms > 0)
+        // R3 v2: 触发 BilateralStats 更新（uTime_HHMM=0 表示调用方未传时间，跳过；
+        // hasSessionInfo()=false 表示 sessinfo 注入失败，统计已 DISABLED）
+        if (uTime_HHMM > 0 && _bilateral_stats.hasSessionInfo())
         {
             auto snapshot = getValidQuoteSnapshot();
-            _bilateral_stats->update(snapshot, now_ms);
+            _bilateral_stats.update(snapshot, uTime_HHMM, sec_in_min);
         }
     }
 }
 
-void FutuQuoter::onTrade(uint32_t localid, double vol, double price)
+void FutuQuoter::onTrade(uint32_t localid, double vol, double price,
+                         uint32_t uTime_HHMM, uint32_t sec_in_min)
 {
     if (_tracker) _tracker->recordFilled();
+
+    // R3 v2: 成交导致挂单 qty 减少，可能跌出 min_valid_qty 累计深度阈值
+    // 必须重新评估 valid 状态（onOrder 路径不一定能覆盖所有部分成交场景）
+    if (uTime_HHMM > 0 && _bilateral_stats.hasSessionInfo())
+    {
+        auto snapshot = getValidQuoteSnapshot();
+        _bilateral_stats.update(snapshot, uTime_HHMM, sec_in_min);
+    }
 }
 
 double FutuQuoter::totalBidQty() const
@@ -453,7 +465,7 @@ QuoteLevel* FutuQuoter::getLevelByOrder(uint32_t localid)
     auto it = _order_id_to_level.find(localid);
     if (it != _order_id_to_level.end())
     {
-        // FIX P2-8: Use is_bid to directly locate the correct level
+        // Use is_bid to directly locate the correct level
         uint8_t idx = it->second.level;
         bool is_bid = it->second.is_bid;
         if (is_bid && idx < _bid_levels.size())
@@ -468,27 +480,53 @@ ValidQuoteSnapshot FutuQuoter::getValidQuoteSnapshot() const
 {
     ValidQuoteSnapshot snapshot;
     snapshot.tick_size = _cfg.tick_size;
-    
-    for (const auto& level : _bid_levels)
+
+    const double target = _cfg.min_valid_qty;
+    if (target <= 0)
+        return snapshot;
+
+    // Bid 侧累计加权（_bid_levels 已按价格优劣排序，level 0 = 最优 bid）
     {
-        if (level.order_id != 0 && level.qty >= _cfg.min_valid_qty)
+        double cum_qty = 0;
+        double weighted_sum = 0;  // Σ(qty_i × price_i)
+        for (const auto& level : _bid_levels)
+        {
+            if (level.order_id == 0 || level.qty <= 0) continue;
+            double remain = target - cum_qty;
+            if (remain <= 0) break;
+            double take = (level.qty >= remain) ? remain : level.qty;
+            weighted_sum += take * level.price;
+            cum_qty += take;
+            if (cum_qty >= target) break;
+        }
+        if (cum_qty >= target - 1e-9)
         {
             snapshot.has_valid_bid = true;
-            snapshot.best_bid_price = level.price;
-            break;
+            snapshot.weighted_bid_price = weighted_sum / target;
         }
     }
-    
-    for (const auto& level : _ask_levels)
+
+    // Ask 侧累计加权
     {
-        if (level.order_id != 0 && level.qty >= _cfg.min_valid_qty)
+        double cum_qty = 0;
+        double weighted_sum = 0;
+        for (const auto& level : _ask_levels)
+        {
+            if (level.order_id == 0 || level.qty <= 0) continue;
+            double remain = target - cum_qty;
+            if (remain <= 0) break;
+            double take = (level.qty >= remain) ? remain : level.qty;
+            weighted_sum += take * level.price;
+            cum_qty += take;
+            if (cum_qty >= target) break;
+        }
+        if (cum_qty >= target - 1e-9)
         {
             snapshot.has_valid_ask = true;
-            snapshot.best_ask_price = level.price;
-            break;
+            snapshot.weighted_ask_price = weighted_sum / target;
         }
     }
-    
+
     return snapshot;
 }
 

@@ -24,19 +24,17 @@
 #include "../Includes/ExecuteDefs.h"
 #include "../Includes/WTSMarcos.h"
 #include "../Includes/FasterDefs.h"
+#include "BilateralQuoteStats.h"
 
 NS_WTP_BEGIN
 class IUftStraCtx;
+class WTSSessionInfo;
 NS_WTP_END
 
 namespace futu {
 
 class FutuPortfolio;
 class UnifiedOrderTracker;
-class BilateralQuoteStats;  // 前向声明
-
-/// 有效报价快照（用于统计，定义在 BilateralQuoteStats.h）
-struct ValidQuoteSnapshot;
 
 /// A single price level in the quote ladder (lightweight, no order state)
 struct QuoteLevel
@@ -163,14 +161,20 @@ public:
     void cancelAll(wtp::IUftStraCtx* ctx);
 
     /// Handle order update — clear level order ID, trigger stats update
-    /// @param localid    本地订单号
-    /// @param isCanceled 是否撤销
-    /// @param leftQty    剩余数量
-    /// @param now_ms     当前时间戳（毫秒），由调用方从 ctx 获取
-    void onOrder(uint32_t localid, bool isCanceled, double leftQty, uint64_t now_ms = 0);
+    /// @param localid       本地订单号
+    /// @param isCanceled    是否撤销
+    /// @param leftQty       剩余数量
+    /// @param uTime_HHMM    当前时间 HHMM 格式（用于 BilateralStats 时间累计；0 = 不更新统计）
+    /// @param sec_in_min    分钟内秒数 [0, 59]
+    void onOrder(uint32_t localid, bool isCanceled, double leftQty,
+                 uint32_t uTime_HHMM = 0, uint32_t sec_in_min = 0);
 
-    /// Handle fill — clear the filled level's order ID
-    void onTrade(uint32_t localid, double vol, double price);
+    /// Handle fill — clear the filled level's order ID, trigger stats update
+    /// （成交导致挂单 qty 减少，可能跌出 min_valid_qty 累计深度阈值，必须更新统计）
+    /// @param uTime_HHMM    当前时间 HHMM 格式（用于 BilateralStats 时间累计；0 = 不更新统计）
+    /// @param sec_in_min    分钟内秒数 [0, 59]
+    void onTrade(uint32_t localid, double vol, double price,
+                 uint32_t uTime_HHMM = 0, uint32_t sec_in_min = 0);
 
     //==========================================================================
     // Accessors
@@ -199,20 +203,33 @@ public:
     QuoteLevel* getLevelByOrder(uint32_t localid);
     
     //==========================================================================
-    // 双边报价统计接口（新增）
+    // 双边报价统计接口（R3 v2 - Per-Quoter 值成员）
     //==========================================================================
-    
-    /// 设置双边报价统计模块
-    void setBilateralStats(BilateralQuoteStats* stats) { _bilateral_stats = stats; }
-    
-    /// 获取统计模块
-    BilateralQuoteStats* getBilateralStats() const { return _bilateral_stats; }
-    
+
+    /// 配置 BilateralStats（每 quoter 独立实例）
+    /// @param sessInfo  必须传入有效 sessionInfo;nullptr 会让本 quoter 的统计 DISABLED
+    /// @return true=注入成功, false=禁用统计
+    bool initBilateralStats(WTSSessionInfo* sessInfo)
+    {
+        BilateralStatsConfig bcfg;
+        bcfg.min_valid_qty = _cfg.min_valid_qty;
+        bcfg.max_obligation_spread = _cfg.max_obligation_spread;
+        _bilateral_stats.setConfig(bcfg);
+        return _bilateral_stats.setSessionInfo(sessInfo, _cfg.code.c_str());
+    }
+
+    /// 获取统计模块（const,只读)
+    const BilateralQuoteStats& getBilateralStats() const { return _bilateral_stats; }
+    BilateralQuoteStats& getBilateralStats() { return _bilateral_stats; }
+
     /// 获取是否使用双边报价接口
     bool useBilateralQuote() const { return _cfg.use_bilateral_quote; }
-    
+
     /// 获取有效报价快照（用于统计）
-    /// 有效挂单定义：满足 min_valid_qty 要求的最优 level（level 0）
+    /// 累计加权语义（R3 v2）：
+    ///   - 从最优档累加到 min_valid_qty，最后档按 qty 截取
+    ///   - 加权价 = Σ(qty_i × price_i) / min_valid_qty
+    ///   - 整侧累计 < min_valid_qty 时 has_valid_xxx=false（深度不足该侧不 valid）
     ValidQuoteSnapshot getValidQuoteSnapshot() const;
 
 private:
@@ -314,9 +331,9 @@ private:
     bool _allow_bid = true;
     bool _allow_ask = true;
     
-    BilateralQuoteStats* _bilateral_stats = nullptr;
+    BilateralQuoteStats _bilateral_stats;   ///< Per-Quoter 值成员（R3 v2）
     
-    // FIX P2-8: 存储level索引+方向，避免bid/ask共用索引时查找冲突
+    // 存储level索引+方向，避免bid/ask共用索引时查找冲突
     struct OrderLevelInfo {
         uint8_t level;    ///< Level index
         bool is_bid;      ///< true=bid, false=ask

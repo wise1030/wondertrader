@@ -135,7 +135,7 @@ void ToxicFlowDetector::updateCache() const
     _cached_metrics.predictive_toxicity = pred_result.combined_score;
     _cached_metrics.toxic_score = pred_result.combined_score;
     
-    // FIX P2-9: extreme_signal作为独立保护层，在最终加权后叠加
+    // extreme_signal作为独立保护层，在最终加权后叠加
     // 原代码在realized加权之前就把extreme_signal混入toxic_score，然后realized_weight
     // 会稀释extreme_signal的保护效果。例如:
     //   extreme_signal=0.9, combined_score=0.3, self_trade_weight=0.4

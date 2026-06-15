@@ -237,8 +237,8 @@ struct CloseoutSubInfo
     uint32_t retry_count;       ///< Number of retries attempted
     uint32_t max_retries;       ///< Maximum retries before giving up (default 3)
     uint64_t retry_interval_ms; ///< Interval between retries in ms (default 5000)
-    bool is_night_closeout;     ///< FIX Bug-A: was this triggered by night session closeout?
-    bool night_closeout_done;   ///< FIX Bug-A: night closeout already executed this session
+    bool is_night_closeout;     ///< was this triggered by night session closeout?
+    bool night_closeout_done;   ///< night closeout already executed this session
     
     CloseoutSubInfo()
         : state(CloseoutSub::IDLE)
@@ -396,7 +396,7 @@ public:
     void haltTrading(RiskCategory category = RiskCategory::REVERSIBLE, double pnl_snapshot = 0);
     
     /// Resume trading (only for reversible risks)
-    /// FIX P1-10: Returns true if successfully resumed, false if IRREVERSIBLE
+    /// Returns true if successfully resumed, false if IRREVERSIBLE
     bool resumeTrading();
     
     /// Block opening long positions
@@ -532,7 +532,7 @@ public:
     void resetDaily();
     void resetSession();
     
-    /// FIX P2-6: Manually clear IRREVERSIBLE halt (requires human confirmation)
+    /// Manually clear IRREVERSIBLE halt (requires human confirmation)
     /// Returns true if successfully cleared, false if not in IRREVERSIBLE state
     bool clearIrreversible();
 

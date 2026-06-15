@@ -95,7 +95,7 @@ struct AsyncArbConfig
     uint32_t signal_interval_us;    ///< Signal generation interval (microseconds)
     uint32_t max_wait_us;           ///< Max wait time for condition variable (microseconds)
     uint32_t ticks_per_signal;      ///< Generate signal every N ticks
-    std::atomic<bool> enabled{true}; ///< FIX: atomic — arb线程读, 主线程写(setConfig)
+    std::atomic<bool> enabled{true}; ///< atomic — arb线程读, 主线程写(setConfig)
     
     AsyncArbConfig()
         : tick_queue_size(1024)
@@ -105,7 +105,7 @@ struct AsyncArbConfig
         , ticks_per_signal(5)           // 每5个tick检查一次信号
     {}
 
-    // FIX: copy/move需特殊处理atomic字段
+    // copy/move需特殊处理atomic字段
     AsyncArbConfig(const AsyncArbConfig& other)
         : tick_queue_size(other.tick_queue_size)
         , order_queue_size(other.order_queue_size)
@@ -269,7 +269,7 @@ private:
     std::unique_ptr<OrderQueue> _order_queue;
     
     //==========================================================================
-    // FIX P0-4: Orphan leg tracking for auto-hedge (dual-queue for SPSC safety)
+    // Orphan leg tracking for auto-hedge (dual-queue for SPSC safety)
     //==========================================================================
     struct OrphanLeg {
         std::string pair_id;
@@ -280,7 +280,7 @@ private:
         double leg1_qty;
         double leg1_price;
         std::chrono::steady_clock::time_point timestamp;
-        // FIX P2-7: delta_ratio用于动态调整对冲超时
+        // delta_ratio用于动态调整对冲超时
         // = abs(current_delta / max_delta), 0表示无delta限制
         double delta_ratio = 0.0;
     };

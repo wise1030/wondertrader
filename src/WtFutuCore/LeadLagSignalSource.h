@@ -126,7 +126,7 @@ public:
         {
             double mid_change = (mid - info.last_mid) / info.last_mid;
             
-            // FIX P2-13: 新增RingBuffer存储mid_change历史，计算窗口内加权平均
+            // 新增RingBuffer存储mid_change历史，计算窗口内加权平均
             // 原代码仅存储单次mid_change，window/lag_ms配置未使用。
             // 单次mid_change噪声大，容易被单笔大单或瞬时波动误导。
             // 现在用RingBuffer存储最近window次mid_change，计算加权平均：
@@ -172,7 +172,7 @@ private:
     
     std::unordered_map<std::string, LeadContractInfo> _lead_contracts;
     
-    // FIX P2-13: RingBuffer存储mid_change历史，用于窗口内加权平均
+    // RingBuffer存储mid_change历史，用于窗口内加权平均
     using MidChangeHistory = RingBuffer<double, 64>;  // power of 2 for optimal performance
     std::unordered_map<std::string, MidChangeHistory> _mid_change_histories;
     

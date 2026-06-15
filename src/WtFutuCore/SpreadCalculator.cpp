@@ -12,6 +12,7 @@
  *       Using SIMD on RingBuffer causes boundary violations and crashes.
  */
 #include "SpreadCalculator.h"
+#include "../WTSTools/WTSLogger.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -106,7 +107,7 @@ void SpreadCalculator::onLeg2Tick(double price, uint64_t timestamp)
 double SpreadCalculator::calculateSpread(double price1, double price2) const
 {
     if (price2 <= 0) return 0;
-    if (price1 <= 0) return 0;  // FIX: LOG_DIFF/RATIO模式下price1<=0也会产生NaN/Inf
+    if (price1 <= 0) return 0;  // LOG_DIFF/RATIO模式下price1<=0也会产生NaN/Inf
     
     switch (_spread_type)
     {
@@ -320,6 +321,7 @@ double SpreadCalculator::calculateBeta() const
         return 1.0;
     
     double beta = (valid_count * sum_xy - sum_x * sum_y) / denom;
+    
     _alpha = (sum_y - beta * sum_x) / valid_count;
     
     // Beta 解释：

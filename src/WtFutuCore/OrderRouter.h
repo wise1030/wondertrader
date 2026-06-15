@@ -82,7 +82,7 @@ struct ActiveOrderInfo
     double      price     = 0;    ///< Order price
     Source      source    = Source::ARBITRAGE; ///< Order source
     uint64_t    submit_ts = 0;    ///< Submit timestamp (ms)
-    // FIX P2-15: Track pending cancel state to avoid counting cancelled orders as active
+    // Track pending cancel state to avoid counting cancelled orders as active
     // in self-trade checks. Without this, cancelAllBySource sends cancel but the order
     // remains in _active_orders until onOrderDone, so self-trade check may block new orders
     // that conflict with a cancelling (but not yet cancelled) order.
@@ -95,7 +95,7 @@ struct OrderSubmitResult
     wtp::OrderIDs localids;       ///< Local order IDs from exchange
     bool          rate_limited = false; ///< True if blocked by rate limit
     bool          self_trade_blocked = false; ///< True if blocked by self-trade check
-    bool          rejected = false;  ///< FIX P1: True if rejected (e.g. invalid price)
+    bool          rejected = false;  ///< True if rejected (e.g. invalid price)
 };
 
 /// Unified Order Router (for non-MM sources only)

@@ -299,11 +299,11 @@ private:
     /// 风险监控
     std::unique_ptr<FutuRiskMonitor> _risk_monitor;
     
-    /// FIX Bug-C: closeout 对冲单只在 FLATTENING 状态首次执行一次
+    /// closeout 对冲单只在 FLATTENING 状态首次执行一次
     bool _closeout_hedge_executed = false;
-    // FIX Bug-D: track closeout hedge order ids so on_order can distinguish them from MM cancels
+    // track closeout hedge order ids so on_order can distinguish them from MM cancels
     std::unordered_set<uint32_t> _closeout_pending_ids;
-    // FIX Bug-H (Plan A): defer hedge to a later tick so inflight cancel/fill回执先回流
+    // defer hedge to a later tick so inflight cancel/fill回执先回流
     bool _closeout_hedge_pending = false;
     uint32_t _closeout_hedge_wait_ticks = 0;
     static constexpr uint32_t CLOSEOUT_HEDGE_WAIT_TICKS = 2;
@@ -389,7 +389,7 @@ private:
     TradingState _trading_state;           // 统一交易状态（替代5个bool）
     uint64_t _toxicity_resume_time; // 熔断恢复时间
     
-    // FIX P0-9: 保存ctx指针，供on_entrust等无ctx回调使用
+    // 保存ctx指针，供on_entrust等无ctx回调使用
     IUftStraCtx* _main_ctx = nullptr;
     
     // 风险控制状态（由 FutuRiskMonitor 管理）

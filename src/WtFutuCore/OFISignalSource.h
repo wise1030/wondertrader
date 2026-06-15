@@ -121,7 +121,7 @@ public:
             // Update cumulative OFI
             _cumulative_ofi += ofi;
             
-            // FIX P0-5: 移除0.999乘法衰减，仅用ring buffer弹出做衰减
+            // 移除0.999乘法衰减，仅用ring buffer弹出做衰减
             // 原代码同时使用 *=0.999(乘法衰减) 和 -=front()(窗口弹出)，双重衰减导致信号偏小。
             // 方案A: 仅用ring buffer弹出做衰减，_cumulative_ofi始终等于sum(_ofi_history)，数学一致。
             // 方案B(已弃用): *=0.999 会在窗口内OFI=0时仍残留累积偏移，但该偏移量级极小
@@ -234,7 +234,7 @@ private:
         double variance = sum_sq / n - mean * mean;
         double std_dev = std::sqrt(std::max(0.0, variance));
         
-        // FIX P1-1: 移除魔法数字*10.0，改用2*std_dev作为归一化因子
+        // 移除魔法数字*10.0，改用2*std_dev作为归一化因子
         // 2*std_dev是95%置信区间宽度，物理含义清晰。
         // 原*10.0无解释且过度压制信号：若std_dev=5，原normalization_factor=clamp(100,50,1000)=100，
         //   而无*10.0时normalization_factor=clamp(10,5,200)=10，tanh输入大10倍，信号灵敏度合理。

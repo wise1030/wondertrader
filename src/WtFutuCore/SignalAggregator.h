@@ -258,7 +258,7 @@ private:
         // 修正字段名：volatility -> realized_vol
         _ctx.market_state.vol_estimate = _ctx.volatility.realized_vol;
         _ctx.market_state.should_widen = (_ctx.volatility.realized_vol > _cfg.vol_threshold);
-        // FIX BUG-15: should_pause每tick重算，不复位锁存
+        // should_pause每tick重算，不复位锁存
         // 原代码只在vol_tier==EXTREME时设true，无else分支复位false
         // 导致should_pause一旦被设就永久锁死，报价永远被阻止
         _ctx.market_state.should_pause = (_ctx.volatility.vol_tier == VolTier::EXTREME);

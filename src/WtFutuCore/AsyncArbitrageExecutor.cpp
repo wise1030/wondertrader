@@ -103,7 +103,7 @@ size_t AsyncArbitrageExecutor::processPendingOrders(OrderCallback callback)
     ArbOrderRequest order;
     while (_order_queue->tryPop(order))
     {
-        // FIX P2-14: Wrap callback in try-catch to prevent one exception
+        // Wrap callback in try-catch to prevent one exception
         // from blocking processing of subsequent orders in the queue
         try {
             callback(order);
@@ -447,9 +447,9 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
                          "succeeded! pair={}, leg1_req_id={}",
             signal.pair_id, req_id);
         
-        // FIX P0-4: 记录单腿敞口，供processPendingOrders检测并自动对冲
+        // 记录单腿敞口，供processPendingOrders检测并自动对冲
         // Arb线程push到_from_arb队列(SPSC安全)，主线程pop
-        // FIX P2-7: 传入delta_ratio=0(arb线程无法获取portfolio delta，主线程回调时补充)
+        // 传入delta_ratio=0(arb线程无法获取portfolio delta，主线程回调时补充)
         _orphan_legs_from_arb.tryPush({signal.pair_id, req_id, signal.leg1_code,
             signal.leg2_code, leg1_is_buy, leg1_qty, leg1_price,
             std::chrono::steady_clock::now(), 0.0});
@@ -475,7 +475,7 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
     size_t processed = 0;
     auto now = std::chrono::steady_clock::now();
     
-    // FIX P0-4: Dual-queue SPSC-safe design:
+    // Dual-queue SPSC-safe design:
     // 1. Pop all new orphan legs from arb thread (SPSC queue)
     // 2. Merge with existing deferred legs
     // 3. Process all: hedge if timeout, defer if not
@@ -485,7 +485,7 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
     OrphanLeg orphan;
     while (_orphan_legs_from_arb.tryPop(orphan))
     {
-        // FIX P2-7: arb线程无法获取portfolio delta，主线程传入current_delta_ratio
+        // arb线程无法获取portfolio delta，主线程传入current_delta_ratio
         if (orphan.delta_ratio == 0.0 && current_delta_ratio > 0.0) {
             orphan.delta_ratio = current_delta_ratio;
         }
@@ -499,7 +499,7 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
         auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - leg.timestamp).count();
         
-        // FIX P2-7: 根据delta_ratio动态调整超时
+        // 根据delta_ratio动态调整超时
         // delta_ratio越高(接近或超过max_delta)，超时越短，对冲越积极
         // delta_ratio=0: 无delta限制，使用原始超时
         // delta_ratio>=1.0: 已超delta限制，立即强制对冲

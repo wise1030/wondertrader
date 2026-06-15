@@ -41,7 +41,7 @@ OrderSubmitResult OrderRouter::submitBuy(wtp::IUftStraCtx* ctx,
 {
     OrderSubmitResult result;
 
-    // FIX P1: 价格0保护 — 防止无效价格下单
+    // 价格0保护 — 防止无效价格下单
     if (price <= 0) {
         result.rejected = true;
         WTSLogger::error("OrderRouter: BUY {} rejected - invalid price={}", code, price);
@@ -89,7 +89,7 @@ OrderSubmitResult OrderRouter::submitSell(wtp::IUftStraCtx* ctx,
 {
     OrderSubmitResult result;
 
-    // FIX P1: 价格0保护 — 防止无效价格下单
+    // 价格0保护 — 防止无效价格下单
     if (price <= 0) {
         result.rejected = true;
         WTSLogger::error("OrderRouter: SELL {} rejected - invalid price={}", code, price);
@@ -207,7 +207,7 @@ void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
     auto it = _active_orders.find(key);
     if (it == _active_orders.end()) return;
 
-    // FIX P2-15: Mark orders as pending_cancel before sending cancel request.
+    // Mark orders as pending_cancel before sending cancel request.
     // This prevents self-trade check from treating them as active orders
     // during the cancel-acknowledge window.
     for (auto& info : it->second)
@@ -266,7 +266,7 @@ const std::vector<ActiveOrderInfo>& OrderRouter::getActiveOrders(Source src) con
     auto key = static_cast<int>(src);
     auto it = _active_orders.find(key);
     if (it == _active_orders.end()) return empty;
-    // FIX P2-15: Filter out pending_cancel orders from the returned list
+    // Filter out pending_cancel orders from the returned list
     std::vector<ActiveOrderInfo> result;
     for (const auto& info : it->second)
     {
@@ -287,7 +287,7 @@ size_t OrderRouter::totalActiveOrders() const
     size_t total = 0;
     for (const auto& kv : _active_orders)
     {
-        // FIX P2-15: Exclude pending_cancel orders from active count
+        // Exclude pending_cancel orders from active count
         for (const auto& info : kv.second)
         {
             if (!info.pending_cancel)

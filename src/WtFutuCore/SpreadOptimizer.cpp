@@ -154,7 +154,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     // 两者协同才能在毒性环境下快速出清库存。
     double skew_price = total_skew * _params.tick_size * spread_mult;
     
-    // FIX P0-6: 第二次截断上限改为 half_spread_price * spread_mult
+    // 第二次截断上限改为 half_spread_price * spread_mult
     // 原代码截断到half_spread_price，当spread_mult>1时skew_price必然被截断，
     // 导致spread_mult放大skew的设计意图被抵消（skew被截断回half_spread_price）。
     // 修复后截断上限=half_spread_price*spread_mult，与skew_price的最大值一致：

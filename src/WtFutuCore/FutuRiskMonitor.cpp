@@ -32,7 +32,7 @@ void FutuRiskMonitor::recordOrder()
         if (*item < cutoff)
         {
             _order_times.try_pop();
-            // FIX P0-8: 防止计数器下溢 — 只有当计数>0时才减
+            // 防止计数器下溢 — 只有当计数>0时才减
             int32_t cur = _orders_last_sec.load(std::memory_order_relaxed);
             if (cur > 0) {
                 _orders_last_sec.fetch_sub(1, std::memory_order_relaxed);
@@ -45,7 +45,7 @@ void FutuRiskMonitor::recordOrder()
     }
     
     // Add new timestamp
-    // FIX P2-2: try_push失败时仍然增加计数器
+    // try_push失败时仍然增加计数器
     // 原代码只在try_push成功时增加_orders_last_sec，但ring buffer满时订单仍然发生了，
     // 计数偏低会导致流控判断失误（以为订单频率低，实际已超限）。
     // try_push失败仅意味着旧时间戳无法被覆盖存储，不代表订单不存在。
@@ -64,7 +64,7 @@ void FutuRiskMonitor::recordCancel()
         if (*item < cutoff)
         {
             _cancel_times.try_pop();
-            // FIX P0-8: 防止计数器下溢
+            // 防止计数器下溢
             int32_t cur = _cancels_last_sec.load(std::memory_order_relaxed);
             if (cur > 0) {
                 _cancels_last_sec.fetch_sub(1, std::memory_order_relaxed);
@@ -77,7 +77,7 @@ void FutuRiskMonitor::recordCancel()
     }
     
     // Add new timestamp
-    // FIX P2-2: try_push失败时仍然增加计数器(与recordOrder同理)
+    // try_push失败时仍然增加计数器(与recordOrder同理)
     _cancel_times.try_push(now);
     _cancels_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
@@ -93,7 +93,7 @@ void FutuRiskMonitor::recordTrade()
         if (*item < cutoff)
         {
             _trade_times.try_pop();
-            // FIX P0-8: 防止计数器下溢
+            // 防止计数器下溢
             int32_t cur = _trades_last_sec.load(std::memory_order_relaxed);
             if (cur > 0) {
                 _trades_last_sec.fetch_sub(1, std::memory_order_relaxed);
@@ -106,7 +106,7 @@ void FutuRiskMonitor::recordTrade()
     }
     
     // Add new timestamp
-    // FIX P2-2: try_push失败时仍然增加计数器(与recordOrder同理)
+    // try_push失败时仍然增加计数器(与recordOrder同理)
     _trade_times.try_push(now);
     _trades_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
@@ -176,7 +176,7 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     
     //==========================================================================
     // 硬指标：Exposure（不得突破，严格风控）
-    // FIX P1-3: 使用getTotalGrossExposure替代getTotalExposure
+    // 使用getTotalGrossExposure替代getTotalExposure
     // 跨品种多空不能简单对冲，毛暴露更准确反映实际风险
     //==========================================================================
     double exposure = portfolio->getTotalGrossExposure();
@@ -522,7 +522,7 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     if (delta_util > _recovery_config.recovery_threshold)
         return false;
     
-    // Check exposure utilization (FIX P1-3: use gross exposure)
+    // Check exposure utilization (use gross exposure)
     double exposure = portfolio->getTotalGrossExposure();
     if (params.max_exposure > 0)
     {
@@ -621,7 +621,7 @@ bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)
 
 void FutuRiskMonitor::resetDaily()
 {
-    // FIX P2-6: Preserve IRREVERSIBLE halt category across daily reset.
+    // Preserve IRREVERSIBLE halt category across daily reset.
     // IRREVERSIBLE risks (e.g. daily loss) must not auto-recover on new day.
     // Only clearIrreversible() (called with human confirmation) can reset it.
     RiskCategory saved_halt_category = _halt_category;
@@ -816,7 +816,7 @@ bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
 
 bool FutuRiskMonitor::transitionCloseoutSub(CloseoutSub next_state, uint64_t timestamp)
 {
-    // FIX C: same-state 静默短路 —— 调用方(StrategyCoordinator/UftFutuMmStrategy)在
+    // same-state 静默短路 —— 调用方(StrategyCoordinator/UftFutuMmStrategy)在
     // closeout 窗口的 on_tick/on_calc 高频路径里反复调 markCloseoutFlattening,
     // 不应每次都报 warning("Invalid state transition: 2 -> 2")。同 state 视为
     // idempotent no-op 即可,真正的非法转移(如 IDLE → COMPLETED)仍走下面的告警。
@@ -880,7 +880,7 @@ void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
 {
     if (transitionCloseoutSub(CloseoutSub::COMPLETED, timestamp))
     {
-        // FIX Bug-A: 标记夜盘 closeout 已完成，防止 reset 后重触发
+        // 标记夜盘 closeout 已完成，防止 reset 后重触发
         if (_closeout_state.is_night_closeout)
             _closeout_state.night_closeout_done = true;
         broadcastAlert("CLOSEOUT_COMPLETED", 
@@ -940,7 +940,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         _closeout_state.state == CloseoutSub::FAILED)
         return false;
     
-    // FIX A-step: ctx->stra_get_time() 返回 HHMM (4位), 不是 HHMMSS。
+    // ctx->stra_get_time() 返回 HHMM (4位), 不是 HHMMSS。
     // 兼容两种格式：>= 10000 视为 HHMMSS, 否则 HHMM。
     uint32_t currentHour, currentMin;
     if (currentTime >= 10000) {
@@ -977,7 +977,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
     
     // --- 触发点1: 夜盘收盘 ---
     // 只在夜盘时段 (21:00-05:59) 检查，避免白盘时段误触发
-    // FIX Bug-A: 跳过已完成的夜盘 closeout（防止 reset 后重触发）
+    // 跳过已完成的夜盘 closeout（防止 reset 后重触发）
     if (_closeout_config.night_close_time > 0 && _closeout_config.night_minutes_before > 0
         && (currentHour >= 21 || currentHour < 6)
         && !_closeout_state.night_closeout_done)
@@ -986,7 +986,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         uint32_t nightCloseHour = nightClose / 100;
         uint32_t nightCloseMin = nightClose % 100;
         
-        // FIX P2-1: 夜盘收盘时间合法性校验，防止八进制误配
+        // 夜盘收盘时间合法性校验，防止八进制误配
         // C++中以0开头的整数字面量被解析为八进制，如0230→八进制=十进制152(01:52)而非23:00。
         // 配置文件也可能误配为非法值。校验hour<=23, minute<=59。
         if (nightCloseHour > 23 || nightCloseMin > 59)
@@ -1020,7 +1020,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
             
             if (currentAbs >= triggerAbs && _closeout_state.state == CloseoutSub::IDLE)
             {
-            // FIX Bug-A: record this is a night closeout so COMPLETED handler
+            // record this is a night closeout so COMPLETED handler
             // only resets state for night→day transition, not day closeout
             _closeout_state.is_night_closeout = true;
                 markCloseoutTriggered(currentTime * 100);
@@ -1040,7 +1040,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
             if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
                 && _closeout_state.state == CloseoutSub::IDLE)
             {
-            // FIX Bug-A: record this is a night closeout
+            // record this is a night closeout
             _closeout_state.is_night_closeout = true;
                 markCloseoutTriggered(currentTime * 100);
                 broadcastAlert("CLOSEOUT_TRIGGERED", 
@@ -1049,7 +1049,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
                 return true;
             }
         }
-        } // end FIX P2-1 else (valid night_close_time)
+        } // end else (valid night_close_time)
     }
     
     // --- 触发点2: 全天收盘 (白盘) ---
@@ -1085,7 +1085,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
             && _closeout_state.state == CloseoutSub::IDLE)
         {
-            // FIX Bug-A: day closeout, not night; reset night flag for next session
+            // day closeout, not night; reset night flag for next session
             _closeout_state.is_night_closeout = false;
             _closeout_state.night_closeout_done = false;
             markCloseoutTriggered(currentTime * 100);
@@ -1099,9 +1099,9 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
     return _closeout_state.state != CloseoutSub::IDLE;
 }
 
-// FIX P2-5: resetCloseout改为通过状态机转换而非直接构造
+// resetCloseout改为通过状态机转换而非直接构造
 // 直接构造新对象绕过canTransitionTo检查，可能导致非法状态转换
-// FIX v3-multi-session: force=true 用于 session_begin —— 新交易日是硬边界,
+// force=true 用于 session_begin —— 新交易日是硬边界,
 // 上一日 FLATTENING/TRIGGERED 等残留状态必须清掉(否则 resetCloseout 被状态机
 // 拒绝,state 永久卡死,Delta 雪崩)。force=false(默认)保留状态机保护。
 void FutuRiskMonitor::resetCloseout(bool force)
@@ -1114,7 +1114,7 @@ void FutuRiskMonitor::resetCloseout(bool force)
         _closeout_state.complete_time = 0;
         _closeout_state.fail_time = 0;
         _closeout_state.retry_count = 0;
-        _closeout_state.is_night_closeout = false;  // FIX Bug-A: reset night flag
+        _closeout_state.is_night_closeout = false;  // reset night flag
         // NOTE: night_closeout_done 不在此重置，只在新白盘 closeout 触发时重置
         // 这样 reset 后夜盘时段不会重触发夜盘 closeout
     }

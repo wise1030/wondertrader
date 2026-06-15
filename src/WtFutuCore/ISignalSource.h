@@ -268,7 +268,7 @@ struct SignalContext
         ofi = OFISignalResult();
         volatility = VolatilitySignalResult();
         trade_flow = TradeFlowSignalResult();
-        book_imbalance = BookImbalanceSignalResult();  // FIX P0-4: 修复reset()遗漏book_imbalance
+        book_imbalance = BookImbalanceSignalResult();  // 修复reset()遗漏book_imbalance
         alpha = AlphaSignalResult();
         market_state = MarketStateSignalResult();
         toxicity = ToxicitySignalResult();

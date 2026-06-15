@@ -67,7 +67,7 @@ public:
     
     void update(const MarketDataContext& book) override
     {
-        // FIX P1: TradeFlow双路径数据不一致修复
+        // TradeFlow双路径数据不一致修复
         // 优先使用onTrade()维护的内部状态(SSOT)，仅当onTrade未被调用时回退到MarketDataContext
         if (_trade_count > 0) {
             // 使用onTrade()路径的内部状态
@@ -160,7 +160,7 @@ public:
             {
                 _large_volume -= old.qty;
             }
-            // FIX P1-8: 防止_trade_count下溢 — uint32_t的0-1会回绕到4294967295
+            // 防止_trade_count下溢 — uint32_t的0-1会回绕到4294967295
             // 改为条件判断保护，仅当_trade_count>0时才递减
             if (_trade_count > 0)
             {

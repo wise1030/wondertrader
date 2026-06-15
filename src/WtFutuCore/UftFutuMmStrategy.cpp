@@ -933,7 +933,7 @@ _tick_count = 0;
 
 void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 {
-// FIX P0-9: 保存ctx指针
+// 保存ctx指针
 _main_ctx = ctx;
 
 // 默认收盘时间
@@ -1159,16 +1159,16 @@ void UftFutuMmStrategy::on_session_begin(IUftStraCtx* ctx, uint32_t uTDate)
 {
 // 重置日内状态
 _risk_monitor->resetDaily();
-// FIX v3-multi-session: force=true —— 新交易日强制清 closeout state,
+// force=true —— 新交易日强制清 closeout state,
 // 否则上一日卡 FLATTENING 时 resetCloseout 会被状态机拒绝,导致 state 永久死锁
 _risk_monitor->resetCloseout(true);  // 重置收盘前平仓状态(强制)
 
 // P1-1: reset() clears phase+qphase+blocks for new session
 _trading_state.reset();
 
-// FIX Bug-E Phase 1: reset closeout hedge guard so new day can fire hedge if needed
+// reset closeout hedge guard so new day can fire hedge if needed
 _closeout_hedge_executed = false;
-// FIX Bug-D v2: clear stale hedge ids from previous session
+// clear stale hedge ids from previous session
 _closeout_pending_ids.clear();
 _closeout_hedge_pending = false;
 _closeout_hedge_wait_ticks = 0;
@@ -1264,7 +1264,7 @@ _stp->clear();
     WTSLogger::info("UftFutuMmStrategy[{}] session end: {}, Delta: {}", 
         id(), uTDate, _portfolio->getTotalDelta());
 
-    // FIX v3-multi-session: session_end closeout 状态强制收尾
+    // session_end closeout 状态强制收尾
     // 根因:closeout FLATTENING → COMPLETED 仅在 on_order 回调 + getTotalDelta()<0.01
     // 这一条路径上转移。若 hedge 单未全成、或成交后 Delta 因取整/口径残留(如 1 手)
     // 不到阈值,state 卡 FLATTENING。session 结束是硬边界:此后不可能再有 tick/order
@@ -1454,10 +1454,10 @@ auto result = _coordinator->processTick(ctx, stdCode, tick);
         }
 
 // Execute closeout hedge if triggered
-// FIX Bug-C: Only execute on FLATTENING state edge (TRIGGERED→FLATTENING or RETRYING→FLATTENING),
+// Only execute on FLATTENING state edge (TRIGGERED→FLATTENING or RETRYING→FLATTENING),
 // not every tick. processCloseout returns true for TRIGGERED/FLATTENING/COMPLETED states,
 // which previously caused executeCloseoutHedge to be called every tick, oscillating delta.
-// FIX Bug-E (Phase 1, choice Y): halt trading on closeout trigger; only on_session_begin restores.
+// halt trading on closeout trigger; only on_session_begin restores.
 // This prevents new MM fills from accumulating delta during FLATTENING/RETRYING.
 if (result.closeout_executed && _config.closeout.flatten_position
     && _risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
@@ -1468,7 +1468,7 @@ if (result.closeout_executed && _config.closeout.flatten_position
     for (auto& [code, quoter] : _quoters) {
         if (quoter) quoter->cancelAll(ctx);
     }
-    // FIX Bug-H (Plan A): defer hedge to N+CLOSEOUT_HEDGE_WAIT_TICKS so inflight
+    // defer hedge to N+CLOSEOUT_HEDGE_WAIT_TICKS so inflight
     // cancel/fill 回执先回流，避免 hedge 后 inflight trade 反超 net_delta
     _closeout_hedge_pending = true;
     _closeout_hedge_wait_ticks = 0;
@@ -1879,7 +1879,7 @@ break;
 
 if (!hasHardBreach && _risk_monitor->getHaltCategory() != RiskCategory::IRREVERSIBLE)
 {
-// FIX Bug-F: do not auto-resume while closeout flattening is in progress.
+// do not auto-resume while closeout flattening is in progress.
 // closeout halt must persist until on_session_begin restores it.
 if (_risk_monitor->isCloseoutFlattening() ||
     _risk_monitor->isCloseoutTriggered() ||
@@ -1889,12 +1889,12 @@ if (_risk_monitor->isCloseoutFlattening() ||
 }
 else
 {
-// FIX P1-10: Call resumeTrading() first and check return value.
+// Call resumeTrading() first and check return value.
 // Only update TradingState if resumeTrading succeeds (not IRREVERSIBLE).
 bool resumed = _risk_monitor->resumeTrading();
 if (resumed)
 {
-// FIX P0-7: Use resumeFromRisk() instead of direct assignments
+// Use resumeFromRisk() instead of direct assignments
 _trading_state.resumeFromRisk();
 _trading_state.unblockLong();
 _trading_state.unblockShort();
@@ -1958,9 +1958,9 @@ _stp->untrackOrder(localid);
 if ((isCanceled || leftQty == 0) && _order_router)
 _order_router->onOrderDone(localid);
 
-// FIX P0-3: Check closeout order status in on_order callback
+// Check closeout order status in on_order callback
 // When in FLATTENING state, check if all closeout orders are done
-// FIX Bug-D v2: only handle orders we know are closeout hedges (tracked in _closeout_pending_ids)
+// only handle orders we know are closeout hedges (tracked in _closeout_pending_ids)
 bool is_closeout_order = (_closeout_pending_ids.find(localid) != _closeout_pending_ids.end());
 if (_risk_monitor && _risk_monitor->isCloseoutFlattening() && is_closeout_order)
 {
@@ -2093,7 +2093,7 @@ WTSLogger::info("UftFutuMmStrategy[{}] No price yet, resuming quoting (risk will
 auto violations = _risk_monitor->checkRiskLimits(_portfolio.get());
 if (violations.empty())
 {
-// FIX P0-7: Use resumeFromRisk() instead of direct assignments
+// Use resumeFromRisk() instead of direct assignments
 _trading_state.resumeFromRisk();
 _trading_state.unblockLong();
 _trading_state.unblockShort();
@@ -2203,7 +2203,7 @@ WTSLogger::warn("UftFutuMmStrategy[{}] channel ready but trading remains halted 
 }
 else
 {
-// FIX P0-7: Use resumeFromRisk() instead of direct assignment
+// Use resumeFromRisk() instead of direct assignment
 _trading_state.resumeFromRisk();
 }
 
@@ -2443,7 +2443,7 @@ _async_arb->processOrphanLegs([this, ctx](const std::string& code,
         _risk_monitor->recordOrder();
     }
 },
-// FIX P2-7: 传入当前组合delta_ratio，用于动态调整对冲超时
+// 传入当前组合delta_ratio，用于动态调整对冲超时
 [this]() -> double {
     if (!_portfolio) return 0.0;
     return _portfolio->getPortfolioDeltaUtilization();  // abs(net_delta)/max_delta
@@ -2485,7 +2485,7 @@ else if (!is_buy && new_pos < 0)
 {
 if (old_pos <= 0)
 {
-// FIX P2-4: 空头加仓时用绝对值计算加权均价
+// 空头加仓时用绝对值计算加权均价
 // old_pos<0, new_pos<0, 需要取绝对值避免负数导致计算错误
 new_avg_cost = (cs->avg_cost * std::abs(old_pos) + price * qty) / std::abs(new_pos);
 }
@@ -2633,7 +2633,7 @@ void UftFutuMmStrategy::on_params_updated()
     }
     
     // Delta软指标 → Portfolio
-    // FIX P0-10: 使用setParams替代const_cast，保持接口一致性
+    // 使用setParams替代const_cast，保持接口一致性
     if (_portfolio)
     {
         PortfolioParams pp = _portfolio->getParams();  // 拷贝

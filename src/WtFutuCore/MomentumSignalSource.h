@@ -81,7 +81,7 @@ public:
         {
             calculateMomentum();
             _result.timestamp = ts;
-            _result.valid = true;   // FIX P0-5: valid=true移到if内部，样本不足时不标记valid
+            _result.valid = true;   // valid=true移到if内部，样本不足时不标记valid
         }
         else
         {
@@ -132,7 +132,7 @@ private:
     {
         size_t n = _price_history.size();
         
-        // FIX P1-2: 改用对数收益率替代百分比变化率
+        // 改用对数收益率替代百分比变化率
         // 百分比变化率 (P_t - P_{t-1})/P_{t-1} * 100 对高价合约信号被压制：
         //   同样1个tick变动，价格3000的合约变化率0.033%，价格30000的合约仅0.0033%。
         // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异，数学性质更优：
