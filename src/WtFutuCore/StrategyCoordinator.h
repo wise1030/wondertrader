@@ -208,14 +208,21 @@ public:
     // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_scale)
     void updateAdaptiveParams(wtp::IUftStraCtx* ctx, const TickContext& tc);
     
-    inline bool isTradingHalted() const { return _trading_state ? _trading_state->trading_halted : false; }
-    inline bool isQuotingPaused() const { return _trading_state ? _trading_state->quoting_paused : false; }
+    inline bool isTradingHalted() const { 
+        return _trading_state ? _trading_state->qphase == QuotingPhase::RISK_HALTED : false; 
+    }
+    inline bool isQuotingPaused() const { 
+        return _trading_state ? _trading_state->qphase == QuotingPhase::ERROR : false; 
+    }
     inline bool isLongBlocked() const { return _trading_state ? _trading_state->long_blocked : false; }
     inline bool isShortBlocked() const { return _trading_state ? _trading_state->short_blocked : false; }
-    inline bool isMarketStatePaused() const { return _trading_state ? _trading_state->market_paused : false; }
-    inline bool isToxicityPaused() const { return _trading_state ? _trading_state->toxicity_paused : false; }
-    
-    void setTradingHalted(bool halted) { if (_trading_state) _trading_state->trading_halted = halted; }
+    inline bool isMarketStatePaused() const { 
+        return _trading_state ? _trading_state->qphase == QuotingPhase::MARKET : false; 
+    }
+    inline bool isToxicityPaused() const { 
+        return _trading_state ? _trading_state->qphase == QuotingPhase::TOXICITY : false; 
+    }
+    // setTradingHalted removed — use setQuotingPhase(RISK_HALTED) or enterCloseout()
     void resetSession();
     void resetDaily();
     
@@ -241,12 +248,6 @@ private:
     bool _channel_ready = true;
     
     uint64_t _toxicity_resume_time = 0;
-    
-    // v3 软风控字段：从 RiskMonitor.checkPreTradePosition 透传到 FutuQuoter.refreshQuotes
-    double _v3_long_util = 0.0;
-    double _v3_short_util = 0.0;
-    bool   _v3_force_ask_obligation = false;
-    bool   _v3_force_bid_obligation = false;
     uint64_t _tick_count = 0;
     
     // P0-2.3: Global cache for portfolio metrics

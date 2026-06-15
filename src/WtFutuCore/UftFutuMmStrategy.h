@@ -402,7 +402,7 @@ private:
     // 下单错误处理（统一处理所有下单错误）
     uint32_t _order_error_count;     // 连续下单错误计数
     // order_error_threshold: use _config.order_control.order_error_threshold directly
-    uint64_t _quoting_paused_since;  // quoting_paused 开始时间戳(ms)，0=未暂停
+    uint64_t _quoting_paused_since;  // ERROR qphase 开始时间戳(ms)，0=未暂停
     
     // 收盘前平仓状态 (now managed by FutuRiskMonitor state machine)
     

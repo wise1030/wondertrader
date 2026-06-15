@@ -212,23 +212,26 @@ struct CloseoutConfig
     }
 };
 
-/// Closeout state machine states
-enum class CloseoutState
+/// Closeout sub-state machine (P1-1: merged old CloseoutState + CloseoutPhase)
+/// Used by both RiskMonitor (SSOT with metadata) and CloseoutExecutor
+enum class CloseoutSub : uint8_t
 {
     IDLE,           ///< Not triggered, normal trading
     TRIGGERED,      ///< Triggered, waiting to execute closeout
-    FLATTENING,     ///< Executing flatten orders
+    DRAINING,       ///< Executor: waiting for inflight orders to settle
+    ASSESSING,      ///< Executor: reading net delta, computing remaining
+    EXECUTING,      ///< Executor: iterative FAK batches
     COMPLETED,      ///< Closeout completed
     FAILED,         ///< Closeout failed (e.g., partial fill, no liquidity)
     RETRYING        ///< Retrying closeout after failure
 };
 
-/// Closeout state with transition tracking
-struct CloseoutStateInfo
+/// Closeout sub-state with transition tracking
+struct CloseoutSubInfo
 {
-    CloseoutState state;
+    CloseoutSub state;
     uint64_t trigger_time;      ///< When state was triggered
-    uint64_t flatten_start;     ///< When flattening started
+    uint64_t flatten_start;     ///< When executor started (DRAINING entry)
     uint64_t complete_time;     ///< When completed
     uint64_t fail_time;         ///< When last failure occurred
     uint32_t retry_count;       ///< Number of retries attempted
@@ -237,31 +240,38 @@ struct CloseoutStateInfo
     bool is_night_closeout;     ///< FIX Bug-A: was this triggered by night session closeout?
     bool night_closeout_done;   ///< FIX Bug-A: night closeout already executed this session
     
-    CloseoutStateInfo()
-        : state(CloseoutState::IDLE)
+    CloseoutSubInfo()
+        : state(CloseoutSub::IDLE)
         , trigger_time(0), flatten_start(0), complete_time(0), fail_time(0)
         , retry_count(0), max_retries(3), retry_interval_ms(5000)
         , is_night_closeout(false), night_closeout_done(false)
     {}
     
-    inline bool canTransitionTo(CloseoutState next) const
+    inline bool canTransitionTo(CloseoutSub next) const
     {
         switch (state)
         {
-            case CloseoutState::IDLE:
-                return next == CloseoutState::TRIGGERED;
-            case CloseoutState::TRIGGERED:
-                return next == CloseoutState::FLATTENING || next == CloseoutState::COMPLETED;
-            case CloseoutState::FLATTENING:
-                return next == CloseoutState::COMPLETED || next == CloseoutState::FAILED;
-            case CloseoutState::COMPLETED:
-                // FIX P2-5: Allow COMPLETED→IDLE for night session reset
-                // (白盘时段需重置夜盘的COMPLETED状态以恢复交易)
-                return next == CloseoutState::IDLE;
-            case CloseoutState::FAILED:
-                return next == CloseoutState::RETRYING || next == CloseoutState::COMPLETED;
-            case CloseoutState::RETRYING:
-                return next == CloseoutState::FLATTENING || next == CloseoutState::FAILED || next == CloseoutState::COMPLETED;
+            case CloseoutSub::IDLE:
+                return next == CloseoutSub::TRIGGERED;
+            case CloseoutSub::TRIGGERED:
+                return next == CloseoutSub::DRAINING || next == CloseoutSub::COMPLETED;
+            case CloseoutSub::DRAINING:
+                return next == CloseoutSub::ASSESSING || next == CloseoutSub::COMPLETED
+                    || next == CloseoutSub::FAILED;
+            case CloseoutSub::ASSESSING:
+                return next == CloseoutSub::EXECUTING || next == CloseoutSub::COMPLETED
+                    || next == CloseoutSub::FAILED;
+            case CloseoutSub::EXECUTING:
+                return next == CloseoutSub::DRAINING || next == CloseoutSub::ASSESSING
+                    || next == CloseoutSub::COMPLETED || next == CloseoutSub::FAILED;
+            case CloseoutSub::COMPLETED:
+                // Allow COMPLETED→IDLE for night session reset
+                return next == CloseoutSub::IDLE;
+            case CloseoutSub::FAILED:
+                return next == CloseoutSub::RETRYING || next == CloseoutSub::COMPLETED;
+            case CloseoutSub::RETRYING:
+                return next == CloseoutSub::DRAINING || next == CloseoutSub::FAILED
+                    || next == CloseoutSub::COMPLETED;
             default:
                 return false;
         }
@@ -428,39 +438,41 @@ public:
     bool checkCloseout(uint32_t currentTime, uint32_t closeTime);
     
     /// Get current closeout state
-    inline CloseoutState getCloseoutState() const {
+    inline CloseoutSub getCloseoutSub() const {
         return _closeout_state.state;
     }
     
     /// Get closeout state info
-    inline const CloseoutStateInfo& getCloseoutStateInfo() const {
+    inline const CloseoutSubInfo& getCloseoutSubInfo() const {
         return _closeout_state;
     }
     
     /// Check if closeout has been triggered
     inline bool isCloseoutTriggered() const {
-        return _closeout_state.state != CloseoutState::IDLE;
+        return _closeout_state.state != CloseoutSub::IDLE;
     }
     
     /// Check if closeout has been completed
     inline bool isCloseoutCompleted() const {
-        return _closeout_state.state == CloseoutState::COMPLETED;
+        return _closeout_state.state == CloseoutSub::COMPLETED;
     }
     
-    /// Check if currently flattening positions
+    /// Check if currently in executor-managed active states
     inline bool isCloseoutFlattening() const {
-        return _closeout_state.state == CloseoutState::FLATTENING;
+        return _closeout_state.state == CloseoutSub::DRAINING
+            || _closeout_state.state == CloseoutSub::ASSESSING
+            || _closeout_state.state == CloseoutSub::EXECUTING;
     }
     
     /// Transition closeout state (with validation)
     /// @return true if transition successful, false otherwise
-    bool transitionCloseoutState(CloseoutState next_state, uint64_t timestamp = 0);
+    bool transitionCloseoutSub(CloseoutSub next_state, uint64_t timestamp = 0);
     
     /// Mark closeout as triggered
     void markCloseoutTriggered(uint64_t timestamp = 0);
     
-    /// Mark closeout as flattening
-    void markCloseoutFlattening(uint64_t timestamp = 0);
+    /// Mark closeout as draining (executor started, first executor-managed state)
+    void markCloseoutDraining(uint64_t timestamp = 0);
     
     /// Mark closeout as completed
     void markCloseoutCompleted(uint64_t timestamp = 0);
@@ -562,7 +574,7 @@ private:
     
     // Closeout state (收盘前平仓) - State Machine
     CloseoutConfig _closeout_config;
-    CloseoutStateInfo _closeout_state;
+    CloseoutSubInfo _closeout_state;
     
     // Delta rate tracking
     struct DeltaSnapshot {

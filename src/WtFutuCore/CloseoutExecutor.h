@@ -23,6 +23,7 @@
 #include <vector>
 #include "../Includes/FasterDefs.h"
 #include "OrderRouter.h"
+#include "FutuRiskMonitor.h"  // CloseoutSub enum (P1-1: merged state machine)
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -34,16 +35,8 @@ class UnifiedOrderTracker;
 class FutuPortfolio;
 struct ContractState;
 
-/// Closeout execution phase
-enum class CloseoutPhase : uint8_t
-{
-    IDLE        = 0,
-    DRAINING    = 1,   ///< Waiting for inflight orders to settle
-    ASSESSING   = 2,   ///< Reading net delta, computing remaining
-    EXECUTING   = 3,   ///< Iterative FAK batches
-    COMPLETED   = 4,
-    FAILED      = 5,
-};
+// P1-1: CloseoutSub is now defined in FutuRiskMonitor.h (merged state machine)
+// The executor uses it directly — no separate phase enum needed.
 
 /// Price escalation tier for urgency-driven execution
 enum class PriceTier : uint8_t
@@ -149,12 +142,12 @@ public:
     //==========================================================================
     // State queries
     //==========================================================================
-    CloseoutPhase getPhase() const { return _phase; }
-    bool isIdle() const      { return _phase == CloseoutPhase::IDLE; }
-    bool isCompleted() const { return _phase == CloseoutPhase::COMPLETED; }
-    bool isFailed() const    { return _phase == CloseoutPhase::FAILED; }
-    bool isActive() const    { return _phase != CloseoutPhase::IDLE
-                                    && _phase != CloseoutPhase::COMPLETED; }
+    CloseoutSub getPhase() const { return _phase; }
+    bool isIdle() const      { return _phase == CloseoutSub::IDLE; }
+    bool isCompleted() const { return _phase == CloseoutSub::COMPLETED; }
+    bool isFailed() const    { return _phase == CloseoutSub::FAILED; }
+    bool isActive() const    { return _phase != CloseoutSub::IDLE
+                                    && _phase != CloseoutSub::COMPLETED; }
 
     double getRemaining() const    { return _remaining; }
     double getTotalFilled() const  { return _total_filled; }
@@ -217,7 +210,7 @@ private:
     //==========================================================================
     // State
     //==========================================================================
-    CloseoutPhase  _phase          = CloseoutPhase::IDLE;
+    CloseoutSub  _phase          = CloseoutSub::IDLE;
     char           _code[32]       = {};
     uint64_t       _close_time_ms  = 0;
     double         _hedge_ratio    = 1.0;

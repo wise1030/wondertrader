@@ -25,7 +25,7 @@ void CloseoutExecutor::start(wtp::IUftStraCtx* ctx,
                               uint64_t close_time_ms,
                               double hedge_ratio)
 {
-    _phase           = CloseoutPhase::DRAINING;
+    _phase           = CloseoutSub::DRAINING;
     std::strncpy(_code, code, sizeof(_code) - 1);
     _code[sizeof(_code) - 1] = '\0';
     _close_time_ms   = close_time_ms;
@@ -50,7 +50,7 @@ void CloseoutExecutor::start(wtp::IUftStraCtx* ctx,
 
 void CloseoutExecutor::reset()
 {
-    _phase          = CloseoutPhase::IDLE;
+    _phase          = CloseoutSub::IDLE;
     _remaining      = 0;
     _total_to_hedge = 0;
     _total_filled   = 0;
@@ -64,23 +64,23 @@ void CloseoutExecutor::reset()
 
 void CloseoutExecutor::run(wtp::IUftStraCtx* ctx, const MarketSnapshot& snap)
 {
-    if (_phase == CloseoutPhase::IDLE || _phase == CloseoutPhase::COMPLETED)
+    if (_phase == CloseoutSub::IDLE || _phase == CloseoutSub::COMPLETED)
         return;
 
     switch (_phase)
     {
-        case CloseoutPhase::DRAINING:
+        case CloseoutSub::DRAINING:
             handleDraining(ctx, snap);
             // If drain completed, fall through to assessing this tick
-            if (_phase == CloseoutPhase::ASSESSING)
+            if (_phase == CloseoutSub::ASSESSING)
                 handleAssessing(ctx, snap);
             break;
 
-        case CloseoutPhase::ASSESSING:
+        case CloseoutSub::ASSESSING:
             handleAssessing(ctx, snap);
             break;
 
-        case CloseoutPhase::EXECUTING:
+        case CloseoutSub::EXECUTING:
             handleExecuting(ctx, snap);
             break;
 
@@ -121,7 +121,7 @@ bool CloseoutExecutor::handleDraining(wtp::IUftStraCtx* ctx,
         WTSLogger::info("CloseoutExecutor[{}] DRAIN complete after {}ms (orders={})",
                         (void*)this, elapsed,
                         _tracker ? _tracker->getOrderCount() : -1);
-        _phase = CloseoutPhase::ASSESSING;
+        _phase = CloseoutSub::ASSESSING;
         return true;
     }
 
@@ -131,7 +131,7 @@ bool CloseoutExecutor::handleDraining(wtp::IUftStraCtx* ctx,
         WTSLogger::warn("CloseoutExecutor[{}] DRAIN timeout after {}ms, {} orders still active — proceeding anyway",
                         (void*)this, elapsed,
                         _tracker ? _tracker->getOrderCount() : -1);
-        _phase = CloseoutPhase::ASSESSING;
+        _phase = CloseoutSub::ASSESSING;
         return true;
     }
 
@@ -147,7 +147,7 @@ void CloseoutExecutor::handleAssessing(wtp::IUftStraCtx* ctx,
     if (!_portfolio)
     {
         WTSLogger::error("CloseoutExecutor[{}] ASSESS: portfolio is null", (void*)this);
-        _phase = CloseoutPhase::FAILED;
+        _phase = CloseoutSub::FAILED;
         return;
     }
 
@@ -157,7 +157,7 @@ void CloseoutExecutor::handleAssessing(wtp::IUftStraCtx* ctx,
     {
         WTSLogger::error("CloseoutExecutor[{}] ASSESS: invalid hedge_ratio={}",
                          (void*)this, _hedge_ratio);
-        _phase = CloseoutPhase::FAILED;
+        _phase = CloseoutSub::FAILED;
         return;
     }
 
@@ -175,7 +175,7 @@ void CloseoutExecutor::handleAssessing(wtp::IUftStraCtx* ctx,
     WTSLogger::warn("CloseoutExecutor[{}] ASSESS: remaining={:.2f} lots (net_delta={:.4f}), entering EXECUTE",
                     (void*)this, _remaining, net_delta);
 
-    _phase = CloseoutPhase::EXECUTING;
+    _phase = CloseoutSub::EXECUTING;
     _prev_round_pos = _remaining;  // track for fill calculation
     _prev_round_ts  = snap.timestamp_ms;
 }
@@ -188,7 +188,7 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
 {
     if (!_portfolio)
     {
-        _phase = CloseoutPhase::FAILED;
+        _phase = CloseoutSub::FAILED;
         return;
     }
 
@@ -265,7 +265,7 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
     {
         WTSLogger::error("CloseoutExecutor[{}] EXECUTE: invalid price {:.2f} (bid={:.2f} ask={:.2f})",
                          (void*)this, price, snap.bid1, snap.ask1);
-        _phase = CloseoutPhase::FAILED;
+        _phase = CloseoutSub::FAILED;
         return;
     }
 
@@ -494,7 +494,7 @@ void CloseoutExecutor::updateRoundFill(const MarketSnapshot& snap)
 
 void CloseoutExecutor::complete()
 {
-    _phase = CloseoutPhase::COMPLETED;
+    _phase = CloseoutSub::COMPLETED;
 
     // Log summary
     uint64_t total_elapsed = 0;

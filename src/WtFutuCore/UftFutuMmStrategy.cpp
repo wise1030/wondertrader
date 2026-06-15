@@ -1163,9 +1163,8 @@ _risk_monitor->resetDaily();
 // 否则上一日卡 FLATTENING 时 resetCloseout 会被状态机拒绝,导致 state 永久死锁
 _risk_monitor->resetCloseout(true);  // 重置收盘前平仓状态(强制)
 
-// FIX: 重置TradingState — 前一日on_session_end设置了halt/pause，
-// 新交易日必须清除所有暂停标志，否则报价无法启动
-_trading_state.resume();
+// P1-1: reset() clears phase+qphase+blocks for new session
+_trading_state.reset();
 
 // FIX Bug-E Phase 1: reset closeout hedge guard so new day can fire hedge if needed
 _closeout_hedge_executed = false;
@@ -1209,9 +1208,8 @@ WTSLogger::info("UftFutuMmStrategy[{}] session begin: {}", id(), uTDate);
 
 void UftFutuMmStrategy::on_session_end(IUftStraCtx* ctx, uint32_t uTDate)
 {
-    // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
-    _trading_state.halt(TradingState::PauseReason::CLOSEOUT);
-    _trading_state.pauseQuoting(TradingState::PauseReason::CLOSEOUT);
+    // P1-1: enter CLOSEOUT phase on session end
+    _trading_state.enterCloseout();
 
 // 停止异步套利执行器
 if (_async_arb)
@@ -1272,8 +1270,8 @@ _stp->clear();
     // 不到阈值,state 卡 FLATTENING。session 结束是硬边界:此后不可能再有 tick/order
     // 推动状态,必须当场强制收尾,避免下一日 resetCloseout 被状态机拒绝(canTransitionTo
     // 仅允许 COMPLETED→IDLE)导致 state 永久死锁。
-    auto cs_at_end = _risk_monitor->getCloseoutState();
-    if (cs_at_end != CloseoutState::IDLE && cs_at_end != CloseoutState::COMPLETED)
+    auto cs_at_end = _risk_monitor->getCloseoutSub();
+    if (cs_at_end != CloseoutSub::IDLE && cs_at_end != CloseoutSub::COMPLETED)
     {
         WTSLogger::warn("UftFutuMmStrategy[{}] session end with non-terminal closeout state={}, force-finalizing",
             id(), static_cast<int>(cs_at_end));
@@ -1298,7 +1296,7 @@ return;
 // P0-4: 报价暂停条件恢复（非固定定时器）
 // 暂停期间无新错误(errors==0)才恢复，否则指数退避
 //============================================================
-if (_trading_state.quoting_paused && !_trading_state.trading_halted && _quoting_paused_since > 0)
+if (_trading_state.qphase == QuotingPhase::ERROR && _quoting_paused_since > 0)
 {
     uint64_t paused_ms = TimeUtils::getLocalTimeNow() - _quoting_paused_since;
     uint64_t wait_threshold = 10000;  // 初始等待 10 秒
@@ -1315,7 +1313,7 @@ if (_trading_state.quoting_paused && !_trading_state.trading_halted && _quoting_
         {
             WTSLogger::info("UftFutuMmStrategy[{}] Quoting auto-resumed after {}ms (errors cleared)",
                 id(), paused_ms);
-            _trading_state.resumeQuoting();
+            _trading_state.setQuotingPhase(QuotingPhase::NORMAL);
             _quoting_paused_since = 0;
         }
         else
@@ -1465,8 +1463,7 @@ if (result.closeout_executed && _config.closeout.flatten_position
     && _risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
 {
     // Halt MM BEFORE hedge so no new quotes go out concurrently
-    _trading_state.halt(TradingState::PauseReason::CLOSEOUT);
-    _trading_state.pauseQuoting(TradingState::PauseReason::CLOSEOUT);
+    _trading_state.enterCloseout();
     // Cancel any inflight MM orders to prevent stale fills
     for (auto& [code, quoter] : _quoters) {
         if (quoter) quoter->cancelAll(ctx);
@@ -1519,7 +1516,7 @@ if (_closeout_executor && _closeout_executor->isActive())
     // Check executor results
     if (_closeout_executor->isCompleted())
     {
-        if (_risk_monitor->getCloseoutState() != CloseoutState::COMPLETED)
+        if (_risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
         {
             uint64_t now = ctx->stra_get_date() * 1000000ULL
                          + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
@@ -1537,9 +1534,9 @@ if (_closeout_executor && _closeout_executor->isActive())
 // - IDLE: closeout completed and reset (next session via on_session_begin)
 // - FAILED/RETRYING: previous attempt failed, allow retry to re-fire hedge
 // Note: when RETRYING re-enters FLATTENING, we re-halt above (idempotent).
-auto cs = _risk_monitor->getCloseoutState();
-if (cs == CloseoutState::IDLE || cs == CloseoutState::FAILED 
-    || cs == CloseoutState::RETRYING)
+auto cs = _risk_monitor->getCloseoutSub();
+if (cs == CloseoutSub::IDLE || cs == CloseoutSub::FAILED 
+    || cs == CloseoutSub::RETRYING)
 {
     _closeout_hedge_executed = false;
     _closeout_hedge_pending = false;
@@ -1553,9 +1550,8 @@ else
 {
 // Fallback: no coordinator, trigger fail-safe and cancel all orders
         WTSLogger::error("UftFutuMmStrategy[{}] Coordinator is null, triggering FAIL-SAFE!", id());
-        // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
-        _trading_state.halt(TradingState::PauseReason::RISK_LIMIT);
-        _trading_state.pauseQuoting(TradingState::PauseReason::RISK_LIMIT);
+        // P1-1: coordinator null fail-safe
+        _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
 
 // Cancel all outstanding orders directly via ctx to ensure safety
 for (auto& [code, quoter] : _quoters)
@@ -1618,7 +1614,7 @@ double totalDelta = _portfolio->getNetDelta();
 if (std::abs(totalDelta) < 0.01)
 {
     WTSLogger::info("UftFutuMmStrategy[{}] Closeout: No position to hedge (Delta=0)", id());
-    if (_risk_monitor->getCloseoutState() != CloseoutState::COMPLETED)
+    if (_risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
     {
         uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
         _risk_monitor->markCloseoutCompleted(now);
@@ -1662,7 +1658,7 @@ _closeout_executor->start(ctx, _config.anchor_code.c_str(),
 
 // 标记 FLATTENING (executor 已启动，等待渐进成交)
 uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-_risk_monitor->markCloseoutFlattening(now);
+_risk_monitor->markCloseoutDraining(now);
 }
 
 void UftFutuMmStrategy::on_order_queue(IUftStraCtx* ctx, const char* stdCode, WTSOrdQueData* newOrdQue)
@@ -1864,7 +1860,7 @@ _toxicity_detector->onSelfTradeCalibration(calibration);
 // ============================================================
 // 成交后检查风控状态，如果没有硬指标违规则恢复交易
 // ============================================================
-if (_trading_state.trading_halted && _risk_monitor)
+if (_trading_state.qphase == QuotingPhase::RISK_HALTED && _risk_monitor)
 {
 auto violations = _risk_monitor->checkRiskLimits(_portfolio.get());
 bool hasHardBreach = false;
@@ -1887,7 +1883,7 @@ if (!hasHardBreach && _risk_monitor->getHaltCategory() != RiskCategory::IRREVERS
 // closeout halt must persist until on_session_begin restores it.
 if (_risk_monitor->isCloseoutFlattening() ||
     _risk_monitor->isCloseoutTriggered() ||
-    _trading_state.pause_reason == TradingState::PauseReason::CLOSEOUT)
+    _trading_state.phase == MmPhase::CLOSEOUT)
 {
     // skip resume — closeout in progress
 }
@@ -2194,8 +2190,10 @@ WTSLogger::info("UftFutuMmStrategy[{}] Auto position reduction triggered, will r
 }
 
 // 保持风控状态不变
-// FIX P0-7: SSOT — 通过syncFromRiskMonitor统一同步，而非逐字段直接赋值
-_trading_state.syncFromRiskMonitor(_risk_monitor.get());
+// P1-1: TradingState manages its own phase; syncFromRiskMonitor removed.
+// If RiskMonitor is halted, ensure TradingState reflects it.
+if (_risk_monitor->isTradingHalted())
+    _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
 }
 else
@@ -2217,9 +2215,8 @@ void UftFutuMmStrategy::on_channel_lost(IUftStraCtx* ctx)
     _channel_ready = false;
 
     // 1. 立即暂停所有交易和报价
-    // FIX P0-7: SSOT — 通过TradingState方法而非直接赋值
-    _trading_state.halt(TradingState::PauseReason::RISK_LIMIT);
-    _trading_state.pauseQuoting(TradingState::PauseReason::RISK_LIMIT);
+    // P1-1: enter RISK_HALTED on channel lost
+    _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
     _quoting_paused_since = TimeUtils::getLocalTimeNow();
 
     // 2. 撤销所有做市挂单（通道断开时无法保证订单状态）
@@ -2538,9 +2535,9 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     if (bSuccess)
     {
         _order_error_count = 0;
-        if (_trading_state.quoting_paused && !_trading_state.trading_halted)
+        if (_trading_state.qphase == QuotingPhase::ERROR)
         {
-            _trading_state.resumeQuoting();
+            _trading_state.setQuotingPhase(QuotingPhase::NORMAL);
             _quoting_paused_since = 0;
             WTSLogger::info("UftFutuMmStrategy[{}] Quoting resumed after successful order", id());
         }
@@ -2556,8 +2553,7 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
 
     if (_order_error_count >= _config.order_control.order_error_threshold)
     {
-        _trading_state.pauseQuoting(TradingState::PauseReason::ORDER_ERROR);
-        _trading_state.halt(TradingState::PauseReason::ORDER_ERROR);
+        _trading_state.setQuotingPhase(QuotingPhase::ERROR);
 
         WTSLogger::error("UftFutuMmStrategy[{}] Trading HALTED due to consecutive order errors (count={}/threshold={})",
             id(), _order_error_count, _config.order_control.order_error_threshold);
@@ -2572,7 +2568,7 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     }
     else
     {
-        _trading_state.pauseQuoting(TradingState::PauseReason::ORDER_ERROR);
+        _trading_state.setQuotingPhase(QuotingPhase::ERROR);
         _quoting_paused_since = TimeUtils::getLocalTimeNow();
         WTSLogger::warn("UftFutuMmStrategy[{}] Quoting temporarily paused due to order error ({}/{})",
             id(), _order_error_count, _config.order_control.order_error_threshold);

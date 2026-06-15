@@ -814,7 +814,7 @@ bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
 // Closeout Management (收盘前平仓) - State Machine Implementation
 //==========================================================================
 
-bool FutuRiskMonitor::transitionCloseoutState(CloseoutState next_state, uint64_t timestamp)
+bool FutuRiskMonitor::transitionCloseoutSub(CloseoutSub next_state, uint64_t timestamp)
 {
     // FIX C: same-state 静默短路 —— 调用方(StrategyCoordinator/UftFutuMmStrategy)在
     // closeout 窗口的 on_tick/on_calc 高频路径里反复调 markCloseoutFlattening,
@@ -835,20 +835,20 @@ bool FutuRiskMonitor::transitionCloseoutState(CloseoutState next_state, uint64_t
     
     switch (next_state)
     {
-        case CloseoutState::TRIGGERED:
+        case CloseoutSub::TRIGGERED:
             _closeout_state.trigger_time = timestamp;
             break;
-        case CloseoutState::FLATTENING:
+        case CloseoutSub::DRAINING:
             _closeout_state.flatten_start = timestamp;
             break;
-        case CloseoutState::COMPLETED:
+        case CloseoutSub::COMPLETED:
             _closeout_state.complete_time = timestamp;
             break;
-        case CloseoutState::FAILED:
+        case CloseoutSub::FAILED:
             _closeout_state.fail_time = timestamp;
             _closeout_state.retry_count++;
             break;
-        case CloseoutState::RETRYING:
+        case CloseoutSub::RETRYING:
             break;
         default:
             break;
@@ -859,7 +859,7 @@ bool FutuRiskMonitor::transitionCloseoutState(CloseoutState next_state, uint64_t
 
 void FutuRiskMonitor::markCloseoutTriggered(uint64_t timestamp)
 {
-    if (transitionCloseoutState(CloseoutState::TRIGGERED, timestamp))
+    if (transitionCloseoutSub(CloseoutSub::TRIGGERED, timestamp))
     {
         pauseQuoting();
         broadcastAlert("CLOSEOUT_TRIGGERED", 
@@ -867,18 +867,18 @@ void FutuRiskMonitor::markCloseoutTriggered(uint64_t timestamp)
     }
 }
 
-void FutuRiskMonitor::markCloseoutFlattening(uint64_t timestamp)
+void FutuRiskMonitor::markCloseoutDraining(uint64_t timestamp)
 {
-    if (transitionCloseoutState(CloseoutState::FLATTENING, timestamp))
+    if (transitionCloseoutSub(CloseoutSub::DRAINING, timestamp))
     {
-        broadcastAlert("CLOSEOUT_FLATTENING", 
-            fmt::format("Closeout state: FLATTENING at {}", timestamp));
+        broadcastAlert("CLOSEOUT_DRAINING",
+            fmt::format("Closeout state: DRAINING at {}", timestamp));
     }
 }
 
 void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
 {
-    if (transitionCloseoutState(CloseoutState::COMPLETED, timestamp))
+    if (transitionCloseoutSub(CloseoutSub::COMPLETED, timestamp))
     {
         // FIX Bug-A: 标记夜盘 closeout 已完成，防止 reset 后重触发
         if (_closeout_state.is_night_closeout)
@@ -890,7 +890,7 @@ void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
 
 void FutuRiskMonitor::markCloseoutFailed(uint64_t timestamp)
 {
-    if (transitionCloseoutState(CloseoutState::FAILED, timestamp))
+    if (transitionCloseoutSub(CloseoutSub::FAILED, timestamp))
     {
         if (_closeout_state.retry_count >= _closeout_state.max_retries)
         {
@@ -910,7 +910,7 @@ void FutuRiskMonitor::markCloseoutFailed(uint64_t timestamp)
 
 bool FutuRiskMonitor::checkCloseoutRetry(uint64_t current_time_ms)
 {
-    if (_closeout_state.state != CloseoutState::FAILED)
+    if (_closeout_state.state != CloseoutSub::FAILED)
         return false;
     
     if (_closeout_state.retry_count >= _closeout_state.max_retries)
@@ -923,7 +923,7 @@ bool FutuRiskMonitor::checkCloseoutRetry(uint64_t current_time_ms)
     if (current_time_ms - _closeout_state.fail_time < _closeout_state.retry_interval_ms)
         return false;
     
-    if (transitionCloseoutState(CloseoutState::RETRYING, current_time_ms))
+    if (transitionCloseoutSub(CloseoutSub::RETRYING, current_time_ms))
     {
         broadcastAlert("CLOSEOUT_RETRYING",
             fmt::format("Closeout retry {}/{} at {}", 
@@ -936,8 +936,8 @@ bool FutuRiskMonitor::checkCloseoutRetry(uint64_t current_time_ms)
 
 bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
 {
-    if (_closeout_state.state == CloseoutState::COMPLETED ||
-        _closeout_state.state == CloseoutState::FAILED)
+    if (_closeout_state.state == CloseoutSub::COMPLETED ||
+        _closeout_state.state == CloseoutSub::FAILED)
         return false;
     
     // FIX A-step: ctx->stra_get_time() 返回 HHMM (4位), 不是 HHMMSS。
@@ -1018,7 +1018,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
                 currentAbs = static_cast<int32_t>(currentTotalMin) + 1440;  // 00:00-05:59
             }
             
-            if (currentAbs >= triggerAbs && _closeout_state.state == CloseoutState::IDLE)
+            if (currentAbs >= triggerAbs && _closeout_state.state == CloseoutSub::IDLE)
             {
             // FIX Bug-A: record this is a night closeout so COMPLETED handler
             // only resets state for night→day transition, not day closeout
@@ -1038,7 +1038,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
             if (triggerTotalMin < 0) triggerTotalMin = 0;
             
             if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
-                && _closeout_state.state == CloseoutState::IDLE)
+                && _closeout_state.state == CloseoutSub::IDLE)
             {
             // FIX Bug-A: record this is a night closeout
             _closeout_state.is_night_closeout = true;
@@ -1083,7 +1083,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         if (triggerTotalMin < 0) triggerTotalMin = 0;
         
         if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
-            && _closeout_state.state == CloseoutState::IDLE)
+            && _closeout_state.state == CloseoutSub::IDLE)
         {
             // FIX Bug-A: day closeout, not night; reset night flag for next session
             _closeout_state.is_night_closeout = false;
@@ -1096,7 +1096,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         }
     }
     
-    return _closeout_state.state != CloseoutState::IDLE;
+    return _closeout_state.state != CloseoutSub::IDLE;
 }
 
 // FIX P2-5: resetCloseout改为通过状态机转换而非直接构造
@@ -1106,9 +1106,9 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
 // 拒绝,state 永久卡死,Delta 雪崩)。force=false(默认)保留状态机保护。
 void FutuRiskMonitor::resetCloseout(bool force)
 {
-    if (force || _closeout_state.canTransitionTo(CloseoutState::IDLE))
+    if (force || _closeout_state.canTransitionTo(CloseoutSub::IDLE))
     {
-        _closeout_state.state = CloseoutState::IDLE;
+        _closeout_state.state = CloseoutSub::IDLE;
         _closeout_state.trigger_time = 0;
         _closeout_state.flatten_start = 0;
         _closeout_state.complete_time = 0;

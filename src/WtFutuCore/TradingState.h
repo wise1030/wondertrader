@@ -1,156 +1,176 @@
 /*!
- * \file TradingStateManager.h
- * \brief Unified Trading State Management - Single Source of Truth
- * 
- * Consolidates trading state from UftFutuMmStrategy and StrategyCoordinator
- * to prevent state inconsistency.
- * 
+ * \file TradingState.h
+ * \brief Unified Trading State — Hierarchical State Machine (HSM)
+ *
+ * P1-1 重构 (2026-06): 两层分层状态机，替代旧扁平 bool 标志位
+ *
+ * 业务语义分层:
+ *   顶层 MmPhase — 做市报价 vs 收盘平仓对冲（两个业务阶段）
+ *   QUOTING 子状态 — 毒性/市场/错误/风控暂停
+ *   CLOSEOUT 子状态 — 由 RiskMonitor 的 CloseoutSub 管理（TradingState 不跟踪细节）
+ *   方向级软禁 long_blocked/short_blocked — 正交于两个阶段
+ *
+ * 线程安全约束 (P1-7):
+ *   WT UFT 回调在 reader 线程串行调用，无并发。不加 std::atomic。
+ *   若未来引入多线程，需将 MmPhase/QuotingPhase 改为 atomic 或加锁。
+ *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
 
-#include <string>
 #include <cstdint>
-
-// FIX P0-7: SSOT — syncFromRiskMonitor需要完整类型定义
-#include "FutuRiskMonitor.h"
 
 namespace futu {
 
-/// 交易状态 - 单一 Source of Truth
+//==========================================================================
+// 顶层：业务阶段
+//==========================================================================
+enum class MmPhase : uint8_t {
+    QUOTING,    ///< 做市报价阶段
+    CLOSEOUT,   ///< 收盘平仓对冲阶段
+};
+
+//==========================================================================
+// QUOTING 子状态
+//==========================================================================
+enum class QuotingPhase : uint8_t {
+    NORMAL,         ///< 正常报价
+    TOXICITY,       ///< 毒性流暂停（VPIN/OFI 等信号触发，定时恢复）
+    MARKET,         ///< 极端波动暂停（vol tier EXTREME）
+    ERROR,          ///< 下单错误暂停（指数退避恢复）
+    RISK_HALTED,    ///< 风控硬触发（持仓超限/Delta爆炸），需显式 resumeFromRisk
+};
+
+//==========================================================================
+// 统一交易状态 — Single Source of Truth
+//==========================================================================
+//
+// 设计要点:
+//   - MmPhase 只有两个值：做市 vs 收盘平仓。转移只发生在 closeout 触发/完成。
+//   - QuotingPhase 是 QUOTING 内的子状态。互相可抢占（高优先级覆盖）。
+//   - RISK_HALTED → NORMAL 只能通过 resumeFromRisk()（带转移校验）。
+//   - CLOSEOUT 子状态由 RiskMonitor 的 CloseoutSub 管理，TradingState 不跟踪细节。
+//   - long_blocked/short_blocked 是方向级软禁，与 phase/qphase 正交。
+//   - 不再需要 syncFromRiskMonitor：各模块管自己的域，strategy 是编排者。
+//
 struct TradingState {
-    bool trading_halted = false;      ///< 交易暂停（风控触发）
-    bool quoting_paused = false;      ///< 报价暂停（下单错误等）
-    bool long_blocked = false;        ///< 禁止买入
-    bool short_blocked = false;       ///< 禁止卖出
-    bool toxicity_paused = false;     ///< 毒性暂停
-    bool market_paused = false;       ///< 市场状态暂停（极端波动等）
-    
-    /// 暂停原因追踪
-    enum class PauseReason : uint8_t {
-        NONE = 0,
-        RISK_LIMIT,       ///< 风控限制
-        TOXICITY,          ///< 毒性流
-        ORDER_ERROR,       ///< 下单错误
-        CLOSEOUT,          ///< 收盘平仓
-        MANUAL,            ///< 手动暂停
-        DELTA_LIMIT,       ///< Delta限制
-        MARKET_VOLATILITY  ///< 市场波动暂停(EXTREME vol tier)
-    };
-    
-    PauseReason pause_reason = PauseReason::NONE;
-    
+    MmPhase      phase  = MmPhase::QUOTING;
+    QuotingPhase qphase = QuotingPhase::NORMAL;
+
+    // 方向级软禁（正交，两阶段都适用）
+    bool long_blocked  = false;
+    bool short_blocked = false;
+
     //==========================================================================
-    // 统一查询接口
+    // 查询接口
     //==========================================================================
-    
-    bool canQuote() const { 
-        return !trading_halted && !quoting_paused && !toxicity_paused && !market_paused; 
+
+    /// 能否报价（做市阶段 + NORMAL 子状态）
+    bool canQuote() const {
+        return phase == MmPhase::QUOTING && qphase == QuotingPhase::NORMAL;
     }
-    bool canBuy() const { 
-        return canQuote() && !long_blocked; 
+
+    /// 能否买入
+    bool canBuy() const {
+        return canQuote() && !long_blocked;
     }
-    bool canSell() const { 
-        return canQuote() && !short_blocked; 
+
+    /// 能否卖出
+    bool canSell() const {
+        return canQuote() && !short_blocked;
     }
+
+    /// 是否活跃（做市阶段 且 非风控暂停）
+    /// 语义映射旧 isActive(): NORMAL 或 TOXICITY 时为 true
     bool isActive() const {
-        return !trading_halted && !quoting_paused && !market_paused;
+        return phase == MmPhase::QUOTING
+            && qphase != QuotingPhase::RISK_HALTED
+            && qphase != QuotingPhase::ERROR
+            && qphase != QuotingPhase::MARKET;
     }
-    
+
+    /// 收盘平仓阶段是否激活
+    bool isCloseoutActive() const {
+        return phase == MmPhase::CLOSEOUT;
+    }
+
     //==========================================================================
-    // 状态变更方法（集中管理，方便日志和审计）
+    // 顶层转移
     //==========================================================================
-    
-    void halt(PauseReason reason) {
-        if (!trading_halted) {
-            trading_halted = true;
-            pause_reason = reason;
-        }
+
+    /// 进入收盘平仓阶段
+    void enterCloseout() {
+        phase = MmPhase::CLOSEOUT;
     }
-    
-    void resume() {
-        trading_halted = false;
-        quoting_paused = false;
-        toxicity_paused = false;
-        market_paused = false;  // FIX: resume()必须清除market_paused，否则isActive()/canQuote()仍返回false
-        long_blocked = false;
-        short_blocked = false;
-        pause_reason = PauseReason::NONE;
+
+    /// 退出到做市报价阶段（夜盘平仓完成 / session reset）
+    void exitToQuoting() {
+        phase  = MmPhase::QUOTING;
+        qphase = QuotingPhase::NORMAL;
     }
-    
-    void pauseQuoting(PauseReason reason) {
-        quoting_paused = true;
-        pause_reason = reason;
+
+    //==========================================================================
+    // QUOTING 子状态转移
+    //==========================================================================
+
+    /// QuotingPhase 转移校验
+    /// RISK_HALTED → NORMAL 仅允许通过 resumeFromRisk()
+    /// 其他状态间自由转移（互相抢占）
+    bool canTransitionQuoting(QuotingPhase next) const {
+        if (qphase == QuotingPhase::RISK_HALTED)
+            return next == QuotingPhase::NORMAL;
+        return true;
     }
-    
-    void resumeQuoting() {
-        quoting_paused = false;
-        if (pause_reason == PauseReason::ORDER_ERROR) {
-            pause_reason = PauseReason::NONE;
-        }
+
+    /// 设置 QUOTING 子状态（抢占式，自动校验）
+    /// @return true=转移成功(含同态幂等) false=被校验拒绝（RISK_HALTED 不可直接抢占）
+    bool setQuotingPhase(QuotingPhase q) {
+        if (qphase == q) return true;  // idempotent
+        if (!canTransitionQuoting(q)) return false;
+        qphase = q;
+        return true;
     }
-    
-    void pauseForToxicity() {
-        toxicity_paused = true;
-        pause_reason = PauseReason::TOXICITY;
-    }
-    
-    void resumeFromToxicity() {
-        toxicity_paused = false;
-        if (pause_reason == PauseReason::TOXICITY) {
-            pause_reason = PauseReason::NONE;
-        }
-    }
-    
-    // FIX P0-7: 统一风控恢复方法，避免直接赋值绕过状态机
+
+    /// 风控恢复（RISK_HALTED → NORMAL 的唯一合法路径）
     void resumeFromRisk() {
-        trading_halted = false;
-        quoting_paused = false;
-        market_paused = false;  // FIX: 同resume()，必须清除market_paused
-        if (pause_reason == PauseReason::RISK_LIMIT) {
-            pause_reason = PauseReason::NONE;
+        qphase = QuotingPhase::NORMAL;
+    }
+
+    //==========================================================================
+    // 全量重置（session begin / 日切）
+    //==========================================================================
+
+    void reset() {
+        phase  = MmPhase::QUOTING;
+        qphase = QuotingPhase::NORMAL;
+        long_blocked  = false;
+        short_blocked = false;
+    }
+
+    //==========================================================================
+    // 方向级软禁
+    //==========================================================================
+
+    void blockLong()   { long_blocked  = true;  }
+    void unblockLong() { long_blocked  = false; }
+    void blockShort()  { short_blocked = true;  }
+    void unblockShort(){ short_blocked = false; }
+
+    //==========================================================================
+    // 日志/调试
+    //==========================================================================
+
+    /// 当前状态字符串
+    const char* getPhaseStr() const {
+        if (phase == MmPhase::CLOSEOUT) return "CLOSEOUT";
+        switch (qphase) {
+            case QuotingPhase::NORMAL:       return "NORMAL";
+            case QuotingPhase::TOXICITY:     return "TOXICITY";
+            case QuotingPhase::MARKET:       return "MARKET";
+            case QuotingPhase::ERROR:        return "ERROR";
+            case QuotingPhase::RISK_HALTED:  return "RISK_HALTED";
         }
-    }
-    
-    void pauseForMarket() {
-        market_paused = true;
-        pause_reason = PauseReason::MARKET_VOLATILITY;  // FIX: 用独立的MARKET_VOLATILITY而非RISK_LIMIT
-    }
-    
-    void resumeFromMarket() {
-        market_paused = false;
-        if (pause_reason == PauseReason::MARKET_VOLATILITY && !trading_halted) {
-            pause_reason = PauseReason::NONE;
-        }
-    }
-    
-    void blockLong() { long_blocked = true; }
-    void unblockLong() { long_blocked = false; }
-    void blockShort() { short_blocked = true; }
-    void unblockShort() { short_blocked = false; }
-    
-    // FIX P0-7: SSOT — 从RiskMonitor同步状态（唯一合法的跨模块同步路径）
-    // 替代UftFutuMmStrategy中对trading_halted/quoting_paused等字段的直接赋值
-    void syncFromRiskMonitor(const FutuRiskMonitor* monitor) {
-        if (!monitor) return;
-        trading_halted = monitor->isTradingHalted();
-        quoting_paused = monitor->isQuotingPaused();
-        long_blocked = monitor->isLongBlocked();
-        short_blocked = monitor->isShortBlocked();
-    }
-    
-    /// 获取暂停原因描述
-    const char* getPauseReasonStr() const {
-        switch (pause_reason) {
-            case PauseReason::NONE:        return "NONE";
-            case PauseReason::RISK_LIMIT:  return "RISK_LIMIT";
-            case PauseReason::TOXICITY:    return "TOXICITY";
-            case PauseReason::ORDER_ERROR: return "ORDER_ERROR";
-            case PauseReason::CLOSEOUT:    return "CLOSEOUT";
-            case PauseReason::MANUAL:      return "MANUAL";
-            case PauseReason::DELTA_LIMIT: return "DELTA_LIMIT";
-            default:                       return "UNKNOWN";
-        }
+        return "UNKNOWN";
     }
 };
 

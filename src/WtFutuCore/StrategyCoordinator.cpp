@@ -310,12 +310,12 @@ if (_cfg.closeout_minutes_before <= 0 &&
 return false;
 }
 
-CloseoutState state = _risk_monitor->getCloseoutState();
+CloseoutSub state = _risk_monitor->getCloseoutSub();
 uint32_t closeTime = _cfg.close_time;
 
 switch (state)
 {
-case CloseoutState::IDLE:
+case CloseoutSub::IDLE:
 {
 bool triggered = _risk_monitor->checkCloseout(tc.time_hms, closeTime);
 if (triggered)
@@ -327,7 +327,7 @@ if (quoter) quoter->cancelAll(ctx);
 }
 
 if (_cfg.closeout_flatten_position && _portfolio) {
-_risk_monitor->markCloseoutFlattening(tc.time_hms * 100);
+_risk_monitor->markCloseoutDraining(tc.time_hms * 100);
 } else {
 _risk_monitor->markCloseoutCompleted(tc.time_hms * 100);
 }
@@ -336,7 +336,7 @@ return true;
 return false;
 }
 
-case CloseoutState::FAILED:
+case CloseoutSub::FAILED:
 {
 uint64_t now_ms = tc.timestamp;
 if (_risk_monitor->checkCloseoutRetry(now_ms))
@@ -347,18 +347,20 @@ if (quoter) quoter->cancelAll(ctx);
 }
 }
 if (_portfolio) {
-_risk_monitor->markCloseoutFlattening(now_ms);
+_risk_monitor->markCloseoutDraining(now_ms);
 }
 }
 return true;
 }
 
-case CloseoutState::TRIGGERED:
-case CloseoutState::FLATTENING:
-case CloseoutState::RETRYING:
+case CloseoutSub::TRIGGERED:
+case CloseoutSub::DRAINING:
+case CloseoutSub::ASSESSING:
+case CloseoutSub::EXECUTING:
+case CloseoutSub::RETRYING:
 return true;
 
-case CloseoutState::COMPLETED:
+case CloseoutSub::COMPLETED:
 {
 //======================================================================
 // FIX Bug-A: 区分夜盘/白盘 closeout 完成
@@ -371,14 +373,14 @@ case CloseoutState::COMPLETED:
 // 新逻辑: 夜盘 closeout 完成立即 reset + resume，白盘 closeout
 //         在 minutes_before=15 时才重新触发 (14:45)，期间正常做市。
 //======================================================================
-const auto& closeoutInfo = _risk_monitor->getCloseoutStateInfo();
+const auto& closeoutInfo = _risk_monitor->getCloseoutSubInfo();
 
 if (_cfg.night_close_time > 0 && closeoutInfo.is_night_closeout)
 {
 // 夜盘 closeout 完成 → 立即 reset，让白盘可以正常做市
 _risk_monitor->resetCloseout();
 if (_trading_state) {
-    _trading_state->resume();
+    _trading_state->exitToQuoting();
 }
 WTSLogger::info("[CLOSEOUT] Night session closeout completed, resetting for day session");
 // 重新检查白盘 closeout (09:00 不会触发，14:45 才触发)
@@ -391,7 +393,7 @@ if (quoter) quoter->cancelAll(ctx);
 }
 }
 if (_cfg.closeout_flatten_position && _portfolio) {
-_risk_monitor->markCloseoutFlattening(tc.time_hms * 100);
+_risk_monitor->markCloseoutDraining(tc.time_hms * 100);
 } else {
 _risk_monitor->markCloseoutCompleted(tc.time_hms * 100);
 }
@@ -403,7 +405,7 @@ return false;
 // 白盘 closeout 完成 → 终态，不做市直到日内交易结束
 // FIX Bug-A-2: 只在首次进入 COMPLETED 时打日志+halt，避免每 tick 循环
 if (_trading_state) {
-    _trading_state->halt(TradingState::PauseReason::CLOSEOUT);
+    _trading_state->enterCloseout();
 }
 if (_quoters) {
 for (auto& [code, quoter] : *_quoters) {
@@ -548,7 +550,7 @@ SignalContext& mutable_sig_ctx = agg_it->second->getContext();
 // 3. 更新市场状态暂停标志
 // FIX P0-12: 使用TradingState方法
 if (sig_ctx.shouldPause()) {
-    if (_trading_state) _trading_state->pauseForMarket();
+    if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::MARKET);
     // DIAG: 限频诊断日志，确认shouldPause()触发原因
     {
         uint64_t now_ms = TimeUtils::getLocalTimeNow();
@@ -565,10 +567,10 @@ if (sig_ctx.shouldPause()) {
         }
     }
 } else {
-    if (_trading_state) _trading_state->resumeFromMarket();
+    if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::NORMAL);
 }
 
-if (_trading_state && _trading_state->market_paused && _quoters) {
+if (_trading_state && _trading_state->qphase == QuotingPhase::MARKET && _quoters) {
 auto quoter_it = _quoters->find(tc.code);
 if (quoter_it != _quoters->end() && quoter_it->second) {
 quoter_it->second->cancelAll(ctx);
@@ -636,7 +638,7 @@ if (!_risk_monitor || !_portfolio) return true;
 if (_risk_monitor->isTradingHalted()) {
 // FIX P0-11/P0-12: 空指针保护 + 使用TradingState方法
 if (_trading_state) {
-    _trading_state->halt(TradingState::PauseReason::RISK_LIMIT);
+    _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
 // 限频日志：每5秒输出一次，避免刷屏
 {
@@ -652,7 +654,7 @@ return false;
 if (_risk_monitor->checkDeltaRate()) {
 // FIX P0-12: 使用TradingState方法
 if (_trading_state) {
-    _trading_state->pauseQuoting(TradingState::PauseReason::DELTA_LIMIT);
+    _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
 }
 
@@ -668,7 +670,7 @@ switch (action)
 case RiskAction::HALT_TRADING:
 // FIX P0-12: 使用TradingState方法
 if (_trading_state) {
-    _trading_state->halt(TradingState::PauseReason::RISK_LIMIT);
+    _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
 _risk_monitor->haltTrading(category, _portfolio->getTotalPnL());
 
@@ -714,7 +716,7 @@ break;
 case RiskAction::PAUSE_QUOTING:
 // FIX P0-12: 使用TradingState方法
 if (_trading_state) {
-    _trading_state->pauseQuoting(TradingState::PauseReason::RISK_LIMIT);
+    _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
 }
 WTSLogger::warn("[RISK] QUOTING_PAUSED: Quoting paused due to risk violation (position/exposure)");
 if (_arb_executor) {
@@ -747,13 +749,9 @@ if (_trading_state && !_trading_state->isActive())
 {
 if (_risk_monitor->canRecover(_portfolio))
 {
-// FIX BUG-16: 恢复逻辑不完整 — 原代码只清quoting_paused，
-// 不清market_paused和toxicity_paused，导致振荡环路:
-// resumeQuoting清quoting_paused → isActive()仍为false(market_paused=true)
-// → canRecover()返回true → "Risk normalized" → 但canQuote()=false → 不报价
-_trading_state->resumeQuoting();
-_trading_state->resumeFromMarket();     // BUG-16 fix: 清market_paused
-_trading_state->resumeFromToxicity();   // BUG-16 fix: 清toxicity_paused
+// P1-1: resumeFromRisk() unconditionally sets qphase=NORMAL
+// (replaces old 3-call recovery that cleared individual bool flags)
+_trading_state->resumeFromRisk();
 _trading_state->unblockLong();
 _trading_state->unblockShort();
 
@@ -774,17 +772,17 @@ WTSLogger::info("StrategyCoordinator[{}]: Risk normalized, resuming operations",
 // Check toxicity cooldown
 // FIX P0-11: 空指针保护 + P0-12: 使用TradingState方法
 if (_toxicity && tc.timestamp < _toxicity_resume_time) {
-if (_trading_state) _trading_state->pauseForToxicity();
+if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::TOXICITY);
 if (_self_trade_calibrator) {
 _self_trade_calibrator->decayCalibration(tc.code, tc.timestamp, _cfg.modules.toxicity_cooloff_ms);
 }
 } else {
 // FIX P0-11/P0-12: 空指针保护 + 使用TradingState方法
-if (_trading_state) _trading_state->resumeFromToxicity();
+if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::NORMAL);
 }
 
 // FIX P0-11: 空指针保护
-return !_trading_state || !_trading_state->trading_halted;
+return !_trading_state || _trading_state->qphase != QuotingPhase::RISK_HALTED;
 }
 
 //==========================================================================
@@ -1234,9 +1232,9 @@ return;
 
 void StrategyCoordinator::resetSession()
 {
-// FIX P0-12: 使用TradingState::resume()统一重置所有状态
+// P1-1: reset() replaces old resume() — resets to QUOTING+NORMAL
 if (_trading_state) {
-    _trading_state->resume();
+    _trading_state->reset();
 }
 _toxicity_resume_time = 0;
 _tick_count = 0;
