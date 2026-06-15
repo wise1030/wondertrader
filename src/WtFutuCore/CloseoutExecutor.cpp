@@ -420,39 +420,45 @@ void CloseoutExecutor::submitHedgeOrder(wtp::IUftStraCtx* ctx,
 {
     int flag = _cfg.use_fak ? 1 : 0;
 
-    // Closeout = explicit position closing semantics
-    // is_buy=false (SELL to flatten long) → exit_long (stra_exit_long)
-    // is_buy=true  (BUY to flatten short) → exit_short (stra_exit_short)
-    // WT ActionPolicy handles close-today/close-yesterday automatically
+    // Closeout uses net-position API (stra_buy/stra_sell) instead of explicit
+    // exit_long/exit_short. Reason: for CoverToday exchanges (INE/CFFEX),
+    // exit_long(isToday=false) can only close yesterday's position. Since all
+    // MM positions are opened intraday (today), the closeout would fail with
+    // "no enough available old position" and loop 55000+ rounds.
+    //
+    // Net-position API auto-splits close-today/close-yesterday via ActionPolicy.
+    // This is safe because CloseoutExecutor runs in CLOSEOUT phase where MM
+    // quoting is halted — no concurrent fills, no risk of net-position API
+    // opening new positions.
     if (_router)
     {
         Source src = Source::CLOSEOUT;
         if (is_buy)
         {
-            // BUY to close short → exit_short
-            auto res = _router->submitExitShort(ctx, _code, price, qty, false, src, flag);
+            // BUY to close short → stra_buy (net position API)
+            auto res = _router->submitBuy(ctx, _code, price, qty, src, flag);
             if (res.rate_limited)
-                WTSLogger::warn("CloseoutExecutor: EXIT_SHORT rate limited");
+                WTSLogger::warn("CloseoutExecutor: BUY rate limited");
             else if (res.self_trade_blocked)
-                WTSLogger::warn("CloseoutExecutor: EXIT_SHORT self-trade blocked");
+                WTSLogger::warn("CloseoutExecutor: BUY self-trade blocked");
         }
         else
         {
-            // SELL to close long → exit_long
-            auto res = _router->submitExitLong(ctx, _code, price, qty, false, src, flag);
+            // SELL to close long → stra_sell (net position API)
+            auto res = _router->submitSell(ctx, _code, price, qty, src, flag);
             if (res.rate_limited)
-                WTSLogger::warn("CloseoutExecutor: EXIT_LONG rate limited");
+                WTSLogger::warn("CloseoutExecutor: SELL rate limited");
             else if (res.self_trade_blocked)
-                WTSLogger::warn("CloseoutExecutor: EXIT_LONG self-trade blocked");
+                WTSLogger::warn("CloseoutExecutor: SELL self-trade blocked");
         }
     }
     else
     {
         // Fallback: direct ctx API
         if (is_buy)
-            ctx->stra_exit_short(_code, price, qty, false, flag);
+            ctx->stra_buy(_code, price, qty, flag);
         else
-            ctx->stra_exit_long(_code, price, qty, false, flag);
+            ctx->stra_sell(_code, price, qty, flag);
     }
 }
 
