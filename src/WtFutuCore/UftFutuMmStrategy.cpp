@@ -1287,17 +1287,15 @@ _stp->clear();
     }
 }
 
-void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
-{
-if (!_channel_ready || !tick)
-return;
+//============================================================
+// on_tick 子函数 (P2-1a: 从 on_tick 拆出)
+//============================================================
 
-//============================================================
-// P0-4: 报价暂停条件恢复（非固定定时器）
-// 暂停期间无新错误(errors==0)才恢复，否则指数退避
-//============================================================
-if (_trading_state.qphase == QuotingPhase::ERROR && _quoting_paused_since > 0)
+void UftFutuMmStrategy::handleQuotingAutoResume()
 {
+    if (_trading_state.qphase != QuotingPhase::ERROR || _quoting_paused_since == 0)
+        return;
+
     uint64_t paused_ms = TimeUtils::getLocalTimeNow() - _quoting_paused_since;
     uint64_t wait_threshold = 10000;  // 初始等待 10 秒
     if (_order_error_count > 0)
@@ -1320,257 +1318,224 @@ if (_trading_state.qphase == QuotingPhase::ERROR && _quoting_paused_since > 0)
         {
             WTSLogger::warn("UftFutuMmStrategy[{}] Quoting still paused ({} errors), extending wait",
                 id(), _order_error_count);
-            _quoting_paused_since = TimeUtils::getLocalTimeNow();  // 重置计时器继续等
+            _quoting_paused_since = TimeUtils::getLocalTimeNow();
         }
     }
 }
 
-//============================================================
-// 更新风控模块时间戳（流控计数器依赖此时间戳进行过期清理）
-//============================================================
-if (_risk_monitor)
+void UftFutuMmStrategy::handleMarketDataUpdate(const char* stdCode, WTSTickData* tick, double mid)
 {
-    _risk_monitor->setCurrentTime(TimeUtils::getLocalTimeNow());
-}
+    if (mid > 0)
+    {
+        _portfolio->markToMarket(stdCode, mid);
+        _last_mid[stdCode] = mid;
 
-//============================================================
-// 更新价格（每个 tick 都更新，exposure/loss 计算依赖 last_price）
-//============================================================
-double mid = (tick->bidprice(0) + tick->askprice(0)) / 2.0;
-if (mid > 0)
-{
-_portfolio->markToMarket(stdCode, mid);
-_last_mid[stdCode] = mid;
+        if (_price_stale)
+        {
+            _price_stale = false;
+            WTSLogger::info("UftFutuMmStrategy[{}] Price recovered (first tick after channel ready)", id());
+        }
+    }
 
-// P1-4: 首个有效 tick 到达，清除价格过期标志
-if (_price_stale)
-{
-    _price_stale = false;
-    WTSLogger::info("UftFutuMmStrategy[{}] Price recovered (first tick after channel ready)", id());
-}
-}
+    if (_correlation_manager) {
+        _correlation_manager->onTick(tick);
 
-if (_correlation_manager) {
-_correlation_manager->onTick(tick);
+        if (_portfolio) {
+            const std::string& anchor = _config.anchor_code;
+            if (stdCode != anchor) {
+                double beta = _correlation_manager->getHedgeRatio(stdCode, anchor);
+                auto stats = _correlation_manager->getCorrelation(stdCode, anchor);
 
-if (_portfolio) {
-std::string anchor = _config.anchor_code;
-if (stdCode != anchor) {
-    double beta = _correlation_manager->getHedgeRatio(stdCode, anchor);
-    
-    // hedge_ratio 更新策略 (语义统一为"货值等价手数"后)：
-    //   beta = (p_c × m_c × price_beta_c→anchor) / (p_anchor × m_anchor)
-    //   见 CorrelationManager::getHedgeRatio
-    //
-    // 冷启动初始化 (Z=2):
-    //   首次 tick 时,无论样本数是否足够,都用纯货值比 (price_beta=1)
-    //   把 cs->hedge_ratio 从默认 1.0 拉到合理量级,避免持仓 delta 被严重低估
-    //   样本攒够后再切换到 EMA β 平滑值
-    //
-    // 保护措施 (Y=1):
-    //   1. 冷启动样本不足: 不切到 EMA β 路径,但保留货值比初始化
-    //   2. 删掉 |β-1|>0.3 保护 (跨期 EC 真实 β 范围 0.4~2.0,旧保护与货值修正语义冲突)
-    //   3. 变化率限制: 单次更新不超过 ±20%,防止异常跳变
-    auto stats = _correlation_manager->getCorrelation(stdCode, anchor);
-    
-    if (auto* cs = _portfolio->getContract(stdCode)) {
-        // === Z=2: 冷启动货值比初始化 ===
-        // 仅在 hedge_ratio 仍是默认值 (initialized=false) 且 beta 数值合理时执行一次
-        // CorrelationManager::getHedgeRatio 在数据未就绪时返回 1.0,我们额外要求
-        // last_price 已就绪 (cs->last_price > 0) 才认为初始化数据有效
-        if (!cs->hedge_ratio_initialized && cs->last_price > 0 && std::isfinite(beta) && beta > 0) {
-            cs->hedge_ratio = beta;
-            cs->hedge_ratio_initialized = true;
-            // 冷启动初始化后立即返回,等下一 tick 走正常更新路径
-        } else {
-            // === 正常更新路径 (样本攒够后) ===
-            bool should_update = true;
-            
-            // 冷启动保护：样本数不足100时不更新 EMA β
-            if (stats.sample_count < 100) {
-                should_update = false;
-            }
-            
-            // 变化率限制：单次更新不超过20%
-            if (should_update && cs->hedge_ratio > 0) {
-                double change_ratio = std::abs(beta - cs->hedge_ratio) / cs->hedge_ratio;
-                if (change_ratio > 0.2) {
-                    // 限制在当前值的±20%范围内
-                    beta = cs->hedge_ratio * (1.0 + (beta > cs->hedge_ratio ? 0.2 : -0.2));
+                if (auto* cs = _portfolio->getContract(stdCode)) {
+                    if (!cs->hedge_ratio_initialized && cs->last_price > 0 && std::isfinite(beta) && beta > 0) {
+                        cs->hedge_ratio = beta;
+                        cs->hedge_ratio_initialized = true;
+                    } else {
+                        bool should_update = (stats.sample_count >= 100);
+
+                        if (should_update && cs->hedge_ratio > 0) {
+                            double change_ratio = std::abs(beta - cs->hedge_ratio) / cs->hedge_ratio;
+                            if (change_ratio > 0.2) {
+                                beta = cs->hedge_ratio * (1.0 + (beta > cs->hedge_ratio ? 0.2 : -0.2));
+                            }
+                        }
+
+                        if (should_update && std::isfinite(beta) && beta > 0) {
+                            cs->hedge_ratio = beta;
+                        }
+                    }
                 }
             }
-            
-            if (should_update && std::isfinite(beta) && beta > 0) {
-                cs->hedge_ratio = beta;
+        }
+    }
+}
+
+void UftFutuMmStrategy::handleLeadLagPush(const char* stdCode, WTSTickData* tick, double mid)
+{
+    if (_config.anchor_code.empty() || stdCode != _config.anchor_code || mid <= 0)
+        return;
+
+    uint64_t ts = tick->volume() > 0
+        ? static_cast<uint64_t>(tick->actiondate()) * 1000000000ULL
+        + static_cast<uint64_t>(tick->actiontime())
+        : 0;
+
+    for (auto& [code, aggregator] : _signal_aggregators)
+    {
+        if (code != _config.anchor_code && aggregator)
+        {
+            aggregator->updateLeadContract(_config.anchor_code, mid, ts);
+        }
+    }
+}
+
+void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
+{
+    if (!_coordinator || _price_stale)
+    {
+        // Fallback: no coordinator (or stale price), trigger fail-safe
+        if (!_coordinator) {
+            WTSLogger::error("UftFutuMmStrategy[{}] Coordinator is null, triggering FAIL-SAFE!", id());
+            _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
+            for (auto& [code, quoter] : _quoters)
+                quoter->cancelAll(ctx);
+        }
+        return;
+    }
+
+    auto result = _coordinator->processTick(ctx, stdCode, tick);
+
+    // 记录报价到绩效分析器
+    if (result.quote_placed && _perf_analyzer)
+    {
+        double qmid = 0;
+        auto mid_it = _last_mid.find(stdCode);
+        if (mid_it != _last_mid.end()) qmid = mid_it->second;
+        _perf_analyzer->recordQuote(stdCode, qmid, qmid, 0, 0,
+            ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs());
+    }
+
+    // Run synthetic signal fusion cycle
+    if (_toxicity_detector && _toxicity_detector->isFusionEnabled())
+    {
+        _toxicity_detector->runFusionCycle();
+    }
+
+    // === Closeout hedge trigger ===
+    if (result.closeout_executed && _config.closeout.flatten_position
+        && _risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
+    {
+        _trading_state.enterCloseout();
+        for (auto& [code, quoter] : _quoters) {
+            if (quoter) quoter->cancelAll(ctx);
+        }
+        _closeout_hedge_pending = true;
+        _closeout_hedge_wait_ticks = 0;
+        _closeout_hedge_executed = true;
+        WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: halted + cancelAll, hedge deferred {} ticks",
+                        id(), CLOSEOUT_HEDGE_WAIT_TICKS);
+    }
+
+    // Deferred CloseoutExecutor start
+    if (_closeout_hedge_pending)
+    {
+        _closeout_hedge_wait_ticks++;
+        if (_closeout_hedge_wait_ticks >= CLOSEOUT_HEDGE_WAIT_TICKS)
+        {
+            WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: starting CloseoutExecutor after {} ticks",
+                            id(), _closeout_hedge_wait_ticks);
+            executeCloseoutHedge(ctx);
+            _closeout_hedge_pending = false;
+            _closeout_hedge_wait_ticks = 0;
+        }
+    }
+
+    // Run CloseoutExecutor every tick if active
+    if (_closeout_executor && _closeout_executor->isActive())
+    {
+        const ContractState* anchorState = _portfolio->getContract(_config.anchor_code);
+        MarketSnapshot snap;
+        snap.bid1       = anchorState ? anchorState->bid1 : 0;
+        snap.ask1       = anchorState ? anchorState->ask1 : 0;
+        snap.bid1_qty   = tick->bidqty(0);
+        snap.ask1_qty   = tick->askqty(0);
+        snap.price_tick = anchorState ? anchorState->tick_size : 0;
+        {
+            uint32_t at = tick->actiontime();
+            uint32_t hh = at / 10000000;
+            uint32_t mm = (at / 100000) % 100;
+            uint32_t ss = (at / 1000) % 100;
+            uint32_t mmm = at % 1000;
+            snap.timestamp_ms = static_cast<uint64_t>(hh) * 3600000ULL
+                              + static_cast<uint64_t>(mm) * 60000ULL
+                              + static_cast<uint64_t>(ss) * 1000ULL
+                              + mmm;
+        }
+        _closeout_executor->run(ctx, snap);
+
+        if (_closeout_executor->isCompleted())
+        {
+            if (_risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
+            {
+                uint64_t now = ctx->stra_get_date() * 1000000ULL
+                             + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+                _risk_monitor->markCloseoutCompleted(now);
             }
         }
-    }
-}
-}
-}
-
-//============================================================
-// LeadLag 跨合约数据推送
-// 当收到 anchor 合约 tick 时，通知所有非 anchor 合约的 SignalAggregator
-// 使 LeadLagSignalSource 能计算跨合约预测信号
-//============================================================
-if (!_config.anchor_code.empty() && stdCode == _config.anchor_code && mid > 0)
-{
-uint64_t ts = tick->volume() > 0 
-? static_cast<uint64_t>(tick->actiondate()) * 1000000000ULL + static_cast<uint64_t>(tick->actiontime())
-: 0;
-for (auto& [code, aggregator] : _signal_aggregators)
-{
-if (code != _config.anchor_code && aggregator)
-{
-aggregator->updateLeadContract(_config.anchor_code, mid, ts);
-}
-}
-}
-
-//============================================================
-// 使用 StrategyCoordinator 处理主做市业务逻辑
-//============================================================
-if (_coordinator && !_price_stale)  // P1-4: 价格过期时跳过 hedge/risk 决策
-{
-// TradingState now shared via pointer — no push/pull sync needed
-
-auto result = _coordinator->processTick(ctx, stdCode, tick);
-        
-        // 记录报价到绩效分析器（用于计算 fill_rate = trades / quotes）
-        if (result.quote_placed && _perf_analyzer)
-        {
-            double mid = 0;
-            auto mid_it = _last_mid.find(stdCode);
-            if (mid_it != _last_mid.end()) mid = mid_it->second;
-            _perf_analyzer->recordQuote(stdCode, mid, mid, 0, 0,
-                ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs());
-        }
-        
-        // Run synthetic signal fusion cycle (feeds fused data back into toxicity detection)
-        if (_toxicity_detector && _toxicity_detector->isFusionEnabled())
-        {
-            _toxicity_detector->runFusionCycle();
-        }
-
-// Execute closeout hedge if triggered
-// Only execute on FLATTENING state edge (TRIGGERED→FLATTENING or RETRYING→FLATTENING),
-// not every tick. processCloseout returns true for TRIGGERED/FLATTENING/COMPLETED states,
-// which previously caused executeCloseoutHedge to be called every tick, oscillating delta.
-// halt trading on closeout trigger; only on_session_begin restores.
-// This prevents new MM fills from accumulating delta during FLATTENING/RETRYING.
-if (result.closeout_executed && _config.closeout.flatten_position
-    && _risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
-{
-    // Halt MM BEFORE hedge so no new quotes go out concurrently
-    _trading_state.enterCloseout();
-    // Cancel any inflight MM orders to prevent stale fills
-    for (auto& [code, quoter] : _quoters) {
-        if (quoter) quoter->cancelAll(ctx);
-    }
-    // defer hedge to N+CLOSEOUT_HEDGE_WAIT_TICKS so inflight
-    // cancel/fill 回执先回流，避免 hedge 后 inflight trade 反超 net_delta
-    _closeout_hedge_pending = true;
-    _closeout_hedge_wait_ticks = 0;
-    _closeout_hedge_executed = true;  // prevent re-entry on subsequent ticks
-    WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: halted + cancelAll, hedge deferred {} ticks",
-                    id(), CLOSEOUT_HEDGE_WAIT_TICKS);
-}
-// Deferred CloseoutExecutor start: wait N ticks then start executor
-if (_closeout_hedge_pending)
-{
-    _closeout_hedge_wait_ticks++;
-    if (_closeout_hedge_wait_ticks >= CLOSEOUT_HEDGE_WAIT_TICKS)
-    {
-        WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: starting CloseoutExecutor after {} ticks",
-                        id(), _closeout_hedge_wait_ticks);
-        executeCloseoutHedge(ctx);
-        _closeout_hedge_pending = false;
-        _closeout_hedge_wait_ticks = 0;
-    }
-}
-// Run CloseoutExecutor every tick if active
-if (_closeout_executor && _closeout_executor->isActive())
-{
-    const ContractState* anchorState = _portfolio->getContract(_config.anchor_code);
-    MarketSnapshot snap;
-    snap.bid1       = anchorState ? anchorState->bid1 : 0;
-    snap.ask1       = anchorState ? anchorState->ask1 : 0;
-    snap.bid1_qty   = tick->bidqty(0);
-    snap.ask1_qty   = tick->askqty(0);
-    snap.price_tick = anchorState ? anchorState->tick_size : 0;
-    // timestamp in ms-from-midnight for urgency calc
-    {
-        uint32_t at = tick->actiontime();  // HHMMSSmmm
-        uint32_t hh = at / 10000000;
-        uint32_t mm = (at / 100000) % 100;
-        uint32_t ss = (at / 1000) % 100;
-        uint32_t mmm = at % 1000;
-        snap.timestamp_ms = static_cast<uint64_t>(hh) * 3600000ULL
-                          + static_cast<uint64_t>(mm) * 60000ULL
-                          + static_cast<uint64_t>(ss) * 1000ULL
-                          + mmm;
-    }
-    _closeout_executor->run(ctx, snap);
-
-    // Check executor results
-    if (_closeout_executor->isCompleted())
-    {
-        if (_risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
+        else if (_closeout_executor->isFailed())
         {
             uint64_t now = ctx->stra_get_date() * 1000000ULL
                          + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-            _risk_monitor->markCloseoutCompleted(now);
+            _risk_monitor->markCloseoutFailed(now);
         }
     }
-    else if (_closeout_executor->isFailed())
+
+    // Reset hedge flags on terminal/transient closeout states
+    auto cs = _risk_monitor->getCloseoutSub();
+    if (cs == CloseoutSub::IDLE || cs == CloseoutSub::FAILED
+        || cs == CloseoutSub::RETRYING)
     {
-        uint64_t now = ctx->stra_get_date() * 1000000ULL
-                     + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-        _risk_monitor->markCloseoutFailed(now);
+        _closeout_hedge_executed = false;
+        _closeout_hedge_pending = false;
+        _closeout_hedge_wait_ticks = 0;
+        if (_closeout_executor && !_closeout_executor->isCompleted())
+            _closeout_executor->reset();
     }
 }
-// Reset flag on state changes that warrant a fresh hedge attempt:
-// - IDLE: closeout completed and reset (next session via on_session_begin)
-// - FAILED/RETRYING: previous attempt failed, allow retry to re-fire hedge
-// Note: when RETRYING re-enters FLATTENING, we re-halt above (idempotent).
-auto cs = _risk_monitor->getCloseoutSub();
-if (cs == CloseoutSub::IDLE || cs == CloseoutSub::FAILED 
-    || cs == CloseoutSub::RETRYING)
-{
-    _closeout_hedge_executed = false;
-    _closeout_hedge_pending = false;
-    _closeout_hedge_wait_ticks = 0;
-    // Reset CloseoutExecutor to allow fresh retry
-    if (_closeout_executor && !_closeout_executor->isCompleted())
-        _closeout_executor->reset();
-}
-}
-else
-{
-// Fallback: no coordinator, trigger fail-safe and cancel all orders
-        WTSLogger::error("UftFutuMmStrategy[{}] Coordinator is null, triggering FAIL-SAFE!", id());
-        // P1-1: coordinator null fail-safe
-        _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
-
-// Cancel all outstanding orders directly via ctx to ensure safety
-for (auto& [code, quoter] : _quoters)
-{
-quoter->cancelAll(ctx);
-}
-
-return;
-}
 
 //============================================================
-// 跨期价差套利处理 (与做市业务平级，独立处理)
+// on_tick 主控 (P2-1a: 从 285 行 → ~35 行)
 //============================================================
-if (_spread_arb_manager && _config.modules.use_spread_arbitrage)
-{
-processSpreadArbitrage(ctx, stdCode, tick);
-}
 
-_tick_count++;
+void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
+{
+    if (!_channel_ready || !tick)
+        return;
+
+    // 1. 报价暂停恢复 (ERROR → NORMAL with exponential backoff)
+    handleQuotingAutoResume();
+
+    // 2. 风控时间戳
+    if (_risk_monitor)
+        _risk_monitor->setCurrentTime(TimeUtils::getLocalTimeNow());
+
+    // 3. 行情数据更新 (markToMarket + correlation + hedge_ratio)
+    double mid = (tick->bidprice(0) + tick->askprice(0)) / 2.0;
+    handleMarketDataUpdate(stdCode, tick, mid);
+
+    // 4. LeadLag 跨合约推送
+    handleLeadLagPush(stdCode, tick, mid);
+
+    // 5. Coordinator 主处理 + closeout 驱动 (含 coordinator null fail-safe)
+    handleCoordinatorTick(ctx, stdCode, tick);
+
+    // 6. 跨期价差套利 (与做市业务平级，独立处理)
+    if (_spread_arb_manager && _config.modules.use_spread_arbitrage)
+    {
+        processSpreadArbitrage(ctx, stdCode, tick);
+    }
+
+    _tick_count++;
 }
 
 void UftFutuMmStrategy::executeCloseoutHedge(IUftStraCtx* ctx)

@@ -264,6 +264,22 @@ private:
     void onSpreadTrade(IUftStraCtx* ctx, const std::string& pair_id, 
                        const std::string& code, bool is_buy, double qty, double price);
     
+    //==========================================================================
+    // on_tick 子函数 (P2-1a: 从 on_tick 拆出)
+    //==========================================================================
+    
+    /// 报价暂停条件恢复（ERROR 状态指数退避恢复）
+    void handleQuotingAutoResume();
+    
+    /// 更新行情数据（markToMarket + correlation + hedge_ratio）
+    void handleMarketDataUpdate(const char* stdCode, WTSTickData* tick, double mid);
+    
+    /// LeadLag 跨合约数据推送
+    void handleLeadLagPush(const char* stdCode, WTSTickData* tick, double mid);
+    
+    /// Coordinator 主处理 + closeout 执行驱动
+    void handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick);
+    
 private:
     FutuMmConfig _config;
     
