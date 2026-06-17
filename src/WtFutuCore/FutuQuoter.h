@@ -93,7 +93,7 @@ struct QuoterConfig
         , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0)
         , qty_decay_factor(2.0), obligation_min_qty(10.0)
         , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
-        , always_obligation(true) {}
+        , always_obligation(false) {}
 };
 
 /// Multi-level quoter for a single contract

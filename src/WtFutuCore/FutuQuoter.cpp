@@ -185,23 +185,27 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
 
     uint32_t orders = 0;
 
-    // 双边下单
-    auto bidIds = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
-    if (!bidIds.empty()) {
-        uint32_t bidId = bidIds[0];
-        bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
-        _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
-        if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
-        orders++;
+    // 双边下单 (qty=0 时跳过该侧，避免 Entrust error)
+    if (qr.bidQty > 0) {
+        auto bidIds = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
+        if (!bidIds.empty()) {
+            uint32_t bidId = bidIds[0];
+            bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
+            _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
+            if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+            orders++;
+        }
     }
 
-    auto askIds = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
-    if (!askIds.empty()) {
-        uint32_t askId = askIds[0];
-        ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
-        _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
-        if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
-        orders++;
+    if (qr.askQty > 0) {
+        auto askIds = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
+        if (!askIds.empty()) {
+            uint32_t askId = askIds[0];
+            ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
+            _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+            if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+            orders++;
+        }
     }
 
     return orders;
