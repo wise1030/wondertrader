@@ -36,6 +36,261 @@ void FutuQuoter::init(const QuoterConfig& cfg)
     }
 }
 
+FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
+    uint32_t level, double mid,
+    double l0_bid_price, double l0_ask_price,
+    double spread_mult, bool allow_bid, bool allow_ask,
+    double upper_limit, double lower_limit,
+    double best_bid, double best_ask,
+    double long_util, double short_util,
+    bool force_ask_obligation, bool force_bid_obligation,
+    bool is_obligation_mode)
+{
+    QuoteResult qr{};
+    qr.is_obligation_bid = false;
+    qr.is_obligation_ask = false;
+
+    double level_offset = level * _cfg.level_step * _cfg.tick_size;
+    qr.bidPrice = floor((l0_bid_price - level_offset) / _cfg.tick_size) * _cfg.tick_size;
+    qr.askPrice = ceil((l0_ask_price + level_offset) / _cfg.tick_size) * _cfg.tick_size;
+    qr.bidQty = computeQty(level);
+    qr.askQty = computeQty(level);
+
+    const bool apply_obligation = (!_cfg.obligation_only_l0 || level == 0);
+
+    if (is_obligation_mode)
+    {
+        // 义务模式: 不衰减 qty，价格偏移到义务区间
+        if (force_ask_obligation && apply_obligation) {
+            qr.askPrice = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+            qr.askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
+            qr.is_obligation_ask = true;
+        }
+        if (force_bid_obligation && apply_obligation) {
+            qr.bidPrice = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+            qr.bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
+            qr.is_obligation_bid = true;
+        }
+        // 义务模式: allow 不阻断，至少保持 baseQty
+        qr.bidQty = std::max(qr.bidQty, 1.0);
+        qr.askQty = std::max(qr.askQty, 1.0);
+    }
+    else
+    {
+        // 自由模式: qty 衰减
+        if (long_util > 0.0) {
+            double decay = std::exp(-_cfg.qty_decay_factor * long_util);
+            qr.bidQty = std::max(0.0, std::round(qr.bidQty * decay));
+        }
+        if (short_util > 0.0) {
+            double decay = std::exp(-_cfg.qty_decay_factor * short_util);
+            qr.askQty = std::max(0.0, std::round(qr.askQty * decay));
+        }
+        // allow 阻断
+        if (!allow_bid) qr.bidQty = 0;
+        if (!allow_ask) qr.askQty = 0;
+    }
+
+    // 价格保护 (不对义务报价应用)
+    if (_cfg.price_protection)
+    {
+        if (qr.bidQty > 0 && !qr.is_obligation_bid && best_bid > 0)
+            qr.bidPrice = std::min(qr.bidPrice, best_bid + _cfg.protect_ticks * _cfg.tick_size);
+        if (qr.askQty > 0 && !qr.is_obligation_ask && best_ask > 0)
+            qr.askPrice = std::max(qr.askPrice, best_ask - _cfg.protect_ticks * _cfg.tick_size);
+    }
+
+    // 价格边界验证 (涨跌停)
+    if (qr.bidQty > 0 && !validatePrice(qr.bidPrice, mid, upper_limit, lower_limit)) qr.bidQty = 0;
+    if (qr.askQty > 0 && !validatePrice(qr.askPrice, mid, upper_limit, lower_limit)) qr.askQty = 0;
+
+    return qr;
+}
+
+uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now)
+{
+    QuoteLevel& bid_level = _bid_levels[level];
+    QuoteLevel& ask_level = _ask_levels[level];
+
+    // 做市双边接口: 必须双边报单，顶单自动撤旧
+    // 即使一侧 allow=false 也用 stra_quote（价格偏到义务区间）
+    bool bid_need_update = (bid_level.order_id == 0);
+    bool ask_need_update = (ask_level.order_id == 0);
+
+    if (_tracker) {
+        if (auto* oi = _tracker->getOrderByOrderId(bid_level.order_id); oi && !oi->isPendingCancel())
+            bid_need_update = checkStickyUpdate(qr.bidPrice, oi->price, true);
+        else if (bid_level.order_id != 0)
+            bid_need_update = true;
+    } else if (bid_level.order_id != 0) {
+        bid_need_update = checkStickyUpdate(qr.bidPrice, bid_level.price, true);
+    }
+
+    if (_tracker) {
+        if (auto* oi = _tracker->getOrderByOrderId(ask_level.order_id); oi && !oi->isPendingCancel())
+            ask_need_update = checkStickyUpdate(qr.askPrice, oi->price, false);
+        else if (ask_level.order_id != 0)
+            ask_need_update = true;
+    } else if (ask_level.order_id != 0) {
+        ask_need_update = checkStickyUpdate(qr.askPrice, ask_level.price, false);
+    }
+
+    if (!bid_need_update && !ask_need_update)
+        return 0;
+
+    // 标记旧单 pending_cancel（stra_quote 顶单会自动撤旧）
+    if (bid_level.order_id != 0) {
+        if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
+        bid_level.order_id = 0;
+    }
+    if (ask_level.order_id != 0) {
+        if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
+        ask_level.order_id = 0;
+    }
+
+    auto [bidId, askId] = _ctx->stra_quote(_cfg.code.c_str(), qr.bidPrice, qr.bidQty,
+                                            qr.askPrice, qr.askQty,
+                                            (_allow_bid && _allow_ask) ? "MM_BILATERAL" : "MM_OBLIGATION");
+    if (bidId != 0 && askId != 0)
+    {
+        bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
+        ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
+        _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
+        _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+        if (_tracker && now > 0) {
+            _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+            _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+        }
+        return 2;
+    }
+    return 0;
+}
+
+uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now)
+{
+    QuoteLevel& bid_level = _bid_levels[level];
+    QuoteLevel& ask_level = _ask_levels[level];
+
+    // 义务模式: 必须双边，先撤所有残留（含部分成交），不走 sticky
+    if (bid_level.order_id != 0) {
+        _ctx->stra_cancel(bid_level.order_id);
+        if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
+        bid_level.order_id = 0;
+    }
+    if (ask_level.order_id != 0) {
+        _ctx->stra_cancel(ask_level.order_id);
+        if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
+        ask_level.order_id = 0;
+    }
+
+    uint32_t orders = 0;
+
+    // 双边下单
+    auto bidIds = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
+    if (!bidIds.empty()) {
+        uint32_t bidId = bidIds[0];
+        bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
+        _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
+        if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+        orders++;
+    }
+
+    auto askIds = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
+    if (!askIds.empty()) {
+        uint32_t askId = askIds[0];
+        ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
+        _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+        if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+        orders++;
+    }
+
+    return orders;
+}
+
+uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now)
+{
+    QuoteLevel& bid_level = _bid_levels[level];
+    QuoteLevel& ask_level = _ask_levels[level];
+    uint32_t orders = 0;
+
+    // B2 自由模式: sticky + 可单边 + qty 衰减
+    // Bid
+    if (qr.bidQty == 0) {
+        if (bid_level.order_id != 0) {
+            _ctx->stra_cancel(bid_level.order_id);
+            if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
+            bid_level.order_id = 0;
+        }
+    } else {
+        bool need_update = (bid_level.order_id == 0);
+        if (!need_update) {
+            if (_tracker) {
+                auto* oi = _tracker->getOrderByOrderId(bid_level.order_id);
+                if (oi && !oi->isPendingCancel())
+                    need_update = checkStickyUpdate(qr.bidPrice, oi->price, true);
+                else
+                    need_update = true;
+            } else {
+                need_update = checkStickyUpdate(qr.bidPrice, bid_level.price, true);
+            }
+        }
+        if (need_update) {
+            if (bid_level.order_id != 0) {
+                _ctx->stra_cancel(bid_level.order_id);
+                if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::PRICE_DEVIATION);
+                bid_level.order_id = 0;
+            }
+            auto ids = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
+            if (!ids.empty()) {
+                uint32_t bidId = ids[0];
+                bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
+                _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
+                if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+                orders++;
+            }
+        }
+    }
+
+    // Ask
+    if (qr.askQty == 0) {
+        if (ask_level.order_id != 0) {
+            _ctx->stra_cancel(ask_level.order_id);
+            if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
+            ask_level.order_id = 0;
+        }
+    } else {
+        bool need_update = (ask_level.order_id == 0);
+        if (!need_update) {
+            if (_tracker) {
+                auto* oi = _tracker->getOrderByOrderId(ask_level.order_id);
+                if (oi && !oi->isPendingCancel())
+                    need_update = checkStickyUpdate(qr.askPrice, oi->price, false);
+                else
+                    need_update = true;
+            } else {
+                need_update = checkStickyUpdate(qr.askPrice, ask_level.price, false);
+            }
+        }
+        if (need_update) {
+            if (ask_level.order_id != 0) {
+                _ctx->stra_cancel(ask_level.order_id);
+                if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::PRICE_DEVIATION);
+                ask_level.order_id = 0;
+            }
+            auto ids = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
+            if (!ids.empty()) {
+                uint32_t askId = ids[0];
+                ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
+                _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+                if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+                orders++;
+            }
+        }
+    }
+
+    return orders;
+}
+
 uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_bid_price, double l0_ask_price,
                                     double spread_mult, bool allow_bid, bool allow_ask,
                                     uint64_t now, double upper_limit, double lower_limit,
@@ -49,277 +304,39 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_
     _allow_ask = allow_ask;
     if (!ctx) return 0;
 
-    // v3 软风控：是否走新路径（仅当 use_bilateral_quote=false 时启用）
-    const bool v3_mode = !_cfg.use_bilateral_quote;
-
     for (uint32_t i = 0; i < _cfg.num_levels; i++)
     {
-        bool is_bilateral = (_cfg.use_bilateral_quote && i == 0);
-        QuoteLevel& bid_level = _bid_levels[i];
-        QuoteLevel& ask_level = _ask_levels[i];
-        
-        // 1. 计算原始报价和挂单量 (统一使用 SpreadOptimizer 定价逻辑)
-        double level_offset = i * _cfg.level_step * _cfg.tick_size;
-        double bidPrice = floor((l0_bid_price - level_offset) / _cfg.tick_size) * _cfg.tick_size;
-        double askPrice = ceil((l0_ask_price + level_offset) / _cfg.tick_size) * _cfg.tick_size;
-        double bidQty = computeQty(i);
-        double askQty = computeQty(i);
-        
-        // 2. 报价预处理与风控限制
-        bool is_obligation_bid = false;
-        bool is_obligation_ask = false;
+        // 判断是否需要履行做市义务(双边报单)
+        bool is_obligation = needObligation(i, force_ask_obligation, force_bid_obligation);
 
-        if (is_bilateral)
+        // 统一定价
+        QuoteResult qr = computeQuotePrices(
+            i, mid, l0_bid_price, l0_ask_price,
+            spread_mult, allow_bid, allow_ask,
+            upper_limit, lower_limit,
+            best_bid, best_ask,
+            long_util, short_util,
+            force_ask_obligation, force_bid_obligation,
+            is_obligation);
+
+        // 路径选择
+        if (_cfg.use_bilateral_quote && i == 0)
         {
-            // ===== 旧路径（use_bilateral_quote=true）：硬 allow + 双边义务，原样保留 =====
-            if (!allow_bid && _cfg.max_obligation_spread > 0) {
-                bidPrice = floor((mid - _cfg.max_obligation_spread * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-                is_obligation_bid = true;
-            }
-            if (!allow_ask && _cfg.max_obligation_spread > 0) {
-                askPrice = ceil((mid + _cfg.max_obligation_spread * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-                is_obligation_ask = true;
-            }
+            // 路径A: 做市双边接口 (stra_quote)
+            orders_placed += handleBilateralQuote(i, qr, mid, now);
         }
-        else if (v3_mode)
+        else if (is_obligation)
         {
-            // ===== v3 新路径：utilization → qty 指数衰减 + 软 obligation =====
-            // 2a. qty 指数衰减（仅 L0 强势衰减，深档保留 baseline；这里对所有层级一致衰减，更保守）
-            //     bidQty 受 long_util 影响（多头打满 → 减少 bid）
-            //     askQty 受 short_util 影响（空头打满 → 减少 ask）
-            if (long_util > 0.0) {
-                double decay = std::exp(-_cfg.qty_decay_factor * long_util);
-                bidQty = std::max(0.0, std::round(bidQty * decay));
-            }
-            if (short_util > 0.0) {
-                double decay = std::exp(-_cfg.qty_decay_factor * short_util);
-                askQty = std::max(0.0, std::round(askQty * decay));
-            }
-            
-            // 2b. 软 obligation：达到 hard cap 时强制反向减仓报价（仅 L0 或全档）
-            const bool apply_obligation = (!_cfg.obligation_only_l0 || i == 0);
-            if (force_ask_obligation && apply_obligation) {
-                // 多头打满 → 必须挂 ask 让自己被减仓
-                askPrice = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-                askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
-                is_obligation_ask = true;
-            }
-            if (force_bid_obligation && apply_obligation) {
-                // 空头打满 → 必须挂 bid 让自己被减仓
-                bidPrice = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-                bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
-                is_obligation_bid = true;
-            }
-        }
-
-        // 强制风控：如果不允许且不是义务报价，则数量置 0
-        // v3 模式下 allow_bid/allow_ask 仍保留兼容（Toxicity/TradingState 可关闭）
-        if (!allow_bid && !is_obligation_bid) bidQty = 0;
-        if (!allow_ask && !is_obligation_ask) askQty = 0;
-
-        // 3. 价格保护 (不对义务报价应用)
-        if (_cfg.price_protection)
-        {
-            if (bidQty > 0 && !is_obligation_bid && best_bid > 0)
-                bidPrice = std::min(bidPrice, best_bid + _cfg.protect_ticks * _cfg.tick_size);
-                
-            if (askQty > 0 && !is_obligation_ask && best_ask > 0)
-                askPrice = std::max(askPrice, best_ask - _cfg.protect_ticks * _cfg.tick_size);
-        }
-
-        // 4. 价格边界验证 (涨跌停)
-        if (bidQty > 0 && !validatePrice(bidPrice, mid, upper_limit, lower_limit)) bidQty = 0;
-        if (askQty > 0 && !validatePrice(askPrice, mid, upper_limit, lower_limit)) askQty = 0;
-
-        // 5. 不对称粘性阈值判断 (Sticky Logic)
-        bool bid_need_update = false;
-        if (bidQty > 0)
-        {
-            if (bid_level.order_id == 0) {
-                bid_need_update = true;
-            } else if (_tracker) {
-                auto* orderInfo = _tracker->getOrderByOrderId(bid_level.order_id);
-                if (orderInfo && !orderInfo->isPendingCancel()) {
-                    bid_need_update = checkStickyUpdate(bidPrice, orderInfo->price, true);
-                } else if (!orderInfo) {
-                    bid_need_update = checkStickyUpdate(bidPrice, bid_level.price, true);
-                }
-            } else {
-                bid_need_update = checkStickyUpdate(bidPrice, bid_level.price, true);
-            }
-        }
-
-        bool ask_need_update = false;
-        if (askQty > 0)
-        {
-            if (ask_level.order_id == 0) {
-                ask_need_update = true;
-            } else if (_tracker) {
-                auto* orderInfo = _tracker->getOrderByOrderId(ask_level.order_id);
-                if (orderInfo && !orderInfo->isPendingCancel()) {
-                    ask_need_update = checkStickyUpdate(askPrice, orderInfo->price, false);
-                } else if (!orderInfo) {
-                    ask_need_update = checkStickyUpdate(askPrice, ask_level.price, false);
-                }
-            } else {
-                ask_need_update = checkStickyUpdate(askPrice, ask_level.price, false);
-            }
-        }
-
-        // 6. 执行报单更新
-        if (is_bilateral)
-        {
-            // 双边报价逻辑：单侧被BLOCK时保留减仓侧独立报价，避免仓位死锁
-            if (bidQty == 0 && askQty == 0)
-            {
-                // 双侧都被BLOCK，撤销双边
-                if (bid_level.order_id != 0) {
-                    ctx->stra_cancel(bid_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
-                    bid_level.order_id = 0;
-                }
-                if (ask_level.order_id != 0) {
-                    ctx->stra_cancel(ask_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
-                    ask_level.order_id = 0;
-                }
-            }
-            else if (bidQty == 0 || askQty == 0)
-            {
-                // 单侧被BLOCK：撤销被BLOCK侧，保留有量侧独立报价
-                if (bidQty == 0 && bid_level.order_id != 0) {
-                    ctx->stra_cancel(bid_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
-                    bid_level.order_id = 0;
-                }
-                if (askQty == 0 && ask_level.order_id != 0) {
-                    ctx->stra_cancel(ask_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
-                    ask_level.order_id = 0;
-                }
-                // 有量侧独立下单（减仓方向）
-                if (bidQty > 0 && bid_need_update) {
-                    if (bid_level.order_id != 0) {
-                        if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
-                        bid_level.order_id = 0;
-                    }
-                    auto ids = ctx->stra_buy(_cfg.code.c_str(), bidPrice, bidQty);
-                    if (!ids.empty()) {
-                        uint32_t bidId = ids[0];
-                        bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
-                        // Store level+is_bid direction
-                        _order_id_to_level[bidId] = {i, true};
-                        if (_tracker && now > 0) _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
-                        orders_placed += 1;
-                    }
-                }
-                if (askQty > 0 && ask_need_update) {
-                    if (ask_level.order_id != 0) {
-                        if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
-                        ask_level.order_id = 0;
-                    }
-                    auto ids = ctx->stra_sell(_cfg.code.c_str(), askPrice, askQty);
-                    if (!ids.empty()) {
-                        uint32_t askId = ids[0];
-                        ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                        // Store level+is_bid direction
-                        _order_id_to_level[askId] = {i, false};
-                        if (_tracker && now > 0) _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
-                        orders_placed += 1;
-                    }
-                }
-            }
-            else if (bid_need_update || ask_need_update)
-            {
-                // Bilateral Replace (顶单) 功能: 
-                // 新发出的双边报价会自动清理上一次的双边未成挂单。
-                // 策略层无需调用 stra_cancel，仅需解除旧订单在本地 Tracker 的状态。
-                // [关键修复]：不要立即 untrackOrder 和 erase，这会导致在途成交丢失上下文。
-                // 而是标记为 PENDING_CANCEL，等待真实的 onOrder 回报来执行物理清理。
-                if (bid_level.order_id != 0) {
-                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
-                    bid_level.order_id = 0; // 解绑 Level，腾出空位接收新订单
-                }
-                if (ask_level.order_id != 0) {
-                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
-                    ask_level.order_id = 0;
-                }
-
-                auto [bidId, askId] = ctx->stra_quote(_cfg.code.c_str(), bidPrice, bidQty, askPrice, askQty, 
-                                                      (allow_bid && allow_ask) ? "MM_BILATERAL" : "MM_OBLIGATION");
-                if (bidId != 0 && askId != 0)
-                {
-                    bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
-                    ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                    // Store level+is_bid direction
-                    _order_id_to_level[bidId] = {i, true}; _order_id_to_level[askId] = {i, false};
-                    if (_tracker && now > 0) {
-                        _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
-                        _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
-                    }
-                    orders_placed += 2;
-                }
-            }
+            // 路径B1: 普通报单 + 做市义务 (先撤残留, 双边下单, 不走 sticky)
+            orders_placed += handleObligationQuote(i, qr, mid, now);
         }
         else
         {
-            // 普通接口：深度档 (Level 1+) 独立报单
-            // 处理独立买单
-            if (bidQty == 0)
-            {
-                if (bid_level.order_id != 0) {
-                    ctx->stra_cancel(bid_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
-                    bid_level.order_id = 0;
-                }
-            }
-            else if (bid_need_update)
-            {
-                if (bid_level.order_id != 0) {
-                    ctx->stra_cancel(bid_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::PRICE_DEVIATION);
-                    bid_level.order_id = 0;
-                }
-                auto ids = ctx->stra_buy(_cfg.code.c_str(), bidPrice, bidQty);
-                if (!ids.empty()) {
-                    uint32_t bidId = ids[0];
-                    bid_level.order_id = bidId; bid_level.price = bidPrice; bid_level.qty = bidQty;
-                    // Store level+is_bid direction
-                    _order_id_to_level[bidId] = {i, true};
-                    if (_tracker && now > 0) _tracker->trackMMOrder(bidId, i, _cfg.code, bidPrice, bidQty, mid, now, true);
-                    orders_placed += 1;
-                }
-            }
-
-            // 处理独立卖单
-            if (askQty == 0)
-            {
-                if (ask_level.order_id != 0) {
-                    ctx->stra_cancel(ask_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
-                    ask_level.order_id = 0;
-                }
-            }
-            else if (ask_need_update)
-            {
-                if (ask_level.order_id != 0) {
-                    ctx->stra_cancel(ask_level.order_id);
-                    if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::PRICE_DEVIATION);
-                    ask_level.order_id = 0;
-                }
-                auto ids = ctx->stra_sell(_cfg.code.c_str(), askPrice, askQty);
-                if (!ids.empty()) {
-                    uint32_t askId = ids[0];
-                    ask_level.order_id = askId; ask_level.price = askPrice; ask_level.qty = askQty;
-                    // Store level+is_bid direction
-                    _order_id_to_level[askId] = {i, false};
-                    if (_tracker && now > 0) _tracker->trackMMOrder(askId, i, _cfg.code, askPrice, askQty, mid, now, false);
-                    orders_placed += 1;
-                }
-            }
+            // 路径B2: 普通报单 + 自由报价 (sticky, 可单边)
+            orders_placed += handleFlexibleQuote(i, qr, mid, now);
         }
     }
-    
+
     return orders_placed;
 }
 

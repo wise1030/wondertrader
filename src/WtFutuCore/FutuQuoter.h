@@ -83,6 +83,7 @@ struct QuoterConfig
     double      obligation_min_qty;        ///< 软 obligation 报价最小手数 (default: 10)
     double      obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10)
     bool        obligation_only_l0;        ///< 软 obligation 是否仅 L0 (default: true)
+    bool        always_obligation;         ///< 是否始终履行做市义务(双边报单) (default: true)
     
     QuoterConfig()
         : num_levels(1), base_spread(2.0), level_step(1.0)
@@ -91,7 +92,8 @@ struct QuoterConfig
         , price_protection(true), protect_ticks(1.0)
         , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0)
         , qty_decay_factor(2.0), obligation_min_qty(10.0)
-        , obligation_max_spread_ticks(10.0), obligation_only_l0(true) {}
+        , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
+        , always_obligation(true) {}
 };
 
 /// Multi-level quoter for a single contract
@@ -339,6 +341,53 @@ private:
         bool is_bid;      ///< true=bid, false=ask
     };
     wtp::wt_hashmap<uint32_t, OrderLevelInfo> _order_id_to_level;
+
+    //==========================================================================
+    // refreshQuotes 子函数 (重构: 报单控制分离)
+    //==========================================================================
+    
+    /// 统一定价计算 (skew + spread_mult + obligation + qty decay)
+    /// 输出: bidPrice, askPrice, bidQty, askQty, is_obligation_bid, is_obligation_ask
+    struct QuoteResult {
+        double bidPrice;
+        double askPrice;
+        double bidQty;
+        double askQty;
+        bool   is_obligation_bid;
+        bool   is_obligation_ask;
+    };
+    QuoteResult computeQuotePrices(
+        uint32_t level, double mid,
+        double l0_bid_price, double l0_ask_price,
+        double spread_mult, bool allow_bid, bool allow_ask,
+        double upper_limit, double lower_limit,
+        double best_bid, double best_ask,
+        double long_util, double short_util,
+        bool force_ask_obligation, bool force_bid_obligation,
+        bool is_obligation_mode);
+    
+    /// 判断当前 level 是否需要履行做市义务(双边报单)
+    bool needObligation(uint32_t level,
+                         bool force_ask_obligation, bool force_bid_obligation) const
+    {
+        if (force_ask_obligation || force_bid_obligation)
+            return true;
+        if (_cfg.always_obligation && level == 0)
+            return true;
+        return false;
+    }
+    
+    /// 路径A: 做市双边接口 (stra_quote, 顶单自动撤旧)
+    /// 必须双边报单，allow 不阻断，风控通过价格偏移体现
+    uint32_t handleBilateralQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now);
+    
+    /// 路径B1: 普通报单 + 做市义务 (stra_buy + stra_sell, 先撤残留再双边下单)
+    /// 不走 sticky，每 tick 刷新。义务模式下 qty 不衰减。
+    uint32_t handleObligationQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now);
+    
+    /// 路径B2: 普通报单 + 自由报价 (stra_buy + stra_sell, sticky, 可单边)
+    /// 允许 qty 衰减和单边阻断
+    uint32_t handleFlexibleQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now);
 };
 
 } // namespace futu
