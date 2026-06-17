@@ -9,6 +9,7 @@
 #include "../WTSTools/WTSLogger.h"
 #include <cstring>
 #include <utility>  // for std::pair and structured bindings
+#include <algorithm>  // for std::remove
 
 namespace futu {
 
@@ -113,25 +114,24 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
     QuoteLevel& ask_level = _ask_levels[level];
 
     // 做市双边接口: 必须双边报单，顶单自动撤旧
-    // 即使一侧 allow=false 也用 stra_quote（价格偏到义务区间）
-    bool bid_need_update = (bid_level.order_id == 0);
-    bool ask_need_update = (ask_level.order_id == 0);
+    bool bid_need_update = !bid_level.hasOrders();
+    bool ask_need_update = !ask_level.hasOrders();
 
-    if (_tracker) {
-        if (auto* oi = _tracker->getOrderByOrderId(bid_level.order_id); oi && !oi->isPendingCancel())
+    if (_tracker && !bid_level.order_ids.empty()) {
+        if (auto* oi = _tracker->getOrderByOrderId(bid_level.order_ids[0]); oi && !oi->isPendingCancel())
             bid_need_update = checkStickyUpdate(qr.bidPrice, oi->price, true);
-        else if (bid_level.order_id != 0)
+        else
             bid_need_update = true;
-    } else if (bid_level.order_id != 0) {
+    } else if (bid_level.hasOrders()) {
         bid_need_update = checkStickyUpdate(qr.bidPrice, bid_level.price, true);
     }
 
-    if (_tracker) {
-        if (auto* oi = _tracker->getOrderByOrderId(ask_level.order_id); oi && !oi->isPendingCancel())
+    if (_tracker && !ask_level.order_ids.empty()) {
+        if (auto* oi = _tracker->getOrderByOrderId(ask_level.order_ids[0]); oi && !oi->isPendingCancel())
             ask_need_update = checkStickyUpdate(qr.askPrice, oi->price, false);
-        else if (ask_level.order_id != 0)
+        else
             ask_need_update = true;
-    } else if (ask_level.order_id != 0) {
+    } else if (ask_level.hasOrders()) {
         ask_need_update = checkStickyUpdate(qr.askPrice, ask_level.price, false);
     }
 
@@ -139,22 +139,22 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
         return 0;
 
     // 标记旧单 pending_cancel（stra_quote 顶单会自动撤旧）
-    if (bid_level.order_id != 0) {
-        if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
-        bid_level.order_id = 0;
+    for (uint32_t id : bid_level.order_ids) {
+        if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
     }
-    if (ask_level.order_id != 0) {
-        if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
-        ask_level.order_id = 0;
+    bid_level.order_ids.clear();
+    for (uint32_t id : ask_level.order_ids) {
+        if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
     }
+    ask_level.order_ids.clear();
 
     auto [bidId, askId] = _ctx->stra_quote(_cfg.code.c_str(), qr.bidPrice, qr.bidQty,
                                             qr.askPrice, qr.askQty,
                                             (_allow_bid && _allow_ask) ? "MM_BILATERAL" : "MM_OBLIGATION");
     if (bidId != 0 && askId != 0)
     {
-        bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
-        ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
+        bid_level.order_ids = {bidId}; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
+        ask_level.order_ids = {askId}; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
         _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
         _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
         if (_tracker && now > 0) {
@@ -172,39 +172,48 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     QuoteLevel& ask_level = _ask_levels[level];
 
     // 义务模式: 必须双边，先撤所有残留（含部分成交），不走 sticky
-    if (bid_level.order_id != 0) {
-        _ctx->stra_cancel(bid_level.order_id);
-        if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::MANUAL);
-        bid_level.order_id = 0;
+    for (uint32_t id : bid_level.order_ids) {
+        _ctx->stra_cancel(id);
+        if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
     }
-    if (ask_level.order_id != 0) {
-        _ctx->stra_cancel(ask_level.order_id);
-        if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::MANUAL);
-        ask_level.order_id = 0;
+    bid_level.order_ids.clear();
+    for (uint32_t id : ask_level.order_ids) {
+        _ctx->stra_cancel(id);
+        if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
     }
+    ask_level.order_ids.clear();
 
     uint32_t orders = 0;
 
     // 双边下单 (qty=0 时跳过该侧，避免 Entrust error)
+    // stra_buy/sell 可能返回多个子单 ID（exit + open），全部跟踪
     if (qr.bidQty > 0) {
         auto bidIds = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
-        if (!bidIds.empty()) {
-            uint32_t bidId = bidIds[0];
-            bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
-            _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
-            if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
-            orders++;
+        for (uint32_t bidId : bidIds) {
+            if (bidId != 0) {
+                bid_level.order_ids.push_back(bidId);
+                _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
+                if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+                orders++;
+            }
+        }
+        if (!bid_level.order_ids.empty()) {
+            bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
         }
     }
 
     if (qr.askQty > 0) {
         auto askIds = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
-        if (!askIds.empty()) {
-            uint32_t askId = askIds[0];
-            ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
-            _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
-            if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
-            orders++;
+        for (uint32_t askId : askIds) {
+            if (askId != 0) {
+                ask_level.order_ids.push_back(askId);
+                _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+                if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+                orders++;
+            }
+        }
+        if (!ask_level.order_ids.empty()) {
+            ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
         }
     }
 
@@ -220,74 +229,78 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
     // B2 自由模式: sticky + 可单边 + qty 衰减
     // Bid
     if (qr.bidQty == 0) {
-        if (bid_level.order_id != 0) {
-            _ctx->stra_cancel(bid_level.order_id);
-            if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::INVENTORY_LIMIT);
-            bid_level.order_id = 0;
+        for (uint32_t id : bid_level.order_ids) {
+            _ctx->stra_cancel(id);
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
         }
+        bid_level.order_ids.clear();
     } else {
-        bool need_update = (bid_level.order_id == 0);
+        bool need_update = !bid_level.hasOrders();
         if (!need_update) {
-            if (_tracker) {
-                auto* oi = _tracker->getOrderByOrderId(bid_level.order_id);
+            if (_tracker && !bid_level.order_ids.empty()) {
+                auto* oi = _tracker->getOrderByOrderId(bid_level.order_ids[0]);
                 if (oi && !oi->isPendingCancel())
                     need_update = checkStickyUpdate(qr.bidPrice, oi->price, true);
                 else
                     need_update = true;
-            } else {
-                need_update = checkStickyUpdate(qr.bidPrice, bid_level.price, true);
             }
         }
         if (need_update) {
-            if (bid_level.order_id != 0) {
-                _ctx->stra_cancel(bid_level.order_id);
-                if (_tracker) _tracker->markPendingCancel(bid_level.order_id, CancelReason::PRICE_DEVIATION);
-                bid_level.order_id = 0;
+            for (uint32_t id : bid_level.order_ids) {
+                _ctx->stra_cancel(id);
+                if (_tracker) _tracker->markPendingCancel(id, CancelReason::PRICE_DEVIATION);
             }
+            bid_level.order_ids.clear();
             auto ids = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
-            if (!ids.empty()) {
-                uint32_t bidId = ids[0];
-                bid_level.order_id = bidId; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
-                _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
-                if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
-                orders++;
+            for (uint32_t bidId : ids) {
+                if (bidId != 0) {
+                    bid_level.order_ids.push_back(bidId);
+                    _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
+                    if (_tracker && now > 0) _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+                    orders++;
+                }
+            }
+            if (!bid_level.order_ids.empty()) {
+                bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
             }
         }
     }
 
     // Ask
     if (qr.askQty == 0) {
-        if (ask_level.order_id != 0) {
-            _ctx->stra_cancel(ask_level.order_id);
-            if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::INVENTORY_LIMIT);
-            ask_level.order_id = 0;
+        for (uint32_t id : ask_level.order_ids) {
+            _ctx->stra_cancel(id);
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
         }
+        ask_level.order_ids.clear();
     } else {
-        bool need_update = (ask_level.order_id == 0);
+        bool need_update = !ask_level.hasOrders();
         if (!need_update) {
-            if (_tracker) {
-                auto* oi = _tracker->getOrderByOrderId(ask_level.order_id);
+            if (_tracker && !ask_level.order_ids.empty()) {
+                auto* oi = _tracker->getOrderByOrderId(ask_level.order_ids[0]);
                 if (oi && !oi->isPendingCancel())
                     need_update = checkStickyUpdate(qr.askPrice, oi->price, false);
                 else
                     need_update = true;
-            } else {
-                need_update = checkStickyUpdate(qr.askPrice, ask_level.price, false);
             }
         }
         if (need_update) {
-            if (ask_level.order_id != 0) {
-                _ctx->stra_cancel(ask_level.order_id);
-                if (_tracker) _tracker->markPendingCancel(ask_level.order_id, CancelReason::PRICE_DEVIATION);
-                ask_level.order_id = 0;
+            for (uint32_t id : ask_level.order_ids) {
+                _ctx->stra_cancel(id);
+                if (_tracker) _tracker->markPendingCancel(id, CancelReason::PRICE_DEVIATION);
             }
+            ask_level.order_ids.clear();
             auto ids = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
-            if (!ids.empty()) {
-                uint32_t askId = ids[0];
-                ask_level.order_id = askId; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
-                _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
-                if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
-                orders++;
+            for (uint32_t askId : ids) {
+                if (askId != 0) {
+                    ask_level.order_ids.push_back(askId);
+                    _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+                    if (_tracker && now > 0) _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+                    orders++;
+                }
+            }
+            if (!ask_level.order_ids.empty()) {
+                ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
             }
         }
     }
@@ -350,24 +363,22 @@ void FutuQuoter::cancelAll(wtp::IUftStraCtx* ctx)
 
     for (auto& level : _bid_levels)
     {
-        if (level.order_id != 0)
-        {
-            if (_tracker) _tracker->markPendingCancel(level.order_id, CancelReason::MANUAL);
-            ctx->stra_cancel(level.order_id);
-            _order_id_to_level.erase(level.order_id);
-            level.order_id = 0;
+        for (uint32_t id : level.order_ids) {
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
+            ctx->stra_cancel(id);
+            _order_id_to_level.erase(id);
         }
+        level.order_ids.clear();
     }
 
     for (auto& level : _ask_levels)
     {
-        if (level.order_id != 0)
-        {
-            if (_tracker) _tracker->markPendingCancel(level.order_id, CancelReason::MANUAL);
-            ctx->stra_cancel(level.order_id);
-            _order_id_to_level.erase(level.order_id);
-            level.order_id = 0;
+        for (uint32_t id : level.order_ids) {
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
+            ctx->stra_cancel(id);
+            _order_id_to_level.erase(id);
         }
+        level.order_ids.clear();
     }
 }
 
@@ -392,26 +403,32 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty,
     
     if (!level)
     {
-        for (auto& l : _bid_levels) if (l.order_id == localid) { level = &l; break; }
-        if (!level)
-            for (auto& l : _ask_levels) if (l.order_id == localid) { level = &l; break; }
+        for (auto& l : _bid_levels) {
+            for (uint32_t id : l.order_ids) if (id == localid) { level = &l; break; }
+            if (level) break;
+        }
+        if (!level) {
+            for (auto& l : _ask_levels) {
+                for (uint32_t id : l.order_ids) if (id == localid) { level = &l; break; }
+                if (level) break;
+            }
+        }
     }
     
     if (level)
     {
         if (isCanceled || leftQty == 0)
         {
-            if (level->order_id == localid) {
-                level->order_id = 0;
-            }
+            // Remove this order ID from the level
+            level->order_ids.erase(
+                std::remove(level->order_ids.begin(), level->order_ids.end(), localid),
+                level->order_ids.end());
             if (_tracker) _tracker->untrackOrder(localid);
             _order_id_to_level.erase(localid);
         }
         else
         {
-            if (level->order_id == localid) {
-                level->qty = leftQty;
-            }
+            level->qty = leftQty;
             if (_tracker) _tracker->updateOrderQty(localid, leftQty);
             
             if (_tracker)
@@ -464,7 +481,7 @@ double FutuQuoter::totalBidQty() const
 {
     double total = 0;
     for (const auto& level : _bid_levels)
-        if (level.order_id != 0) total += level.qty;
+        if (level.hasOrders()) total += level.qty;
     return total;
 }
 
@@ -472,7 +489,7 @@ double FutuQuoter::totalAskQty() const
 {
     double total = 0;
     for (const auto& level : _ask_levels)
-        if (level.order_id != 0) total += level.qty;
+        if (level.hasOrders()) total += level.qty;
     return total;
 }
 
@@ -512,7 +529,7 @@ ValidQuoteSnapshot FutuQuoter::getValidQuoteSnapshot() const
         double weighted_sum = 0;  // Σ(qty_i × price_i)
         for (const auto& level : _bid_levels)
         {
-            if (level.order_id == 0 || level.qty <= 0) continue;
+            if (!level.hasOrders() || level.qty <= 0) continue;
             double remain = target - cum_qty;
             if (remain <= 0) break;
             double take = (level.qty >= remain) ? remain : level.qty;
@@ -533,7 +550,7 @@ ValidQuoteSnapshot FutuQuoter::getValidQuoteSnapshot() const
         double weighted_sum = 0;
         for (const auto& level : _ask_levels)
         {
-            if (level.order_id == 0 || level.qty <= 0) continue;
+            if (!level.hasOrders() || level.qty <= 0) continue;
             double remain = target - cum_qty;
             if (remain <= 0) break;
             double take = (level.qty >= remain) ? remain : level.qty;

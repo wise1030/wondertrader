@@ -41,11 +41,14 @@ struct QuoteLevel
 {
     double      price;          ///< Current quote price
     double      qty;            ///< Current quote quantity
-    uint32_t    order_id;       ///< Active order ID (0 = no active order)
+    std::vector<uint32_t> order_ids;  ///< Active order IDs (stra_buy/sell may return multiple)
     uint8_t     level_index;    ///< Level index for O(1) lookup
     bool        is_bid;         ///< true=bid, false=ask
     
-    QuoteLevel() : price(0), qty(0), order_id(0), level_index(0), is_bid(true) {}
+    QuoteLevel() : price(0), qty(0), level_index(0), is_bid(true) {}
+    
+    /// Check if any active orders
+    bool hasOrders() const { return !order_ids.empty(); }
 };
 
 /// Configuration for multi-level quoting on a single contract
@@ -93,7 +96,7 @@ struct QuoterConfig
         , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0)
         , qty_decay_factor(2.0), obligation_min_qty(10.0)
         , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
-        , always_obligation(false) {}
+        , always_obligation(true) {}
 };
 
 /// Multi-level quoter for a single contract
