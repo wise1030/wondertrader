@@ -1033,18 +1033,30 @@ uint64_t now_ms = TimeUtils::getLocalTimeNow();
 double currentDelta = _portfolio->getTotalDelta();
 double max_delta = _portfolio->getParams().portfolio_max_delta;
 
-// 0. 紧急突破：delta > 2*max_delta 时无视所有防震荡限制，立即对冲
+// 0. 紧急突破：delta > 2*max_delta 时绕过反向保护，但仍受 cooldown 约束
+//    在 match_this_tick 回测撮合模式下，如果 emergency 绕过 cooldown，
+//    hedge 单秒成交 → 同 tick Delta 变化 → 再次触发 emergency → 无限循环。
+//    实盘 FAK 不秒成交，但 cooldown 对实盘也有益（等待成交回流再决策）。
 bool is_emergency = max_delta > 0 && std::abs(currentDelta) > max_delta * 2.0;
 
-if (!is_emergency)
+// 冷却期检查：所有 hedge（含 emergency）都受 cooldown 约束
+if (_last_hedge_time > 0 && (now_ms - _last_hedge_time) < _cfg.hedge_cooldown_ms)
 {
-    // 1. 冷却期检查：对冲后必须等待 hedge_cooldown_ms 才能再次对冲
-    if (_last_hedge_time > 0 && (now_ms - _last_hedge_time) < _cfg.hedge_cooldown_ms)
+    if (!is_emergency)
     {
         return false;
     }
+    // emergency 也受 cooldown：只记录不执行
+    // 防止 match_this_tick 模式下 hedge 秒成交 → 连续 emergency hedge 循环
+    WTSLogger::debug("Emergency hedge blocked by cooldown: delta={:.1f}, "
+        "remaining {}ms", currentDelta,
+        _cfg.hedge_cooldown_ms - (now_ms - _last_hedge_time));
+    return false;
+}
 
-    // 2. 反向对冲保护：如果上次对冲方向与当前需要方向相反，需要delta翻转幅度超过1.2倍触发阈值
+if (!is_emergency)
+{
+    // 1. 反向对冲保护：如果上次对冲方向与当前需要方向相反，需要delta翻转幅度超过1.2倍触发阈值
     //    防止：delta=80→SELL对冲→delta=-80→立即BUY对冲→无限循环
     if (_last_hedge_direction != 0)
     {
@@ -1055,14 +1067,9 @@ if (!is_emergency)
         
         if (is_reverse)
         {
-            // 反向对冲阈值基于max_delta而非上次hedge_delta
-            // 原代码用abs(_last_hedge_delta)*1.2，如果上次对冲时delta很小，
-            // 阈值也很小，导致频繁反向对冲(振荡)。
-            // 改为基于max_delta: reverse_threshold = max_delta * factor(默认1.2)
-            // 这样阈值稳定，不受上次对冲幅度影响
-            double max_delta = _cfg.modules.portfolio_max_delta;
-            if (max_delta <= 0) max_delta = _cfg.hedge_delta_threshold;  // fallback
-            double reverse_threshold = max_delta * 1.2;
+            double reverse_max = _cfg.modules.portfolio_max_delta;
+            if (reverse_max <= 0) reverse_max = _cfg.hedge_delta_threshold;
+            double reverse_threshold = reverse_max * 1.2;
             if (std::abs(currentDelta) < reverse_threshold)
             {
                 WTSLogger::debug("Hedge anti-oscillation: reverse hedge blocked, "
@@ -1077,7 +1084,7 @@ if (!is_emergency)
 }
 else
 {
-    WTSLogger::warn("EMERGENCY HEDGE: delta={:.1f} > 2*max_delta={:.1f}, bypassing anti-oscillation",
+    WTSLogger::warn("EMERGENCY HEDGE: delta={:.1f} > 2*max_delta={:.1f}",
         currentDelta, max_delta * 2.0);
 }
 

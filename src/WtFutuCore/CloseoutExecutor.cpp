@@ -54,6 +54,7 @@ void CloseoutExecutor::reset()
     _remaining      = 0;
     _total_to_hedge = 0;
     _total_filled   = 0;
+    _inflight_qty   = 0;
     _sweep_done     = false;
     _prev_round_pos = 0;
     _prev_round_ts  = 0;
@@ -194,8 +195,22 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
 
     uint64_t now_ms = snap.timestamp_ms;
 
-    // --- Update previous round fill ---
-    updateRoundFill(snap);
+    // --- Inflight guard: wait for previous batch to settle before submitting next ---
+    // In match_this_tick backtest mode, orders fill instantly but the fill
+    // confirmation (on_order/on_trade) may arrive async. Without this guard,
+    // the executor submits every tick → overfills → remaining flips sign →
+    // submits opposite direction → infinite loop (1696 rounds, 11927 lots).
+    if (_inflight_qty > 0)
+    {
+        int active = _tracker ? _tracker->getOrderCount() : 0;
+        if (active > 0)
+        {
+            // Previous batch still inflight — wait
+            return;
+        }
+        // Previous batch settled
+        _inflight_qty = 0;
+    }
 
     // --- Recompute remaining from fresh net delta ---
     double net_delta = _portfolio->getNetDelta();
@@ -277,6 +292,9 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
                     static_cast<int>(tier), urgency, _remaining, time_left_ms);
 
     submitHedgeOrder(ctx, is_buy, price, batch_qty);
+
+    // --- Set inflight guard (wait for next batch until this settles) ---
+    _inflight_qty = batch_qty;
 
     // --- Record round ---
     _prev_round_pos  = _remaining;

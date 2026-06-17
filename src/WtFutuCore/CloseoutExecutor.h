@@ -218,6 +218,7 @@ private:
     double         _remaining      = 0;      ///< Lots left to hedge (+need buy, -need sell)
     double         _total_to_hedge = 0;
     double         _total_filled   = 0;
+    double         _inflight_qty   = 0;      ///< Qty submitted but not yet confirmed filled/cancelled
 
     uint64_t       _start_ts       = 0;
     uint64_t       _drain_start_ts = 0;
