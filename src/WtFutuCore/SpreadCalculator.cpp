@@ -65,7 +65,7 @@ void SpreadCalculator::onLeg1Tick(double price, uint64_t timestamp)
     _last_leg1_update = timestamp;
     _leg1_fresh = true;  // 标记leg1有新数据
     
-    // BUG-7 修复：同步tick配对机制
+    // 同步tick配对机制
     // 之前每次收到任一合约tick都push，导致另一合约用旧价格
     // 大量log_return=0稀释了beta计算，使同品种跨期beta降到BETA_MIN
     // 现在改为：只在leg2也有新数据（_leg2_fresh=true）时才push
@@ -89,7 +89,7 @@ void SpreadCalculator::onLeg2Tick(double price, uint64_t timestamp)
     _last_leg2_update = timestamp;
     _leg2_fresh = true;  // 标记leg2有新数据
     
-    // BUG-7 修复：对称处理 — leg2新数据到达时标记为fresh
+    // 对称处理 — leg2新数据到达时标记为fresh
     // 下次leg1 tick到来时检查_leg2_fresh，确保两个合约价格同步
     if (_leg1_price > 0 && _leg1_fresh)
     {
@@ -191,7 +191,7 @@ void SpreadCalculator::updateStatistics()
         
         // Beta 边界约束
         // 防止极端值导致 delta 计算异常
-        // BUG-7 修复：收紧范围从 [0.5, 2.0] 到 [0.7, 1.5]
+        // 收紧范围从 [0.5, 2.0] 到 [0.7, 1.5]
         // 同品种跨期beta应该≈1.0，[0.5, 2.0]太宽导致delta被低估
         // 跨品种可以由CorrelationManager的addRelation传入更宽的范围
         constexpr double BETA_MIN = 0.7;

@@ -172,8 +172,8 @@ private:
     double _leg2_multiplier;
     uint64_t _last_leg1_update;
     uint64_t _last_leg2_update;
-    bool _leg1_fresh;    // BUG-7: leg1有新数据标记，用于tick同步配对
-    bool _leg2_fresh;    // BUG-7: leg2有新数据标记，用于tick同步配对
+    bool _leg1_fresh;    // leg1有新数据标记，用于tick同步配对
+    bool _leg2_fresh;    // leg2有新数据标记，用于tick同步配对
     
     //==========================================================================
     // Spread Data

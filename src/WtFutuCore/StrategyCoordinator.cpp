@@ -618,7 +618,7 @@ mutable_sig_ctx.toxicity.toxic_side = tox.toxic_side;
 mutable_sig_ctx.toxicity.valid = true;
 } else {
 // toxic_detected每tick重算，不复位锁存
-// 与should_pause相同的锁存BUG: 只设true不复位false
+// 与should_pause相同的锁存: 只设true不复位false
 // 导致toxic_detected一旦被设就永久锁死
 mutable_sig_ctx.toxicity.toxic_detected = false;
 mutable_sig_ctx.toxicity.valid = true;

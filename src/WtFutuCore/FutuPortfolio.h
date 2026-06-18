@@ -64,7 +64,7 @@ struct ContractState
     
     // Position state
     double      position;       ///< Net position (+ long, - short)
-    double      prev_position;  ///< BUG-10: Previous position for trade effect logging
+    double      prev_position;  ///< Previous position for trade effect logging
     double      avg_cost;       ///< Average cost
     double      unrealized_pnl; ///< Unrealized P&L
     double      realized_pnl;   ///< Realized P&L (accumulated from closed positions)

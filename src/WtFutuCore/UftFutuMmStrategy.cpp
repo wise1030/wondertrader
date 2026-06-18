@@ -1804,7 +1804,7 @@ _toxicity_detector->onSelfTradeCalibration(calibration);
         actionStr = isOpen ? "OPEN_SHORT" : "CLOSE_SHORT";
     }
     
-    // BUG-10 修复：基于position变化判断实际效果
+    // 基于position变化判断实际效果
     // CTP的isLong+offset组合可能不反映实际持仓变化
     // 例如：ag2612有多仓24手时，OPEN_SHORT实际是平多（position减少）
     // 需要同时显示CTP方向和实际效果，避免日志误导

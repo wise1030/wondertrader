@@ -119,7 +119,7 @@ void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
     ContractState* cs = getContract(stdCode);
     if (!cs) return;
 
-    // BUG-10: 记录前一个position用于成交效果日志
+    // 记录前一个position用于成交效果日志
     cs->prev_position = cs->position;
     cs->position = newPos;
 }

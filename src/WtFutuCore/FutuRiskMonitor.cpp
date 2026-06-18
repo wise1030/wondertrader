@@ -456,7 +456,7 @@ bool FutuRiskMonitor::resumeTrading()
 
 void FutuRiskMonitor::pauseQuoting()
 {
-    // BUG-9 修复：避免重复触发QUOTING_PAUSED（与resumeQuoting对称）
+    // 避免重复触发QUOTING_PAUSED（与resumeQuoting对称）
     bool expected = false;
     if (!_quoting_paused.compare_exchange_strong(expected, true,
             std::memory_order_relaxed, std::memory_order_relaxed)) {
@@ -469,7 +469,7 @@ void FutuRiskMonitor::pauseQuoting()
 
 void FutuRiskMonitor::resumeQuoting()
 {
-    // BUG-9 修复：避免重复触发QUOTING_RESUMED
+    // 避免重复触发QUOTING_RESUMED
     // 之前没有检查当前状态，多个合约tick回调都会触发resumeQuoting
     // 导致同一秒内出现多次QUOTING_RESUMED日志
     bool expected = true;
