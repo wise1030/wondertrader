@@ -549,6 +549,9 @@ SignalContext& mutable_sig_ctx = agg_it->second->getContext();
 
 // 3. 更新市场状态暂停标志
 // 使用TradingState方法
+// P1-6/U1: enter 用 setQuotingPhase (会被 RISK_HALTED 校验拒绝, 安全),
+//         exit 用 tryResumeFrom(MARKET) (仅 qphase==MARKET 时翻 NORMAL,
+//         避免在 HALT/ERROR/TOXICITY 期间被误翻).
 if (sig_ctx.shouldPause()) {
     if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::MARKET);
     // DIAG: 限频诊断日志，确认shouldPause()触发原因
@@ -567,7 +570,7 @@ if (sig_ctx.shouldPause()) {
         }
     }
 } else {
-    if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::NORMAL);
+    if (_trading_state) _trading_state->tryResumeFrom(QuotingPhase::MARKET);
 }
 
 if (_trading_state && _trading_state->qphase == QuotingPhase::MARKET && _quoters) {
@@ -769,13 +772,15 @@ WTSLogger::info("StrategyCoordinator[{}]: Risk normalized, resuming operations",
 
 // Check toxicity cooldown
 // 空指针保护 + P0-12: 使用TradingState方法
+// P1-6/U1: enter 用 setQuotingPhase, exit 用 tryResumeFrom(TOXICITY)
+// 避免冷却期结束时在 HALT/ERROR/MARKET 期间被误翻 NORMAL.
 if (_toxicity && tc.timestamp < _toxicity_resume_time) {
 if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::TOXICITY);
 if (_self_trade_calibrator) {
 _self_trade_calibrator->decayCalibration(tc.code, tc.timestamp, _cfg.modules.toxicity_cooloff_ms);
 }
 } else {
-if (_trading_state) _trading_state->setQuotingPhase(QuotingPhase::NORMAL);
+if (_trading_state) _trading_state->tryResumeFrom(QuotingPhase::TOXICITY);
 }
 
 // 空指针保护

@@ -199,7 +199,7 @@ struct FutuMmConfig
         uint32_t order_error_threshold;
         uint32_t max_orders;
         double stp_min_price_gap;
-        OrderControl() : order_error_threshold(3), max_orders(32), stp_min_price_gap(1.0) {}
+        OrderControl() : order_error_threshold(10), max_orders(32), stp_min_price_gap(1.0) {}
     } order_control;
 };
 
