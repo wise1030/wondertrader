@@ -1,5 +1,10 @@
 # WtFutuCore 优化改造详细路径
 > 2026-06-14 | 逐项精确到文件/行号/改动内容/验证方法
+> 2026-06-18 | Phase 2 ✅ 全部完成
+>             见 docs/PHASE2_CLOSEOUT_AUDIT.md (审计)
+>             见 docs/PAUSE_RESUME_UNIFICATION_AUDIT.md (U1 统一恢复入口)
+>             见 docs/ERROR_STATE_MACHINE_AUDIT.md (ERROR 状态机审计)
+>             见 docs/ERROR_STATE_MACHINE.md (最终设计 SSOT)
 
 ---
 
