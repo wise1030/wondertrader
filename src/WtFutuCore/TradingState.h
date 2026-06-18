@@ -10,15 +10,33 @@
  *   CLOSEOUT 子状态 — 由 RiskMonitor 的 CloseoutSub 管理（TradingState 不跟踪细节）
  *   方向级软禁 long_blocked/short_blocked — 正交于两个阶段
  *
- * 线程安全约束 (P1-7):
- *   WT UFT 回调在 reader 线程串行调用，无并发。不加 std::atomic。
- *   若未来引入多线程，需将 MmPhase/QuotingPhase 改为 atomic 或加锁。
+ *==========================================================================
+ * THREADING CONTRACT (P1-7, 2026-06-18):
+ *==========================================================================
+ *   TradingState 设计为单线程访问:
+ *     - 所有写入(setQuotingPhase / tryResumeFrom / enterCloseout /
+ *       exitToQuoting / resumeFromRisk / reset / blockLong/blockShort/
+ *       unblockLong/unblockShort) 必须在 UFT reader 线程上执行
+ *       (WT 引擎对 on_tick, on_order, on_trade, on_session_*, on_entrust 等
+ *        回调串行调度)。
+ *     - 跨线程读取(如 AsyncArbitrageExecutor 异步任务读 isActive())
+ *       仅限于查询单字节 enum 成员。x86/arm64 下对齐 uint8_t 读是原子的。
+ *     - 若未来引入并发写场景,必须改为 std::atomic<uint8_t> 或加 mutex。
+ *
+ *   DEBUG 构建启用 _writer_tid 断言: 首次写记录线程 id, 后续写若来自不同
+ *   线程立即 assert 失败, 提早暴露并发误用. Release 构建零开销.
+ *==========================================================================
  *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
 
 #include <cstdint>
+
+#ifndef NDEBUG
+#include <cassert>
+#include <thread>
+#endif
 
 namespace futu {
 
@@ -49,6 +67,10 @@ enum class QuotingPhase : uint8_t {
 //   - MmPhase 只有两个值：做市 vs 收盘平仓。转移只发生在 closeout 触发/完成。
 //   - QuotingPhase 是 QUOTING 内的子状态。互相可抢占（高优先级覆盖）。
 //   - RISK_HALTED → NORMAL 只能通过 resumeFromRisk()（带转移校验）。
+//   - 非 H 子态的恢复统一走 tryResumeFrom(expected) (P1-6/U1, 2026-06-18):
+//       * 必须显式声明"我在从哪个状态退出",避免高优先级期间被低优先级
+//         else 分支误翻 NORMAL.
+//       * 例如 HALT 期间 MARKET 退出分支不应该把 H 翻 N.
 //   - CLOSEOUT 子状态由 RiskMonitor 的 CloseoutSub 管理，TradingState 不跟踪细节。
 //   - long_blocked/short_blocked 是方向级软禁，与 phase/qphase 正交。
 //   - 不再需要 syncFromRiskMonitor：各模块管自己的域，strategy 是编排者。
@@ -100,11 +122,13 @@ struct TradingState {
 
     /// 进入收盘平仓阶段
     void enterCloseout() {
+        _check_writer_thread();
         phase = MmPhase::CLOSEOUT;
     }
 
     /// 退出到做市报价阶段（夜盘平仓完成 / session reset）
     void exitToQuoting() {
+        _check_writer_thread();
         phase  = MmPhase::QUOTING;
         qphase = QuotingPhase::NORMAL;
     }
@@ -125,14 +149,33 @@ struct TradingState {
     /// 设置 QUOTING 子状态（抢占式，自动校验）
     /// @return true=转移成功(含同态幂等) false=被校验拒绝（RISK_HALTED 不可直接抢占）
     bool setQuotingPhase(QuotingPhase q) {
+        _check_writer_thread();
         if (qphase == q) return true;  // idempotent
         if (!canTransitionQuoting(q)) return false;
         qphase = q;
         return true;
     }
 
+    /// P1-6/U1: 从指定子态恢复到 NORMAL — 仅当 expected 与当前 qphase 匹配时生效
+    ///
+    /// 用途: 非 H 子态 (TOXICITY/MARKET/ERROR) 的退出统一入口.
+    /// 防止"高优先级期间被低优先级 else 分支误翻 NORMAL"的跨态闪烁问题.
+    /// 例如 HALT 期间 MARKET 的 shouldPause=false 分支不应将 qphase 翻 N.
+    ///
+    /// @param expected 期望的当前子态. qphase != expected 时 no-op 并返回 false.
+    /// @return true=恢复成功(qphase 已变 NORMAL) false=当前态不匹配,跳过
+    ///
+    /// 注: H 退出仍走 resumeFromRisk(). 不要用 tryResumeFrom(RISK_HALTED).
+    bool tryResumeFrom(QuotingPhase expected) {
+        _check_writer_thread();
+        if (qphase != expected) return false;
+        qphase = QuotingPhase::NORMAL;
+        return true;
+    }
+
     /// 风控恢复（RISK_HALTED → NORMAL 的唯一合法路径）
     void resumeFromRisk() {
+        _check_writer_thread();
         qphase = QuotingPhase::NORMAL;
     }
 
@@ -141,6 +184,7 @@ struct TradingState {
     //==========================================================================
 
     void reset() {
+        _check_writer_thread();
         phase  = MmPhase::QUOTING;
         qphase = QuotingPhase::NORMAL;
         long_blocked  = false;
@@ -151,10 +195,10 @@ struct TradingState {
     // 方向级软禁
     //==========================================================================
 
-    void blockLong()   { long_blocked  = true;  }
-    void unblockLong() { long_blocked  = false; }
-    void blockShort()  { short_blocked = true;  }
-    void unblockShort(){ short_blocked = false; }
+    void blockLong()   { _check_writer_thread(); long_blocked  = true;  }
+    void unblockLong() { _check_writer_thread(); long_blocked  = false; }
+    void blockShort()  { _check_writer_thread(); short_blocked = true;  }
+    void unblockShort(){ _check_writer_thread(); short_blocked = false; }
 
     //==========================================================================
     // 日志/调试
@@ -172,6 +216,26 @@ struct TradingState {
         }
         return "UNKNOWN";
     }
+
+private:
+    //==========================================================================
+    // P1-7: DEBUG-only 线程契约校验
+    //   首次写记录线程 id, 后续写若来自不同线程立即 assert 失败.
+    //   Release 构建编译为空, 零开销.
+    //==========================================================================
+#ifndef NDEBUG
+    mutable std::thread::id _writer_tid{};
+    void _check_writer_thread() const {
+        auto cur = std::this_thread::get_id();
+        if (_writer_tid == std::thread::id{}) {
+            _writer_tid = cur;
+        } else {
+            assert(_writer_tid == cur && "TradingState write from different thread!");
+        }
+    }
+#else
+    void _check_writer_thread() const {}
+#endif
 };
 
 } // namespace futu
