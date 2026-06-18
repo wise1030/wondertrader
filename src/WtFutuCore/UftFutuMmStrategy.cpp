@@ -222,6 +222,7 @@ _config.quoting.qty_decay_factor = readDouble(cfgQuoting, "qtyDecayFactor", 2.0)
 _config.quoting.obligation_min_qty = readDouble(cfgQuoting, "obligationMinQty", 10.0);
 _config.quoting.obligation_max_spread_ticks = readDouble(cfgQuoting, "obligationMaxSpreadTicks", 10.0);
 _config.quoting.obligation_only_l0 = readBool(cfgQuoting, "obligationOnlyL0", true);
+_config.quoting.always_obligation = readBool(cfgQuoting, "alwaysObligation", true);
 }
 
 //------------------------------------------------------------
@@ -520,6 +521,7 @@ qcfg.qty_decay_factor = _config.quoting.qty_decay_factor;
 qcfg.obligation_min_qty = _config.quoting.obligation_min_qty;
 qcfg.obligation_max_spread_ticks = _config.quoting.obligation_max_spread_ticks;
 qcfg.obligation_only_l0 = _config.quoting.obligation_only_l0;
+qcfg.always_obligation = _config.quoting.always_obligation;
 
 quoter->init(qcfg);
 // Note: UnifiedOrderTracker will be set after it's created (in section 5)
