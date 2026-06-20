@@ -1246,12 +1246,9 @@ void UftMocker::update_position(const char* stdCode, bool isLong, uint32_t offse
 		pItem._prevol -= maxQty;
 		pItem._newvol -= qty - maxQty;
 
-		// BUG-M2 fix (2026-06-20): 平仓成交时同步扣减可用量.
-		// 先扣昨仓可用, 不够再扣今仓可用.
-		double availPreDeduct = std::min(maxQty, pItem._preavail);
-		pItem._preavail -= availPreDeduct;
-		double availNewDeduct = std::min(qty - maxQty, pItem._newavail);
-		pItem._newavail -= availNewDeduct;
+		// 注: on_trade 不扣减 _avail. 冻结在 stra_exit_long/short 下单时完成,
+		// 解冻在 stra_cancel 撤单时恢复. 成交时冻结永久化(正确).
+		// 之前错误地在此扣 _avail → 双重扣减 → stra_buy valid()虚低 → 跳过平仓.
 
 		std::vector<DetailInfo>::iterator eit = pItem._details.end();
 		double left = qty;
@@ -1312,10 +1309,10 @@ void UftMocker::update_position(const char* stdCode, bool isLong, uint32_t offse
 		}
 		qty = actualQty;
 
-		// BUG-M2 fix (2026-06-20): 平今成交时同步扣减 _newavail.
-		// 原代码只扣 _newvol 不扣 _newavail, 导致 valid() 虚高, stra_exit_short 放行超量平仓.
-		double availToDeduct = std::min(qty, pItem._newavail);
-		pItem._newavail -= availToDeduct;
+		// 注: on_trade 不扣减 _newavail. 冻结在 stra_exit_short(isToday=true) 下单时完成
+		// (L802 _newavail -= qty), 解冻在 stra_cancel 撤单时恢复 (L429 _newavail += left).
+		// 成交时冻结永久化(正确, 持仓确实减了).
+		// 之前错误地在此扣 _newavail → 双重扣减 → stra_buy valid()虚低 → 95%跳过exit_short.
 
 		pItem._newvol -= qty;
 		std::vector<DetailInfo>::iterator sit = pItem._details.end();
