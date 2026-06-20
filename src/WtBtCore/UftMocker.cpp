@@ -1232,9 +1232,26 @@ void UftMocker::update_position(const char* stdCode, bool isLong, uint32_t offse
 	else if(offset == 1)
 	{
 		//如果是平仓（平昨也是这个），则根据明细的时间先后处理平仓
+
+		// BUG-M1 fix (2026-06-20): 平昨/平仓也可能穿仓, 截断到实际持仓量.
+		double totalVol = pItem.volume();
+		if (decimal::gt(qty, totalVol))
+		{
+			log_error("Close position overflow: requested {} but totalvol={}, clamped to {}",
+				qty, totalVol, totalVol);
+			qty = totalVol;
+		}
+
 		double maxQty = min(pItem._prevol, qty);
 		pItem._prevol -= maxQty;
 		pItem._newvol -= qty - maxQty;
+
+		// BUG-M2 fix (2026-06-20): 平仓成交时同步扣减可用量.
+		// 先扣昨仓可用, 不够再扣今仓可用.
+		double availPreDeduct = std::min(maxQty, pItem._preavail);
+		pItem._preavail -= availPreDeduct;
+		double availNewDeduct = std::min(qty - maxQty, pItem._newavail);
+		pItem._newavail -= availNewDeduct;
 
 		std::vector<DetailInfo>::iterator eit = pItem._details.end();
 		double left = qty;
@@ -1283,6 +1300,23 @@ void UftMocker::update_position(const char* stdCode, bool isLong, uint32_t offse
 	else if (offset == 2)
 	{
 		//如果是平今，只更新今仓，先找到今仓起始的位置，再开始处理
+
+		// BUG-M1 fix (2026-06-20): 多笔 CLOSET 叠加撮合时, _newvol 可能被平成负数.
+		// 原代码无条件 pItem._newvol -= qty, 不检查持仓量.
+		// 修复: 将 qty 截断到实际今仓量, 防止穿仓.
+		double actualQty = std::min(qty, pItem._newvol);
+		if (decimal::lt(actualQty, qty))
+		{
+			log_error("CloseToday position overflow: requested {} but newvol={}, clamped to {}",
+				qty, pItem._newvol, actualQty);
+		}
+		qty = actualQty;
+
+		// BUG-M2 fix (2026-06-20): 平今成交时同步扣减 _newavail.
+		// 原代码只扣 _newvol 不扣 _newavail, 导致 valid() 虚高, stra_exit_short 放行超量平仓.
+		double availToDeduct = std::min(qty, pItem._newavail);
+		pItem._newavail -= availToDeduct;
+
 		pItem._newvol -= qty;
 		std::vector<DetailInfo>::iterator sit = pItem._details.end();
 		std::vector<DetailInfo>::iterator eit = pItem._details.end();
