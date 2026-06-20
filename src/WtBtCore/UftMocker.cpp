@@ -660,7 +660,7 @@ uint32_t UftMocker::stra_enter_long(const char* stdCode, double price, double qt
 
 	postTask([this, localid]() {
 		const OrderInfo& ordInfo = _orders[localid];
-		log_debug("order placed: open long of {} @ {} by {}", ordInfo._code, ordInfo._price, ordInfo._total);
+		log_debug("order placed: [{}] open long of {} @ {} by {}", localid, ordInfo._code, ordInfo._price, ordInfo._total);
 		on_entrust(localid, ordInfo._code, true, "entrust success");
 	});
 
@@ -701,7 +701,7 @@ uint32_t UftMocker::stra_enter_short(const char* stdCode, double price, double q
 
 	postTask([this, localid]() {
 		const OrderInfo& ordInfo = _orders[localid];
-		log_debug("order placed: open short of {} @ {} by {}", ordInfo._code, ordInfo._price, ordInfo._total);
+		log_debug("order placed: [{}] open short of {} @ {} by {}", localid, ordInfo._code, ordInfo._price, ordInfo._total);
 		on_entrust(localid, ordInfo._code, true, "entrust success");
 	});
 
@@ -762,7 +762,7 @@ uint32_t UftMocker::stra_exit_long(const char* stdCode, double price, double qty
 
 	postTask([this, localid]() {
 		const OrderInfo& ordInfo = _orders[localid];
-		log_debug("order placed: {} long of {} @ {} by {}", OFFSET_NAMES[ordInfo._offset], ordInfo._code, ordInfo._price, ordInfo._total);
+		log_debug("order placed: [{}] {} long of {} @ {} by {}", localid, OFFSET_NAMES[ordInfo._offset], ordInfo._code, ordInfo._price, ordInfo._total);
 		on_entrust(localid, ordInfo._code, true, "entrust success");
 	});
 
@@ -823,7 +823,7 @@ uint32_t UftMocker::stra_exit_short(const char* stdCode, double price, double qt
 
 	postTask([this, localid]() {
 		const OrderInfo& ordInfo = _orders[localid];
-		log_debug("order placed: {} short of {} @ {} by {}", OFFSET_NAMES[ordInfo._offset], ordInfo._code, ordInfo._price, ordInfo._total);
+		log_debug("order placed: [{}] {} short of {} @ {} by {}", localid, OFFSET_NAMES[ordInfo._offset], ordInfo._code, ordInfo._price, ordInfo._total);
 		on_entrust(localid, ordInfo._code, true, "entrust success");
 	});
 
@@ -924,7 +924,7 @@ bool UftMocker::procOrder(uint32_t localid)
 	if (it == _orders.end())
 		return false;
 
-	OrderInfo ordInfo = (OrderInfo&)it->second;
+	OrderInfo& ordInfo = (OrderInfo&)it->second;
 
 	//第一步,如果在撤单概率中,则执行撤单
 	if(_error_rate>0 && genRand(10000)<=_error_rate)
@@ -1307,8 +1307,8 @@ void UftMocker::update_position(const char* stdCode, bool isLong, uint32_t offse
 		double actualQty = std::min(qty, pItem._newvol);
 		if (decimal::lt(actualQty, qty))
 		{
-			log_error("CloseToday position overflow: requested {} but newvol={}, clamped to {}",
-				qty, pItem._newvol, actualQty);
+			log_error("CloseToday position overflow: code={} isLong={} requested {} but newvol={}, clamped to {}",
+				stdCode, isLong, qty, pItem._newvol, actualQty);
 		}
 		qty = actualQty;
 
