@@ -17,6 +17,7 @@
 #include "BookImbalanceSignalSource.h"
 #include "MomentumSignalSource.h"
 #include "LeadLagSignalSource.h"
+#include "ICWeightTracker.h"
 #include "../WTSTools/WTSLogger.h"
 
 namespace futu {
@@ -102,6 +103,14 @@ public:
         _cfg = cfg;
         _warmup_ticks = cfg.warmup_ticks;
         initializeSignalSources();
+        // Initialize adaptive weight framework
+        AdaptiveWeightFramework::Config wcfg;
+        wcfg.base_ofi = cfg.ofi_weight;
+        wcfg.base_trade = cfg.trade_weight;
+        wcfg.base_book = cfg.book_imbalance_weight;
+        wcfg.base_mom = cfg.momentum_weight;
+        wcfg.base_ll = cfg.lead_lag_weight;
+        _weight_framework = std::make_unique<AdaptiveWeightFramework>(wcfg);
     }
     
     void updateWeights(const SignalAggregatorConfig& cfg) {
@@ -313,31 +322,93 @@ private:
         _valid_signals.clear();
         _valid_weights.clear();
         
+        //==================================================================
+        // Adaptive Weight Framework (三层权重)
+        // 在固定权重逻辑前计算动态权重, 替代后续的 _cfg.xxx_weight
+        //==================================================================
+        // 提取各信号当前值
+        double ofi_val = _ctx.ofi.valid ? _ctx.ofi.ofi : 0.0;
+        double trade_val = _ctx.trade_flow.valid ? _ctx.trade_flow.net_flow_normalized : 0.0;
+        double book_val = _ctx.book_imbalance.valid ? _ctx.book_imbalance.simple_imbalance : 0.0;
+        double mom_val = 0.0;
+        if (_cfg.use_momentum) {
+            auto mom_it = _sources.find(SignalType::MOMENTUM);
+            if (mom_it != _sources.end() && mom_it->second) {
+                const auto& result = mom_it->second->result();
+                if (result.valid) mom_val = mom_it->second->getAlphaValue();
+            }
+        }
+        double ll_val = 0.0;
+        if (_cfg.use_lead_lag) {
+            auto ll_it = _sources.find(SignalType::LEAD_LAG);
+            if (ll_it != _sources.end() && ll_it->second) {
+                const auto& result = ll_it->second->result();
+                if (result.valid) { ll_val = ll_it->second->getAlphaValue(); }
+                _ctx.alpha.lead_lag_component = result.valid ? ll_val : 0.0;
+            }
+        }
+        
+        // 记录信号值用于 IC 跟踪
+        _tick_counter++;
+        if (_weight_framework) {
+            _weight_framework->recordSignal(WeightedSignalType::OFI, ofi_val);
+            _weight_framework->recordSignal(WeightedSignalType::TRADE_FLOW, trade_val);
+            _weight_framework->recordSignal(WeightedSignalType::BOOK_IMBALANCE, book_val);
+            _weight_framework->recordSignal(WeightedSignalType::MOMENTUM, mom_val);
+            _weight_framework->recordSignal(WeightedSignalType::LEAD_LAG, ll_val);
+            
+            // 记录 horizon-tick 前的信号对应的未来回报
+            if (_tick_counter > _weight_framework->getConfig().ic_horizon) {
+                double future_return = _ctx.mid_price - _prev_mid_for_ic;
+                _weight_framework->recordReturn(future_return);
+            }
+            _prev_mid_for_ic = _ctx.mid_price;
+            
+            // 定期更新 IC
+            if (_tick_counter % _weight_framework->getConfig().ic_update_interval == 0) {
+                _weight_framework->updateIC();
+            }
+            
+            // 计算动态权重
+            double signal_array[5] = {ofi_val, trade_val, book_val, mom_val, ll_val};
+            // EC 跨期品种 → LeadLag regime factor 升权
+            bool is_cross_term = (_sources.find(SignalType::LEAD_LAG) != _sources.end());
+            auto regime = MarketRegime::detect(
+                _ctx.volatility.vol_percentile,
+                _ctx.mid_price, _ctx.mid_price,  // MA 简化为当前价(暂不维护 MA 历史)
+                (_ctx.bid_depth + _ctx.ask_depth) / 2.0
+            );
+            _dynamic_weights = _weight_framework->computeWeights(regime, signal_array, is_cross_term);
+        }
+        
         // OFI component
         if (_cfg.use_ofi && _ctx.ofi.valid) {
             _ctx.alpha.ofi_component = _ctx.ofi.ofi;  // ofi is normalized [-1, 1]
-            alpha_sum += _cfg.ofi_weight * _ctx.ofi.ofi;
-            weight_sum += _cfg.ofi_weight;
+            double w = getDynamicWeight(WeightedSignalType::OFI, _cfg.ofi_weight);
+            alpha_sum += w * _ctx.ofi.ofi;
+            weight_sum += w;
             _valid_signals.push_back(_ctx.ofi.ofi);
-            _valid_weights.push_back(_cfg.ofi_weight);
+            _valid_weights.push_back(w);
         }
         
         // Trade flow component
         if (_cfg.use_trade_flow && _ctx.trade_flow.valid) {
             _ctx.alpha.trade_component = _ctx.trade_flow.net_flow_normalized;
-            alpha_sum += _cfg.trade_weight * _ctx.trade_flow.net_flow_normalized;
-            weight_sum += _cfg.trade_weight;
+            double w = getDynamicWeight(WeightedSignalType::TRADE_FLOW, _cfg.trade_weight);
+            alpha_sum += w * _ctx.trade_flow.net_flow_normalized;
+            weight_sum += w;
             _valid_signals.push_back(_ctx.trade_flow.net_flow_normalized);
-            _valid_weights.push_back(_cfg.trade_weight);
+            _valid_weights.push_back(w);
         }
         
         // Book imbalance component
         if (_cfg.use_book_imbalance && _ctx.book_imbalance.valid) {
             _ctx.alpha.book_imbalance_component = _ctx.book_imbalance.simple_imbalance;
-            alpha_sum += _cfg.book_imbalance_weight * _ctx.book_imbalance.simple_imbalance;
-            weight_sum += _cfg.book_imbalance_weight;
+            double w = getDynamicWeight(WeightedSignalType::BOOK_IMBALANCE, _cfg.book_imbalance_weight);
+            alpha_sum += w * _ctx.book_imbalance.simple_imbalance;
+            weight_sum += w;
             _valid_signals.push_back(_ctx.book_imbalance.simple_imbalance);
-            _valid_weights.push_back(_cfg.book_imbalance_weight);
+            _valid_weights.push_back(w);
         }
         
         // Momentum component (if enabled)
@@ -348,10 +419,11 @@ private:
                 if (result.valid) {
                     double alpha = mom_it->second->getAlphaValue();
                     _ctx.alpha.momentum_component = alpha;
-                    alpha_sum += _cfg.momentum_weight * alpha;
-                    weight_sum += _cfg.momentum_weight;
+                    double w = getDynamicWeight(WeightedSignalType::MOMENTUM, _cfg.momentum_weight);
+                    alpha_sum += w * alpha;
+                    weight_sum += w;
                     _valid_signals.push_back(alpha);
-                    _valid_weights.push_back(_cfg.momentum_weight);
+                    _valid_weights.push_back(w);
                 }
             }
         }
@@ -362,10 +434,11 @@ private:
                 const auto& result = ll_it->second->result();
                 if (result.valid) {
                     double alpha = ll_it->second->getAlphaValue();
-                    alpha_sum += _cfg.lead_lag_weight * alpha;
-                    weight_sum += _cfg.lead_lag_weight;
+                    double w = getDynamicWeight(WeightedSignalType::LEAD_LAG, _cfg.lead_lag_weight);
+                    alpha_sum += w * alpha;
+                    weight_sum += w;
                     _valid_signals.push_back(alpha);
-                    _valid_weights.push_back(_cfg.lead_lag_weight);
+                    _valid_weights.push_back(w);
                 }
             }
         }
@@ -461,6 +534,21 @@ private:
     
     // 上一次的 alpha 值，用于 EWMA 衰减（Alpha 跳跃修复）
     double _prev_alpha = 0.0;
+    
+    //==========================================================================
+    // Adaptive Weight Framework members
+    //==========================================================================
+    std::unique_ptr<AdaptiveWeightFramework> _weight_framework;
+    std::unordered_map<WeightedSignalType, double> _dynamic_weights;
+    uint64_t _tick_counter = 0;
+    double _prev_mid_for_ic = 0.0;
+    
+    /// Get dynamic weight (falls back to fixed weight if framework not active)
+    double getDynamicWeight(WeightedSignalType type, double fallback) const {
+        if (!_weight_framework || _dynamic_weights.empty()) return fallback;
+        auto it = _dynamic_weights.find(type);
+        return (it != _dynamic_weights.end()) ? it->second : fallback;
+    }
 };
 
 } // namespace futu

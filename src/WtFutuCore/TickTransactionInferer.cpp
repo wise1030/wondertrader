@@ -286,8 +286,23 @@ double TickTransactionInferer::calculateConfidence(
             
         case InferenceMethod::SPREAD_CROSS_UP:
         case InferenceMethod::SPREAD_CROSS_DOWN:
-            // Spread cross is a strong signal
-            confidence = 0.9;
+            // Spread cross confidence should be volume-weighted.
+            // 旧代码固定 0.9 — 在窄 spread + bid-ask bounce 下,
+            // 小单在 ask/bid 成交也被高置信度判定为方向性,
+            // 导致 TradeFlow IC=-0.83 (反向).
+            // 修复: 用盘口消耗量缩放置信度.
+            //   大单消耗 ask(>20手) → 高置信度(真实买方)
+            //   小单在 ask(<=5手) → 低置信度(可能 bounce)
+            {
+                double max_depletion = std::max(bid_vol_change, ask_vol_change);
+                if (max_depletion > 0) {
+                    // 量加权: 5 手以下 0.2, 20 手以上 0.9
+                    confidence = std::clamp(0.2 + max_depletion / 30.0, 0.2, 0.9);
+                } else {
+                    // 无盘口消耗数据 → 保守低置信度
+                    confidence = 0.3;
+                }
+            }
             break;
             
         case InferenceMethod::VOLUME_SURGE:

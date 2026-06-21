@@ -46,11 +46,16 @@ public:
         uint32_t window;       ///< Mid-change smoothing window size
         double weight;
         uint32_t lag_ms;
+        double scale_factor;   ///< Signal scale factor (tanh input multiplier)
+                               ///< bps scaling. EC mid~3700, 1 tick(0.5)=1.35bps
+                               ///< scale=3000: tanh(1.35×0.3)=0.37 (moderate, 不饱和)
+                               ///< scale=10000: tanh(1.35×0.3)=0.87 (偏饱和)
         
         Config() 
             : window(50)
             , weight(0.3)
             , lag_ms(50)
+            , scale_factor(3000.0)
         {}
     };
     
@@ -188,7 +193,10 @@ private:
         for (const auto& [code, info] : _lead_contracts)
         {
             double weight = std::abs(info.correlation);
-            total_signal += info.mid_change * weight * 100.0;  // Scale for range
+            // Scale mid_change (ratio) by configurable factor
+            // Old: × 100 (too weak for high-priced contracts like EC)
+            // New: × scale_factor (default 10000 = bps)
+            total_signal += info.mid_change * weight * _cfg.scale_factor;
             total_weight += weight;
         }
         

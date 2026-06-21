@@ -17,6 +17,7 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <cmath>
 #include <cstdint>
 #include "../Includes/FasterDefs.h"
@@ -166,6 +167,17 @@ public:
     
 private:
     double _large_trade_threshold;
+    
+    // 滑动窗口: 存储最近 N 个推断记录, 用于衰减 (修复 onTickInference 无衰减 bug)
+    struct InferenceRecord {
+        double signed_flow;   // 正=买, 负=卖
+        double volume;
+        bool is_large;
+        uint64_t timestamp;
+    };
+    std::deque<InferenceRecord> _inference_window;
+    uint32_t _window_size;  // 滑窗大小 (tick 数, 默认 100 ≈ 30-50 秒)
+    uint64_t _window_ms;    // 滑窗时间 (毫秒, 默认 5000 = 5秒)
     
     std::vector<double> _trade_sizes;
     size_t _trade_sizes_idx;

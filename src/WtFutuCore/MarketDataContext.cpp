@@ -128,6 +128,8 @@ void OrderBookStateTracker::reset()
 
 TradeFlowTracker::TradeFlowTracker()
     : _large_trade_threshold(10.0)
+    , _window_size(100)
+    , _window_ms(5000)
     , _trade_sizes_idx(0)
     , _trade_sizes_sum(0.0)
     , _net_trade_flow(0)
@@ -169,13 +171,42 @@ void TradeFlowTracker::onTickInference(wtp::WTSTickData* tick, double tickSize)
     if (inferred.confidence >= 0.3 && inferred.volume > 0)
     {
         double signed_flow = inferred.is_buy_initiated ? inferred.volume : -inferred.volume;
+        bool is_large = inferred.volume > _large_trade_threshold;
+        
+        // 记录到滑窗
+        InferenceRecord rec;
+        rec.signed_flow = signed_flow;
+        rec.volume = inferred.volume;
+        rec.is_large = is_large;
+        rec.timestamp = static_cast<uint64_t>(tickStruct.action_time);
+        _inference_window.push_back(rec);
+        
+        // 累加
         _net_trade_flow += signed_flow;
         _total_trade_volume += inferred.volume;
         
-        // 跟踪大单
-        if (inferred.volume > _large_trade_threshold)
+        if (is_large)
         {
             _large_trade_volume += inferred.volume;
+        }
+        
+        // 滑窗衰减: 移除超过时间窗口或数量窗口的旧记录
+        // 修复: 原代码无衰减, net_trade_flow 在整个 session 单调累积,
+        // 在趋势行情中导致 TradeFlow IC=-0.83 (系统性反向).
+        while (!_inference_window.empty()) {
+            const auto& front = _inference_window.front();
+            bool too_old = (rec.timestamp > front.timestamp + _window_ms);
+            bool too_many = (_inference_window.size() > _window_size);
+            if (too_old || too_many) {
+                _net_trade_flow -= front.signed_flow;
+                _total_trade_volume -= front.volume;
+                if (front.is_large) {
+                    _large_trade_volume -= front.volume;
+                }
+                _inference_window.pop_front();
+            } else {
+                break;
+            }
         }
         
         // 记录成交大小
@@ -251,6 +282,7 @@ void TradeFlowTracker::reset()
     _net_trade_flow = 0;
     _large_trade_volume = 0;
     _total_trade_volume = 0;
+    _inference_window.clear();
     
     _tick_inferer.reset();
 }
