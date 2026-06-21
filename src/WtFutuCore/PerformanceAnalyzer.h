@@ -208,7 +208,7 @@ struct AnalyzerConfig
     double strong_alpha_threshold;
     
     AnalyzerConfig()
-        : strong_alpha_threshold(0.7)
+        : strong_alpha_threshold(0.3)
     {}
 };
 
