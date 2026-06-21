@@ -430,6 +430,20 @@ private:
         // Determine strong signal
         _ctx.alpha.is_strong_signal = std::abs(_ctx.alpha.alpha) > _cfg.strong_threshold;
         
+        // IC 验证: 输出各信号源独立值 + 最终 alpha (debug 级)
+        // 用于离线 IC/IR 分析各信号在 EC 的预测力
+        WTSLogger::debug("[SIGNAL_DECOMP] {} mid={:.2f} | "
+            "ofi={:.4f} trade={:.4f} book={:.4f} mom={:.4f} ll={:.4f} | "
+            "alpha={:.4f} conf={:.4f} valid={}",
+            _ctx.code, _ctx.mid_price,
+            _ctx.alpha.ofi_component,
+            _ctx.alpha.trade_component,
+            _ctx.alpha.book_imbalance_component,
+            _ctx.alpha.momentum_component,
+            _ctx.alpha.lead_lag_component,
+            _ctx.alpha.alpha, _ctx.alpha.confidence,
+            _ctx.alpha.valid ? 1 : 0);
+        
         // 保存当前 alpha 用于下次 EWMA 衰减
         if (_ctx.alpha.valid) {
             _prev_alpha = _ctx.alpha.alpha;
