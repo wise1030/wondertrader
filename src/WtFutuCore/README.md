@@ -24,12 +24,13 @@ UftFutuMmStrategy (入口策略)
 │   │   ├── PredictiveToxicity  (VPIN + OFI + Alpha)
 │   │   ├── RealizedToxicity    (自成交校准)
 │   │   └── SyntheticSignalFusion (内嵌3源融合)
-│   ├── SignalAggregator     (per合约, 6源信号聚合)
-│   │   ├── OFISignalSource         (订单流不平衡, w=0.35)
-│   │   ├── TradeFlowSignalSource   (交易流, w=0.25)
+│   ├── SignalAggregator     (per合约, 6源信号聚合 + 三层权重 + 幅度归一化)
+│   │   ├── ICWeightTracker        (三层权重: 基础×市场状态×IC可信度)
+│   │   ├── OFISignalSource         (订单流不平衡, w=0.25)
+│   │   ├── TradeFlowSignalSource   (交易流, w=0.20, 统计显著性归一化)
 │   │   ├── BookImbalanceSignalSource (簿不平衡, w=0.20)
 │   │   ├── MomentumSignalSource    (动量EMA, w=0.15)
-│   │   ├── LeadLagSignalSource     (跨合约领先滞后, w=0.05)
+│   │   ├── LeadLagSignalSource     (跨合约领先滞后, w=0.20, bps缩放)
 │   │   └── VolatilitySignalSource  (波动率, 辅助)
 │   ├── SpreadOptimizer      (per合约, GLFT价差模型)
 │   ├── FutuQuoter           (per合约, 多档双边报价)
@@ -88,22 +89,40 @@ struct TradingState {
 };
 ```
 
-### 信号架构 (SignalAggregator)
+### 信号架构 (SignalAggregator + 三层权重框架)
 
-插件式信号源，配置驱动启用/禁用：
+插件式信号源 + 自适应权重框架，配置驱动启用/禁用：
 
 ```
-alpha = Σ(weight_i × signal_i) / Σ(weights)
-confidence = consistency × strength × warmup_factor
+alpha = Σ(dynamic_weight_i × normalized_signal_i) / Σ(dynamic_weights)
 ```
 
-| 信号源 | 权重 | 说明 |
-|--------|------|------|
-| OFI | 0.35 | 订单流不平衡 (Order Flow Imbalance) |
-| TradeFlow | 0.25 | 净交易流方向 |
+**三层权重模型** (ICWeightTracker.h):
+
+```
+最终权重 = 基础逻辑权重 × 市场状态调节 × 在线可信度调节
+
+第一层: 基础逻辑权重 (静态, 按交易逻辑设定)
+第二层: 市场状态调节 (波动率/趋势/流动性 regime)
+  - OFI: 薄流动性 ×0.5, 深 ×1.5
+  - TradeFlow: 高波动 ×1.3, 低 ×0.7
+  - Momentum: 趋势 ×1.5, 震荡 ×0.5
+  - LeadLag: 跨期品种 ×1.5
+第三层: 在线可信度 (滚动 IC + 信号一致性)
+  - floor=0.05 / cap=0.50, 不归零不独占
+  - IC 低 ≠ 信号无效 (可能是参数不适配)
+```
+
+**信号幅度归一化** (RollingScaleTracker):
+所有信号在加权前通过滚动 p95 归一化到可比范围，确保权重真正有效。
+
+| 信号源 | 基础权重 | 说明 |
+|--------|---------|------|
+| OFI | 0.25 | 订单流不平衡 (Order Flow Imbalance) |
+| TradeFlow | 0.20 | 净交易流方向 (统计显著性归一化) |
 | BookImbalance | 0.20 | 订单簿买卖压力 |
 | Momentum | 0.15 | 价格动量 EMA |
-| LeadLag | 0.05 | 跨合约领先滞后预测 |
+| LeadLag | 0.20 | 跨合约领先滞后预测 (scale_factor=3000, bps 缩放) |
 | Volatility | 辅助 | 已实现波动率 + 分层 |
 
 ### LeadLag 跨合约数据流
@@ -114,7 +133,7 @@ Anchor合约Tick到达
   → 遍历所有非Anchor合约的SignalAggregator
   → SignalAggregator::updateLeadContract(code, mid, ts)
   → LeadLagSignalSource::updateLeadContract()
-  → calculateSignal(): signal = tanh(Σ(correlation × mid_change × 100) / Σ(correlation))
+  → calculateSignal(): signal = tanh(Σ(correlation × mid_change × scale_factor) / Σ(correlation))
 ```
 
 ## 做市流水线 (StrategyCoordinator)
@@ -474,9 +493,10 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | StrategyCoordinator | .h/.cpp | 做市流水线编排 |
 | FutuQuoter | .h/.cpp | 多档双边报价引擎 |
 | SpreadOptimizer | .h/.cpp | GLFT价差优化(公允价+偏斜) |
-| SignalAggregator | .h | 6源信号聚合 |
+| SignalAggregator | .h | 6源信号聚合 + 幅度归一化 |
+| ICWeightTracker | .h | 三层权重框架 + RollingScaleTracker + IC追踪 |
 | OrderRouter | .h/.cpp | 非做市统一下单路由 |
-| TradingState | .h | 统一交易状态管理 |
+| TradingState | .h | 统一交易状态管理 (分层状态机) |
 
 ### 信号源
 | 模块 | 文件 | 说明 |
@@ -547,3 +567,44 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 8. **可恢复机制**: 可逆风险冷却后自动恢复; 不可逆风险(日亏)需人工干预
 9. **热参数更新**: 共享内存同步, on_params_updated()回调, 22个参数无需重启
 10. **异步套利**: 独立线程+无锁SPSC队列, ~50ns tick推送, 自成交检查对抗做市快照
+
+## 优化历程 (ROADMAP V2)
+
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| Phase 0 | 基础设施 (12项 P0) | ✅ 完成 |
+| Phase 1 | 架构重构 (triple-state-machine, 3-path quotes) | ✅ 完成 |
+| Phase 2 | 状态机统一 (tryResumeFrom, ERROR 修复, 线程契约) | ✅ 完成 |
+| Phase 3 | 代码质量 (on_tick 拆分, FIX 标记审计) | ✅ 完成 (initBusinessModules 拆分放弃) |
+| Phase 4 | 信号系统改造 + 评估指标修正 | ✅ 完成 |
+
+### Phase 4 关键改造
+
+1. **UftMocker 框架 BUG 修复**: 平仓穿仓 + 订单重复撮合 → POSITION_BREACH 23万→0
+2. **信号源修复**: LeadLag 缩放(IC 0→0.09), TradeFlow 滑窗衰减(IC -0.83→-0.04), OFI 去饱和
+3. **三层权重框架**: 基础逻辑 × 市场状态 × IC 可信度, floor/cap 保护
+4. **信号幅度归一化**: RollingScaleTracker 统一各信号幅度, 权重真正有效
+5. **评估指标修正**: 真实 adverse selection (成交后价格追踪), 旧 adverse 被 PnL 分母放大
+6. **最优配置**: alphaSensitivity=0.5 (PnL/vol=1.099, sharpe=5.40, spread_captured=0.99)
+
+## 待定项
+
+### Trade-through 毒性检测 (暂缓)
+
+**状态**: 评估完成, 暂缓实现
+
+**设计**: 作为 ISignalSource 实现, 基于 tick 快照 volume 增量检测脉冲毒性 (连续同方向大单).
+
+**价值**: 补充 VPIN 的持续性毒性检测, 提供脉冲毒性 + 方向性检测.
+
+**暂缓原因**:
+- 国内期货只有行情切片 (tick snapshot), 无逐笔成交
+- volume 增量方向推断有 bid-ask bounce 问题 (TradeFlow IC=-0.83 的同根因)
+- tick 快照无法精确区分"大单扫盘" vs "多笔小单累积"
+- 当前 VPIN toxicity 实际影响仅 1% 交易时间, 改善空间有限
+
+**重启条件**: 接入有逐笔成交数据的市场 (如加密货币), 或解决 tick 快照方向推断准确性.
+
+### P1-8 跨期同步报价组 (部分覆盖)
+
+Phase 4 的 LeadLag + 权重框架已部分覆盖跨期协调。独立 sync_group 实现需要改 Quoter 架构, 留作后续.
