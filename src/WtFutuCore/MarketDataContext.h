@@ -78,10 +78,11 @@ struct TradeFlowAnalysis
     double sell_pressure;     ///< Estimated sell pressure (0-1)
     double avg_trade_size;    ///< Average trade size
     double large_trade_ratio; ///< Ratio of large trades
+    double net_flow_normalized; ///< Statistical significance normalized [-1, 1]
     
     TradeFlowAnalysis()
         : net_flow(0), buy_pressure(0.5), sell_pressure(0.5)
-        , avg_trade_size(0), large_trade_ratio(0)
+        , avg_trade_size(0), large_trade_ratio(0), net_flow_normalized(0)
     {}
 };
 

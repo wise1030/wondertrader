@@ -256,6 +256,8 @@ class AdaptiveWeightFramework {
 public:
     struct Config {
         // Layer 1: Base logic weights (by trading logic, not data fitting)
+        // Book 权重提高: EC 窄 spread 做市中, 盘口不平衡是最直接的即时供需信号,
+        // IC 实测最高(0.047), 理论上应高于 OFI(盘口薄时噪声大)
         double base_ofi;
         double base_trade;
         double base_book;
@@ -443,6 +445,9 @@ private:
                 return 1.0;
 
             case WeightedSignalType::BOOK_IMBALANCE:
+                // Book 在深流动性时更可靠(挂单真实), 薄流动性时易被撤单干扰
+                if (regime.liquidity == MarketRegime::Liquidity::DEEP) return 1.3;
+                if (regime.liquidity == MarketRegime::Liquidity::THIN) return 0.7;
                 return _cfg.book_normal_factor;
 
             case WeightedSignalType::MOMENTUM:

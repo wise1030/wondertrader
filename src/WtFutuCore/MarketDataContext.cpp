@@ -271,6 +271,20 @@ TradeFlowAnalysis TradeFlowTracker::getAnalysis() const
         flow.avg_trade_size = _trade_sizes_sum / _trade_sizes.size();
     }
     
+    // 统计显著性归一化: 用净流相对于随机波动的 t-statistic
+    // 原 buy_pressure/sell_pressure 比值在方向一致时饱和到 ±1.
+    // 新: net_flow / (avg_size × sqrt(n)) 衡量方向不平衡的统计显著性
+    //   n = 滑窗内推断数 (_inference_window.size())
+    //   少量大单全同向: net_flow大, n小 → 显著性可能高 (合理)
+    //   大量成交混合方向: net_flow小, n大 → 显著性低 (合理)
+    //   tanh 压缩到 [-1,1], p95 约 ±0.7 (不饱和)
+    size_t n = _inference_window.size();
+    if (n > 3 && flow.avg_trade_size > 0) {
+        double sqrt_n = std::sqrt(static_cast<double>(n));
+        double significance = _net_trade_flow / (flow.avg_trade_size * sqrt_n);
+        flow.net_flow_normalized = std::tanh(significance / 3.0);
+    }
+    
     return flow;
 }
 

@@ -93,17 +93,9 @@ public:
             _result.sell_volume = flow.sell_pressure * std::abs(flow.net_flow);
             _result.large_trade_ratio = flow.large_trade_ratio;
             _result.avg_trade_size = flow.avg_trade_size;
-            if (flow.buy_pressure + flow.sell_pressure > 0)
-                _result.net_flow_normalized = (flow.buy_pressure - flow.sell_pressure) / (flow.buy_pressure + flow.sell_pressure);
-            else
-                _result.net_flow_normalized = 0;
-            // Trade 饱和修复:
-            // 原 net_flow_normalized = (buy-sell)/(buy+sell), 在只有几个大单时
-            // buy_pressure ≈ 1.0 或 sell_pressure ≈ 1.0 → 归一化 ±1 饱和.
-            // 新: 用 tanh 压缩, 让中间状态有梯度.
-            // tanh 映射: 原 ±1 → ±0.76, 原 ±0.5 → ±0.46
-            // 对纯方向性流(全买/全卖)仍保持高值但非饱和.
-            _result.net_flow_normalized = std::tanh(_result.net_flow_normalized * 1.5);
+            // 优先用 TradeFlowTracker 计算的统计显著性归一化
+            // (比 buy_pressure/sell_pressure 比值更不易饱和)
+            _result.net_flow_normalized = flow.net_flow_normalized;
             _result.confidence = (flow.buy_pressure + flow.sell_pressure > 0) ? 1.0 : 0.5;
         }
         _result.valid = true;
