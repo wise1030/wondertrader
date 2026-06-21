@@ -288,6 +288,9 @@ public:
         double ic_confidence_weight;
         double consistency_weight;
 
+        // Layer 1: Base logic weights (平衡, 经多轮调优验证)
+        // LL=0.20: IC 最高(0.09)但绝对值仍弱, 高权重放大 adverse
+        // 各信号保持均衡, 由 IC tracker 动态调节
         Config()
             : base_ofi(0.25), base_trade(0.20), base_book(0.20), base_mom(0.15), base_ll(0.20)
             , weight_floor(0.05), weight_cap(0.50)

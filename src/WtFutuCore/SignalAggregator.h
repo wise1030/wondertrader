@@ -438,11 +438,15 @@ private:
                 const auto& result = ll_it->second->result();
                 if (result.valid) {
                     double ll_raw = ll_it->second->getAlphaValue();
-                    double ll_norm = normalizeSignal(WeightedSignalType::LEAD_LAG, ll_raw);
+                    // LL 不做幅度归一化 — LL 信号特性与其他信号不同:
+                    // 大部分 tick 是重复值(anchor tick 频率低), p95 归一化会爆炸.
+                    // LL 的 IC 虽然最高(0.09)但绝对值仍小, 放大幅度=放大噪声.
+                    // 用原始 tanh 值参与合成, 由权重框架通过 IC 升权.
+                    _ctx.alpha.lead_lag_component = ll_raw;
                     double w = getDynamicWeight(WeightedSignalType::LEAD_LAG, _cfg.lead_lag_weight);
-                    alpha_sum += w * ll_norm;
+                    alpha_sum += w * ll_raw;
                     weight_sum += w;
-                    _valid_signals.push_back(ll_norm);
+                    _valid_signals.push_back(ll_raw);
                     _valid_weights.push_back(w);
                 }
             }
@@ -508,8 +512,9 @@ private:
         // Determine strong signal
         _ctx.alpha.is_strong_signal = std::abs(_ctx.alpha.alpha) > _cfg.strong_threshold;
         
-        // IC 验证: 输出各信号源独立值 + 最终 alpha (debug 级)
-        // 用于离线 IC/IR 分析各信号在 EC 的预测力
+        // IC 验证: 输出各信号源归一化后的值 + 最终 alpha (debug 级)
+        // 注意: ofi/trade/book/mom/ll 打的是归一化后的 _ctx.alpha.*_component
+        // 这些值才是真正参与 alpha_sum 的值
         WTSLogger::debug("[SIGNAL_DECOMP] {} mid={:.2f} | "
             "ofi={:.4f} trade={:.4f} book={:.4f} mom={:.4f} ll={:.4f} | "
             "alpha={:.4f} conf={:.4f} valid={}",
