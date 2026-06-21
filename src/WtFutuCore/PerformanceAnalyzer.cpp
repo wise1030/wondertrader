@@ -17,6 +17,8 @@ PerformanceAnalyzer::PerformanceAnalyzer()
     , _total_pnl(0)
     , _total_spread_captured(0)
     , _total_adverse_selection(0)
+    , _total_real_adverse(0)
+    , _real_adverse_count(0)
     , _total_volume(0)
     , _total_trades(0)
     , _winning_trades(0)
@@ -56,9 +58,19 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
     double spread_cap = trade.spreadCaptured();
     _total_spread_captured += spread_cap;
     
-    // Track adverse selection
+    // 旧 adverse 计算 (保留兼容, 但不再作为主要指标)
     double adverse = calculateAdverseSelection(trade);
     _total_adverse_selection += adverse;
+    
+    // 真实 adverse: 加入 pending 队列, N tick 后评估
+    PendingAdverse pa;
+    pa.code = trade.code;
+    pa.mid_at_trade = trade.mid_at_trade;
+    pa.qty = trade.qty;
+    pa.is_buy = trade.is_buy;
+    pa.trade_timestamp = trade.timestamp;
+    pa.ticks_remaining = _adverse_eval_ticks;
+    _pending_adverse.push_back(pa);
     
     // Track winning trades
     if (immediate_pnl > 0)
@@ -101,6 +113,40 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
         cp.win_rate = cp.win_rate * (cp.trade_count - 1) / cp.trade_count;
     cp.avg_spread_captured = (cp.avg_spread_captured * (cp.trade_count - 1) + spread_cap) 
                               / cp.trade_count;
+}
+
+void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint64_t timestamp)
+{
+    // 评估 pending adverse: 每个 tick 递减 ticks_remaining, 到 0 时用当前 mid 计算
+    for (auto& pa : _pending_adverse) {
+        if (pa.evaluated) continue;
+        if (pa.code != code) continue;  // 只评估同合约的 pending
+        
+        pa.ticks_remaining--;
+        if (pa.ticks_remaining == 0) {
+            // 计算成交后价格变动
+            double price_change = mid - pa.mid_at_trade;
+            
+            // 真实 adverse: 成交后价格逆向移动
+            // 买入(is_buy=true)后价格下跌 → adverse
+            // 卖出(is_buy=false)后价格上涨 → adverse
+            double real_adverse = 0;
+            if (pa.is_buy && price_change < 0) {
+                real_adverse = std::abs(price_change) * pa.qty;  // 买入后跌的量
+            } else if (!pa.is_buy && price_change > 0) {
+                real_adverse = price_change * pa.qty;  // 卖出后涨的量
+            }
+            
+            _total_real_adverse += real_adverse;
+            _real_adverse_count++;
+            pa.evaluated = true;
+        }
+    }
+    
+    // 清理已评估的 pending (保留未评估的)
+    while (!_pending_adverse.empty() && _pending_adverse.front().evaluated) {
+        _pending_adverse.pop_front();
+    }
 }
 
 void PerformanceAnalyzer::recordQuote(const std::string& code, 
@@ -191,6 +237,11 @@ PerformanceMetrics PerformanceAnalyzer::getMetrics() const
     if (_total_pnl != 0)
     {
         metrics.adverse_ratio = _total_adverse_selection / std::abs(_total_pnl);
+    }
+    // 真实 adverse (成交后价格逆向 / 成交量) — 独立指标, 不被 PnL 放大
+    if (_total_volume > 0)
+    {
+        metrics.real_adverse_per_vol = _total_real_adverse / _total_volume;
     }
     metrics.toxicity_events = _toxicity_events;
     
@@ -330,6 +381,9 @@ void PerformanceAnalyzer::reset()
     _total_pnl = 0;
     _total_spread_captured = 0;
     _total_adverse_selection = 0;
+    _total_real_adverse = 0;
+    _real_adverse_count = 0;
+    _pending_adverse.clear();
     _total_volume = 0;
     _total_trades = 0;
     _winning_trades = 0;

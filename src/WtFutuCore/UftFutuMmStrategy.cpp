@@ -1256,7 +1256,7 @@ _stp->clear();
         auto metrics = _perf_analyzer->getMetrics();
         WTSLogger::info("[PERF] session={} | pnl={:.2f}(unreal={:.2f}) | vol={} trades={} | "
             "spread_captured={:.4f} capture_rate={:.2f}% | fill_rate={:.2f}% | "
-            "max_dd={:.2f} sharpe={:.2f} win={:.2f}% | adverse={:.4f} tox_events={} | "
+            "max_dd={:.2f} sharpe={:.2f} win={:.2f}% | adverse={:.4f} real_adv/vol={:.4f} tox_events={} | "
             "alpha_acc={:.2f}% alpha_pnl={:.2f} | avg_inv={:.1f} turnover={:.2f}",
             uTDate,
             metrics.total_pnl, metrics.unrealized_pnl,
@@ -1264,7 +1264,7 @@ _stp->clear();
             metrics.avg_spread_captured, metrics.spread_capture_rate * 100,
             metrics.fill_rate * 100,
             metrics.max_drawdown, metrics.sharpe_ratio, metrics.win_rate * 100,
-            metrics.adverse_ratio, metrics.toxicity_events,
+            metrics.adverse_ratio, metrics.real_adverse_per_vol, metrics.toxicity_events,
             metrics.alpha_accuracy * 100, metrics.alpha_pnl_per_trade,
             metrics.avg_inventory, metrics.inventory_turnover);
     }
@@ -1378,7 +1378,17 @@ void UftFutuMmStrategy::handleMarketDataUpdate(const char* stdCode, WTSTickData*
 
 void UftFutuMmStrategy::handleLeadLagPush(const char* stdCode, WTSTickData* tick, double mid)
 {
-    if (_config.anchor_code.empty() || stdCode != _config.anchor_code || mid <= 0)
+    if (_config.anchor_code.empty() || mid <= 0)
+        return;
+
+    // LeadLag 调试: 确认 push 是否到达
+    static uint64_t ll_dbg_counter = 0;
+    if (ll_dbg_counter++ % 10000 == 0) {
+        WTSLogger::debug("[LEADLAG_DBG] stdCode={} anchor={} mid={:.2f} aggregators={}",
+            stdCode, _config.anchor_code, mid, _signal_aggregators.size());
+    }
+
+    if (stdCode != _config.anchor_code)
         return;
 
     uint64_t ts = tick->volume() > 0
@@ -1528,6 +1538,10 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     // 3. 行情数据更新 (markToMarket + correlation + hedge_ratio)
     double mid = (tick->bidprice(0) + tick->askprice(0)) / 2.0;
     handleMarketDataUpdate(stdCode, tick, mid);
+    
+    // 3.5 PerformanceAnalyzer tick 更新 (真实 adverse selection 追踪)
+    if (_perf_analyzer)
+        _perf_analyzer->onTickUpdate(stdCode, mid, tick->actiontime());
 
     // 4. LeadLag 跨合约推送
     handleLeadLagPush(stdCode, tick, mid);

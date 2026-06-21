@@ -13,6 +13,7 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <map>
 #include <cmath>
 #include <cstdint>
@@ -122,7 +123,8 @@ struct PerformanceMetrics
     double win_rate;            ///< Profitable trades / Total trades
     
     // Adverse selection
-    double adverse_ratio;       ///< Adverse selection / Total PnL
+    double adverse_ratio;       ///< Adverse selection / Total PnL (旧指标, 保留兼容)
+    double real_adverse_per_vol; ///< 真实 adverse (成交后价格逆向) / volume (独立指标)
     double toxicity_events;     ///< Number of toxicity triggers
     
     // Alpha performance
@@ -143,7 +145,7 @@ struct PerformanceMetrics
         , avg_spread_captured(0), spread_capture_rate(0)
         , fill_rate(0), cross_rate(0), avg_fill_latency_us(0)
         , max_drawdown(0), sharpe_ratio(0), sortino_ratio(0), win_rate(0)
-        , adverse_ratio(0), toxicity_events(0)
+        , adverse_ratio(0), real_adverse_per_vol(0), toxicity_events(0)
         , alpha_accuracy(0), alpha_pnl_per_trade(0)
         , avg_inventory(0), inventory_turnover(0), max_inventory_held(0)
         , trading_time_sec(0), trading_days(0)
@@ -232,6 +234,10 @@ public:
     
     /// Record a trade
     void recordTrade(const TradeRecord& trade);
+    
+    /// Tick update — 用于回填成交后价格, 计算真实 adverse selection
+    /// 每个新 tick 调用, 检查 pending trades 是否到达评估窗口
+    void onTickUpdate(const std::string& code, double mid, uint64_t timestamp);
     
     /// Record a quote (for fill rate calculation)
     void recordQuote(const std::string& code, double bidPrice, double askPrice,
@@ -333,6 +339,21 @@ private:
     uint64_t _start_time;
     uint64_t _last_trade_time;
     uint32_t _trading_days;
+    
+    // 真实 adverse selection 追踪: 成交后 N tick 价格变动
+    struct PendingAdverse {
+        std::string code;
+        double mid_at_trade;     // 成交时 mid
+        double qty;
+        bool is_buy;             // true=买(多头成交), false=卖
+        uint64_t trade_timestamp;
+        uint32_t ticks_remaining; // 还需等几个 tick
+        bool evaluated = false;
+    };
+    std::deque<PendingAdverse> _pending_adverse;
+    uint32_t _adverse_eval_ticks = 10;  // 成交后 10 tick 评估
+    double _total_real_adverse = 0;     // 真实 adverse (价格逆向移动)
+    uint32_t _real_adverse_count = 0;   // 已评估的成交数
 };
 
 //==============================================================================
