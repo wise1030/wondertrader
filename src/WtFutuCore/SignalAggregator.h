@@ -383,31 +383,34 @@ private:
         
         // OFI component
         if (_cfg.use_ofi && _ctx.ofi.valid) {
-            _ctx.alpha.ofi_component = _ctx.ofi.ofi;  // ofi is normalized [-1, 1]
+            double ofi_norm = normalizeSignal(WeightedSignalType::OFI, _ctx.ofi.ofi);
+            _ctx.alpha.ofi_component = ofi_norm;
             double w = getDynamicWeight(WeightedSignalType::OFI, _cfg.ofi_weight);
-            alpha_sum += w * _ctx.ofi.ofi;
+            alpha_sum += w * ofi_norm;
             weight_sum += w;
-            _valid_signals.push_back(_ctx.ofi.ofi);
+            _valid_signals.push_back(ofi_norm);
             _valid_weights.push_back(w);
         }
         
         // Trade flow component
         if (_cfg.use_trade_flow && _ctx.trade_flow.valid) {
-            _ctx.alpha.trade_component = _ctx.trade_flow.net_flow_normalized;
+            double trade_norm = normalizeSignal(WeightedSignalType::TRADE_FLOW, _ctx.trade_flow.net_flow_normalized);
+            _ctx.alpha.trade_component = trade_norm;
             double w = getDynamicWeight(WeightedSignalType::TRADE_FLOW, _cfg.trade_weight);
-            alpha_sum += w * _ctx.trade_flow.net_flow_normalized;
+            alpha_sum += w * trade_norm;
             weight_sum += w;
-            _valid_signals.push_back(_ctx.trade_flow.net_flow_normalized);
+            _valid_signals.push_back(trade_norm);
             _valid_weights.push_back(w);
         }
         
         // Book imbalance component
         if (_cfg.use_book_imbalance && _ctx.book_imbalance.valid) {
-            _ctx.alpha.book_imbalance_component = _ctx.book_imbalance.simple_imbalance;
+            double book_norm = normalizeSignal(WeightedSignalType::BOOK_IMBALANCE, _ctx.book_imbalance.simple_imbalance);
+            _ctx.alpha.book_imbalance_component = book_norm;
             double w = getDynamicWeight(WeightedSignalType::BOOK_IMBALANCE, _cfg.book_imbalance_weight);
-            alpha_sum += w * _ctx.book_imbalance.simple_imbalance;
+            alpha_sum += w * book_norm;
             weight_sum += w;
-            _valid_signals.push_back(_ctx.book_imbalance.simple_imbalance);
+            _valid_signals.push_back(book_norm);
             _valid_weights.push_back(w);
         }
         
@@ -417,12 +420,13 @@ private:
             if (mom_it != _sources.end() && mom_it->second) {
                 const auto& result = mom_it->second->result();
                 if (result.valid) {
-                    double alpha = mom_it->second->getAlphaValue();
-                    _ctx.alpha.momentum_component = alpha;
+                    double mom_raw = mom_it->second->getAlphaValue();
+                    double mom_norm = normalizeSignal(WeightedSignalType::MOMENTUM, mom_raw);
+                    _ctx.alpha.momentum_component = mom_norm;
                     double w = getDynamicWeight(WeightedSignalType::MOMENTUM, _cfg.momentum_weight);
-                    alpha_sum += w * alpha;
+                    alpha_sum += w * mom_norm;
                     weight_sum += w;
-                    _valid_signals.push_back(alpha);
+                    _valid_signals.push_back(mom_norm);
                     _valid_weights.push_back(w);
                 }
             }
@@ -433,11 +437,12 @@ private:
             if (ll_it != _sources.end() && ll_it->second) {
                 const auto& result = ll_it->second->result();
                 if (result.valid) {
-                    double alpha = ll_it->second->getAlphaValue();
+                    double ll_raw = ll_it->second->getAlphaValue();
+                    double ll_norm = normalizeSignal(WeightedSignalType::LEAD_LAG, ll_raw);
                     double w = getDynamicWeight(WeightedSignalType::LEAD_LAG, _cfg.lead_lag_weight);
-                    alpha_sum += w * alpha;
+                    alpha_sum += w * ll_norm;
                     weight_sum += w;
-                    _valid_signals.push_back(alpha);
+                    _valid_signals.push_back(ll_norm);
                     _valid_weights.push_back(w);
                 }
             }
@@ -542,6 +547,28 @@ private:
     std::unordered_map<WeightedSignalType, double> _dynamic_weights;
     uint64_t _tick_counter = 0;
     double _prev_mid_for_ic = 0.0;
+    
+    // Signal amplitude normalization (rolling p95 scale)
+    // 确保 Mom/LL 等小幅信号不被 OFI/Trade 饱和信号淹没
+    std::unordered_map<WeightedSignalType, RollingScaleTracker> _scale_trackers;
+    bool _scale_trackers_initialized = false;
+    
+    void initScaleTrackers() {
+        if (_scale_trackers_initialized) return;
+        for (uint8_t i = 0; i < static_cast<uint8_t>(WeightedSignalType::COUNT); i++) {
+            auto type = static_cast<WeightedSignalType>(i);
+            _scale_trackers.emplace(type, RollingScaleTracker(500, 20, 0.95, 0.01));
+        }
+        _scale_trackers_initialized = true;
+    }
+    
+    double normalizeSignal(WeightedSignalType type, double raw_value) {
+        initScaleTrackers();
+        auto it = _scale_trackers.find(type);
+        if (it == _scale_trackers.end()) return raw_value;
+        it->second.record(raw_value);
+        return it->second.normalize(raw_value);
+    }
     
     /// Get dynamic weight (falls back to fixed weight if framework not active)
     double getDynamicWeight(WeightedSignalType type, double fallback) const {

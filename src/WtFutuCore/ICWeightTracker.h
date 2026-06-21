@@ -183,6 +183,73 @@ private:
 };
 
 //==========================================================================
+// Rolling scale tracker — normalize signal amplitudes to comparable range
+// Uses rolling p95(|signal|) as scale factor, making all signals contribute
+// proportionally to their weight, not their raw amplitude.
+//==========================================================================
+class RollingScaleTracker {
+    std::deque<double> _abs_history;
+    std::vector<double> _sorted_cache;  // for percentile computation
+    uint32_t _window;
+    uint32_t _update_interval;
+    uint32_t _tick_count = 0;
+    double _cached_scale = 1.0;
+    double _min_scale;
+    double _percentile;  // e.g. 0.95 for p95
+    bool _cache_dirty = true;
+
+public:
+    explicit RollingScaleTracker(uint32_t window = 500, uint32_t update_interval = 20,
+                                  double percentile = 0.95, double min_scale = 0.01)
+        : _window(window), _update_interval(update_interval)
+        , _min_scale(min_scale), _percentile(percentile) {}
+
+    void record(double signal_val) {
+        _abs_history.push_back(std::abs(signal_val));
+        if (_abs_history.size() > _window) {
+            _abs_history.pop_front();
+        }
+        _cache_dirty = true;
+        _tick_count++;
+    }
+
+    /// Get current scale factor (updates periodically)
+    double getScale() {
+        if (_abs_history.size() < 20) return 1.0;  // warmup: no scaling
+
+        if (!_cache_dirty && (_tick_count % _update_interval != 0)) {
+            return _cached_scale;
+        }
+
+        // Compute percentile of absolute values
+        _sorted_cache.assign(_abs_history.begin(), _abs_history.end());
+        std::sort(_sorted_cache.begin(), _sorted_cache.end());
+
+        size_t idx = static_cast<size_t>(_percentile * _sorted_cache.size());
+        if (idx >= _sorted_cache.size()) idx = _sorted_cache.size() - 1;
+
+        double scale = _sorted_cache[idx];
+        _cached_scale = std::max(scale, _min_scale);
+        _cache_dirty = false;
+        return _cached_scale;
+    }
+
+    /// Normalize a signal value to [-1, 1] using current scale
+    double normalize(double signal_val) {
+        double scale = getScale();
+        return std::clamp(signal_val / scale, -1.0, 1.0);
+    }
+
+    void reset() {
+        _abs_history.clear();
+        _sorted_cache.clear();
+        _cached_scale = 1.0;
+        _tick_count = 0;
+        _cache_dirty = true;
+    }
+};
+
+//==========================================================================
 // Adaptive weight framework
 //==========================================================================
 class AdaptiveWeightFramework {
