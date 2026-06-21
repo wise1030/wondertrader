@@ -222,26 +222,32 @@ private:
         size_t n = _ofi_history.size();
         if (n < 10) return;
         
-        // Calculate standard deviation of OFI
-        double sum = 0, sum_sq = 0;
+        // 原方法: 用单 tick OFI 的 std_dev 做归一化
+        // 问题: EC 盘口薄, 单 tick OFI 量级大手(±5~±20),
+        //   但 cumulative_ofi 累积 50 tick 后量级更大(±50~±500),
+        //   std_dev(单tick) 与 cumulative_ofi 量级不匹配 → tanh 饱和.
+        
+        // 新方法: 用 cumulative_ofi 的滚动幅度做归一化
+        // 计算 _ofi_history 的 sum 的绝对值作为 cumulative 估计
+        double cum_sum = 0;
+        double cum_abs_sum = 0;
         for (size_t i = 0; i < n; ++i)
         {
-            sum += _ofi_history[i];
-            sum_sq += _ofi_history[i] * _ofi_history[i];
+            cum_sum += _ofi_history[i];
+            cum_abs_sum += std::abs(_ofi_history[i]);
         }
         
-        double mean = sum / n;
-        double variance = sum_sq / n - mean * mean;
-        double std_dev = std::sqrt(std::max(0.0, variance));
+        // avg_abs_ofi = 窗口内平均单 tick |OFI|
+        // cumulative 的典型幅度 ≈ avg_abs_ofi × sqrt(n) (随机游走)
+        // 或 ≈ avg_abs_ofi × n (同方向累积)
+        // 用 avg_abs_ofi × n 作为保守估计 (覆盖同方向累积情况)
+        double avg_abs = cum_abs_sum / n;
+        double cum_scale = avg_abs * n * 0.5;  // 0.5 因子: 介于随机游走和同方向之间
         
-        // 移除魔法数字*10.0，改用2*std_dev作为归一化因子
-        // 2*std_dev是95%置信区间宽度，物理含义清晰。
-        // 原*10.0无解释且过度压制信号：若std_dev=5，原normalization_factor=clamp(100,50,1000)=100，
-        //   而无*10.0时normalization_factor=clamp(10,5,200)=10，tanh输入大10倍，信号灵敏度合理。
-        // clamp范围从[50,1000]调整为[5,200]：下限5防止除零/极小值，上限200防止信号消失。
-        if (std_dev > 0)
+        // 归一化因子: 使典型 cumulative_ofi 映射到 tanh 的线性区 (0.5-0.8)
+        if (cum_scale > 0.1)
         {
-            _cfg.normalization_factor = std::clamp(2.0 * std_dev, 5.0, 200.0);
+            _cfg.normalization_factor = std::clamp(cum_scale, 5.0, 500.0);
         }
     }
 };

@@ -87,6 +87,16 @@ public:
         // This method just stores current contract's mid
         _current_mid = book.getMidPrice();
         _current_timestamp = book.getTimestamp();
+        
+        // LL 持久化: 非 anchor tick 保留上次 calculateSignal 的结果
+        // 原: result 保持上次的 valid/alpha (calculateSignal 只在 updateLeadContract 调)
+        // 这是正确的行为 — result 不在 update() 里重置
+        // 但 _ctx.alpha.lead_lag_component 在 computeAlpha 里每次会清零 (_ctx.alpha = AlphaSignalResult())
+        // 所以需要在 computeAlpha 里对 LL 做特殊处理: 如果 result.valid, 就用上次的值
+        
+        // 不需要在这里改什么, result 保持上次值是正确的
+        // 问题在 computeAlpha 里 _ctx.alpha.lead_lag_component 的赋值
+        // 已在 SignalAggregator computeAlpha 的 LL 分支修复
     }
     
     const SignalResult& result() const override { return _result; }
