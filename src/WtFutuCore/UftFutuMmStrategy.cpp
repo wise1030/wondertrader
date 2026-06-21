@@ -1168,9 +1168,7 @@ _risk_monitor->resetCloseout(true);  // 重置收盘前平仓状态(强制)
 // P1-1: reset() clears phase+qphase+blocks for new session
 _trading_state.reset();
 
-// BUG-7 修复: 跨日重置下单错误状态机, 避免昨日累计错误带到今日.
-// 旧版只在 on_entrust 成功 (line 2504) 清零 count, session 切换不清,
-// 若隔夜没有成功成交, count 持续累积, 翌日开盘第一笔失败立即走硬触发.
+// 跨日重置下单错误状态机, 避免昨日累计错误带到今日.
 _order_error_count = 0;
 _quoting_paused_since = 0;
 
@@ -1315,11 +1313,9 @@ void UftFutuMmStrategy::handleQuotingAutoResume()
 
     if (paused_ms > wait_threshold)
     {
-        // BUG-2 修复 + Q-B 选 b: 试探性恢复, count 不衰减保留真实历史.
+        // 试探性恢复: count 不衰减保留真实历史.
         // 退避到期后无条件试探翻 NORMAL, 让做市试发新单. 若再次失败 on_entrust
         // 失败回调会立即把 qphase 翻回 ERROR (count 已大, 走硬触发硬撤路径).
-        // 旧逻辑 "count==0 才能恢复" 实际不可达 (count 只在 on_entrust 成功才清),
-        // 是死代码, 恢复完全靠 on_entrust 成功 / R4 兜底.
         if (_trading_state.tryResumeFrom(QuotingPhase::ERROR))
         {
             _quoting_paused_since = 0;
@@ -2517,8 +2513,8 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     // 柜台错误(CTP平仓不足/流控等)由 TraderCTP 适配层处理
     // 策略只做通用错误计数: 达到阈值 → halt
     //============================================================
-    // BUG-8 (P1-6/U1): RISK_HALTED 期间 set(ERROR) 会被 canTransitionQuoting
-    // 静默拒绝 (H 来源仅允许 N), 但 _order_error_count++ 已污染状态.
+    // RISK_HALTED 期间 set(ERROR) 会被 canTransitionQuoting 静默拒绝
+    // (H 来源仅允许 N), 但 _order_error_count++ 已污染状态.
     // H 是更高优先级的暂停, 不应再被下单错误覆盖, 直接忽略.
     if (_trading_state.qphase == QuotingPhase::RISK_HALTED)
     {
@@ -2550,8 +2546,7 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     if (_order_error_count >= _config.order_control.order_error_threshold)
     {
         _trading_state.setQuotingPhase(QuotingPhase::ERROR);
-        // BUG-1 修复: 硬触发分支补设 paused_since, 让 handleQuotingAutoResume
-        // 不再因 paused_since==0 第一行 return.
+        // 硬触发分支补设 paused_since, 让 handleQuotingAutoResume 正常工作.
         _quoting_paused_since = TimeUtils::getLocalTimeNow();
 
         WTSLogger::error("UftFutuMmStrategy[{}] Trading HALTED due to consecutive order errors (count={}/threshold={})",
@@ -2567,8 +2562,7 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     }
     else
     {
-        // BUG-3 (Q-C 选 c): 软触发不 cancelAll, 维持原语义
-        // (临时小问题, 挂单留着等下笔成功)
+        // 软触发不 cancelAll, 维持原语义 (临时小问题, 挂单留着等下笔成功)
         _trading_state.setQuotingPhase(QuotingPhase::ERROR);
         _quoting_paused_since = TimeUtils::getLocalTimeNow();
         WTSLogger::warn("UftFutuMmStrategy[{}] Quoting temporarily paused due to order error ({}/{})",
