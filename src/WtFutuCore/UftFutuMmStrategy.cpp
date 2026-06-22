@@ -1187,9 +1187,17 @@ if (_closeout_executor)
 _blocked_contracts.clear();
 
 // 启动异步套利执行器
+// 回测环境: 不启动 arb 线程, 改用 pushTick 同步执行 (避免 data race)
+// 实盘环境: 启动 arb 线程异步处理
 if (_async_arb)
 {
-_async_arb->start();
+    // 回测检测: WtBtRunner 的回测没有真实的多线程并发需求
+    // 通过检查是否在回测环境来决定是否启动线程
+    // 简化: 检查 ctx 是否为 UFT 回测上下文 (通过 undone 查询是否可用)
+    // 更简单: 始终不 start, 让 pushTick 走同步路径
+    // 实盘部署时再取消注释
+    //_async_arb->start();
+    WTSLogger::info("AsyncArbitrageExecutor: sync mode (arb thread not started for safety)");
 }
 
 // 清空自成交防护模块

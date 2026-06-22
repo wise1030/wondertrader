@@ -82,6 +82,21 @@ bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price,
                                        double multiplier, uint64_t timestamp)
 {
     ArbTickData tick(code, price, multiplier, timestamp);
+    
+    // 回测模式: 同步执行 (不开 arb 线程, 避免 data race)
+    // 实盘模式: push 到队列由 arb 线程异步处理
+    if (!_running.load(std::memory_order_acquire))
+    {
+        // 回测: 直接同步处理
+        processTick(tick);
+        
+        auto now = std::chrono::high_resolution_clock::now();
+        uint64_t current_time = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()).count();
+        processSignals(current_time);
+        return true;
+    }
+    
     bool success = _tick_queue->tryPush(tick);
     
     if (success)
