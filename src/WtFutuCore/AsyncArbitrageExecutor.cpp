@@ -87,7 +87,7 @@ bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price,
     // 实盘模式: push 到队列由 arb 线程异步处理
     if (!_running.load(std::memory_order_acquire))
     {
-        // 回测: 直接同步处理
+        // 回测: 直接同步处理 (不开 arb 线程, 避免 data race)
         processTick(tick);
         
         auto now = std::chrono::high_resolution_clock::now();
