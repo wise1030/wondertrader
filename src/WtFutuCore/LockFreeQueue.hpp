@@ -77,7 +77,7 @@ public:
         }
         
         // Store item
-        new (&_buffer[current_tail]) T(item);
+        new (&_buffer[current_tail * sizeof(T)]) T(item);
         
         // Publish tail
         _tail.store(next_tail, std::memory_order_release);
@@ -98,7 +98,7 @@ public:
             return false;
         }
         
-        new (&_buffer[current_tail]) T(std::move(item));
+        new (&_buffer[current_tail * sizeof(T)]) T(std::move(item));
         
         _tail.store(next_tail, std::memory_order_release);
         
@@ -128,7 +128,7 @@ public:
             overwritten = true;
         }
         
-        new (&_buffer[current_tail]) T(item);
+        new (&_buffer[current_tail * sizeof(T)]) T(item);
         _tail.store(next_tail, std::memory_order_release);
         
         return overwritten;
@@ -158,7 +158,7 @@ public:
                 if (current_head == _tail.load(std::memory_order_acquire))
                     break;
                 // 析构被跳过的元素
-                reinterpret_cast<T*>(&_buffer[current_head])->~T();
+                reinterpret_cast<T*>(&_buffer[current_head * sizeof(T)])->~T();
                 _head.store((current_head + 1) & (Capacity - 1), std::memory_order_release);
                 ++skipped;
             }
@@ -175,10 +175,10 @@ public:
         }
         
         // Load item
-        item = std::move(*reinterpret_cast<T*>(&_buffer[current_head]));
+        item = std::move(*reinterpret_cast<T*>(&_buffer[current_head * sizeof(T)]));
         
         // Destroy item
-        reinterpret_cast<T*>(&_buffer[current_head])->~T();
+        reinterpret_cast<T*>(&_buffer[current_head * sizeof(T)])->~T();
         
         // Publish head
         _head.store((current_head + 1) & (Capacity - 1), std::memory_order_release);
