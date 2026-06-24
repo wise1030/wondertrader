@@ -331,6 +331,10 @@ void SpreadArbitrageManager::onTick(const std::string& code, double price,
         stored_state.half_life = state.half_life;
         stored_state.leg1_price = state.leg1_price;
         stored_state.leg2_price = state.leg2_price;
+        stored_state.is_active = state.is_active;   // BUG FIX: previously missed,
+                                                    // strategies always early-returned
+                                                    // (is_active=false) → 0 raw signals
+                                                    // ever, B-3 gate never exercised.
         stored_state.last_update = timestamp;
         
         // Update risk manager
@@ -446,6 +450,23 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     else if (instance.statistical_arb)
     {
         signal = instance.statistical_arb->generateSignal(state, current_time);
+    }
+
+    // BUG FIX: strategies populate only type/confidence/suggested_size/reason —
+    // leg metadata (codes, prices) is left at defaults (empty string, 0). The
+    // downstream consumer (AsyncArbitrageExecutor::executeSignal) hashes
+    // signal.leg1_code into _tick_sizes / _mm_buy_orders and uses leg*_price
+    // for the actual order submission; an empty code or zero price leads to
+    // an ArbOrderRequest with invalid fields and OrderRouter::submitSell
+    // tries to format a null code → segfault. Populate from SpreadState so
+    // the signal is self-contained. Done before B-3 gate which only touches
+    // leg*_qty.
+    if (signal.type != SpreadSignalType::NONE)
+    {
+        if (signal.leg1_code.empty()) signal.leg1_code = state.leg1_code;
+        if (signal.leg2_code.empty()) signal.leg2_code = state.leg2_code;
+        if (signal.leg1_price <= 0)   signal.leg1_price = state.leg1_price;
+        if (signal.leg2_price <= 0)   signal.leg2_price = state.leg2_price;
     }
     
     // Check confidence threshold
