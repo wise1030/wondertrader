@@ -283,6 +283,10 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
     // Don't exceed remaining
     batch_qty = std::min(batch_qty, std::abs(_remaining));
 
+    // Absolute safety cap: prevent runaway batch in extreme conditions
+    // (e.g. closeout starts with very large netDelta from upstream bugs)
+    batch_qty = std::min(batch_qty, static_cast<double>(_cfg.max_batch_size));
+
     // --- Compute price ---
     bool is_buy = (_remaining > 0);  // positive remaining = need to buy
     double price = computePrice(tier, is_buy, snap.bid1, snap.ask1, snap.price_tick);

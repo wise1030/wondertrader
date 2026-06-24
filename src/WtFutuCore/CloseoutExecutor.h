@@ -80,6 +80,7 @@ struct CloseoutExecConfig
     uint32_t sweep_threshold_ms   = 5000;  ///< Time left (ms) to enter SWEEP
     uint32_t sweep_ticks          = 3;     ///< SWEEP: opponent price + N ticks
     bool     use_fak              = true;  ///< Use FAK for all orders
+    uint32_t max_batch_size       = 20;    ///< Absolute cap on single batch qty (lots)
 
     /// Get depth ratio for a tier
     double depthRatio(PriceTier tier) const
