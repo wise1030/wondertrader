@@ -137,7 +137,15 @@ void SpreadCalculator::updateStatistics()
 {
     // Welford's online algorithm for O(1) mean/variance updates
     // This is critical for low-latency HFT systems
-    
+
+    // Guard: once _welford_m becomes nan (from a nan spread), it stays nan
+    // forever and poisons all downstream signals. Detect and log.
+    if (std::isnan(_current_spread))
+    {
+        // Skip nan sample to protect accumulator
+        return;
+    }
+
     _welford_n++;
     double delta = _current_spread - _welford_m;
     _welford_m += delta / _welford_n;

@@ -420,7 +420,7 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
             return signal;
         state = state_it->second; // Copy for thread safety
     }
-    
+
     // Check risk limits
     if (!_risk_manager->canOpenPosition(pair_id, 1.0))
     {
