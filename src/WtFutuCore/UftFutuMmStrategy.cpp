@@ -2320,8 +2320,13 @@ return;
 _arb_last_order_price[order.code] = order.price;
 
 // 执行订单（通过 OrderRouter）
-if (_order_router)
+if (!_order_router)
 {
+WTSLogger::error("AsyncArb callback invoked with _order_router==nullptr; "
+                 "OrderRouter must be initialized before arb is enabled. Dropping order.");
+return;
+}
+
 OrderSubmitResult router_result;
 if (order.is_buy)
 {
@@ -2357,23 +2362,6 @@ if (router_result.self_trade_blocked)
 {
 WTSLogger::warn("AsyncArb order self-trade blocked: {} {}", order.code, order.is_buy ? "BUY" : "SELL");
 return;
-}
-}
-else
-{
-// Fallback: 直接调 ctx API
-if (order.is_buy)
-{
-ctx->stra_enter_long(order.code.c_str(), order.price, order.qty);
-WTSLogger::info("AsyncArb BUY {} {}@{}", order.code, order.qty, order.price);
-}
-else
-{
-ctx->stra_enter_short(order.code.c_str(), order.price, order.qty);
-WTSLogger::info("AsyncArb SELL {} {}@{}", order.code, order.qty, order.price);
-}
-// Fallback path: cannot tag (ctx->stra_enter_* doesn't return localids
-// to this scope). In-flight tracking will rely on timeout-only reset.
 }
 
 // 记录到风险监控

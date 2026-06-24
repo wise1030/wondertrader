@@ -459,35 +459,31 @@ void CloseoutExecutor::submitHedgeOrder(wtp::IUftStraCtx* ctx,
     // This is safe because CloseoutExecutor runs in CLOSEOUT phase where MM
     // quoting is halted — no concurrent fills, no risk of net-position API
     // opening new positions.
-    if (_router)
+    if (!_router)
     {
-        Source src = Source::CLOSEOUT;
-        if (is_buy)
-        {
-            // BUY to close short → stra_buy (net position API)
-            auto res = _router->submitBuy(ctx, _code, price, qty, src, flag);
-            if (res.rate_limited)
-                WTSLogger::warn("CloseoutExecutor: BUY rate limited");
-            else if (res.self_trade_blocked)
-                WTSLogger::warn("CloseoutExecutor: BUY self-trade blocked");
-        }
-        else
-        {
-            // SELL to close long → stra_sell (net position API)
-            auto res = _router->submitSell(ctx, _code, price, qty, src, flag);
-            if (res.rate_limited)
-                WTSLogger::warn("CloseoutExecutor: SELL rate limited");
-            else if (res.self_trade_blocked)
-                WTSLogger::warn("CloseoutExecutor: SELL self-trade blocked");
-        }
+        WTSLogger::error("CloseoutExecutor::submitHedgeOrder called with _router==nullptr; "
+                         "setOrderRouter() must be invoked at strategy init. Skipping order.");
+        return;
+    }
+
+    Source src = Source::CLOSEOUT;
+    if (is_buy)
+    {
+        // BUY to close short → stra_buy (net position API)
+        auto res = _router->submitBuy(ctx, _code, price, qty, src, flag);
+        if (res.rate_limited)
+            WTSLogger::warn("CloseoutExecutor: BUY rate limited");
+        else if (res.self_trade_blocked)
+            WTSLogger::warn("CloseoutExecutor: BUY self-trade blocked");
     }
     else
     {
-        // Fallback: direct ctx API
-        if (is_buy)
-            ctx->stra_buy(_code, price, qty, flag);
-        else
-            ctx->stra_sell(_code, price, qty, flag);
+        // SELL to close long → stra_sell (net position API)
+        auto res = _router->submitSell(ctx, _code, price, qty, src, flag);
+        if (res.rate_limited)
+            WTSLogger::warn("CloseoutExecutor: SELL rate limited");
+        else if (res.self_trade_blocked)
+            WTSLogger::warn("CloseoutExecutor: SELL self-trade blocked");
     }
 }
 
