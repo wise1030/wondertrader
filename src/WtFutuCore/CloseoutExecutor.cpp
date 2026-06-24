@@ -200,9 +200,20 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
     // confirmation (on_order/on_trade) may arrive async. Without this guard,
     // the executor submits every tick → overfills → remaining flips sign →
     // submits opposite direction → infinite loop (1696 rounds, 11927 lots).
+    //
+    // FIX (PB-2): use OrderRouter's per-source active count instead of the
+    // shared UnifiedOrderTracker. UnifiedOrderTracker only tracks MM quotes
+    // (via FutuQuoter::trackMMOrder); closeout orders go through OrderRouter
+    // which maintains its own per-source vector. The old code queried tracker
+    // and always saw count=0 (closeout orders never landed there) → guard
+    // was a no-op → every tick re-submitted → maker limit orders stacked on
+    // the book → all filled at once when price reached them → blowup.
     if (_inflight_qty > 0)
     {
-        int active = _tracker ? _tracker->getOrderCount() : 0;
+        // Count only this executor's own active orders (CLOSEOUT source).
+        int active = _router
+            ? static_cast<int>(_router->getActiveCountBySource(Source::CLOSEOUT))
+            : 0;
         if (active > 0)
         {
             // Previous batch still inflight — wait

@@ -175,6 +175,23 @@ public:
     void cancelAllBySource(wtp::IUftStraCtx* ctx, Source src);
 
     //==========================================================================
+    // Active order query (per-source)
+    //==========================================================================
+
+    /// Number of active (not yet finalized) orders submitted with a given source.
+    /// Used by executors like CloseoutExecutor to gate "previous batch settled"
+    /// without polluting the MM order tracker.
+    /// Counts are maintained via recordActiveOrder / onOrderDone — only orders
+    /// that went through this router are counted. Direct ctx->stra_* calls are
+    /// invisible here.
+    uint32_t getActiveCountBySource(Source src) const
+    {
+        auto it = _active_orders.find(static_cast<int>(src));
+        return it == _active_orders.end() ? 0
+            : static_cast<uint32_t>(it->second.size());
+    }
+
+    //==========================================================================
     // Self-Trade Prevention
     //==========================================================================
 
