@@ -213,14 +213,14 @@ public:
     /// @param filled_qty Filled quantity (absolute, single-leg fill)
     void onArbOrderFilled(const std::string& pair_id, double filled_qty);
 
-    /// Configure in-flight timeout in microseconds. Defaults to 60 seconds
-    /// (60_000_000 us). Once elapsed, in_flight_qty is forcibly reset
-    /// (defense against stuck orders that never deliver a fill callback).
+    /// Configure in-flight timeout in milliseconds. Defaults to 60000 (60 seconds).
+    /// Once elapsed, in_flight_qty is forcibly reset (defense against stuck orders
+    /// that never deliver a fill callback).
     ///
-    /// NOTE: applyB3Gate compares this against `current_time` which is
-    /// microseconds-since-epoch from std::chrono::high_resolution_clock
-    /// (see AsyncArbitrageExecutor::onTickUpdate). Units MUST match.
-    void setInFlightTimeoutUs(uint64_t microseconds) { _in_flight_timeout_us = microseconds; }
+    /// NOTE: applyB3Gate compares this against `current_time` which
+    /// AsyncArbitrageExecutor derives from std::chrono::high_resolution_clock.
+    /// Units MUST match — both are milliseconds.
+    void setInFlightTimeoutMs(uint64_t milliseconds) { _in_flight_timeout_ms = milliseconds; }
     
     //==========================================================================
     // Risk Management
@@ -362,10 +362,10 @@ private:
     wtp::wt_hashmap<std::string, PairArbState> _pair_arb_states;
     mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
 
-    /// In-flight timeout in microseconds. After this, in_flight_qty is forcibly
-    /// reset. Default: 60 seconds. Compared against `current_time` (us-since-epoch)
+    /// In-flight timeout in milliseconds. After this, in_flight_qty is forcibly
+    /// reset. Default: 60 seconds (60000 ms). Compared against `current_time`
     /// passed to applyB3Gate. Units MUST match.
-    uint64_t _in_flight_timeout_us{60ULL * 1000ULL * 1000ULL};
+    uint64_t _in_flight_timeout_ms{60000ULL};
 };
 
 } // namespace futu

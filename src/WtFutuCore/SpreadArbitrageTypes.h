@@ -414,17 +414,17 @@ struct PairArbState
 
     /// In-flight unfilled qty (absolute value, sum of both legs' outstanding qty).
     /// Decremented in onArbOrderFilled; allows fresh signal once back to 0
-    /// or after in_flight_timeout_us elapses (defense against stuck orders).
+    /// or after in_flight_timeout_ms elapses (defense against stuck orders).
     double    in_flight_qty;
     int       in_flight_direction;   ///< +1=opening long spread, -1=opening short spread
-    uint64_t  in_flight_set_tick;
+    uint64_t  in_flight_set_time;
 
     /// Last derived spread position observed (for monitoring/debug)
     double    last_derived_position;
 
     PairArbState()
         : intent(ArbIntent::NONE), intent_set_tick(0)
-        , in_flight_qty(0), in_flight_direction(0), in_flight_set_tick(0)
+        , in_flight_qty(0), in_flight_direction(0), in_flight_set_time(0)
         , last_derived_position(0)
     {}
 };

@@ -725,9 +725,13 @@ ArbIntent SpreadArbitrageManager::computeIntent(double z,
 
 SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
                                                   const SpreadSignal& raw,
-                                                  uint64_t current_time)
+                                                  uint64_t current_time_us)
 {
     SpreadSignal result = raw;
+
+    // AsyncArbitrageExecutor passes current_time as microseconds-since-epoch.
+    // Convert to milliseconds for all in-flight timeout comparisons.
+    const uint64_t current_time = current_time_us / 1000;
 
     // Look up config
     auto cfg_it = _pair_configs.find(pair_id);
@@ -800,15 +804,15 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     // Reset in_flight if timeout elapsed (defense against stuck orders).
     // -----------------------------------------------------------------
     if (arb_state.in_flight_qty > 0.5 &&
-        arb_state.in_flight_set_tick != 0 &&
-        (current_time - arb_state.in_flight_set_tick) >= _in_flight_timeout_us)
+        arb_state.in_flight_set_time != 0 &&
+        (current_time - arb_state.in_flight_set_time) >= _in_flight_timeout_ms)
     {
-        WTSLogger::warn("SpreadArbMgr[{}] in_flight timeout: clearing {} elapsed_us={}",
+        WTSLogger::warn("SpreadArbMgr[{}] in_flight timeout: clearing {} elapsed_ms={}",
             pair_id, arb_state.in_flight_qty,
-            current_time - arb_state.in_flight_set_tick);
+            current_time - arb_state.in_flight_set_time);
         arb_state.in_flight_qty = 0;
         arb_state.in_flight_direction = 0;
-        arb_state.in_flight_set_tick = 0;
+        arb_state.in_flight_set_time = 0;
     }
 
     if (arb_state.in_flight_qty > 0.5)
@@ -873,7 +877,7 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
 
     arb_state.in_flight_qty = order_qty * 2.0;  // both legs (sum of leg fills decrements)
     arb_state.in_flight_direction = order_dir;
-    arb_state.in_flight_set_tick = current_time;
+    arb_state.in_flight_set_time = current_time;
 
     WTSLogger::debug("SpreadArbMgr[{}] B3-gate: intent={} derived={:.2f} target={:.2f} "
                      "gap={:.2f} order_qty={:.2f} dir={}",
@@ -897,7 +901,7 @@ void SpreadArbitrageManager::onArbOrderFilled(const std::string& pair_id, double
     {
         arb_state.in_flight_qty = 0;
         arb_state.in_flight_direction = 0;
-        arb_state.in_flight_set_tick = 0;
+        arb_state.in_flight_set_time = 0;
         WTSLogger::debug("SpreadArbMgr[{}] in-flight fully cleared after fill {:.2f}",
             pair_id, filled_qty);
     }
