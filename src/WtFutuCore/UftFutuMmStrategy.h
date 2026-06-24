@@ -199,7 +199,11 @@ struct FutuMmConfig
         uint32_t order_error_threshold;
         uint32_t max_orders;
         double stp_min_price_gap;
-        OrderControl() : order_error_threshold(10), max_orders(32), stp_min_price_gap(1.0) {}
+        bool use_stp;            ///< Self-Trade Prevention switch (independent of arb).
+                                  ///< Default false; FORCED true when use_spread_arbitrage=true
+                                  ///< (arb sends marketable orders that can hit own quotes).
+        OrderControl() : order_error_threshold(10), max_orders(32),
+                         stp_min_price_gap(1.0), use_stp(false) {}
     } order_control;
 };
 

@@ -32,6 +32,10 @@ NS_WTP_END
 
 namespace futu {
 
+// Forward declaration: SpreadArbMgr uses Portfolio as SSOT for derived positions.
+// Defined in FutuPortfolio.h; we only need the pointer type here.
+class FutuPortfolio;
+
 //==============================================================================
 // Arbitrage Manager Configuration
 //==============================================================================
@@ -192,6 +196,26 @@ public:
     
     /// Get all pair states
     std::vector<SpreadState> getAllStates() const;
+
+    //==========================================================================
+    // Scheme B-3: Portfolio-Derived Spread Monitoring
+    //==========================================================================
+
+    /// Inject Portfolio pointer (SSOT for all positions, MM + ARB combined).
+    /// Must be called once at init, before any generateSignal call.
+    /// Portfolio must outlive SpreadArbitrageManager.
+    void setPortfolio(const FutuPortfolio* portfolio) { _portfolio_ptr = portfolio; }
+
+    /// Callback when an arb order fills (called from UftFutuMmStrategy::on_trade
+    /// after consumePairTag identifies the order as an arb order).
+    /// Decrements in_flight_qty for the pair. Idempotent on partial fills.
+    /// @param pair_id Spread pair id (from consumePairTag)
+    /// @param filled_qty Filled quantity (absolute, single-leg fill)
+    void onArbOrderFilled(const std::string& pair_id, double filled_qty);
+
+    /// Configure in-flight timeout (ticks). Defaults to 60.
+    /// Once timeout elapses, in_flight_qty is reset (defense against stuck orders).
+    void setInFlightTimeout(uint32_t ticks) { _in_flight_timeout_ticks = ticks; }
     
     //==========================================================================
     // Risk Management
@@ -301,6 +325,40 @@ private:
     //==========================================================================
     
     wtp::wt_hashmap<std::string, double> _contract_multipliers;  ///< Per-contract multiplier lookup
+
+    //==========================================================================
+    // Scheme B-3: Portfolio-Derived Arb State
+    //==========================================================================
+
+    /// Pure helper: derive spread position from Portfolio (signed).
+    /// Returns 0 when either leg is empty, legs co-directional, or matched < min_unit.
+    /// Sign: +1 = long spread (leg1 long, leg2 short), -1 = short spread.
+    /// Caller must hold no locks; this only reads portfolio (NOT thread-safe with
+    /// concurrent portfolio writes — must be called from reader thread).
+    double computeDerivedSpread(const SpreadPairConfig& cfg) const;
+
+    /// Pure helper: derive arb intent from z-score (with hysteresis).
+    /// Hysteresis band: exit_z < |z| < entry_z → keep prev intent.
+    ArbIntent computeIntent(double z, const SpreadPairConfig& cfg, ArbIntent prev) const;
+
+    /// B-3 gate: takes raw signal from strategy, applies portfolio-derived
+    /// dedup + size adjustment + in-flight check. Returns possibly-modified
+    /// signal (type=NONE if suppressed, or with adjusted suggested_size).
+    /// Side effects: updates _pair_arb_states (intent, in_flight tracking).
+    SpreadSignal applyB3Gate(const std::string& pair_id,
+                              const SpreadSignal& raw,
+                              uint64_t current_time);
+
+    /// Portfolio SSOT pointer (injected via setPortfolio).
+    /// Nullable: if null, B-3 logic falls back to legacy generateSignal path.
+    const FutuPortfolio* _portfolio_ptr{nullptr};
+
+    /// Per-pair arb state (intent + in-flight tracking).
+    wtp::wt_hashmap<std::string, PairArbState> _pair_arb_states;
+    mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
+
+    /// In-flight timeout (ticks). After this, in_flight_qty is forcibly reset.
+    uint32_t _in_flight_timeout_ticks{60};
 };
 
 } // namespace futu

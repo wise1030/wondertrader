@@ -240,6 +240,7 @@ _config.portfolio.hedge_cooldown_ms = readUInt32(cfgPortfolio, "hedgeCooldownMs"
 _config.order_control.order_error_threshold = readUInt32(cfg, "orderErrorThreshold", 10);
 _config.order_control.max_orders = readUInt32(cfg, "maxOrders", 32);
 _config.order_control.stp_min_price_gap = readDouble(cfg, "stpMinPriceGap", 1.0);
+_config.order_control.use_stp = readBool(cfg, "useStp", false);
 
 // 收盘前平仓参数（嵌套在 closeout 节点下）
 WTSVariant* cfgCloseout = cfg->get("closeout");
@@ -571,7 +572,15 @@ tracker_cfg.max_age_ms = mp.auto_cancel_max_age_ms;
 tracker_cfg.price_deviation = mp.auto_cancel_price_deviation;
 tracker_cfg.sticky_threshold = _config.quoting.sticky_threshold;
 tracker_cfg.inv_limit_cooldown_ms = mp.auto_cancel_inventory_cooldown_ms;
-tracker_cfg.stp_enabled = _config.modules.use_spread_arbitrage;
+// STP decoupled from arb (default false), but FORCED true when arb is enabled.
+// Reason: arb sends marketable orders via OrderRouter that can cross own MM quotes.
+// Without STP, arb would self-trade with its own MM book.
+bool stp_effective = _config.order_control.use_stp || _config.modules.use_spread_arbitrage;
+if (_config.modules.use_spread_arbitrage && !_config.order_control.use_stp)
+{
+    WTSLogger::info("STP forced ON because use_spread_arbitrage=true (prevents arb→MM self-trade)");
+}
+tracker_cfg.stp_enabled = stp_effective;
 tracker_cfg.stp_min_price_gap = _config.order_control.stp_min_price_gap;
 _order_tracker->setConfig(tracker_cfg);
 }
@@ -871,6 +880,12 @@ _spread_arb_manager->setConfig(arb_cfg);
 
 WTSLogger::warn("SpreadArbitrageManager: using default config (file load failed from {})", arb_cfg_path);
 }
+
+// Scheme B-3: inject Portfolio SSOT for portfolio-derived spread monitoring.
+// Must be set before any generateSignal call. Portfolio outlives SpreadArbMgr.
+_spread_arb_manager->setPortfolio(_portfolio.get());
+_spread_arb_manager->setInFlightTimeout(60);  // 60 ticks (~0.5-1 min @ rb HF)
+WTSLogger::info("SpreadArbitrageManager: B-3 gate enabled (Portfolio SSOT, in_flight_timeout=60 ticks)");
 }
 else
 {
@@ -1727,6 +1742,18 @@ _portfolio->onPositionUpdate(stdCode, local_net);
 _portfolio_ctx_dirty = true;
 }
 
+// Scheme B-3: if this fill is from an arb order, decrement its in_flight tracking.
+// consumePairTag returns true and writes pair_id when localid is an arb-tagged order.
+// We decrement by `vol` (single-leg fill); both legs decrement separately as each fills.
+if (_async_arb && _spread_arb_manager)
+{
+    std::string arb_pair_id;
+    if (_async_arb->consumePairTag(localid, arb_pair_id))
+    {
+        _spread_arb_manager->onArbOrderFilled(arb_pair_id, vol);
+    }
+}
+
 // 更新 Quoter 订单状态
 // R3 v2: onTrade 补时间参数(UFT: stra_get_time=HHMM, stra_get_secs=SSmmm)
 {
@@ -1946,6 +1973,12 @@ _stp->untrackOrder(localid);
 // 通知 OrderRouter 订单完成（撤销或完全成交）
 if ((isCanceled || leftQty == 0) && _order_router)
 _order_router->onOrderDone(localid);
+
+// Scheme B-3: clean up arb localid → pair_id tag on order finalize
+// (full fill or cancel). Defensive: removes stale entries even if
+// onArbOrderFilled (in_flight tracking) already saw the fills.
+if ((isCanceled || leftQty == 0) && _async_arb)
+_async_arb->onOrderFinalized(localid);
 
 // Check closeout order status in on_order callback
 // When in FLATTENING state, check if all closeout orders are done
@@ -2303,6 +2336,18 @@ if (!router_result.localids.empty())
 WTSLogger::info("AsyncArb SELL {} {}@{} via OrderRouter", order.code, order.qty, order.price);
 }
 
+// Scheme B-3: tag each returned localid with the pair_id so on_trade can
+// route fills to SpreadArbMgr::onArbOrderFilled (in-flight tracking).
+// Tag here ONLY when submit succeeded (localids non-empty); rate_limited /
+// self_trade_blocked paths produce empty localids and are skipped naturally.
+if (!router_result.localids.empty() && !order.pair_id.empty())
+{
+    for (uint32_t lid : router_result.localids)
+    {
+        _async_arb->tagOrderPair(lid, order.pair_id);
+    }
+}
+
 if (router_result.rate_limited)
 {
 WTSLogger::warn("AsyncArb order rate limited: {} {}", order.code, order.is_buy ? "BUY" : "SELL");
@@ -2327,6 +2372,8 @@ else
 ctx->stra_enter_short(order.code.c_str(), order.price, order.qty);
 WTSLogger::info("AsyncArb SELL {} {}@{}", order.code, order.qty, order.price);
 }
+// Fallback path: cannot tag (ctx->stra_enter_* doesn't return localids
+// to this scope). In-flight tracking will rely on timeout-only reset.
 }
 
 // 记录到风险监控

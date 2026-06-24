@@ -3,6 +3,7 @@
  * \brief Spread Arbitrage Manager Implementation
  */
 #include "SpreadArbitrageManager.h"
+#include "FutuPortfolio.h"
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/WTSVariant.hpp"
 #include "../WTSUtils/WTSCfgLoader.h"
@@ -453,6 +454,27 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         signal.type = SpreadSignalType::NONE;
     }
     
+    //==========================================================================
+    // Scheme B-3 Gate: portfolio-derived dedup + size adjustment
+    //
+    // When Portfolio is injected (setPortfolio called), we apply a final gate
+    // that:
+    //   (a) derives current spread position from Portfolio (SSOT, MM + ARB combined)
+    //   (b) computes intent from raw signal (OPEN_LONG_SPREAD → WANT_LONG, etc.)
+    //   (c) computes gap = target - derived
+    //   (d) suppresses signal if gap is small (already have enough)
+    //   (e) clamps suggested_size to max_order_per_signal (= max_spread_position / 4)
+    //   (f) blocks if in-flight from previous signal not yet filled
+    //   (g) enforces position limit projection
+    //   (h) suppresses CLOSE_X_SPREAD signals (let MM consume naturally)
+    //
+    // If Portfolio not injected, gate is bypassed (legacy behavior).
+    //==========================================================================
+    if (_portfolio_ptr != nullptr && signal.type != SpreadSignalType::NONE)
+    {
+        signal = applyB3Gate(pair_id, signal, current_time);
+    }
+
     // Store last signal time/signal under spinlock
     // (arb thread writes here, main thread reads in getQuotingAdjustment)
     if (signal.isActionable())
@@ -622,6 +644,242 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
     
     // Update risk manager
     _risk_manager->updatePairState(pair_id, state);
+}
+
+//==============================================================================
+// Scheme B-3: Portfolio-Derived Helpers & Gate
+//==============================================================================
+
+double SpreadArbitrageManager::computeDerivedSpread(const SpreadPairConfig& cfg) const
+{
+    if (!_portfolio_ptr) return 0.0;
+
+    double leg1_pos = _portfolio_ptr->getPosition(cfg.leg1_code);
+    double leg2_pos = _portfolio_ptr->getPosition(cfg.leg2_code);
+
+    // Either leg empty → no spread
+    if (std::abs(leg1_pos) < 1e-6 || std::abs(leg2_pos) < 1e-6)
+        return 0.0;
+
+    double r1 = (cfg.leg1_ratio > 0) ? cfg.leg1_ratio : 1.0;
+    double r2 = (cfg.leg2_ratio > 0) ? cfg.leg2_ratio : 1.0;
+
+    // Legs co-directional (both long or both short) → invalid spread config,
+    // not a valid pair (likely transient state during MM consumption).
+    // Returning 0 is conservative: arb will treat as flat and refill via target.
+    if (std::signbit(leg1_pos) == std::signbit(leg2_pos))
+        return 0.0;
+
+    double leg1_pairs = std::abs(leg1_pos) / r1;
+    double leg2_pairs = std::abs(leg2_pos) / r2;
+    double matched = std::min(leg1_pairs, leg2_pairs);
+
+    // Sign: +1 = long spread (leg1 long, leg2 short)
+    int sign = (leg1_pos > 0) ? +1 : -1;
+
+    // Minimum unit threshold (defense against float residue)
+    double min_unit = std::min(r1, r2) * 0.5;
+    if (matched < min_unit) return 0.0;
+
+    return matched * sign;
+}
+
+ArbIntent SpreadArbitrageManager::computeIntent(double z,
+                                                  const SpreadPairConfig& cfg,
+                                                  ArbIntent prev) const
+{
+    // Mean-reversion semantics:
+    //   z > +entry_z  → spread too high, want SHORT (sell spread, wait for revert)
+    //   z < -entry_z  → spread too low, want LONG
+    //   |z| < exit_z  → revert achieved, WANT_FLAT (do NOT actively close)
+    //   exit < |z| < entry → hysteresis, keep prev intent
+    double entry = cfg.entry_z_threshold;
+    double exit_z = cfg.exit_z_threshold;
+
+    if (z > entry)      return ArbIntent::WANT_SHORT;
+    if (z < -entry)     return ArbIntent::WANT_LONG;
+    if (std::abs(z) < exit_z) return ArbIntent::WANT_FLAT;
+    return prev;
+}
+
+SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
+                                                  const SpreadSignal& raw,
+                                                  uint64_t current_time)
+{
+    SpreadSignal result = raw;
+
+    // Look up config
+    auto cfg_it = _pair_configs.find(pair_id);
+    if (cfg_it == _pair_configs.end())
+    {
+        result.type = SpreadSignalType::NONE;
+        return result;
+    }
+    const SpreadPairConfig& cfg = cfg_it->second;
+
+    // -----------------------------------------------------------------
+    // Suppress CLOSE / STOP_LOSS / TIMEOUT signals — let MM consume.
+    // (Scheme B-3: arb never actively closes; MM's contract_skew handles it.)
+    // -----------------------------------------------------------------
+    if (raw.type == SpreadSignalType::CLOSE_LONG_SPREAD ||
+        raw.type == SpreadSignalType::CLOSE_SHORT_SPREAD ||
+        raw.type == SpreadSignalType::STOP_LOSS ||
+        raw.type == SpreadSignalType::TIMEOUT_EXIT ||
+        raw.type == SpreadSignalType::REBALANCE)
+    {
+        result.type = SpreadSignalType::NONE;
+        return result;
+    }
+
+    // -----------------------------------------------------------------
+    // Derive intent from raw signal type (not from z, since not all
+    // strategies use z — trend following uses MA, stat arb uses ML).
+    // -----------------------------------------------------------------
+    ArbIntent intent;
+    int target_sign;
+    if (raw.type == SpreadSignalType::OPEN_LONG_SPREAD)
+    {
+        intent = ArbIntent::WANT_LONG;
+        target_sign = +1;
+    }
+    else if (raw.type == SpreadSignalType::OPEN_SHORT_SPREAD)
+    {
+        intent = ArbIntent::WANT_SHORT;
+        target_sign = -1;
+    }
+    else
+    {
+        // Non-action signal types (NONE / PAUSE_QUOTING / RESUME_QUOTING):
+        // do not gate, return as-is
+        return result;
+    }
+
+    // -----------------------------------------------------------------
+    // Update per-pair arb state under lock
+    // -----------------------------------------------------------------
+    SpinLockGuard arb_lock(_pair_arb_spin);
+
+    auto& arb_state = _pair_arb_states[pair_id];
+
+    // Intent transition tracking
+    if (arb_state.intent != intent)
+    {
+        arb_state.intent = intent;
+        arb_state.intent_set_tick = current_time;
+    }
+
+    // -----------------------------------------------------------------
+    // Compute derived spread position (signed)
+    // -----------------------------------------------------------------
+    double derived = computeDerivedSpread(cfg);
+    arb_state.last_derived_position = derived;
+
+    // -----------------------------------------------------------------
+    // In-flight check (block double-fire)
+    // Reset in_flight if timeout elapsed (defense against stuck orders).
+    // -----------------------------------------------------------------
+    if (arb_state.in_flight_qty > 0.5 &&
+        arb_state.in_flight_set_tick != 0 &&
+        (current_time - arb_state.in_flight_set_tick) >= _in_flight_timeout_ticks)
+    {
+        WTSLogger::warn("SpreadArbMgr[{}] in_flight timeout: clearing {} ticks={}",
+            pair_id, arb_state.in_flight_qty,
+            current_time - arb_state.in_flight_set_tick);
+        arb_state.in_flight_qty = 0;
+        arb_state.in_flight_direction = 0;
+        arb_state.in_flight_set_tick = 0;
+    }
+
+    if (arb_state.in_flight_qty > 0.5)
+    {
+        // Previous order still in-flight; suppress new signal
+        result.type = SpreadSignalType::NONE;
+        return result;
+    }
+
+    // -----------------------------------------------------------------
+    // Compute gap (target = sign * max_spread_position, derived is signed)
+    // -----------------------------------------------------------------
+    double max_pos = cfg.max_spread_position;
+    if (max_pos <= 0) max_pos = 5.0;  // Defensive default
+    double target = target_sign * max_pos;
+    double gap = target - derived;
+
+    // -----------------------------------------------------------------
+    // Min-order-size threshold: if gap is small, derived is "close enough"
+    // — let MM continue consuming, do not refill.
+    // Threshold = 1 lot (minimum tradable unit for futures).
+    // -----------------------------------------------------------------
+    double min_order_size = 1.0;
+    if (std::abs(gap) < min_order_size)
+    {
+        result.type = SpreadSignalType::NONE;
+        return result;
+    }
+
+    // -----------------------------------------------------------------
+    // Clamp suggested_size to max_order_per_signal (ramp protection).
+    // Default to max_spread_position / 4 (≤ 25% of full position per signal).
+    // -----------------------------------------------------------------
+    double max_order_per_signal = std::max(1.0, max_pos * 0.25);
+    double order_qty = std::min(std::abs(gap), max_order_per_signal);
+
+    // -----------------------------------------------------------------
+    // Position projection cap: ensure |derived + signed_order| <= max_pos * 1.05
+    // (5% headroom for in-flight slack).
+    // -----------------------------------------------------------------
+    int order_dir = (gap > 0) ? +1 : -1;
+    double projected = derived + order_dir * order_qty;
+    double abs_limit = max_pos * 1.05;
+    if (std::abs(projected) > abs_limit)
+    {
+        // Shrink order_qty to stay within limit
+        double room = abs_limit - std::abs(derived);
+        if (room < min_order_size)
+        {
+            result.type = SpreadSignalType::NONE;
+            return result;
+        }
+        order_qty = std::min(order_qty, room);
+    }
+
+    // -----------------------------------------------------------------
+    // Apply adjusted size to signal; mark in-flight
+    // -----------------------------------------------------------------
+    result.suggested_size = order_qty;
+    result.leg1_qty = order_qty * cfg.leg1_ratio;
+    result.leg2_qty = order_qty * cfg.leg2_ratio;
+
+    arb_state.in_flight_qty = order_qty * 2.0;  // both legs (sum of leg fills decrements)
+    arb_state.in_flight_direction = order_dir;
+    arb_state.in_flight_set_tick = current_time;
+
+    WTSLogger::debug("SpreadArbMgr[{}] B3-gate: intent={} derived={:.2f} target={:.2f} "
+                     "gap={:.2f} order_qty={:.2f} dir={}",
+        pair_id, (int)intent, derived, target, gap, order_qty, order_dir);
+
+    return result;
+}
+
+void SpreadArbitrageManager::onArbOrderFilled(const std::string& pair_id, double filled_qty)
+{
+    if (filled_qty <= 0) return;
+
+    SpinLockGuard lock(_pair_arb_spin);
+    auto it = _pair_arb_states.find(pair_id);
+    if (it == _pair_arb_states.end()) return;
+
+    auto& arb_state = it->second;
+    arb_state.in_flight_qty = std::max(0.0, arb_state.in_flight_qty - filled_qty);
+
+    if (arb_state.in_flight_qty < 0.5)
+    {
+        arb_state.in_flight_qty = 0;
+        arb_state.in_flight_direction = 0;
+        arb_state.in_flight_set_tick = 0;
+        WTSLogger::debug("SpreadArbMgr[{}] in-flight fully cleared after fill {:.2f}",
+            pair_id, filled_qty);
+    }
 }
 
 SpreadState SpreadArbitrageManager::getSpreadState(const std::string& pair_id) const

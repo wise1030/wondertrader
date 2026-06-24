@@ -156,6 +156,32 @@ void AsyncArbitrageExecutor::updateTickSize(const std::string& code, double tick
 }
 
 //==============================================================================
+// Scheme B-3: Order → Pair Tagging
+//
+// All three methods are MAIN-THREAD only (called from processPendingOrders
+// callback and on_trade). No locks needed.
+//==============================================================================
+
+void AsyncArbitrageExecutor::tagOrderPair(uint32_t localid, const std::string& pair_id)
+{
+    if (pair_id.empty()) return;
+    _oid_to_pair[localid] = pair_id;
+}
+
+bool AsyncArbitrageExecutor::consumePairTag(uint32_t localid, std::string& out_pair_id) const
+{
+    auto it = _oid_to_pair.find(localid);
+    if (it == _oid_to_pair.end()) return false;
+    out_pair_id = it->second;
+    return true;
+}
+
+void AsyncArbitrageExecutor::onOrderFinalized(uint32_t localid)
+{
+    _oid_to_pair.erase(localid);
+}
+
+//==============================================================================
 // Arb Thread
 //==============================================================================
 

@@ -389,4 +389,44 @@ struct StrategyWeights
     }
 };
 
+//==============================================================================
+// Scheme B-3: Portfolio-derived Arb State
+//==============================================================================
+
+/// Arbitrage intent for a pair (driven by z-score with hysteresis).
+/// Separate from PairState — intent reflects what arb *wants*, not what it has.
+enum class ArbIntent : uint8_t
+{
+    NONE = 0,        ///< |z| in hysteresis band, no fresh intent
+    WANT_LONG,       ///< Want long spread (buy leg1, sell leg2)
+    WANT_SHORT,      ///< Want short spread (sell leg1, buy leg2)
+    WANT_FLAT        ///< |z| <= exit_z, want spread to flatten (but do NOT actively close)
+};
+
+/// Per-pair arbitrage runtime state (B-3 scheme):
+///  - intent comes from z-score (pure function)
+///  - derived position comes from Portfolio (SSOT, recomputed each tick)
+///  - in_flight tracks unfilled arb orders to prevent double-firing
+struct PairArbState
+{
+    ArbIntent intent;
+    uint64_t  intent_set_tick;
+
+    /// In-flight unfilled qty (absolute value, sum of both legs' outstanding qty).
+    /// Decremented in onArbOrderFilled; allows fresh signal once back to 0
+    /// or after in_flight_timeout_ticks elapses (defense against stuck orders).
+    double    in_flight_qty;
+    int       in_flight_direction;   ///< +1=opening long spread, -1=opening short spread
+    uint64_t  in_flight_set_tick;
+
+    /// Last derived spread position observed (for monitoring/debug)
+    double    last_derived_position;
+
+    PairArbState()
+        : intent(ArbIntent::NONE), intent_set_tick(0)
+        , in_flight_qty(0), in_flight_direction(0), in_flight_set_tick(0)
+        , last_derived_position(0)
+    {}
+};
+
 } // namespace futu

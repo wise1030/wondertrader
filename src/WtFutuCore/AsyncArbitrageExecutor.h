@@ -153,6 +153,31 @@ public:
     
     void setArbitrageManager(SpreadArbitrageManager* manager) { _arb_manager = manager; }
     void setSelfTradePrevention(SelfTradePrevention* stp) { _stp = stp; }
+
+    //==========================================================================
+    // Scheme B-3: Order → Pair Tagging
+    //
+    // When the main thread submits an arb order via OrderRouter, it tags the
+    // returned localid(s) with the pair_id here. on_trade then calls
+    // consumePairTag(localid) to identify arb fills and route them to
+    // SpreadArbMgr::onArbOrderFilled for in-flight tracking.
+    //
+    // Both methods are called from the MAIN thread only (processPendingOrders
+    // callback and on_trade). No cross-thread access — no lock needed.
+    //==========================================================================
+
+    /// Tag a localid as belonging to a spread pair (called after OrderRouter submit).
+    /// Multiple localids can map to the same pair_id (e.g. close-today + open-yesterday).
+    void tagOrderPair(uint32_t localid, const std::string& pair_id);
+
+    /// On fill, look up which pair this localid belongs to.
+    /// Returns true if it is an arb order; writes pair_id to out_pair_id.
+    /// Tag is RETAINED (not consumed) — supports partial fills.
+    /// Cleanup happens on order finalize (full fill / cancel), see onOrderFinalized.
+    bool consumePairTag(uint32_t localid, std::string& out_pair_id) const;
+
+    /// Erase the tag (called when order is terminal: fully filled or cancelled).
+    void onOrderFinalized(uint32_t localid);
     
     //==========================================================================
     // Callbacks
@@ -336,6 +361,15 @@ private:
     
     OrderCallback _order_callback;
     PositionCallback _position_callback;
+
+    //==========================================================================
+    // Scheme B-3: Order → Pair Tagging Map
+    //
+    // localid → pair_id. Main thread only (no lock).
+    // Lifetime: written in tagOrderPair (after OrderRouter submit),
+    //   read in consumePairTag (in on_trade), erased in onOrderFinalized.
+    //==========================================================================
+    wtp::wt_hashmap<uint32_t, std::string> _oid_to_pair;
 };
 
 } // namespace futu
