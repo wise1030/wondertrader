@@ -884,8 +884,9 @@ WTSLogger::warn("SpreadArbitrageManager: using default config (file load failed 
 // Scheme B-3: inject Portfolio SSOT for portfolio-derived spread monitoring.
 // Must be set before any generateSignal call. Portfolio outlives SpreadArbMgr.
 _spread_arb_manager->setPortfolio(_portfolio.get());
-_spread_arb_manager->setInFlightTimeout(60);  // 60 ticks (~0.5-1 min @ rb HF)
-WTSLogger::info("SpreadArbitrageManager: B-3 gate enabled (Portfolio SSOT, in_flight_timeout=60 ticks)");
+_spread_arb_manager->setInFlightTimeoutUs(60ULL * 1000ULL * 1000ULL);  // 60 seconds
+WTSLogger::info("SpreadArbitrageManager: B-3 gate enabled (Portfolio SSOT, in_flight_timeout={}us)",
+    60ULL * 1000ULL * 1000ULL);
 }
 else
 {

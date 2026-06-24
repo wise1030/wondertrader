@@ -801,9 +801,9 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     // -----------------------------------------------------------------
     if (arb_state.in_flight_qty > 0.5 &&
         arb_state.in_flight_set_tick != 0 &&
-        (current_time - arb_state.in_flight_set_tick) >= _in_flight_timeout_ticks)
+        (current_time - arb_state.in_flight_set_tick) >= _in_flight_timeout_us)
     {
-        WTSLogger::warn("SpreadArbMgr[{}] in_flight timeout: clearing {} ticks={}",
+        WTSLogger::warn("SpreadArbMgr[{}] in_flight timeout: clearing {} elapsed_us={}",
             pair_id, arb_state.in_flight_qty,
             current_time - arb_state.in_flight_set_tick);
         arb_state.in_flight_qty = 0;

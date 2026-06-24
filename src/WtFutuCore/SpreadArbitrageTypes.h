@@ -414,7 +414,7 @@ struct PairArbState
 
     /// In-flight unfilled qty (absolute value, sum of both legs' outstanding qty).
     /// Decremented in onArbOrderFilled; allows fresh signal once back to 0
-    /// or after in_flight_timeout_ticks elapses (defense against stuck orders).
+    /// or after in_flight_timeout_us elapses (defense against stuck orders).
     double    in_flight_qty;
     int       in_flight_direction;   ///< +1=opening long spread, -1=opening short spread
     uint64_t  in_flight_set_tick;
