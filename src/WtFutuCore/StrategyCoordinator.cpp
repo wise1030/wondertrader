@@ -253,15 +253,20 @@ updateSignals(ctx, tc, tick);
 
 // Stage 4: Check risk
 if (!checkRisk(ctx, tc)) {
-result.processed = true;
-return result;
+    // PAUSE_QUOTING 时仍执行 hedge — 减仓才能恢复正常
+    // HALT_TRADING 时跳过(已有 FORCE FLAT 在 checkRisk 内执行)
+    if (_risk_monitor && !_risk_monitor->isTradingHalted()) {
+        checkAndHedge(ctx);
+    }
+    result.processed = true;
+    return result;
 }
 
-// Stage 5: Process quoting (MM core)
-result.quote_placed = processQuoting(ctx, tc, tick);
-
-// Stage 6: Process auto-cancel (MM only)
+// Stage 5: Process auto-cancel (先撤旧单,再报新单)
 result.order_canceled = processAutoCancel(ctx, tc);
+
+// Stage 6: Process quoting (MM core)
+result.quote_placed = processQuoting(ctx, tc, tick);
 }
 
 // ===== Arbitrage Pipeline =====

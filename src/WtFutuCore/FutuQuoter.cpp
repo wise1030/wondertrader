@@ -87,9 +87,28 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
             double decay = std::exp(-_cfg.qty_decay_factor * short_util);
             qr.askQty = std::max(0.0, std::round(qr.askQty * decay));
         }
-        // allow 阻断
-        if (!allow_bid) qr.bidQty = 0;
-        if (!allow_ask) qr.askQty = 0;
+        // allow 阻断 + 做市义务加宽
+        // 被block的一边:如果有做市义务需求(always_obligation 或 level==0),
+        //   用 maxObligationSpread 加宽报价(降低成交概率,但满足义务)
+        //   否则直接 qty=0
+        if (!allow_bid) {
+            if (_cfg.always_obligation && level == 0) {
+                qr.bidPrice = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+                qr.bidQty = std::max(1.0, _cfg.obligation_min_qty);
+                qr.is_obligation_bid = true;
+            } else {
+                qr.bidQty = 0;
+            }
+        }
+        if (!allow_ask) {
+            if (_cfg.always_obligation && level == 0) {
+                qr.askPrice = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+                qr.askQty = std::max(1.0, _cfg.obligation_min_qty);
+                qr.is_obligation_ask = true;
+            } else {
+                qr.askQty = 0;
+            }
+        }
     }
 
     // 价格保护 (不对义务报价应用)
