@@ -2527,6 +2527,25 @@ _async_arb->processOrphanLegs([this, ctx](const std::string& code,
     if (!_portfolio) return 0.0;
     return _portfolio->getPortfolioDeltaUtilization();  // abs(net_delta)/max_delta
 }());
+
+// ============================================================
+// in_flight timeout 清理: 撤掉超时 pair 的未成交套利挂单
+// 防止: leg1 成交 + leg2 挂单超时 → in_flight 清零 → 新信号发出
+//       但 leg2 仍在场上 → 可能重复建仓
+// ============================================================
+if (_spread_arb_manager && _order_router)
+{
+    std::vector<std::string> timed_out;
+    if (_spread_arb_manager->popTimedOutPairs(timed_out))
+    {
+        for (const auto& pair_id : timed_out)
+        {
+            WTSLogger::warn("Arb in_flight timeout cleanup: pair={}, canceling pending arb orders",
+                pair_id);
+            _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
+        }
+    }
+}
 }
 
 void UftFutuMmStrategy::onSpreadTrade(IUftStraCtx* ctx, const std::string& pair_id,
@@ -2635,11 +2654,23 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     }
 
     // 报单失败 — 通用计数
-    std::string errMsg = message ? message : "";
+    std::string errMsg = message ? message : "" ;
     _order_error_count++;
 
     WTSLogger::error("UftFutuMmStrategy[{}] Order FAILED (count={}/{}): localid={}, error={}",
         id(), _order_error_count, _config.order_control.order_error_threshold, localid, errMsg);
+
+    // 套利单被拒: 撤同 pair 另一腿,防止裸腿
+    if (_async_arb && _order_router)
+    {
+        std::string pair_id;
+        if (_async_arb->consumePairTag(localid, pair_id))
+        {
+            WTSLogger::warn("Arb order REJECTED: localid={}, pair={}, canceling all arb orders",
+                localid, pair_id);
+            _order_router->cancelAllBySource(_main_ctx, Source::ARBITRAGE);
+        }
+    }
 
     if (_order_error_count >= _config.order_control.order_error_threshold)
     {

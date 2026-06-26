@@ -813,6 +813,7 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
         arb_state.in_flight_qty = 0;
         arb_state.in_flight_direction = 0;
         arb_state.in_flight_set_time = 0;
+        _timed_out_pairs.push_back(pair_id);
     }
 
     if (arb_state.in_flight_qty > 0.5)

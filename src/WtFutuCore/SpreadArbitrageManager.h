@@ -362,10 +362,30 @@ private:
     wtp::wt_hashmap<std::string, PairArbState> _pair_arb_states;
     mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
 
+    /// Pairs whose in_flight timed out and need cleanup (cancel pending legs).
+    /// UftFutuMmStrategy polls this via popTimedOutPairs() each tick.
+    std::vector<std::string> _timed_out_pairs;
+
     /// In-flight timeout in milliseconds. After this, in_flight_qty is forcibly
     /// reset. Default: 60 seconds (60000 ms). Compared against `current_time`
     /// passed to applyB3Gate. Units MUST match.
     uint64_t _in_flight_timeout_ms{60000ULL};
+
+public:
+    /// Pop pairs whose in_flight timed out (for external cancel cleanup).
+    /// Returns true if any pairs were written to out_pairs.
+    bool popTimedOutPairs(std::vector<std::string>& out_pairs)
+    {
+        while (_pair_arb_spin.test_and_set(std::memory_order_acquire)) {}
+        if (_timed_out_pairs.empty()) {
+            _pair_arb_spin.clear(std::memory_order_release);
+            return false;
+        }
+        out_pairs = std::move(_timed_out_pairs);
+        _timed_out_pairs.clear();
+        _pair_arb_spin.clear(std::memory_order_release);
+        return true;
+    }
 };
 
 } // namespace futu
