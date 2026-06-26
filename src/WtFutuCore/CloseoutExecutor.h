@@ -67,6 +67,8 @@ struct MarketSnapshot
     double    bid1_qty     = 0;
     double    ask1_qty     = 0;
     double    price_tick   = 0;
+    double    upper_limit  = 0;   ///< P2-2: 涨停价
+    double    lower_limit  = 0;   ///< P2-2: 跌停价
     uint64_t  timestamp_ms = 0;
 };
 

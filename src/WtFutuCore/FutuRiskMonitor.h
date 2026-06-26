@@ -341,15 +341,15 @@ public:
     /// Check rate limits only
     bool checkRateLimits() const;
     
-    /// Get current rate counts (atomic reads)
-    inline uint32_t getOrdersPerSec() const { 
-        return static_cast<uint32_t>(std::max(0, _orders_last_sec.load(std::memory_order_relaxed))); 
+    /// Get current rate counts (ring buffer size)
+    inline uint32_t getOrdersPerSec() const {
+        return static_cast<uint32_t>(_order_times.size());
     }
-    inline uint32_t getCancelsPerSec() const { 
-        return static_cast<uint32_t>(std::max(0, _cancels_last_sec.load(std::memory_order_relaxed))); 
+    inline uint32_t getCancelsPerSec() const {
+        return static_cast<uint32_t>(_cancel_times.size());
     }
-    inline uint32_t getTradesPerSec() const { 
-        return static_cast<uint32_t>(std::max(0, _trades_last_sec.load(std::memory_order_relaxed))); 
+    inline uint32_t getTradesPerSec() const {
+        return static_cast<uint32_t>(_trade_times.size());
     }
     
     //==========================================================================
@@ -541,9 +541,8 @@ private:
     RecoveryConfig _recovery_config;
     
     // Lock-free atomic counters for rate tracking
-    std::atomic<int32_t> _orders_last_sec{0};
-    std::atomic<int32_t> _cancels_last_sec{0};
-    std::atomic<int32_t> _trades_last_sec{0};
+    // P2-1: atomic 双轨计数已移除,直接用 ring buffer size()
+    // 旧代码 try_push 失败仍 +1 导致计数虚高
     
     // Timestamp tracking using fixed-size RingBuffer (no dynamic allocation)
     // This prevents memory reallocation and potential data races

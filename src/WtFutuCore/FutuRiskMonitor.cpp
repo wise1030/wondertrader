@@ -24,91 +24,49 @@ FutuRiskMonitor::FutuRiskMonitor()
 void FutuRiskMonitor::recordOrder()
 {
     uint64_t now = _current_time.load(std::memory_order_relaxed);
-    
-    // Clean up expired ones
+
+    // P2-1: 去掉 atomic 双轨计数,直接用 ring buffer size() 读取
+    // 旧代码 atomic +1 无条件、-1 有条件(try_pop 成功),ring buffer 满(256)时
+    // try_push 失败仍 +1,导致计数单调虚高。改用 size() 精确反映 1 秒窗口内事件数。
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _order_times.try_peek())
     {
         if (*item < cutoff)
-        {
             _order_times.try_pop();
-            // 防止计数器下溢 — 只有当计数>0时才减
-            int32_t cur = _orders_last_sec.load(std::memory_order_relaxed);
-            if (cur > 0) {
-                _orders_last_sec.fetch_sub(1, std::memory_order_relaxed);
-            }
-        }
         else
-        {
             break;
-        }
     }
-    
-    // Add new timestamp
-    // try_push失败时仍然增加计数器
-    // 原代码只在try_push成功时增加_orders_last_sec，但ring buffer满时订单仍然发生了，
-    // 计数偏低会导致流控判断失误（以为订单频率低，实际已超限）。
-    // try_push失败仅意味着旧时间戳无法被覆盖存储，不代表订单不存在。
     _order_times.try_push(now);
-    _orders_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FutuRiskMonitor::recordCancel()
 {
     uint64_t now = _current_time.load(std::memory_order_relaxed);
-    
-    // Clean up expired ones
+
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _cancel_times.try_peek())
     {
         if (*item < cutoff)
-        {
             _cancel_times.try_pop();
-            // 防止计数器下溢
-            int32_t cur = _cancels_last_sec.load(std::memory_order_relaxed);
-            if (cur > 0) {
-                _cancels_last_sec.fetch_sub(1, std::memory_order_relaxed);
-            }
-        }
         else
-        {
             break;
-        }
     }
-    
-    // Add new timestamp
-    // try_push失败时仍然增加计数器(与recordOrder同理)
     _cancel_times.try_push(now);
-    _cancels_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FutuRiskMonitor::recordTrade()
 {
     uint64_t now = _current_time.load(std::memory_order_relaxed);
-    
-    // Clean up expired ones
+
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _trade_times.try_peek())
     {
         if (*item < cutoff)
-        {
             _trade_times.try_pop();
-            // 防止计数器下溢
-            int32_t cur = _trades_last_sec.load(std::memory_order_relaxed);
-            if (cur > 0) {
-                _trades_last_sec.fetch_sub(1, std::memory_order_relaxed);
-            }
-        }
         else
-        {
             break;
-        }
     }
-    
-    // Add new timestamp
-    // try_push失败时仍然增加计数器(与recordOrder同理)
     _trade_times.try_push(now);
-    _trades_last_sec.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::string& message)
@@ -218,9 +176,10 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     }
     
     // Check rate limits (using atomic values)
-    uint32_t orders = _orders_last_sec.load(std::memory_order_relaxed);
-    uint32_t cancels = _cancels_last_sec.load(std::memory_order_relaxed);
-    uint32_t trades = _trades_last_sec.load(std::memory_order_relaxed);
+    // P2-1: 直接用 ring buffer size() 替代 atomic 双轨计数
+    uint32_t orders = static_cast<uint32_t>(_order_times.size());
+    uint32_t cancels = static_cast<uint32_t>(_cancel_times.size());
+    uint32_t trades = static_cast<uint32_t>(_trade_times.size());
     
     if (orders > _rate_limits.max_orders_per_sec)
     {
@@ -289,9 +248,9 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
 
 bool FutuRiskMonitor::checkRateLimits() const
 {
-    return _orders_last_sec.load(std::memory_order_relaxed) < _rate_limits.max_orders_per_sec &&
-           _cancels_last_sec.load(std::memory_order_relaxed) < _rate_limits.max_cancels_per_sec &&
-           _trades_last_sec.load(std::memory_order_relaxed) < _rate_limits.max_trades_per_sec;
+    return _order_times.size() < _rate_limits.max_orders_per_sec &&
+           _cancel_times.size() < _rate_limits.max_cancels_per_sec &&
+           _trade_times.size() < _rate_limits.max_trades_per_sec;
 }
 
 RiskAction FutuRiskMonitor::determineAction(const std::vector<RiskViolation>& violations) const
@@ -639,9 +598,7 @@ void FutuRiskMonitor::resetDaily()
     _order_times.clear();
     _cancel_times.clear();
     _trade_times.clear();
-    _orders_last_sec.store(0, std::memory_order_relaxed);
-    _cancels_last_sec.store(0, std::memory_order_relaxed);
-    _trades_last_sec.store(0, std::memory_order_relaxed);
+    // P2-1: atomic 双轨计数已删除,清零靠 ring buffer clear()
     
     _delta_snapshots.fill(DeltaSnapshot());
     _delta_snapshot_count = 0;

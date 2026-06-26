@@ -291,6 +291,10 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
     bool is_buy = (_remaining > 0);  // positive remaining = need to buy
     double price = computePrice(tier, is_buy, snap.bid1, snap.ask1, snap.price_tick);
 
+    // P2-2: clamp 到涨跌停范围(防止锁板时报单被 CTP 拒)
+    if (snap.upper_limit > 0 && price > snap.upper_limit) price = snap.upper_limit;
+    if (snap.lower_limit > 0 && price < snap.lower_limit) price = snap.lower_limit;
+
     if (price <= 0)
     {
         WTSLogger::error("CloseoutExecutor[{}] EXECUTE: invalid price {:.2f} (bid={:.2f} ask={:.2f})",

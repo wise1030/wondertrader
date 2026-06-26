@@ -1496,6 +1496,8 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
         snap.bid1_qty   = tick->bidqty(0);
         snap.ask1_qty   = tick->askqty(0);
         snap.price_tick = anchorState ? anchorState->tick_size : 0;
+        snap.upper_limit = tick->upperlimit();   // P2-2
+        snap.lower_limit = tick->lowerlimit();   // P2-2
         {
             uint32_t at = tick->actiontime();
             uint32_t hh = at / 10000000;
