@@ -237,7 +237,13 @@ public:
     
     /// Mark to market with last price
     void markToMarket(const std::string& code, double lastPrice);
-    
+
+    /// Add realized PnL for a contract (accumulated on position close)
+    void addRealizedPnl(const std::string& code, double pnl);
+
+    /// Set reference price for overnight positions (pre_close as cost basis)
+    void setReferencePrice(const std::string& code, double refPrice);
+
     /// Update daily_pnl for a contract (daily_pnl = unrealized_pnl + realized_pnl)
     void updateDailyPnL(const std::string& code);
     

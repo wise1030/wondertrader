@@ -1733,14 +1733,48 @@ _risk_monitor->recordTrade();
 // stra_get_local_position 返回的是本策略的净头寸
 double local_net = ctx->stra_get_local_position(stdCode);
 
-// 更新 Portfolio 持仓（使用策略本地持仓）
-double current = _portfolio->getPosition(stdCode);
-if (std::abs(current - local_net) > 0.01)
+// P0-1: 完整的持仓+PnL 更新(替换原来的简单 onPositionUpdate)
 {
-WTSLogger::debug("UftFutuMmStrategy[{}] Portfolio sync on trade: {} {}->{} (local)",
-id(), stdCode, current, local_net);
-_portfolio->onPositionUpdate(stdCode, local_net);
-_portfolio_ctx_dirty = true;
+    double old_pos = _portfolio->getPosition(stdCode);
+    double new_pos = local_net;
+    const ContractState* cs = _portfolio->getContract(stdCode);
+    double old_avg_cost = cs ? cs->avg_cost : 0;
+    double mult = cs ? cs->multiplier : 1;
+
+    // 1. 计算已实现盈亏(平仓部分)
+    double realized = 0;
+    if (cs && std::abs(old_pos) > 0.01 && std::abs(new_pos) < std::abs(old_pos)) {
+        // 持仓减少 = 有平仓
+        double closed_qty = std::abs(old_pos) - std::abs(new_pos);
+        if (old_pos > 0) {
+            realized = (price - old_avg_cost) * closed_qty * mult;  // 多头平仓
+        } else {
+            realized = (old_avg_cost - price) * closed_qty * mult;  // 空头平仓
+        }
+    }
+
+    // 2. 计算新 avg_cost(开仓部分)
+    double new_avg_cost = old_avg_cost;
+    if (cs && std::abs(new_pos) > std::abs(old_pos)) {
+        // 持仓增加 = 有开仓
+        double added_qty = std::abs(new_pos) - std::abs(old_pos);
+        if ((old_pos >= 0 && new_pos > 0) || (old_pos <= 0 && new_pos < 0)) {
+            // 同方向加仓: 加权平均
+            new_avg_cost = (old_avg_cost * std::abs(old_pos) + price * added_qty) / std::abs(new_pos);
+        } else {
+            // 方向翻转
+            new_avg_cost = price;
+        }
+    }
+
+    // 3. 更新 Portfolio
+    if (std::abs(old_pos - new_pos) > 0.01) {
+        _portfolio->updatePosition(stdCode, new_pos, new_avg_cost);
+        _portfolio_ctx_dirty = true;
+    }
+    if (std::abs(realized) > 0.001) {
+        _portfolio->addRealizedPnl(stdCode, realized);
+    }
 }
 
 // Scheme B-3: if this fill is from an arb order, decrement its in_flight tracking.
@@ -1873,6 +1907,11 @@ _toxicity_detector->onSelfTradeCalibration(calibration);
     
     WTSLogger::info("UftFutuMmStrategy[{}] TRADE: {} {} {}@{} | Delta: {} {}",
         id(), stdCode, actionStr, vol, price, _portfolio->getTotalDelta(), effectStr);
+
+    // P1-3: 成交后重置报单错误计数(成功成交 = 连续错误中断)
+    if (_order_error_count > 0) {
+        _order_error_count = 0;
+    }
 
 // ============================================================
 // 成交后检查风控状态，如果没有硬指标违规则恢复交易
@@ -2357,11 +2396,25 @@ if (!router_result.localids.empty() && !order.pair_id.empty())
 if (router_result.rate_limited)
 {
 WTSLogger::warn("AsyncArb order rate limited: {} {}", order.code, order.is_buy ? "BUY" : "SELL");
+
+// P1-2: 套利单腿提交失败(流控/STP 阻断),撤同 pair_id 已提交的单
+// 防止裸腿风险(leg1 已提交但 leg2 失败)
+if (!order.pair_id.empty()) {
+    WTSLogger::warn("AsyncArb leg FAILED for pair={}, canceling opposite leg", order.pair_id);
+    // OrderRouter 按 Source::ARBITRAGE 撤所有活跃套利单
+    _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
+}
 return;
 }
 if (router_result.self_trade_blocked)
 {
 WTSLogger::warn("AsyncArb order self-trade blocked: {} {}", order.code, order.is_buy ? "BUY" : "SELL");
+
+// P1-2: STP 阻断 = 单腿失败,撤同 pair_id 已提交的单
+if (!order.pair_id.empty()) {
+    WTSLogger::warn("AsyncArb leg STP-BLOCKED for pair={}, canceling opposite leg", order.pair_id);
+    _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
+}
 return;
 }
 

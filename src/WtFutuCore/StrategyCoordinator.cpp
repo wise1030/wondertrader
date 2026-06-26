@@ -294,6 +294,13 @@ end_time - start_time).count();
 if (_perf_monitor && _cfg.perf_enabled) {
 _perf_monitor->recordTickToQuote(result.processing_time_ns);
 _perf_monitor->recordTickProcessed();
+
+// P0-4: 每秒更新一次性能统计
+static uint64_t _last_perf_ms = 0;
+if (tc.timestamp - _last_perf_ms >= 1000) {
+_perf_monitor->updatePerSecondCounters();
+_last_perf_ms = tc.timestamp;
+}
 }
 
 return result;
@@ -461,6 +468,24 @@ return false;
 }
 
 tc.mid = (tc.bid_px + tc.ask_px) / 2.0;
+
+// P0-1: 隔夜持仓用昨收(pre_close)作为成本基准
+if (_portfolio) {
+    ContractState* cs = _portfolio->getContract(tc.code);
+    if (cs && cs->position != 0 && cs->avg_cost == 0) {
+        // 首次收到 tick 且有隔夜持仓,用昨收设置成本基准
+        double pre_close = tick->preclose();
+        if (pre_close > 0) {
+            _portfolio->setReferencePrice(tc.code, pre_close);
+            WTSLogger::info("Overnight position reference: {} cost={} (pre_close), pos={}",
+                tc.code, pre_close, cs->position);
+        }
+    }
+}
+
+// P0-2: 填充涨跌停价到 TickContext
+tc.upper_limit = tick->upperlimit();
+tc.lower_limit = tick->lowerlimit();
 
 // Get tick size from portfolio
 if (_portfolio) {
@@ -936,6 +961,40 @@ allow_ask = false;
 WTSLogger::debug("[TOXIC] {} in cooloff (resume in {}ms)",
 tc.code, _toxicity_resume_time - tc.timestamp);
 }
+}
+
+//==========================================================================
+// 3.15 涨跌停保护 (P0-2)
+//   L1: 距涨跌停 <= 20 ticks → 加宽 spread 2x
+//   L2: 距涨跌停 <= 10 ticks → block 加仓侧(义务报价由 validatePrice 判断)
+//   L3: 锁板(mid ≈ 涨跌停) → 双边暂停
+//==========================================================================
+if (tc.upper_limit > 0 && tc.lower_limit > 0 && tc.tick_size > 0) {
+    double dist_upper = (tc.upper_limit - tc.mid) / tc.tick_size;
+    double dist_lower = (tc.mid - tc.lower_limit) / tc.tick_size;
+
+    // L1: 距涨跌停 <= 20 ticks, 加宽 spread
+    if (dist_upper <= 20.0 || dist_lower <= 20.0) {
+        spread_mult *= 2.0;
+    }
+
+    // L2: 距涨停 <= 10 ticks → block 买单(避免吃到涨停)
+    if (dist_upper <= 10.0) {
+        allow_bid = false;
+        WTSLogger::warn("[LIMIT] {} near UPPER ({} ticks), block bid", tc.code, (int)dist_upper);
+    }
+    // L2: 距跌停 <= 10 ticks → block 卖单
+    if (dist_lower <= 10.0) {
+        allow_ask = false;
+        WTSLogger::warn("[LIMIT] {} near LOWER ({} ticks), block ask", tc.code, (int)dist_lower);
+    }
+
+    // L3: 锁板 → 双边暂停
+    if (dist_upper <= 0.5 || dist_lower <= 0.5) {
+        allow_bid = false;
+        allow_ask = false;
+        WTSLogger::error("[LIMIT] {} LOCKED at limit, PAUSE all quotes", tc.code);
+    }
 }
 
 //==========================================================================

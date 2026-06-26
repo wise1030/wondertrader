@@ -104,6 +104,21 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
     updateDailyPnL(code);
 }
 
+void FutuPortfolio::addRealizedPnl(const std::string& code, double pnl)
+{
+    ContractState* cs = getContract(code);
+    if (!cs) return;
+    cs->realized_pnl += pnl;
+    cs->daily_pnl = cs->unrealized_pnl + cs->realized_pnl;
+}
+
+void FutuPortfolio::setReferencePrice(const std::string& code, double refPrice)
+{
+    ContractState* cs = getContract(code);
+    if (!cs || refPrice <= 0) return;
+    cs->avg_cost = refPrice;
+}
+
 void FutuPortfolio::updateDailyPnL(const std::string& code)
 {
     ContractState* cs = getContract(code);

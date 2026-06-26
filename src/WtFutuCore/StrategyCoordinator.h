@@ -57,11 +57,14 @@ struct TickContext
     bool toxicity_paused;
     bool risk_halted;
     double tick_size;
-    
+    double upper_limit;     ///< P0-2: 涨停价
+    double lower_limit;     ///< P0-2: 跌停价
+
     TickContext()
         : bid_px(0), ask_px(0), mid(0), timestamp(0), time_hms(0), date(0)
         , is_trading_session(false), market_state_paused(false)
-        , toxicity_paused(false), risk_halted(false), tick_size(0) {}
+        , toxicity_paused(false), risk_halted(false), tick_size(0)
+        , upper_limit(0), lower_limit(0) {}
 };
 
 /// Processing result

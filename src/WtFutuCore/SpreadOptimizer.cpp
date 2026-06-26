@@ -192,7 +192,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     // 10. Debug Log
     //==========================================================================
     WTSLogger::debug("[QUOTE] {} mid={:.2f} | alpha={:.4f}(conf={:.2f},adj={:.2f}) | "
-                     "skew={:.2f}(delta={:.2f}) | "
+                     "skew={:.2f}(d_skew={:.2f}) | "
                      "spread={:.2f}(mult={:.2f}) | bid={:.2f} ask={:.2f}",
                      _code, midPrice,
                      alpha, confidence, result.alpha_adjustment,
