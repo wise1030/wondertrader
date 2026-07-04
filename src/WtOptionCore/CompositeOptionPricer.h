@@ -321,6 +321,18 @@ public:
     void triggerOnFill(const OrderStubPtr& order, double fill_px, uint32_t fill_qty) {
         onFill(order, fill_px, fill_qty);
     }
+
+    // P11: Periodic VolCurve fit (called from on_timer)
+    void triggerPeriodicFit() {
+        double now = getTime();
+        if (now - m_lastFitTime >= m_fitInterval) {
+            m_lastFitTime = now;
+            // Trigger SLOW compute which includes fit
+            m_bReprice = true;
+        }
+    }
+    void setFitInterval(double seconds) { m_fitInterval = seconds; }
+
 private:
     void onFitCompleted(const PeriodicCurveFitter& fitter);
 
@@ -359,7 +371,10 @@ private:
     OptionGreeksCPtr m_spPositionGreeks;
     OptionPricer2Ptr m_spOptionPricer2;
 
-    bool   m_bReprice = true;
+    bool m_bReprice = true;
+    // P11: Periodic fit scheduling (replaces PeriodicCurveFitter)
+    double m_lastFitTime = 0;
+    double m_fitInterval = 60.0;  // seconds (default 1 min, matching quantbox)
     double m_refPrice = 0;
     double m_tvLastCompute = 0;
     double m_tvLastSlowCompute = 0;

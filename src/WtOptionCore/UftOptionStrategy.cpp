@@ -71,9 +71,72 @@ bool UftOptionStrategy::init(WTSVariant* cfg)
     _sticky_base       = cfg->has("sticky_base") ? cfg->getDouble("sticky_base") : 0.5;
     _improve_retreat   = cfg->has("improve_retreat_ratio") ? cfg->getDouble("improve_retreat_ratio") : 3.0;
 
+    // P11: Read pricer config as nested section (no flat member variables)
+    WTSVariant* pricerCfg = cfg->get("pricer");
+    if (!pricerCfg) pricerCfg = cfg;  // backward compat: flat config
+
+    // P11: Read OQM configs
+    WTSVariant* omCfg = cfg->get("orderManager");
+    wt_option::OptionQuoteManager::Config optionOqmCfg;
+    wt_option::OptionQuoteManager::Config futureOqmCfg;
+    if (omCfg) {
+        WTSVariant* optOm = omCfg->get("option");
+        if (optOm) {
+            optionOqmCfg.max_side_orders = optOm->has("max_side_orders") ? optOm->getUInt32("max_side_orders") : 1;
+            optionOqmCfg.max_position = optOm->has("max_position") ? optOm->getUInt32("max_position") : 50;
+            optionOqmCfg.time_in_force_ms = optOm->has("time_in_force_ms") ? optOm->getDouble("time_in_force_ms") : 45000;
+            optionOqmCfg.enable_quote_api = optOm->has("enable_quote_api") ? optOm->getBoolean("enable_quote_api") : true;
+            optionOqmCfg.avoid_trade = optOm->has("avoid_trade") ? optOm->getBoolean("avoid_trade") : false;
+            optionOqmCfg.check_potential_position = optOm->has("check_potential_position") ? optOm->getBoolean("check_potential_position") : false;
+            optionOqmCfg.leave_outer_orders = optOm->has("leave_outer_orders") ? optOm->getBoolean("leave_outer_orders") : true;
+            optionOqmCfg.max_cancels_allowed = optOm->has("max_cancels_allowed") ? optOm->getInt32("max_cancels_allowed") : 0;
+            optionOqmCfg.hard_flat_after_n_fills = optOm->has("hard_flat_after_n_fills") ? optOm->getInt32("hard_flat_after_n_fills") : 0;
+        }
+        WTSVariant* futOm = omCfg->get("future");
+        if (futOm) {
+            futureOqmCfg.max_side_orders = futOm->has("max_side_orders") ? futOm->getUInt32("max_side_orders") : 1;
+            futureOqmCfg.max_position = futOm->has("max_position") ? futOm->getUInt32("max_position") : 10;
+            futureOqmCfg.time_in_force_ms = futOm->has("time_in_force_ms") ? futOm->getDouble("time_in_force_ms") : 45000;
+            futureOqmCfg.enable_quote_api = futOm->has("enable_quote_api") ? futOm->getBoolean("enable_quote_api") : true;
+            futureOqmCfg.check_potential_position = futOm->has("check_potential_position") ? futOm->getBoolean("check_potential_position") : true;
+            futureOqmCfg.avoid_trade = futOm->has("avoid_trade") ? futOm->getBoolean("avoid_trade") : false;
+        }
+    }
+    _optionOqmCfg = optionOqmCfg;
+    _futureOqmCfg = futureOqmCfg;
+    _pricerType = cfg->has("pricerType") ? cfg->getCString("pricerType") : "composite_mm";
+
+    // P11: Save config pointer for setupPricer
+    cfgPtr_ = cfg;
+
     // Defaults if not in config
     if (_riskFreeRate == 0.0) _riskFreeRate = 0.03;
     if (_maxTPS == 0) _maxTPS = 50;
+
+    // P10: Read expiry configs (from pricer sub-section if layered, else top-level)
+    WTSVariant* pricerSec = cfg->get("pricer");
+    WTSVariant* expCfg = pricerSec ? pricerSec->get("expiries") : cfg->get("expiries");
+    if (expCfg && expCfg->isArray()) {
+        for (uint32_t i = 0; i < expCfg->size(); i++) {
+            WTSVariant* e = expCfg->get(i);
+            uint32_t expiry = static_cast<uint32_t>(e->getUInt32("expiry"));
+            if (expiry == 0) continue;
+            _expiryConfigs[expiry] = {
+                e->getBoolean("enable"),
+                e->has("delta_min") ? e->getDouble("delta_min") : 0.05,
+                e->has("delta_max") ? e->getDouble("delta_max") : 0.95,
+                e->has("sprd_fwd") ? e->getDouble("sprd_fwd") : 0.01,
+                e->has("sprd_atmvol") ? e->getDouble("sprd_atmvol") : 0.1,
+                e->has("sprd_corr") ? e->getDouble("sprd_corr") : 0.0,
+                e->has("max_pos_fut") ? static_cast<int32_t>(e->getInt32("max_pos_fut")) : 1,
+                e->has("max_pos_stk") ? static_cast<int32_t>(e->getInt32("max_pos_stk")) : 50,
+                e->has("max_pos_opt") ? static_cast<int32_t>(e->getInt32("max_pos_opt")) : 50,
+                e->has("max_qsize") ? static_cast<int32_t>(e->getInt32("max_qsize")) : 5,
+                e->getBoolean("enable_auto_close"),
+                e->has("close_pos_thresh") ? e->getDouble("close_pos_thresh") : 0
+            };
+        }
+    }
 
     // Read option contract list for subscription
     WTSVariant* optCfg = cfg->get("optionContracts");
@@ -128,10 +191,19 @@ void UftOptionStrategy::on_init(IUftStraCtx* ctx)
     _async->start();
     _initialized = true;
 
-    // Inject ctx into all OptionQuoteManagers created by OTG
-    // (OTG creates OQM with nullptr ctx on first tick; we inject here)
-    // This will be called on every on_init, but only matters the first time.
-    // The actual injection happens in on_tick when OTD is created.
+    // P10: Register hot-update params via sync_param (实盘生效, 回测返回nullptr)
+    _hot.wgt_vegaflow      = _ctx->sync_param("wgt_vegaflow", _wgt_vegaflow);
+    _hot.wgt_frontfut_skew = _ctx->sync_param("wgt_frontfut_skew", _wgt_frontfut_skew);
+    _hot.wgt_deltaflow     = _ctx->sync_param("wgt_deltaflow", _wgt_deltaflow);
+    _hot.wgt_atmsig        = _ctx->sync_param("wgt_atmsig", _wgt_atmsig);
+    _hot.wgt_rollema       = _ctx->sync_param("wgt_rollema", _wgt_rollema);
+    _hot.sticky_base       = _ctx->sync_param("sticky_base", _sticky_base);
+    _hot.improve_retreat_ratio = _ctx->sync_param("improve_retreat_ratio", _improve_retreat);
+    _hot.trade_shock_ticks = _ctx->sync_param("trade_shock_ticks", 1.0);
+    _hot.max_tps           = _ctx->sync_param("max_tps", _maxTPS);
+    _hot.command           = _ctx->sync_param("command", 0);
+    _hot.qmode_override    = _ctx->sync_param("qmode_override", 0);
+    _ctx->commit_param_watcher();
 
     // Subscribe to underlying ticks
     if (!_underlyingCode.empty()) {
@@ -237,31 +309,58 @@ void UftOptionStrategy::setupPricer()
         return executeCancel(code);
     });
     _grid->addListener(_otg.get());  // OTG receives onAddOption/onAddExpiry
-    _otg->setUftCtx(_ctx);            // OTG creates OQM with real ctx
+    _otg->setUftCtx(_ctx);
+    _otg->setOptionOQMConfig(_optionOqmCfg);
+    _otg->setFutureOQMConfig(_futureOqmCfg);
 
-    // Create OptionPricer2 (theoretical pricing)
+    // Create pricer based on config (P11: pluggable pricer strategy)
+    // pricerType is a strategy-level decision
     wt_option::OptionPricer2Config p2cfg;
     auto pricer2 = std::make_shared<wt_option::OptionPricer2>(p2cfg, _grid.get(), _risk.get());
 
-    // Create CompositeOptionPricer (market making pricing)
+    // P11: Read pricer config from nested section (no member variable transit)
+    WTSVariant* pCfg = cfgPtr_->get("pricer");
+    if (!pCfg) pCfg = cfgPtr_;  // backward compat
+
     wt_option::CompositeOptionPricerConfig copCfg;
-    // Phase 6: alpha weights from config (stored in init)
-    copCfg.wgt_vegaflow      = _wgt_vegaflow;
-    copCfg.wgt_frontfut_skew = _wgt_frontfut_skew;
-    copCfg.wgt_deltaflow     = _wgt_deltaflow;
-    copCfg.wgt_atmsig        = _wgt_atmsig;
-    copCfg.wgt_rollema       = _wgt_rollema;
-    copCfg.sticky_base       = _sticky_base;
-    copCfg.improve_retreat_ratio = _improve_retreat;
+    // alpha weights
+    copCfg.wgt_vegaflow      = pCfg->has("wgt_vegaflow") ? pCfg->getDouble("wgt_vegaflow") :
+        (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_vegaflow") : 0.0);
+    copCfg.wgt_frontfut_skew = pCfg->has("wgt_frontfut_skew") ? pCfg->getDouble("wgt_frontfut_skew") :
+        (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_frontfut_skew") : 0.0);
+    copCfg.wgt_deltaflow     = pCfg->has("wgt_deltaflow") ? pCfg->getDouble("wgt_deltaflow") :
+        (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_deltaflow") : 0.0);
+    copCfg.wgt_atmsig        = pCfg->has("wgt_atmsig") ? pCfg->getDouble("wgt_atmsig") :
+        (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_atmsig") : 0.0);
+    copCfg.wgt_rollema       = pCfg->has("wgt_rollema") ? pCfg->getDouble("wgt_rollema") :
+        (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_rollema") : 0.0);
+    copCfg.sticky_base       = pCfg->has("sticky_base") ? pCfg->getDouble("sticky_base") :
+        (pCfg->has("quoting") ? pCfg->get("quoting")->getDouble("sticky_base") : 0.5);
+    copCfg.improve_retreat_ratio = pCfg->has("improve_retreat_ratio") ? pCfg->getDouble("improve_retreat_ratio") :
+        (pCfg->has("quoting") ? pCfg->get("quoting")->getDouble("improve_retreat_ratio") : 3.0);
+
+    // P11: Vol curve config (read from pricer.blackCalc.volCurve)
+    double fitInterval = 60.0;
+    WTSVariant* bcCfg = pCfg->get("blackCalc");
+    if (bcCfg) {
+        WTSVariant* vcCfg = bcCfg->get("volCurve");
+        if (vcCfg) {
+            fitInterval = vcCfg->has("fitter") && vcCfg->get("fitter")->has("period")
+                ? vcCfg->get("fitter")->getDouble("period") : 60.0;
+        }
+    }
 
     _pricer = std::make_shared<wt_option::CompositeOptionPricer>(copCfg, _grid.get(), _risk.get());
     _pricer->setBlackPricer(pricer2);
+    _pricer->setFitInterval(fitInterval);
 
-    // Configure expiry risk: enable quoting for all expiries
-    _pricer->enableExpiry(202608, 0.0, 1.0);
-    _pricer->enableExpiry(202610, 0.0, 1.0);
-    _pricer->setMaxPosQty(202608, 5, 50, 50);
-    _pricer->setMaxPosQty(202610, 5, 50, 50);
+    // P10: Configure expiry risk from _expiryConfigs (no hardcoded months)
+    for (const auto& [exp, ec] : _expiryConfigs) {
+        if (ec.enable) {
+            _pricer->enableExpiry(exp, ec.delta_min, ec.delta_max);
+            _pricer->setMaxPosQty(exp, ec.max_qsize, ec.max_pos_stk, ec.max_pos_opt);
+        }
+    }
 
     _grid->setOptionPricer(_pricer);
     _grid->addListener(_pricer.get());
@@ -327,10 +426,11 @@ void UftOptionStrategy::setupAsyncCallbacks()
         }
     };
 
-    // Batch start: set pricer time
+    // Batch start: set pricer time (use stra_get_time for FAST/SLOW scheduling)
     cbs.on_tick_batch = [this]() {
-        if (_pricer) {
-            double timeSec = TimeUtils::getLocalTimeNow() / 1000000.0;
+        if (_pricer && _ctx) {
+            // Use stra_get_time for correct FAST/SLOW scheduling in both backtest and live
+            double timeSec = static_cast<double>(_ctx->stra_get_time()) / 1000.0;
             _pricer->setTime(timeSec);
         }
     };
@@ -405,7 +505,12 @@ void UftOptionStrategy::setupAsyncCallbacks()
 
     // Timer callback — trigger SLOW compute
     cbs.on_timer = [this](uint32_t curDate, uint32_t curTime) {
-        // SLOW compute handled by batch_complete + pricer's FAST/SLOW scheduling
+        // P11: Periodic VolCurve fit — triggered by framework timer
+        // quantbox uses PeriodicCurveFitter with configurable period (default 1 min)
+        // In WT, on_timer is called every second by the framework
+        if (_pricer && _grid && _traderCtx && _traderCtx->enabled) {
+            _pricer->triggerPeriodicFit();
+        }
     };
 
     // Session callback
@@ -414,6 +519,8 @@ void UftOptionStrategy::setupAsyncCallbacks()
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "UftOptionStrategy session begin: {}", tdate);
             if (_traderCtx) _traderCtx->enabled = _channelReady;
+            // Set current date from session (not from tick callback)
+            if (_grid) _grid->setCurrentDate(tdate);
         } else {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "UftOptionStrategy session end: {}", tdate);
@@ -556,4 +663,76 @@ int32_t UftOptionStrategy::executeCancel(const std::string& code)
 
     auto ids = _ctx->stra_cancel_all(code.c_str());
     return static_cast<int32_t>(ids.size());
+}
+
+// ============================================================================
+// on_params_updated — P10: hot-update callback (实盘模式, 回测不触发)
+// ============================================================================
+void UftOptionStrategy::on_params_updated()
+{
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "UftOptionStrategy[{}] === PARAMS HOT UPDATE ===", id());
+
+    // 1. Read hot values into pricer config
+    if (_pricer) {
+        // Alpha weights — read from sync_param pointers (实时值)
+        // Note: pricer reads config values, we update via direct member access
+        // For runtime changes, pricer should read from hot pointers each cycle
+        // Currently pricer uses copCfg snapshot — for hot update we'd need
+        // to either (a) re-construct pricer (heavy) or (b) add setters
+        // For now, log the change; full implementation needs pricer setters
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "  wgt_vegaflow: {} → {}", _wgt_vegaflow,
+            hotVal(_hot.wgt_vegaflow, _wgt_vegaflow));
+    }
+
+    // 2. Update TPS
+    int32_t newTps = hotVal(_hot.max_tps, _maxTPS);
+    if (newTps != _maxTPS && _ctg) {
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "  maxTPS: {} → {}", _maxTPS, newTps);
+        _maxTPS = newTps;
+        _ctg->setMaxTransactionsPerSec(_maxTPS);
+    }
+
+    // 3. Runtime control via command param
+    int32_t cmd = hotVal(_hot.command, 0);
+    if (cmd != 0) {
+        switch (cmd) {
+            case 1: // Stop trading
+                if (_traderCtx) _traderCtx->enabled = false;
+                WTSLogger::log_by_cat("strategy", LL_WARN, "  CMD: trading STOPPED");
+                break;
+            case 2: // Panic
+                if (_traderCtx) {
+                    _traderCtx->panicked = true;
+                    _traderCtx->enabled = false;
+                }
+                WTSLogger::log_by_cat("strategy", LL_ERROR, "  CMD: PANIC");
+                break;
+            case 3: // Resume
+                if (_traderCtx) {
+                    _traderCtx->panicked = false;
+                    _traderCtx->enabled = _channelReady;
+                }
+                WTSLogger::log_by_cat("strategy", LL_INFO, "  CMD: RESUME");
+                break;
+        }
+        // Reset command
+        if (_hot.command) *_hot.command = 0;
+    }
+
+    // 4. QuoteMode override
+    int32_t qmode = hotVal(_hot.qmode_override, 0);
+    if (qmode != 0 && _otg && _ctg) {
+        std::string modeStr = (qmode == 1) ? "on" : (qmode == -1) ? "off" : "close";
+        // Apply to all options
+        for (const auto& od : _grid->getAllOptions()) {
+            if (od && od->getTradingData()) {
+                _ctg->onSetQMode(od->getCode(), modeStr);
+            }
+        }
+        // Reset override
+        if (_hot.qmode_override) *_hot.qmode_override = 0;
+    }
 }

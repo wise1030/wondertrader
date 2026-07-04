@@ -27,6 +27,7 @@
 #include "ExpiryTradingData.h"
 #include "IOptionGridListener.h"
 #include "IOptionPricer.h"
+#include "OptionQuoteManager.h"
 
 // Forward declaration — IUftStraCtx defined in WT Includes
 namespace wtp { class IUftStraCtx; }
@@ -65,6 +66,10 @@ public:
     void setExchange(const std::string& exchg)  { m_exchange = exchg; }
     void setUftCtx(wtp::IUftStraCtx* ctx)            { m_uftCtx = ctx; }
 
+    // P11: Per-instrument-type OQM config (option vs future)
+    void setOptionOQMConfig(const OptionQuoteManager::Config& cfg) { m_optionOqmCfg = cfg; }
+    void setFutureOQMConfig(const OptionQuoteManager::Config& cfg) { m_futureOqmCfg = cfg; }
+
     // --- OptionRisk ---
     const OptionRiskPtr& getPositionRisk() const { return m_spPositionRisk; }
     void setPositionRisk(OptionRiskPtr risk) { m_spPositionRisk = std::move(risk); }
@@ -100,6 +105,9 @@ private:
     CancelExecutor m_cancelExec;
     std::string    m_exchange;
     wtp::IUftStraCtx*   m_uftCtx = nullptr;
+    // P11: Per-instrument-type OQM config
+    OptionQuoteManager::Config m_optionOqmCfg;
+    OptionQuoteManager::Config m_futureOqmCfg;
 
     // Trading object tables
     typedef std::map<std::string, UnderlyingTradingDataPtr> UnderlyingTable;

@@ -125,6 +125,10 @@ public:
     void setHolidays(std::set<uint32_t> h) { m_holidays = std::move(h); }
     size_t numHolidays() const { return m_holidays.size(); }
 
+    // P10: Current trading date (set by strategy from stra_get_date)
+    void setCurrentDate(uint32_t d) { m_currentDate = d; }
+    uint32_t getCurrentDate() const { return m_currentDate; }
+
 private:
     OptionDataPtr __createOption(const std::string& stdCode);
     StrikeDataPtr __findOrCreateStrike(uint32_t expiry, strike_t strike);
@@ -147,6 +151,7 @@ private:
     std::vector<OptionDataPtr> m_allOptions;
     std::vector<StrikeDataPtr> m_allStrikes;
     std::set<uint32_t> m_holidays;  // holiday calendar from holidays.json
+    uint32_t m_currentDate = 0;  // P10: current trading date
     std::unordered_map<std::string, OptionDataPtr> m_optionsByCode;
     ExpiryTable m_expiries;
 

@@ -68,23 +68,43 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
     if (!bid.empty()) potentialPos += static_cast<int32_t>(bid.sz());
     if (!ask.empty()) potentialPos -= static_cast<int32_t>(ask.sz());
 
-    if (std::abs(potentialPos) > static_cast<int32_t>(m_cfg.max_position)) {
+    if (m_cfg.check_potential_position && std::abs(potentialPos) > static_cast<int32_t>(m_cfg.max_position)) {
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "OQM: {} potential position {} > max {}", m_code, potentialPos, m_cfg.max_position);
-        // Only cancel, don't send new
         cancelSide(true);
         cancelSide(false);
         return 0;
     }
 
-    // Cancel old orders before sending new
-    if (m_cfg.enable_quote_api) {
-        // SHFE/CZCE/INE: stra_quote replaces previous quote automatically
-        // No explicit cancel needed — just send new quote
+    // Hard flat after N fills
+    if (m_cfg.hard_flat_after_n_fills > 0 && m_numFill >= m_cfg.hard_flat_after_n_fills) {
+        if (!m_hardFlatMode) {
+            m_hardFlatMode = true;
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "OQM: {} HARD FLAT triggered (fills={})", m_code, m_numFill);
+        }
+    }
+
+    // Reject after N new orders
+    if (m_cfg.reject_max_new_orders >= 0 && m_numNewOrders >= m_cfg.reject_max_new_orders) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "OQM: {} order rejected (newOrders={})", m_code, m_numNewOrders);
+        return 0;
+    }
+
+    // Cancel limit check
+    if (m_cfg.max_cancels_allowed > 0 && m_numCancel >= m_cfg.max_cancels_allowed) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "OQM: {} cancel limit reached ({})", m_code, m_numCancel);
+        // Don't cancel, just update if possible
     } else {
-        // DCE/CFFEX: must cancel before resending
-        cancelSide(true);
-        cancelSide(false);
+        // Cancel old orders before sending new
+        if (m_cfg.enable_quote_api && m_bidOrders.empty() && m_askOrders.empty()) {
+            // SHFE/CZCE/INE: stra_quote replaces previous automatically
+        } else {
+            cancelSide(true);
+            cancelSide(false);
+        }
     }
 
     // Send new orders
@@ -98,21 +118,23 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
             if (ids.first != 0) {
                 m_bidOrders.push_back({ids.first, true, bid.px(),
                     static_cast<uint32_t>(bid.sz()), 0, true, false, now});
+                m_numNewOrders++;
             }
             if (ids.second != 0) {
                 m_askOrders.push_back({ids.second, false, ask.px(),
                     static_cast<uint32_t>(ask.sz()), 0, true, false, now});
+                m_numNewOrders++;
             }
             txns++;
         }
     } else if (!bid.empty() && bid.sz() > 0) {
-        // Buy only (limit order)
-        // Use stra_quote with ask=0 for single-side quote
+        // Buy only (limit order or single-side quote)
         auto ids = sendQuote(bid.px(), static_cast<uint32_t>(bid.sz()), 0, 0);
         if (ids.first != 0) {
             double now = m_getTime ? m_getTime() : 0;
             m_bidOrders.push_back({ids.first, true, bid.px(),
                 static_cast<uint32_t>(bid.sz()), 0, true, false, now});
+            m_numNewOrders++;
             txns++;
         }
     } else if (!ask.empty() && ask.sz() > 0) {
@@ -122,6 +144,7 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
             double now = m_getTime ? m_getTime() : 0;
             m_askOrders.push_back({ids.second, false, ask.px(),
                 static_cast<uint32_t>(ask.sz()), 0, true, false, now});
+            m_numNewOrders++;
             txns++;
         }
     } else {

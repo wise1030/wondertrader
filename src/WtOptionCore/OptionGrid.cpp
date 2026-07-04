@@ -108,7 +108,8 @@ void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick
         if (ci && ci->getExpireDate() > 0) {
             auto ed = od->getExpiryData();
             if (ed) {
-                uint32_t curDate = 20260703; // TODO: from stra_get_date()
+                uint32_t curDate = m_currentDate;
+                if (curDate == 0) return;  // not yet initialized
                 ed->updateDaysToExpiration(curDate, ci->getExpireDate());
             }
         }
@@ -294,7 +295,11 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
     // In backtest: m_bdMgr is null, approximate from expiry YYYYMM → YYYYMM15
     uint32_t approxExpDate = (expiry / 100) * 10000 + (expiry % 100) * 100 + 15;
     // TODO: currentDate from WT session, expireDate from contracts.json via IBaseDataMgr
-    ed->updateDaysToExpiration(20260703, approxExpDate);
+    if (m_currentDate == 0) {
+        // Not yet initialized — will be set by strategy on first batch
+    } else {
+        ed->updateDaysToExpiration(m_currentDate, approxExpDate);
+    }
 
     m_expiries[expiry] = ed;
     __notifyAddExpiry(ed);

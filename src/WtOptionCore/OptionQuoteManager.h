@@ -33,13 +33,26 @@ namespace wt_option {
 class OptionQuoteManager {
 public:
     struct Config {
-        uint32_t max_orders = 1;          // max orders per side
-        uint32_t max_position = 50;       // max position
-        double time_in_force_ms = 45000;  // order TTL (0=never expire)
-        bool enable_quote_api = true;     // use stra_quote (SHFE/CZCE/INE), else limit orders
-        bool avoid_trade = false;         // don't update if desired==current
+        // --- 基础报单参数 ---
+        uint32_t max_side_orders = 1;      // max orders per side (multi-level)
+        uint32_t max_position = 50;        // max position (absolute)
+        double time_in_force_ms = 45000;   // order TTL (0=never expire)
+        bool enable_quote_api = true;      // use stra_quote (single level), else stra_buy/sell
+        bool avoid_trade = false;          // skip update if desired==current
         std::string exchange = "SHFE";
         double tick_size = 0.5;
+
+        // --- DefaultOM 功能补齐 ---
+        bool check_potential_position = false;  // pre-trade position check
+        bool leave_outer_orders = true;         // keep outer orders when updating
+        bool wait_for_cancels = false;          // wait for cancel confirm before resending
+        double order_delay_ms = 0;              // delay orders (testing)
+
+        // --- 撤单限制 ---
+        int32_t max_cancels_allowed = 0;        // hard cancel limit (0=unlimited)
+        int32_t cancel_soft_max = 0;            // soft cancel limit (warn)
+        int32_t hard_flat_after_n_fills = 0;    // force flat after N fills (0=disabled)
+        int32_t reject_max_new_orders = -1;     // reject after N new orders (-1=disabled)
     };
 
     using GetTimeFn = std::function<double()>;
@@ -64,12 +77,14 @@ public:
     bool isActive() const { return m_active; }
     void setActive(bool b) { m_active = b; }
 
-    // --- Queries ---
+    //--- Queries ---
     const MultiMarket& getCurrentMarket() const { return m_orderMarketTracker; }
     const MultiMarket& getLastDesired() const { return m_lastDesired; }
     int32_t getNumCancel() const { return m_numCancel; }
     int32_t getNumReject() const { return m_numReject; }
     int32_t getNumFill() const { return m_numFill; }
+    int32_t getNumNewOrders() const { return m_numNewOrders; }
+    bool isHardFlatMode() const { return m_hardFlatMode; }
     const std::string& getCode() const { return m_code; }
 
     void setGetTimeFn(GetTimeFn fn) { m_getTime = std::move(fn); }
@@ -110,6 +125,8 @@ private:
     int32_t m_numCancel = 0;
     int32_t m_numReject = 0;
     int32_t m_numFill = 0;
+    int32_t m_numNewOrders = 0;
+    bool m_hardFlatMode = false;
 
     std::vector<OrderState> m_bidOrders;
     std::vector<OrderState> m_askOrders;

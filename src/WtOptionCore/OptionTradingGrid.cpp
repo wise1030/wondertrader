@@ -66,16 +66,9 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     getExpiryTradingData(od->getExpiry());
 
     // 4b. Create per-contract OptionQuoteManager (Phase 2)
-    // The OQM holds a raw pointer to IUftStraCtx, which is valid for the
-    // strategy's lifetime. For backtest (UftMocker), the same applies.
-    // Note: m_ctx is not available in OTG; OQM will get ctx set later by strategy
-    // For now, create OQM with nullptr ctx; strategy will set it via on_init
-    OptionQuoteManager::Config omCfg;
+    OptionQuoteManager::Config omCfg = m_optionOqmCfg;
     omCfg.exchange = m_exchange;
     omCfg.tick_size = od->getTickSize();
-    omCfg.enable_quote_api = (m_exchange == "SHFE" || m_exchange == "CZCE" || m_exchange == "INE");
-    omCfg.max_position = 50;
-    // ctx will be injected by strategy
     auto om = std::make_shared<OptionQuoteManager>(code, omCfg, m_uftCtx);
     otd->setQuoteManager(om);
 
