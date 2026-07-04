@@ -1,386 +1,505 @@
 /*!
  * \file OptionGrid.cpp
- * \brief Option grid implementation
+ * \brief 3-level option grid implementation (migrated from quantbox)
  */
-
 #include "OptionGrid.h"
-#include "BlackScholes.h"
-#include <algorithm>
+#include "IOptionPricer.h"
+#include "IOptionGridListener.h"
+
+// WT headers — include standard FIRST to avoid namespace pollution
+#include <cstring>
 #include <cmath>
-#include <mutex>
-#include <shared_mutex>
+#include <algorithm>
+
+#include "../Includes/WTSDataDef.hpp"
+#include "../Includes/IBaseDataMgr.h"
+#include "../Includes/WTSContractInfo.hpp"
+#include "../Includes/WTSStruct.h"
+#include "../Share/CodeHelper.hpp"
+#include "../WTSTools/WTSLogger.h"
+#include "../Share/fmtlib.h"
 
 namespace wt_option {
 
-//=============================================================================
-// OptionGrid implementation
-//=============================================================================
+// Right mapping: OptionRight(OR_Call=0, OR_Put=1) → StrikeData Right(RT_CALL, RT_PUT)
+// StrikeData uses get(Right) / call() / put() — we'll use those directly
 
-OptionGrid::OptionGrid(const std::string& underlyingCode)
-    : m_underlyingCode(underlyingCode)
-    , m_underlyingPrice(0)
-    , m_currentDate(0)
+OptionGrid::OptionGrid(const std::string& optionProduct,
+                       const std::string& underlyingCode,
+                       wtp::IBaseDataMgr* bdMgr,
+                       wtp::WTSSessionInfo* sessInfo)
+    : m_optionProduct(optionProduct)
+    , m_underlyingCode(underlyingCode)
+    , m_bdMgr(bdMgr)
+    , m_sessInfo(sessInfo)
 {
+    auto pos = underlyingCode.find('.');
+    if (pos != std::string::npos)
+        m_exchange = underlyingCode.substr(0, pos);
+
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OptionGrid created: product={} underlying={}", optionProduct, underlyingCode);
+}
+
+OptionGrid::~OptionGrid() {}
+
+// ============================================================================
+// Underlying price
+// ============================================================================
+double OptionGrid::getUnderlyingPrice() const {
+    std::shared_lock<std::shared_mutex> lock(m_priceMutex);
+    return m_underlyingPrice;
 }
 
 void OptionGrid::setUnderlyingPrice(double price) {
-    if (price > 0 && price != m_underlyingPrice) {
-        {
-            std::unique_lock<std::shared_mutex> lock(m_mutex);
-            m_underlyingPrice = price;
-        }
-        if (m_pricer) {
-            m_pricer->onUnderlyingPriceChanged(price);
-        }
+    std::unique_lock<std::shared_mutex> lock(m_priceMutex);
+    m_underlyingPrice = price;
+}
+
+void OptionGrid::onUnderlyingTick(double price) {
+    setUnderlyingPrice(price);
+    if (m_optionPricer && price > 0) {
+        computeValues(m_optionPricer.get());
     }
 }
 
-void OptionGrid::onTick(const std::string& code, double price, double bid, double ask, int32_t bidQty, int32_t askQty) {
-    // 1. Check Underlying
-    if (code == m_underlyingCode) {
-        setUnderlyingPrice(price);
+// ============================================================================
+// onTick — tick-driven contract discovery + market update
+// ============================================================================
+void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick) {
+    if (!tick) return;
+
+    // Underlying tick?
+    if (stdCode == m_underlyingCode) {
+        onUnderlyingTick(tick->price());
         return;
     }
-    
-    // 2. Check Option
-    OptionDataPtr option = nullptr;
+
+    // Option tick?
+    if (!CodeHelper::isStdChnFutOptCode(stdCode.c_str()))
+        return;
+
+    // Build market snapshot from tick
+    OptionMarket mkt;
+    mkt.bid = tick->bidprice(0);
+    mkt.ask = tick->askprice(0);
+    mkt.last = tick->price();
+    mkt.bidSize = tick->bidqty(0);
+    mkt.askSize = tick->askqty(0);
+    mkt.underlyingPrice = getUnderlyingPrice();
+
+    // Dynamic discovery: create if not exists
     {
-        std::shared_lock<std::shared_mutex> lock(m_mutex);
-        auto it = m_optionsByCode.find(code);
+        std::shared_lock<std::shared_mutex> rlock(m_gridMutex);
+        auto it = m_optionsByCode.find(stdCode);
         if (it != m_optionsByCode.end()) {
-            option = it->second;
+            it->second->updateMarket(mkt);
+            return;
         }
     }
 
-    if (option) {
-            OptionMarket market;
-            market.bid = bid;
-            market.ask = ask;
-            market.last = price;
-            market.bidSize = bidQty;
-            market.askSize = askQty;
-            market.underlyingPrice = m_underlyingPrice;
-            // Note: time should ideally be passed in, but for now we assume it's updated elsewhere or uses system time?
-            // Existing WtOptionStrategy passed 'time'. OptionGrid::onTick excludes time?
-            // Let's rely on option->updateMarket to update what it can.
-            
-            option->updateMarket(market);
+    // Create new option
+    OptionDataPtr od = createOption(stdCode);
+    if (od) {
+        od->updateMarket(mkt);
+
+        // Update ExpiryData with exact expiredate from contract info
+        auto* ci = tick->getContractInfo();
+        if (ci && ci->getExpireDate() > 0) {
+            auto ed = od->getExpiryData();
+            if (ed) {
+                uint32_t curDate = 20260703; // TODO: from stra_get_date()
+                ed->updateDaysToExpiration(curDate, ci->getExpireDate());
+            }
         }
-}
-
-void OptionGrid::setBaseDataMgr(wtp::IBaseDataMgr* bdMgr) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    m_bdMgr = bdMgr;
-    // Propagate to all existing expiries
-    for (auto& pair : m_expiries) {
-        pair.second->setBaseDataMgr(bdMgr);
     }
 }
 
-void OptionGrid::setProductId(const std::string& stdPID) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    m_stdPID = stdPID;
-    // Propagate to all existing expiries
-    for (auto& pair : m_expiries) {
-        pair.second->setProductId(stdPID);
+// ============================================================================
+// onTick (TickDataRef) — async path, no WTSTickData* dependency
+// ============================================================================
+void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
+    // Underlying tick?
+    if (stdCode == m_underlyingCode) {
+        onUnderlyingTick(tick.price);
+        return;
     }
-}
 
-void OptionGrid::setSessionInfo(wtp::WTSSessionInfo* sInfo) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    m_sessionInfo = sInfo;
-    // Propagate underlying's session to all expiries
-    // (option session = underlying session)
-    for (auto& pair : m_expiries) {
-        pair.second->setSessionInfo(sInfo);
-    }
-}
+    // Option tick?
+    if (!CodeHelper::isStdChnFutOptCode(stdCode.c_str()))
+        return;
 
-void OptionGrid::setCurrentDate(uint32_t date) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    m_currentDate = date;
-    m_currentTime = 0;  // Day-level only
-    for (auto& pair : m_expiries) {
-        pair.second->updateTimeToExpiry(date, 0);
-    }
-}
+    // Build market snapshot from tick
+    OptionMarket mkt;
+    mkt.bid = tick.bid;
+    mkt.ask = tick.ask;
+    mkt.last = tick.price;
+    mkt.bidSize = tick.bidQty;
+    mkt.askSize = tick.askQty;
+    mkt.underlyingPrice = getUnderlyingPrice();
 
-void OptionGrid::setCurrentDateTime(uint32_t date, uint32_t time) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    m_currentDate = date;
-    m_currentTime = time;
-    for (auto& pair : m_expiries) {
-        pair.second->updateTimeToExpiry(date, time);
-    }
-}
-
-ExpiryDataPtr OptionGrid::addExpiry(uint32_t expiryDate) {
+    // Dynamic discovery: create if not exists
     {
-        std::shared_lock<std::shared_mutex> lock(m_mutex);
-        auto it = m_expiries.find(expiryDate);
-        if (it != m_expiries.end()) {
-            return it->second;
+        std::shared_lock<std::shared_mutex> rlock(m_gridMutex);
+        auto it = m_optionsByCode.find(stdCode);
+        if (it != m_optionsByCode.end()) {
+            it->second->updateMarket(mkt);
+            return;
         }
     }
-    
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    auto expiry = std::make_shared<ExpiryData>(expiryDate, m_underlyingCode);
-    
-    // Propagate trading calendar and session information
-    if (m_bdMgr) expiry->setBaseDataMgr(m_bdMgr);
-    if (!m_stdPID.empty()) expiry->setProductId(m_stdPID);
-    if (m_sessionInfo) expiry->setSessionInfo(m_sessionInfo);
-    
-    if (m_currentDate > 0) {
-        expiry->updateTimeToExpiry(m_currentDate, m_currentTime);
-    }
-    m_expiries[expiryDate] = expiry;
-    lock.unlock(); // Unlock before notify
 
-    notifyExpiryAdded(expiry.get());
-    return expiry;
+    // Create new option
+    OptionDataPtr od = createOption(stdCode);
+    if (od) {
+        od->updateMarket(mkt);
+    }
 }
 
-ExpiryDataPtr OptionGrid::getExpiry(uint32_t expiryDate) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    auto it = m_expiries.find(expiryDate);
+// ============================================================================
+// createOption — parse stdCode → OptionData + StrikeData + ExpiryData
+// ============================================================================
+OptionDataPtr OptionGrid::createOption(const std::string& stdCode) {
+    return __createOption(stdCode);
+}
+
+OptionDataPtr OptionGrid::__createOption(const std::string& stdCode) {
+    std::unique_lock<std::shared_mutex> lock(m_gridMutex);
+
+    auto it = m_optionsByCode.find(stdCode);
+    if (it != m_optionsByCode.end())
+        return it->second;
+
+    if (!CodeHelper::isStdChnFutOptCode(stdCode.c_str())) {
+        WTSLogger::log_by_cat("strategy", LL_WARN, "OptionGrid: not option: {}", stdCode);
+        return nullptr;
+    }
+
+    // Parse: EXCHG.productMMMM.C.strike (4 parts split by '.')
+    std::vector<std::string> parts;
+    {
+        std::string s = stdCode;
+        size_t start = 0, end;
+        while ((end = s.find('.', start)) != std::string::npos) {
+            parts.push_back(s.substr(start, end - start));
+            start = end + 1;
+        }
+        parts.push_back(s.substr(start));
+    }
+    if (parts.size() < 4) return nullptr;
+
+    const std::string& exchg = parts[0];
+    const std::string& prodMonth = parts[1];
+    const std::string& rightStr = parts[2];
+    const std::string& strikeStr = parts[3];
+
+    // Extract product (alpha prefix) and month (digit suffix) from prodMonth
+    std::string product;
+    std::string monthStr;
+    for (size_t i = 0; i < prodMonth.size(); ++i) {
+        if (std::isdigit(static_cast<unsigned char>(prodMonth[i]))) {
+            product = prodMonth.substr(0, i);
+            monthStr = prodMonth.substr(i);
+            break;
+        }
+    }
+    if (product.empty()) product = prodMonth;
+
+    // Parse expiry YYYYMM (6 digits, e.g. 202610)
+    uint32_t expiry = 0;
+    if (monthStr.size() == 4) {
+        // YYMM → YYYYMM
+        uint32_t yy = std::stoul(monthStr.substr(0, 2));
+        uint32_t mm = std::stoul(monthStr.substr(2));
+        expiry = (2000 + yy) * 100 + mm;
+    } else if (monthStr.size() == 6) {
+        expiry = std::stoul(monthStr);
+    }
+
+    strike_t strike = std::stod(strikeStr);
+    OptionRight right = (rightStr == "C" || rightStr == "c") ? OR_Call : OR_Put;
+
+    // Get multiplier/tickSize from IBaseDataMgr
+    double multiplier = 1.0;
+    double tickSize = 1.0;
+    if (m_bdMgr) {
+        // raw code for option: e.g. "cu2502C50000" or "cu2502-50000" etc
+        CodeHelper::CodeInfo ci = CodeHelper::extractStdCode(stdCode.c_str(), nullptr);
+        WTSCommodityInfo* commInfo = m_bdMgr->getCommodity(ci._exchg, ci._product);
+        if (commInfo) {
+            multiplier = commInfo->getVolScale();
+            if (multiplier <= 0) multiplier = 1.0;
+        }
+    }
+
+    OptionInfo info;
+    info.code = stdCode;
+    info.product = product;
+    info.expiry = expiry;
+    info.strike = strike;
+    info.right = right;
+    info.multiplier = multiplier;
+    info.tickSize = tickSize;
+
+    auto od = std::make_shared<OptionData>(info);
+    od->setInternalId(static_cast<uint32_t>(m_allOptions.size()));
+
+    ExpiryDataPtr ed = __getOrCreateExpiryData(expiry);
+    od->setExpiryData(ed);
+
+    StrikeDataPtr sd = __findOrCreateStrike(expiry, strike);
+    // Wire option into strike
+    if (sd) {
+        if (right == OR_Call)
+            sd->setCall(od);
+        else
+            sd->setPut(od);
+    }
+
+    m_allOptions.push_back(od);
+    m_optionsByCode[stdCode] = od;
+
+    // Set initial market
+    OptionMarket mkt;
+    mkt.underlyingPrice = getUnderlyingPrice();
+    od->updateMarket(mkt);
+
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OptionGrid: created {} exp={} strike={} {}",
+        stdCode, expiry, strike, rightStr);
+
+    lock.unlock();
+    __notifyAddOption(od);
+    return od;
+}
+
+// ============================================================================
+// ExpiryData management
+// ============================================================================
+ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
+    auto it = m_expiries.find(expiry);
+    if (it != m_expiries.end())
+        return it->second;
+
+    auto ed = std::make_shared<ExpiryData>(expiry, m_optionProduct);
+    ed->setBaseDataMgr(m_bdMgr);
+    ed->setSessionInfo(m_sessInfo);
+    ed->setStdPID(m_exchange + "." + m_optionProduct);
+    ed->setHedgeCode(m_underlyingCode);
+    if (!m_bdMgr && !m_holidays.empty()) {
+        ed->setHolidays(&m_holidays);
+    }
+
+    // Set days to expiration
+    // In live mode: query from IBaseDataMgr::getContract → getExpireDate()
+    // In backtest: m_bdMgr is null, approximate from expiry YYYYMM → YYYYMM15
+    uint32_t approxExpDate = (expiry / 100) * 10000 + (expiry % 100) * 100 + 15;
+    // TODO: currentDate from WT session, expireDate from contracts.json via IBaseDataMgr
+    ed->updateDaysToExpiration(20260703, approxExpDate);
+
+    m_expiries[expiry] = ed;
+    __notifyAddExpiry(ed);
+    return ed;
+}
+
+// ============================================================================
+// StrikeData management
+// ============================================================================
+StrikeDataPtr OptionGrid::__findOrCreateStrike(uint32_t expiry, strike_t strike) {
+    auto& vec = m_strikesByExpiry[expiry];
+    for (const auto& sd : vec) {
+        if (std::abs(sd->getStrikePrice() - strike) < 1e-6)
+            return sd;
+    }
+
+    ExpiryDataPtr ed = __getOrCreateExpiryData(expiry);
+    auto sd = StrikeData::createWT(ed, strike);
+    vec.push_back(sd);
+    m_allStrikes.push_back(sd);
+    return sd;
+}
+
+// ============================================================================
+// Lookup methods
+// ============================================================================
+OptionDataPtr OptionGrid::get(uint32_t expiry, strike_t strike, OptionRight right) {
+    std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+    auto it = m_strikesByExpiry.find(expiry);
+    if (it == m_strikesByExpiry.end()) return nullptr;
+
+    for (const auto& sd : it->second) {
+        if (std::abs(sd->getStrikePrice() - strike) < 1e-6) {
+            // StrikeData uses Right enum (RT_CALL=0, RT_PUT=1)
+            // Our OptionRight is OR_Call=0, OR_Put=1 — same values
+            return sd->get(static_cast<Right>(right));
+        }
+    }
+    return nullptr;
+}
+
+OptionDataPtr OptionGrid::get(const std::string& code) {
+    std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+    auto it = m_optionsByCode.find(code);
+    return (it != m_optionsByCode.end()) ? it->second : nullptr;
+}
+
+ExpiryDataPtr OptionGrid::getExpiryData(uint32_t expiry) const {
+    auto it = m_expiries.find(expiry);
     return (it != m_expiries.end()) ? it->second : nullptr;
 }
 
-ExpiryDataPtr OptionGrid::getFrontMonthExpiry() const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    if (m_expiries.empty()) return nullptr;
-    return m_expiries.begin()->second;  // Sorted by date, front is earliest
-}
-
-std::vector<uint32_t> OptionGrid::getExpiryDates() const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    std::vector<uint32_t> dates;
-    dates.reserve(m_expiries.size());
-    for (const auto& pair : m_expiries) {
-        dates.push_back(pair.first);
-    }
-    return dates;
-}
-
-OptionDataPtr OptionGrid::addOption(const OptionInfo& info) {
-    // Check if already exists
-    auto existing = getOption(info.code);
-    if (existing) return existing;
-    
-    // Create option
-    auto option = std::make_shared<OptionData>(info);
-    
-    StrikeDataPtr strike;
-    {
-        std::unique_lock<std::shared_mutex> lock(m_mutex);
-        // Verify again under write lock
-        auto it = m_optionsByCode.find(info.code);
-        if (it != m_optionsByCode.end()) return it->second;
-
-        // Assign array index
-        uint32_t internalId = (uint32_t)m_optionsByIndex.size();
-        option->setInternalId(internalId);
-        
-        m_optionsByIndex.push_back(option);
-        m_codeToIndex[info.code] = internalId;
-        m_optionsByCode[info.code] = option;
-        
-        // Expiry assignment
-        auto expiry_it = m_expiries.find(info.expiry);
-        ExpiryDataPtr expiry;
-        if (expiry_it != m_expiries.end()) {
-             expiry = expiry_it->second;
-        } else {
-             expiry = std::make_shared<ExpiryData>(info.expiry, m_underlyingCode);
-             if (m_bdMgr) expiry->setBaseDataMgr(m_bdMgr);
-             if (!m_stdPID.empty()) expiry->setProductId(m_stdPID);
-             if (m_sessionInfo) expiry->setSessionInfo(m_sessionInfo);
-             if (m_currentDate > 0) expiry->updateTimeToExpiry(m_currentDate, m_currentTime);
-             m_expiries[info.expiry] = expiry;
-        }
-
-        // Get or create strike
-        strike = expiry->getStrike(info.strike);
-        if (!strike) {
-            // Need to create strike
-            OptionDataPtr call, put;
-            if (info.right == OptionRight::Call) call = option; else put = option;
-            strike = StrikeData::create(expiry, info.strike, call, put);
-            expiry->addStrike(strike);
-        } else {
-            // Update existing strike
-            strike->get(info.right) = option;
-            option->setStrikeData(strike);
-        }
-    } // Unlock before notify
-    
-    notifyOptionAdded(option.get());
-    return option;
-}
-
-OptionDataPtr OptionGrid::getOption(const std::string& code) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    auto it = m_codeToIndex.find(code);
-    if (it != m_codeToIndex.end()) {
-        return m_optionsByIndex[it->second];
-    }
+ExpiryDataPtr OptionGrid::getFrontMonthExpiryData() {
+    if (m_frontMonthExpiry) return m_frontMonthExpiry;
+    if (!m_expiries.empty()) return m_expiries.begin()->second;
     return nullptr;
 }
 
-OptionDataPtr OptionGrid::getOption(uint32_t internalId) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    if (internalId < m_optionsByIndex.size()) {
-        return m_optionsByIndex[internalId];
+bool OptionGrid::exists(const std::string& code) const {
+    std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+    return m_optionsByCode.count(code) > 0;
+}
+
+// ============================================================================
+// Strike lookups
+// ============================================================================
+StrikeDataPtr OptionGrid::findStrikeFromGrid(uint32_t expiry, double price) const {
+    std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+    auto it = m_strikesByExpiry.find(expiry);
+    if (it == m_strikesByExpiry.end() || it->second.empty())
+        return nullptr;
+
+    const auto& vec = it->second;
+    StrikeDataPtr best = vec[0];
+    double bestDiff = std::abs(price - best->getStrikePrice());
+    for (const auto& sd : vec) {
+        double diff = std::abs(price - sd->getStrikePrice());
+        if (diff < bestDiff) { bestDiff = diff; best = sd; }
     }
-    return nullptr;
+    return best;
 }
 
-uint32_t OptionGrid::getOptionId(const std::string& code) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    auto it = m_codeToIndex.find(code);
-    if (it != m_codeToIndex.end()) {
-        return it->second;
+StrikeDataPtr OptionGrid::getAtmStrike(uint32_t expiry) {
+    return findStrikeFromGrid(expiry, getUnderlyingPrice());
+}
+
+StrikeDataPtr OptionGrid::findOrCreateStrike(uint32_t expiry, strike_t strike) {
+    return __findOrCreateStrike(expiry, strike);
+}
+
+std::vector<StrikeDataPtr> OptionGrid::getStrikesByExpiry(uint32_t expiry) const {
+    std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+    auto it = m_strikesByExpiry.find(expiry);
+    return (it != m_strikesByExpiry.end()) ? it->second : std::vector<StrikeDataPtr>();
+}
+
+// ============================================================================
+// Forward calculation
+// ============================================================================
+double OptionGrid::getFrontForward() {
+    if (m_frontMonth == 0 && !m_expiries.empty())
+        m_frontMonth = m_expiries.begin()->first;
+    return getAtmForward(m_frontMonth);
+}
+
+double OptionGrid::getAtmForward(uint32_t expiry) {
+    auto it = m_atmFwdCache.find(expiry);
+    if (it != m_atmFwdCache.end()) return it->second;
+    ExpiryDataPtr ed = getExpiryData(expiry);
+    if (!ed) return NAN;
+    double fwd = __getBestSyntheticPrice(ed);
+    m_atmFwdCache[expiry] = fwd;
+    return fwd;
+}
+
+double OptionGrid::__getBestSyntheticPrice(const ExpiryDataPtr& ed) {
+    if (!ed) return NAN;
+
+    double upx = getUnderlyingPrice();
+    if (upx > 0) {
+        ed->setForward(upx);
+        ed->setForwardReady(true);
+        return upx;
     }
-    return UINT32_MAX;
-}
 
-OptionDataPtr OptionGrid::getOption(uint32_t expiry, double strike, OptionRight right) const {
-    auto ed = getExpiry(expiry);
-    if (!ed) return nullptr;
-    
-    auto sd = ed->getStrike(strike);
-    if (!sd) return nullptr;
-    
-    return sd->get(right);
-}
+    // Put-call parity fallback
+    double sum = 0, totalWgt = 0;
+    auto it = m_strikesByExpiry.find(ed->getExpiry());
+    if (it != m_strikesByExpiry.end()) {
+        double discount = ed->getDiscountFactor();
+        if (discount <= 0) discount = 1.0;
 
-StrikeDataPtr OptionGrid::getStrike(uint32_t expiry, double strike) const {
-    auto ed = getExpiry(expiry);
-    return ed ? ed->getStrike(strike) : nullptr;
-}
+        for (const auto& sd : it->second) {
+            auto call = sd->call();
+            auto put = sd->put();
+            if (!call || !put) continue;
 
-void OptionGrid::setVolatilityCurve(uint32_t expiry, IVolCurvePtr curve) {
-    std::unique_lock<std::shared_mutex> lock(m_mutex);
-    m_volCurves[expiry] = curve;
-}
+            double callBid = call->getBid(), callAsk = call->getAsk();
+            double putBid = put->getBid(), putAsk = put->getAsk();
+            if (callBid <= 0 || callAsk <= 0 || putBid <= 0 || putAsk <= 0) continue;
 
-IVolCurvePtr OptionGrid::getVolatilityCurve(uint32_t expiry) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    auto it = m_volCurves.find(expiry);
-    return (it != m_volCurves.end()) ? it->second : nullptr;
-}
+            double syn = sd->getStrikePrice() + 0.5 * (callBid + callAsk - putBid - putAsk) / discount;
+            double synSprd = (callAsk - putBid - callBid + putAsk) / discount;
 
-void OptionGrid::computeValues() {
-    if (!m_pricer) return;
-    
-    // Delegate to unified IOptionPricer::computeValues
-    m_pricer->computeValues(this);
-    notifyGridUpdated();
-}
-
-void OptionGrid::computeValues(uint32_t expiry) {
-    if (!m_pricer) return;
-    
-    // For single-expiry compute, use initValuesCompute + computeValue pattern
-    m_pricer->initValuesCompute(this);
-    
-    auto ed = getExpiry(expiry);
-    if (ed) {
-        for (const auto& strikePair : ed->getStrikes()) {
-            const auto& strike = strikePair.second;
-            if (strike->call()) m_pricer->computeValue(strike->call().get());
-            if (strike->put()) m_pricer->computeValue(strike->put().get());
+            if (callAsk / putBid < 10 && putAsk / callBid < 10 && synSprd > 1e-6) {
+                double wgt = 1.0 / synSprd;
+                totalWgt += wgt;
+                sum += syn * wgt;
+            }
         }
     }
-    
-    m_pricer->finalizeCompute(this);
-    notifyGridUpdated();
-}
 
-void OptionGrid::computeValues(OptionData* option) {
-    if (!m_pricer || !option) return;
-    m_pricer->computeValue(option);
-}
-
-OptionGreeks OptionGrid::getAggregatedGreeks() const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    OptionGreeks total;
-    for (const auto& pair : m_expiries) {
-        total.accum(pair.second->getAggregatedGreeks());
+    if (totalWgt < 1e-12) {
+        ed->setForwardReady(false);
+        return NAN;
     }
-    return total;
+
+    double fwd = sum / totalWgt;
+    ed->setForward(fwd);
+    ed->setForwardReady(true);
+    return fwd;
 }
 
-OptionGreeks OptionGrid::getExpiryGreeks(uint32_t expiry) const {
-    auto ed = getExpiry(expiry);
-    return ed ? ed->getAggregatedGreeks() : OptionGreeks();
+// ============================================================================
+// computeValues
+// ============================================================================
+void OptionGrid::computeValues(IOptionPricer* pricer) {
+    IOptionPricer* p = pricer;
+    if (!p) p = m_optionPricer.get();
+    if (p) {
+        m_atmFwdCache.clear();
+        if (p->computeValues(this)) {
+            __notifyComputeCompleted();
+        }
+    }
+}
+
+// ============================================================================
+// Misc
+// ============================================================================
+std::vector<uint32_t> OptionGrid::getValidExpiries() const {
+    std::vector<uint32_t> result;
+    for (const auto& v : m_expiries) result.push_back(v.first);
+    return result;
 }
 
 void OptionGrid::addListener(IOptionGridListener* listener) {
-    if (listener) {
-        m_listeners.push_back(listener);
-    }
+    m_listeners.push_back(listener);
 }
 
 void OptionGrid::removeListener(IOptionGridListener* listener) {
-    m_listeners.erase(
-        std::remove(m_listeners.begin(), m_listeners.end(), listener),
-        m_listeners.end()
-    );
+    m_listeners.erase(std::remove(m_listeners.begin(), m_listeners.end(), listener),
+                      m_listeners.end());
 }
 
-void OptionGrid::forEachOption(std::function<void(OptionData*)> func) {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    for (auto& option : m_optionsByIndex) {
-        func(option.get());
-    }
+void OptionGrid::__notifyAddOption(const OptionDataPtr& od) {
+    for (auto* l : m_listeners) l->onAddOption(od);
 }
 
-void OptionGrid::forEachOption(std::function<void(const OptionData*)> func) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    for (const auto& option : m_optionsByIndex) {
-        func(option.get());
-    }
+void OptionGrid::__notifyAddExpiry(const ExpiryDataPtr& ed) {
+    for (auto* l : m_listeners) l->onAddExpiry(ed);
 }
 
-void OptionGrid::forEachExpiry(std::function<void(ExpiryData*)> func) {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    for (auto& pair : m_expiries) {
-        func(pair.second.get());
-    }
-}
-
-void OptionGrid::forEachExpiry(std::function<void(const ExpiryData*)> func) const {
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    for (const auto& pair : m_expiries) {
-        func(pair.second.get());
-    }
-}
-
-void OptionGrid::notifyExpiryAdded(const ExpiryData* expiry) {
-    for (auto* listener : m_listeners) {
-        listener->onExpiryAdded(expiry);
-    }
-}
-
-void OptionGrid::notifyStrikeAdded(const StrikeData* strike) {
-    for (auto* listener : m_listeners) {
-        listener->onStrikeAdded(strike);
-    }
-}
-
-void OptionGrid::notifyOptionAdded(const OptionData* option) {
-    for (auto* listener : m_listeners) {
-        listener->onOptionAdded(option);
-    }
-}
-
-void OptionGrid::notifyGridUpdated() {
-    for (auto* listener : m_listeners) {
-        listener->onGridUpdated();
-    }
+void OptionGrid::__notifyComputeCompleted() {
+    for (auto* l : m_listeners) l->onComputeValuesCompleted(this);
 }
 
 } // namespace wt_option
-

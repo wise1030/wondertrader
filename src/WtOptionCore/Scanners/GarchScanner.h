@@ -1,121 +1,37 @@
-/*!
- * \file GarchScanner.h
- * \brief GARCH volatility-based scanner for option trading
- * 
- * Migrated from longbeach/optiontrader/GarchScanner.h
- * Uses GARCH model predictions to identify mispriced options.
- */
-
 #pragma once
-
-#include "IScanModule.h"
-#include <map>
-#include <deque>
+#include "../IScanModule.h"
+#include "../OptionData.h"
+#include "../optioncoretypes.h"
+#include <string>
+#include <memory>
 
 namespace wt_option {
 
-/**
- * @brief GARCH scanner configuration
- */
-struct GarchScannerConfig : public ScannerConfig {
-    double omega = 0.000001;            // GARCH omega parameter
-    double alpha = 0.1;                 // GARCH alpha parameter
-    double beta = 0.85;                 // GARCH beta parameter
-    int32_t lookbackPeriod = 20;        // Days for volatility estimation
-    double volDiffThreshold = 0.05;     // Min vol difference to trigger (5%)
-    int32_t maxOpenPositions = 10;      // Maximum open positions
-    int32_t maxOrderSize = 100;         // Maximum order size
-    int32_t minDaysToExpiry = 5;        // Minimum days to expiry
-    int32_t maxDaysToExpiry = 30;       // Maximum days to expiry
-    
-    /// Get effective max open positions for expiry (mirrors longbeach per_month constraints)
-    int32_t getMaxOpenPositions(uint32_t expiry) const {
-        auto* ov = getExpiryOverride(expiry);
-        if (ov && ScannerExpiryOverrides::isSet(ov->maxPosOpt)) return ov->maxPosOpt;
-        return maxOpenPositions;
-    }
-    
-    /// Get effective max order size for expiry
-    int32_t getMaxOrderSize(uint32_t expiry) const {
-        auto* ov = getExpiryOverride(expiry);
-        if (ov && ScannerExpiryOverrides::isSet(ov->maxOrderSize)) return ov->maxOrderSize;
-        return maxOrderSize;
-    }
-};
-
-/**
- * @brief GARCH model for volatility forecasting
- */
-class GarchModel {
-public:
-    GarchModel(double omega = 0.000001, double alpha = 0.1, double beta = 0.85);
-    
-    /**
-     * @brief Add new return observation
-     * @param ret Daily return (e.g., 0.01 for 1%)
-     */
-    void addReturn(double ret);
-    
-    /**
-     * @brief Get current GARCH volatility forecast
-     * @return Annualized volatility
-     */
-    double getVolatility() const;
-    
-    /**
-     * @brief Forecast volatility N days ahead
-     * @param days Number of days
-     * @return Annualized volatility forecast
-     */
-    double forecast(int32_t days) const;
-    
-    /**
-     * @brief Reset the model
-     */
-    void reset();
-    
-private:
-    double m_omega;     // Long-run variance weight
-    double m_alpha;     // Shock weight
-    double m_beta;      // Persistence weight
-    double m_variance;  // Current conditional variance
-    double m_longRunVar;// Unconditional variance
-    std::deque<double> m_returns;
-    int32_t m_maxLookback;
-};
-
-/**
- * @brief GARCH-based volatility scanner
- * 
- * Compares GARCH-forecasted volatility with implied volatility
- * to identify mispriced options.
- */
 class GarchScanner : public IScanModule {
 public:
-    GarchScanner(const ScannerConfig& config);
-    
-    void onStart() override;
-    void onStop() override;
-    void onTick(const OptionGrid* grid) override;
-    void onUnderlyingUpdate(double price) override;
-    void onPanic() override;
-    
-private:
-    void updateGarchModel(double price);
-    void scanOptions(const OptionGrid* grid);
-    void evaluateOption(OptionData* option, double garchVol, const OptionGrid* grid);
-    
-    GarchScannerConfig m_config;
-    GarchModel m_garchModel;
-    
-    uint64_t m_lastScanTime;
-    bool m_isPanicked;
-    
-    double m_lastPrice;
-    uint32_t m_lastPriceDate;
-    int32_t m_currentOpenPositions;
-};
+    struct Config {
+        std::string ident = "GarchScanner";
+        bool enable = true;
+        double min_edge = 0.5;
+        double delta_min = 0.1;
+        double delta_max = 0.9;
+    };
 
-using GarchScannerPtr = std::shared_ptr<GarchScanner>;
+    GarchScanner(const Config& cfg, OptionTraderContextPtr ctx) : m_config(cfg), m_ctx(ctx) {}
+    virtual ~GarchScanner() {}
+
+    std::string getName() const override { return m_config.ident; }
+    void onStart() override { m_active = true; }
+    void onStop() override { m_active = false; }
+    void onPanic() override { m_active = false; }
+    void onOptionHit(OptionData* od, int32_t index) override {}
+
+    double scanOption(OptionData* opt);
+
+private:
+    Config m_config;
+    OptionTraderContextPtr m_ctx;
+    bool m_active = false;
+};
 
 } // namespace wt_option

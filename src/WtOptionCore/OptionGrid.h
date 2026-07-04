@@ -1,147 +1,181 @@
 /*!
  * \file OptionGrid.h
- * \brief Option grid management for option chains
- * 
- * Migrated from longbeach/quantbox/strategy/optioncore/OptionGrid.h
+ * \brief 3-level option data grid: expiry → strike → call/put
+ *
+ * Migrated from quantbox optioncore/OptionGrid.h (355 lines).
+ * Preserves: 3-level structure, dynamic contract discovery, synthetic price,
+ * ATM strike lookup, computeValues delegation.
+ * Replaces: boost::multi_index → vector + unordered_map,
+ *   MarketDataContext → IBaseDataMgr, monitorOptions → onTick-driven,
+ *   IPriceProvider → double m_underlyingPrice, IStrikeFinder → simple search.
  */
-
 #pragma once
 
-#include "OptionTypes.h"
+#include "IOptionGrid.h"
 #include "OptionData.h"
-#include "OptionGreeks.h"
-#include "VolCurve.h"
+#include "ExpiryData.h"
+#include "StrikeData.h"
 #include "IOptionPricer.h"
+#include "optioncoretypes.h"
+
+#include <string>
+#include <vector>
 #include <map>
 #include <unordered_map>
-#include <vector>
-#include <memory>
-#include <functional>
-#include <string>
+#include <set>
 #include <shared_mutex>
+#include <memory>
+#include <cstdint>
+
+namespace wtp {
+    class IBaseDataMgr;
+    class WTSSessionInfo;
+    class WTSTickData;
+}
 
 namespace wt_option {
 
-/**
- * @brief Option grid listener interface
- */
-class IOptionGridListener {
-public:
-    virtual ~IOptionGridListener() = default;
-    
-    virtual void onExpiryAdded(const ExpiryData* expiry) {}
-    virtual void onStrikeAdded(const StrikeData* strike) {}
-    virtual void onOptionAdded(const OptionData* option) {}
-    virtual void onGridUpdated() {}
-};
+class IOptionPricer;
+class PeriodicCurveFitter;
 
-/**
- * @brief Option grid - manages option chain data
- * 
- * Central container for all option data organized by expiry and strike.
- */
-class OptionGrid {
+class OptionGrid : public IOptionGrid {
 public:
-    OptionGrid(const std::string& underlyingCode = "");
-    virtual ~OptionGrid() = default;
-    
-    // Underlying info
-    const std::string& getUnderlyingCode() const { return m_underlyingCode; }
-    void setUnderlyingCode(const std::string& code) { m_underlyingCode = code; }
-    
-    // Underlying price
-    double getUnderlyingPrice() const { return m_underlyingPrice; }
+    OptionGrid(const std::string& optionProduct,
+               const std::string& underlyingCode,
+               wtp::IBaseDataMgr* bdMgr,
+               wtp::WTSSessionInfo* sessInfo);
+    virtual ~OptionGrid();
+
+    // --- IOptionGrid interface ---
+    const std::string& getSymbol() const override { return m_optionProduct; }
+    const std::string& getUnderlyingCode() const override { return m_underlyingCode; }
+
+    OptionDataPtr get(uint32_t expiry, strike_t strike, OptionRight right) override;
+    OptionDataPtr get(const std::string& code) override;
+
+    void computeValues(IOptionPricer* pricer = nullptr) override;
+    double getUnderlyingPrice() const override;
+
+    const ExpiryTable& expiries() const override { return m_expiries; }
+    ExpiryDataPtr getExpiryData(uint32_t expiry) const override;
+    ExpiryDataPtr getFrontMonthExpiryData() override;
+
+    const std::vector<OptionDataPtr>& getAllOptions() const override { return m_allOptions; }
+    const std::vector<StrikeDataPtr>& getAllStrikes() const override { return m_allStrikes; }
+    std::vector<StrikeDataPtr> getStrikesByExpiry(uint32_t expiry) const override;
+
+    size_t numStrikes() const override { return m_allStrikes.size(); }
+    size_t numOptions() const override { return m_allOptions.size(); }
+
+    void addListener(IOptionGridListener* listener) override;
+    void removeListener(IOptionGridListener* listener) override;
+
+    // --- WT-specific: tick-driven contract discovery ---
+    void onTick(const std::string& stdCode, const wtp::WTSTickData* tick);
+
+    // --- TickData version (for async path — no WTSTickData* dependency) ---
+    // TickData is the slimmed struct from OptionAsyncEventProcessor
+    struct TickDataRef {
+        double price = 0;
+        double bid = 0;
+        double ask = 0;
+        double bidQty = 0;
+        double askQty = 0;
+    };
+    void onTick(const std::string& stdCode, const TickDataRef& tick);
+
+    // --- Underlying price ---
     void setUnderlyingPrice(double price);
-    
-    // Market Data Update
-    void onTick(const std::string& code, double price, double bid, double ask, int32_t bidQty, int32_t askQty);
-    
-    // Expiry management
-    ExpiryDataPtr addExpiry(uint32_t expiryDate);
-    ExpiryDataPtr getExpiry(uint32_t expiryDate) const;
-    ExpiryDataPtr getFrontMonthExpiry() const;
-    std::vector<uint32_t> getExpiryDates() const;
-    const std::map<uint32_t, ExpiryDataPtr>& getExpiries() const { return m_expiries; }
-    
-    // Option management
-    OptionDataPtr addOption(const OptionInfo& info);
-    OptionDataPtr getOption(const std::string& code) const;
-    OptionDataPtr getOption(uint32_t internalId) const;
-    OptionDataPtr getOption(uint32_t expiry, double strike, OptionRight right) const;
-    uint32_t getOptionId(const std::string& code) const;
-    
-    // Extracted flat vector for O(1) iteration and lookup
-    const std::vector<OptionDataPtr>& getAllOptions() const { return m_optionsByIndex; }
-    
-    // Strike management
-    StrikeDataPtr getStrike(uint32_t expiry, double strike) const;
-    
-    // Pricer (uses unified IOptionPricer from IOptionPricer.h)
-    void setOptionPricer(IOptionPricerPtr pricer) { m_pricer = pricer; }
-    IOptionPricerPtr getOptionPricer() const { return m_pricer; }
-    
-    // Trading calendar integration (from WonderTrader basedata)
-    // Note: session uses the UNDERLYING's session (option session = underlying session)
-    void setBaseDataMgr(wtp::IBaseDataMgr* bdMgr);
-    void setProductId(const std::string& stdPID);
-    void setSessionInfo(wtp::WTSSessionInfo* sInfo);
-    
-    // Volatility curve
-    void setVolatilityCurve(uint32_t expiry, IVolCurvePtr curve);
-    IVolCurvePtr getVolatilityCurve(uint32_t expiry) const;
-    
-    // Compute values (delegates to IOptionPricer)
-    void computeValues();
-    void computeValues(uint32_t expiry);
-    void computeValues(OptionData* option);
-    
-    // Risk aggregation
-    OptionGreeks getAggregatedGreeks() const;
-    OptionGreeks getExpiryGreeks(uint32_t expiry) const;
-    
-    // Listeners
-    void addListener(IOptionGridListener* listener);
-    void removeListener(IOptionGridListener* listener);
-    
-    // Iteration
-    void forEachOption(std::function<void(OptionData*)> func);
-    void forEachOption(std::function<void(const OptionData*)> func) const;
-    void forEachExpiry(std::function<void(ExpiryData*)> func);
-    void forEachExpiry(std::function<void(const ExpiryData*)> func) const;
-    
-    // Current date/time for calculations
-    uint32_t getCurrentDate() const { return m_currentDate; }
-    uint32_t getCurrentTime() const { return m_currentTime; }
-    void setCurrentDate(uint32_t date);  // Day-level only (backward compat)
-    void setCurrentDateTime(uint32_t date, uint32_t time);  // Minute-level precision
-    
-protected:
-    void notifyExpiryAdded(const ExpiryData* expiry);
-    void notifyStrikeAdded(const StrikeData* strike);
-    void notifyOptionAdded(const OptionData* option);
-    void notifyGridUpdated();
-    
-private:
-    std::string m_underlyingCode;
-    std::string m_stdPID;                                   // Product ID for holiday lookup
-    double m_underlyingPrice;
-    uint32_t m_currentDate;
-    uint32_t m_currentTime = 0;                             // HHMM format for minute-level
-    wtp::IBaseDataMgr* m_bdMgr = nullptr;                   // Trading calendar (not owned)
-    wtp::WTSSessionInfo* m_sessionInfo = nullptr;            // Underlying's trading session (not owned)
-    
-    std::map<uint32_t, ExpiryDataPtr> m_expiries;           // expiry -> ExpiryData
-    std::map<std::string, OptionDataPtr> m_optionsByCode;   // code -> OptionData (legacy)
-    std::unordered_map<std::string, uint32_t> m_codeToIndex; // Fast string to index lookup
-    std::vector<OptionDataPtr> m_optionsByIndex;            // Fast integer lookup
-    std::map<uint32_t, IVolCurvePtr> m_volCurves;           // expiry -> VolCurve
-    
-    IOptionPricerPtr m_pricer;
-    std::vector<IOptionGridListener*> m_listeners;
-    mutable std::shared_mutex m_mutex; // RCU / fine-grained lock
-};
+    void onUnderlyingTick(double price);
 
-using OptionGridPtr = std::shared_ptr<OptionGrid>;
+    // --- Option pricer ---
+    void setOptionPricer(IOptionPricerPtr pricer) { m_optionPricer = pricer; }
+    IOptionPricerPtr getOptionPricer() const { return m_optionPricer; }
+
+    // --- Curve fitter ---
+    void setPeriodicCurveFitter(std::shared_ptr<PeriodicCurveFitter> fitter) { m_fitter = fitter; }
+    std::shared_ptr<PeriodicCurveFitter> getPeriodicCurveFitter() const { return m_fitter; }
+
+    // --- Front month ---
+    void setFrontMonth(uint32_t exp) { m_frontMonth = exp; }
+    uint32_t getFrontMonth() const { return m_frontMonth; }
+    void setFrontMonthExpiryData(ExpiryDataPtr ed) { m_frontMonthExpiry = ed; }
+
+    // --- ATM strike ---
+    StrikeDataPtr getAtmStrike(uint32_t expiry);
+    StrikeDataPtr findStrikeFromGrid(uint32_t expiry, double price) const;
+    StrikeDataPtr findOrCreateStrike(uint32_t expiry, strike_t strike);
+
+    // --- Forward ---
+    double getFrontForward();
+    double getAtmForward(uint32_t expiry);
+
+    // --- ATM signal ---
+    double getAtmSig() { return m_atmSig; }
+    void setAtmSig(double sig) { m_atmSig = sig; }
+
+    // --- Expiry management ---
+    bool exists(const std::string& code) const;
+    std::vector<uint32_t> getValidExpiries() const;
+
+    // --- Create option from stdCode (dynamic discovery) ---
+    OptionDataPtr createOption(const std::string& stdCode);
+
+    // Holiday calendar (from holidays.json, used by ExpiryData when m_bdMgr is null)
+    void setHolidays(std::set<uint32_t> h) { m_holidays = std::move(h); }
+    size_t numHolidays() const { return m_holidays.size(); }
+
+private:
+    OptionDataPtr __createOption(const std::string& stdCode);
+    StrikeDataPtr __findOrCreateStrike(uint32_t expiry, strike_t strike);
+    ExpiryDataPtr __getOrCreateExpiryData(uint32_t expiry);
+    double __getBestSyntheticPrice(const ExpiryDataPtr& ed);
+    void __notifyAddOption(const OptionDataPtr& od);
+    void __notifyAddExpiry(const ExpiryDataPtr& ed);
+    void __notifyComputeCompleted();
+
+    // Option product info
+    std::string m_optionProduct;     // e.g. "cu"
+    std::string m_underlyingCode;    // e.g. "SHFE.cu.2502"
+    std::string m_exchange;          // e.g. "SHFE"
+
+    // WT framework
+    wtp::IBaseDataMgr* m_bdMgr;
+    wtp::WTSSessionInfo* m_sessInfo;
+
+    // 3-level data containers
+    std::vector<OptionDataPtr> m_allOptions;
+    std::vector<StrikeDataPtr> m_allStrikes;
+    std::set<uint32_t> m_holidays;  // holiday calendar from holidays.json
+    std::unordered_map<std::string, OptionDataPtr> m_optionsByCode;
+    ExpiryTable m_expiries;
+
+    // Index: expiry → list of strikes (for fast lookup)
+    std::map<uint32_t, std::vector<StrikeDataPtr>> m_strikesByExpiry;
+
+    // Underlying
+    double m_underlyingPrice = 0;
+    mutable std::shared_mutex m_priceMutex;
+
+    // Front month
+    uint32_t m_frontMonth = 0;
+    ExpiryDataPtr m_frontMonthExpiry;
+
+    // Pricer / fitter
+    IOptionPricerPtr m_optionPricer;
+    std::shared_ptr<PeriodicCurveFitter> m_fitter;
+
+    // ATM signal
+    double m_atmSig = 0;
+
+    // ATM forward cache (per compute cycle)
+    std::map<uint32_t, double> m_atmFwdCache;
+
+    // Listeners
+    std::vector<IOptionGridListener*> m_listeners;
+
+    // Thread safety for container modification
+    mutable std::shared_mutex m_gridMutex;
+};
 
 } // namespace wt_option
-

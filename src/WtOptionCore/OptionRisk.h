@@ -1,187 +1,147 @@
 /*!
  * \file OptionRisk.h
- * \brief Portfolio risk management for options
- * 
- * Migrated from longbeach/quantbox/strategy/optioncore/OptionRisk.h
+ * \brief Portfolio risk / Greeks aggregator for an option chain (migrated from quantbox)
+ *
+ * Original: longbeach::optioncore::OptionRisk inherited
+ *   - OptionGridListener (private) to receive grid compute-complete callbacks
+ * Construction took TradingContextPtr + OptionGridPtr + hedge instrument list
+ * and wired:
+ *   - HedgeData (nested class, IPositionListener) for underlier position pushes
+ *   - ListenerRelay<IFillListener*> / ListenerRelay<OptionRiskDataListener*>
+ *   - grid->subscribe(Subscription, this) for grid-event push
+ *   - InstrumentContext::getContractSize / getPositionProvider lookups
+ *   - SpotTradingData override of m_pfuDelta
+ *
+ * Migration:
+ *  - namespace: longbeach::optioncore -> wt_option
+ *  - Inherits IOptionGridListener (public) replacing private OptionGridListener
+ *  - HedgeData: now a passive plain struct (defined in OptionExpiryGreeks.h at
+ *    namespace scope). Source compat: `using HedgeData = ::wt_option::HedgeData;`
+ *    inside the OptionRisk class body. IPositionListener inheritance removed.
+ *  - Constructor: OptionRisk(OptionGridPtr grid) only — no TradingContext,
+ *    no hedge list. Hedge instruments are registered via registerHedgeInstrument
+ *    (kept public for the engine/strategy to call after the underlying code is
+ *    wired). Position is set on HedgeData directly via setPosition.
+ *  - ListenerRelay / Subscription removed entirely.
+ *  - IOptionPricer* -> IOptionPricerPtr.
+ *  - getHedgeInstruments() now returns vector<HedgeDataPtr> (was
+ *    vector<InstrumentContextPtr>); the original returned InstrumentContexts
+ *    which we no longer have.
+ *  - SpotTradingData override path: stubbed (grid->getSpotTradingData() is not
+ *    yet available — OptionGrid is not migrated). Marked TODO.
+ *
+ * Business logic preserved:
+ *   createOptionRiskData, onAddOption, update, all(), all() const,
+ *   getDelta/getOptionDelta/getPortfolioDelta/getUnderlierDelta/totalDelta,
+ *   getPositionGreeks, getExpiryGreeks, getNonZeroPositions(2 overloads),
+ *   setOptionPricer, option_pfgreeks, portfolio_delta, raw_delta,
+ *   onComputeValuesCompleted.
  */
+#ifndef WTOPTIONCORE_OPTIONRISK_H_INCLUDED
+#define WTOPTIONCORE_OPTIONRISK_H_INCLUDED
 
-#pragma once
-
-#include "OptionTypes.h"
+#include "optioncoretypes.h"
 #include "OptionGreeks.h"
-#include "OptionData.h"
-#include "OptionGrid.h"
-#include <map>
-#include <vector>
-#include <memory>
-#include <mutex>
+#include "OptionValues.h"
+#include "OptionRiskData.h"
+#include "OptionExpiryGreeks.h"
+#include "OptionList.h"
+#include "IOptionGridListener.h"
+#include "IOptionPricer.h"
 
-namespace wtp { class TraderAdapter; }
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+#include <cstdint>
 
 namespace wt_option {
 
-/**
- * @brief Risk data for a single option position
- */
-struct OptionRiskData {
-    OptionDataPtr option;
-    int32_t position = 0;
-    OptionGreeks positionGreeks;  // Greeks scaled by position
-    double marketValue = 0;       // Current market value
-    double theoValue = 0;         // Theoretical value
-    double pnl = 0;               // Position P&L
-    double fees = 0;              // accumulated trading fees
-    double netPnl = 0;            // pnl - fees
-    
-    void update();
-};
+class OptionData;
+class ExpiryData;
+class OptionGrid;
 
-using OptionRiskDataPtr = std::shared_ptr<OptionRiskData>;
-
-
-
-/**
- * @brief Per-expiry Greeks aggregation
- */
-class ExpiryGreeks {
+/// Portfolio risk + Greeks aggregator. Listens to OptionGrid compute-complete
+/// events, tracks per-option position Greeks (OptionRiskData), per-expiry
+/// aggregates (OptionExpiryGreeks), and underlier hedge deltas (HedgeData).
+class OptionRisk
+    : public IOptionGridListener
+{
 public:
-    ExpiryGreeks(uint32_t expiry);
-    
-    uint32_t getExpiry() const { return m_expiry; }
-    
-    const OptionGreeks& getOptionGreeks() const { return m_optionGreeks; }
-    double getUnderlierDelta() const { return m_underlierDelta; }
+    /// Multi-index view on OptionRiskData ordered by instrument code.
+    typedef typename OptionList<OptionRiskData>::nth_index<0>::type by_instr;
+
+    // HedgeData is the plain struct defined at namespace scope (see
+    // OptionExpiryGreeks.h). Source-compat alias for OptionRisk::HedgeData.
+    using HedgeData     = ::wt_option::HedgeData;
+    using HedgeDataPtr  = ::wt_option::HedgeDataPtr;
+
+public:
+    /// Simplified constructor — grid only (no TradingContext, no hedge list).
+    /// Hedge instruments must be registered post-construction via
+    /// registerHedgeInstrument() once the strategy/engine wires underliers.
+    explicit OptionRisk(const OptionGridPtr& grid);
+
+    // ---- Grid listener (compute-complete triggers update()) ----
+    void onComputeValuesCompleted(const IOptionGrid* grid) override;
+
+    // ---- Configuration ----
+    void setAutoUpdateGreeks(bool b) { m_bAutoUpdateGreeks = b; }
+    void setOptionPricer(const IOptionPricerPtr& p) { m_spOptionPricer = p; }
+
+    // ---- Update / query ----
+    void update();
+    const by_instr& all();
+    const by_instr& all() const;
+
+    /// Option-only delta (no underlier delta).
+    double getDelta() const;
+    double getOptionDelta() const;
+    /// Underlier (hedge) delta contribution.
+    double getUnderlierDelta() const;
+    /// Option delta + underlier delta.
     double getPortfolioDelta() const;
-    
-    void setOptionGreeks(const OptionGreeks& greeks);
-    void setUnderlierDelta(double delta) { m_underlierDelta = delta; }
-    
-    void reset();
-    void accumulate(const OptionRiskData& data);
-    
+    /// Unmodified delta (no expire fraction).
+    double totalDelta() const;
+
+    const OptionGridPtr&      getOptionGrid() const { return m_spOptionGrid; }
+    const OptionGreeksPtr&    getPositionGreeks() const;
+    const std::vector<HedgeDataPtr>& getHedgeInstruments() const { return m_hedgeDataList; }
+
+    OptionRiskDataPtr           get(const std::string& instr);
+    const OptionExpiryGreeksPtr& getExpiryGreeks(uint32_t exp);
+    std::vector<OptionRiskDataPtr> getNonZeroPositions();
+    std::vector<OptionRiskDataPtr> getNonZeroPositions(uint32_t exp);
+
+    const OptionGreeks& option_pfgreeks() const;
+    double portfolio_delta() const { return getPortfolioDelta(); }
+    double raw_delta() const       { return totalDelta(); }
+
+    // ---- Hedge instrument registration (public for post-construction wiring) ----
+    HedgeDataPtr registerHedgeInstrument(const std::string& code, uint32_t exp);
+    /// Update a hedge's position externally (replaces IPositionListener push).
+    void setHedgePosition(const std::string& code, int32_t position);
+
 private:
-    uint32_t m_expiry;
-    OptionGreeks m_optionGreeks;
-    double m_underlierDelta;
-    double m_expiryFraction;  // Weight for expiry
-};
+    OptionRiskDataPtr createOptionRiskData(const OptionDataPtr& od);
+    void onAddOption(const OptionDataPtr& od);
 
-using ExpiryGreeksPtr = std::shared_ptr<ExpiryGreeks>;
+    void __onExpiryGreeksChanged(const OptionExpiryGreeks& g, const OptionGreeks& prev);
+    void __onUndDeltaChanged(const OptionExpiryGreeks& g, double prev);
 
-/**
- * @brief Hedge instrument data
- */
-class HedgeData {
-public:
-    HedgeData(uint32_t expiry, const std::string& hedgeCode);
-    
-    const std::string& getCode() const { return m_hedgeCode; }
-    uint32_t getExpiry() const { return m_expiry; }
-    
-    int32_t getPosition() const { return m_position; }
-    void setPosition(int32_t pos);
-    
-    double getDeltaPosition() const;
-    double getMultiplier() const { return m_multiplier; }
-    void setMultiplier(double mult) { m_multiplier = mult; }
-    
-private:
-    std::string m_hedgeCode;
-    uint32_t m_expiry;
-    int32_t m_position;
-    double m_multiplier;
-};
-
-using HedgeDataPtr = std::shared_ptr<HedgeData>;
-
-/**
- * @brief Risk data change listener
- */
-class IOptionRiskListener {
-public:
-    virtual ~IOptionRiskListener() = default;
-    
-    virtual void onRiskUpdated(const class OptionRisk& risk) {}
-    virtual void onPositionChanged(const OptionRiskData& data) {}
-    virtual void onGreeksChanged(const ExpiryGreeks& greeks) {}
-};
-
-/**
- * @brief Portfolio risk manager
- * 
- * Tracks positions and aggregates Greeks across all options.
- */
-class OptionRisk : public IOptionGridListener {
-public:
-    OptionRisk(OptionGridPtr grid);
-    
-    // Update risk calculations
-    void update();
-    
-    // Option risk data access
-    OptionRiskDataPtr getRiskData(const std::string& code);
-    std::vector<OptionRiskDataPtr> getAllRiskData() const;
-    std::vector<OptionRiskDataPtr> getNonZeroPositions() const;
-    std::vector<OptionRiskDataPtr> getPositionsByExpiry(uint32_t expiry) const;
-    
-    // Greeks aggregation
-    const OptionGreeks& getPositionGreeks() const { return m_positionGreeks; }
-    const OptionGreeks& getOptionGreeks() const { return m_optionGreeks; }
-    
-    // Delta calculations
-    double getDelta() const;              // Option delta only
-    double getUnderlierDelta() const;     // Hedge delta
-    double getPortfolioDelta() const;     // Total delta
-    double getTotalDelta() const;         // Unmodified delta
-    
-    // Per-expiry Greeks
-    ExpiryGreeksPtr getExpiryGreeks(uint32_t expiry);
-    
-    // Hedge management (Synced with UnderlyingTradingData)
-    void addHedgeInstrument(uint32_t expiry, const std::string& hedgeCode);
-    HedgeDataPtr getHedgeData(const std::string& code);
-    const std::vector<HedgeDataPtr>& getHedgeInstruments() const { return m_hedges; }
-    void updateHedgePosition(const std::string& code, int32_t position);
-    
-    // Position updates
-    void syncPositionsFromTrader(wtp::TraderAdapter* trader);
-    void setPosition(const std::string& code, int32_t position);
-    void addFill(const std::string& code, int32_t qty, double price, double fee = 0.0);
-    
-    // Listeners
-    void addListener(IOptionRiskListener* listener);
-    void removeListener(IOptionRiskListener* listener);
-    
-    // IOptionGridListener
-    void onOptionAdded(const OptionData* option) override;
-    void onGridUpdated() override;
-    
-    // Session callbacks
-    void onSessionBegin(uint32_t tradingDate);
-    void onSessionEnd(uint32_t tradingDate);
-    
-private:
-    void recalculateGreeks();
-    void notifyRiskUpdated();
-    void notifyPositionChanged(const OptionRiskData& data);
-    
-    OptionGridPtr m_grid;
-    
-    std::map<std::string, OptionRiskDataPtr> m_riskData;
-    std::vector<OptionRiskDataPtr> m_riskDataByIndex; // Fast mapping
-    std::map<uint32_t, ExpiryGreeksPtr> m_expiryGreeks;
-    std::vector<HedgeDataPtr> m_hedges;
-    
-    OptionGreeks m_positionGreeks;   // Position-weighted Greeks
-    OptionGreeks m_optionGreeks;     // Option Greeks only (no hedge)
-    double m_underlierDelta;         // Hedge delta
-    
-    std::vector<IOptionRiskListener*> m_listeners;
-    bool m_autoUpdateGreeks;
-    
-    // Thread safety for multi-threaded access
+    OptionGridPtr                 m_spOptionGrid;
+    OptionList<OptionRiskData>    m_optionList;
+    OptionGreeksPtr               m_spPositionGreeks;
+    std::vector<HedgeDataPtr>     m_hedgeDataList;
+    using ExpiryTable = std::map<uint32_t, OptionExpiryGreeksPtr>;
+    ExpiryTable                    m_expiryTable;
+    IOptionPricerPtr               m_spOptionPricer;
+    bool                           m_bAutoUpdateGreeks;
+    double                         m_pfuDelta;   // underlier delta
 };
 
 using OptionRiskPtr = std::shared_ptr<OptionRisk>;
 
 } // namespace wt_option
+
+#endif // WTOPTIONCORE_OPTIONRISK_H_INCLUDED

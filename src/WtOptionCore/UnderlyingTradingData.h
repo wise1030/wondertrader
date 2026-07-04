@@ -1,94 +1,218 @@
 /*!
  * \file UnderlyingTradingData.h
- * \brief Trading data for underlying instrument (Spot/Future)
- * 
- * Migrated from longbeach/quantbox/strategy/optioncore/UnderlyingTradingData.h
+ * \brief Per-underlying (future) trading state + order executor hooks
+ *
+ * Migrated from quantbox optioncore/UnderlyingTradingData.h + .cc (184 + 131 lines).
+ * Business logic preserved: UnderlyingValues multi-value table, Adjustments/Alphas/
+ * Prices structs, EMA filters, multiMarket, getLastDesiredMarket/getCurrentMarket,
+ * setActive/enable/disable, updateOrders, forward, updateRank, quoteMode,
+ * displayShark, PnlTracker lazy init.
+ *
+ * Dependency replacements (same scheme as OptionTradingData):
+ *  - longbeach IOrderManager/ITrader → std::function executors (OTDOrderExecutor /
+ *    OTDCancelExecutor / OTDQuoteExecutor from OptionTradingData.h).
+ *  - TradingContext/InstrumentContext/ITrader/InstrumentMDContext → deleted;
+ *    underlying code + market + fees provided externally.
+ *  - trading::OrderPtr → fire-and-forget executor calls.
+ *  - Subscription/IFillListener/IOrderStatusListener/Priority → deleted.
+ *  - instrument_t → std::string (the future/underlying code).
+ *  - PnlTracker now takes only a multiplier (migrated variant).
  */
-
 #pragma once
 
-#include "OptionTypes.h"
-#include "BaseOrder.h"
+#include "optioncoretypes.h"
+#include "OptionValues.h"      // MultiMarket, EMAFilter, PriceSize
+#include "OptionTradingData.h" // OTDOrderExecutor / OTDCancelExecutor / OTDQuoteExecutor / PositionProvider
+#include "PnlTracker.h"
+
+#include <cstdint>
 #include <string>
+#include <functional>
 #include <memory>
-#include <vector>
-#include <atomic>
 
 namespace wt_option {
 
-struct UnderlyingMarket {
-    double bid = 0;
-    double ask = 0;
-    double last = 0;
-    int32_t bidSize = 0;
-    int32_t askSize = 0;
-    uint64_t updateTime = 0;
-    
-    double mid() const { return (bid > 0 && ask > 0) ? (bid + ask) * 0.5 : last; }
-};
+class ExpiryData;
+class OptionTradingGrid;
+using OptionTradingGridPtr     = std::shared_ptr<OptionTradingGrid>;
+using OptionTradingGridWeakPtr = std::weak_ptr<OptionTradingGrid>;
 
-struct UnderlyingValues {
-    double theoreticalPrice = 0;
-    double delta = 1.0; // Always 1 for underlying
-    
-    // Market Making / Execution
-    double ourBid = 0;
-    double ourAsk = 0;
-    int32_t ourBidSize = 0;
-    int32_t ourAskSize = 0;
-};
-
-class IOrderManager; // Forward decl
-
-class UnderlyingTradingData {
+class UnderlyingValues
+{
 public:
-    UnderlyingTradingData(const std::string& code);
-    
-    const std::string& getCode() const { return m_code; }
-    
-    // Market Data
-    void updateMarket(const UnderlyingMarket& market);
-    const UnderlyingMarket& getMarket() const { return m_market; }
-    double getMid() const { return m_market.mid(); }
-    
-    // Values (Double-Buffered)
-    // Read from ACTIVE buffer
-    const UnderlyingValues& values() const { return m_values[m_activeIndex.load(std::memory_order_acquire)]; } 
-    
-    // Writer interface for Lock-Free update
-    UnderlyingValues& beginUpdateValues() { return m_values[1 - m_activeIndex.load(std::memory_order_relaxed)]; }
-    void commitUpdateValues() { 
-        m_activeIndex.store(1 - m_activeIndex.load(std::memory_order_relaxed), std::memory_order_release); 
-    }
-    
-    // Position
-    void setPosition(int32_t pos) { m_position = pos; }
-    int32_t getPosition() const { return m_position; }
-    void addFill(int32_t qty, double price);
-    
-    // Orders
-    // We now use BaseOrder for underlying to avoid the overhead of OptionOrder (which carries Greeks and IV)
-    
-    // Quote Mode
-    enum class QuoteMode {
-        Off,
-        Fixed,
-        Join,
-        Penny,
-        Shark
+    UnderlyingValues()
+        : m_adj()
+        , m_alpha()
+    {}
+
+    MultiMarket& ourMarket() { return m_ourMarket; }
+    const MultiMarket& ourMarket() const { return m_ourMarket; }
+
+    struct Adjustments
+    {
+        double risk;
+        double bump;
+        double total;
+        void clear()
+        {
+            memset(this, 0, sizeof(*this));
+            total = NAN;
+        }
     };
-    void setQuoteMode(QuoteMode mode) { m_quoteMode = mode; }
-    QuoteMode getQuoteMode() const { return m_quoteMode; }
-    
+    Adjustments& adj() { return m_adj; }
+    const Adjustments& adj() const { return m_adj; }
+
+    struct Alphas
+    {
+        double atmsig;
+        double sizebias;
+        double tradebias;
+        double rollema;
+        double total;
+        void clear()
+        {
+            memset(this, 0, sizeof(*this));
+            total = NAN;
+        }
+    };
+    Alphas& alpha() { return m_alpha; }
+    const Alphas& alpha() const { return m_alpha; }
+
+    struct Prices
+    {
+    public:
+        Prices() { clear(); }
+        void clear()
+        {
+            mid = bid = ask = 0;
+        }
+        double mid, bid, ask;
+    };
+    /// theoretical prices
+    const Prices& theoPrices() const { return m_theoPrices; }
+    Prices& theoPrices() { return m_theoPrices; }
+
+    EMAFilter& ema() { return m_ema; }
+    EMAFilter& ema_tradebias() { return m_ema_tradebias; }
+    EMAFilter& ema_rollema() { return m_ema_rollema; }
+
 private:
-    std::string m_code;
-    UnderlyingMarket m_market;
-    std::array<UnderlyingValues, 2> m_values;
-    std::atomic<uint32_t> m_activeIndex{0};
-    int32_t m_position;
-    QuoteMode m_quoteMode;
+    MultiMarket m_ourMarket;
+    Adjustments m_adj;
+    Alphas      m_alpha;
+    Prices      m_theoPrices;
+
+    EMAFilter m_ema;
+    EMAFilter m_ema_tradebias;
+    EMAFilter m_ema_rollema;
 };
 
-using UnderlyingTradingDataPtr = std::shared_ptr<UnderlyingTradingData>;
+class UnderlyingTradingData
+{
+public:
+    static const int32_t MAX_VALUES = 5;
+
+public:
+    UnderlyingTradingData(const std::string& code,
+                          const ExpiryDataPtr& ed,
+                          const OptionTradingGridPtr& otg);
+
+    const std::string& getCode() const { return m_instr; }
+    uint32_t getExpiry() const;
+    int32_t getPosition() const;
+
+    MultiMarket& multiMarket() { return m_multiMarket; }
+    const MultiMarket& getLastDesiredMarket() const { return m_lastDesiredMarket; }
+    const MultiMarket& getCurrentMarket() const     { return m_currentMarket; }
+    int32_t updateOrders(bool cancel_only = false);
+
+    // Executor hooks (replaces IOrderManager / ITrader) — same semantics as OptionTradingData.
+    void setOrderExecutor(OTDOrderExecutor oe)   { m_orderExecutor  = std::move(oe); }
+    void setCancelExecutor(OTDCancelExecutor ce) { m_cancelExecutor = std::move(ce); }
+    void setQuoteExecutor(OTDQuoteExecutor qe)   { m_quoteExecutor  = std::move(qe); }
+    void setPositionProvider(PositionProvider pp) { m_positionProvider = std::move(pp); }
+
+    bool isActive() const;
+    void setActive(bool b);
+    void enable();
+    void disable();
+
+    // Market access (replaces InstrumentMDContext / IBook)
+    double getBid() const { return m_bid; }
+    double getAsk() const { return m_ask; }
+    double getMid() const { return (m_bid > 0 && m_ask > 0) ? (m_bid + m_ask) * 0.5 : 0.0; }
+    void setMarket(double bid, double ask) { m_bid = bid; m_ask = ask; }
+
+    double getContractSize() const { return m_contractSize; }
+    void setContractSize(double cs) { m_contractSize = cs; }
+    double getFees(double price) const;
+
+    const MultiMarket& ourMarket() const { return values(0).ourMarket(); }
+    MultiMarket& ourMarket() { return values(0).ourMarket(); }
+
+    int32_t getNumCancel() const { return m_numCancel; }
+    int32_t getNumReject() const { return m_numReject; }
+    int32_t getNumFill() const   { return m_numFill; }
+
+    void setFwd(double v) { m_fwd = v; }
+    double getFwd() const { return m_fwd; }
+
+    void setUpdateRank(double r) { m_updateRank = r; }
+    double getUpdateRank() const { return m_updateRank; }
+    double getDelta() const { return 1; }
+
+    UnderlyingValues& values(int32_t i = 0) { return m_values[i]; }
+    const UnderlyingValues& values(int32_t i = 0) const { return m_values[i]; }
+
+    void setQuoteMode(QuoteMode m) { m_quoteMode = m; }
+    QuoteMode getQuoteMode() const { return m_quoteMode; }
+
+    void setDisplayShark(bool b) { m_bDisplayShark = b; }
+    bool isDisplayShark() const { return m_bDisplayShark; }
+
+    const ExpiryDataPtr& getExpiryData() const { return m_spExpiryData; }
+    const OptionTradingGridPtr& getOptionTradingGrid() const { return m_spOptionTradingGrid; }
+
+    PnlTrackerPtr getPnlTracker();
+
+protected:
+    UnderlyingValues m_values[MAX_VALUES];
+    MultiMarket m_multiMarket;
+    MultiMarket m_lastDesiredMarket;
+    MultiMarket m_currentMarket;
+
+    // Executor callbacks (replace IOrderManager / ITrader)
+    OTDOrderExecutor   m_orderExecutor;
+    OTDCancelExecutor  m_cancelExecutor;
+    OTDQuoteExecutor   m_quoteExecutor;
+    PositionProvider m_positionProvider;
+
+    bool m_bActive;
+
+    // Market (replaces InstrumentMDContext / IBook)
+    double m_bid = 0;
+    double m_ask = 0;
+    double m_contractSize = 1.0;
+    double m_feePct = 0;
+
+    double m_fwd;
+    double m_updateRank;
+
+    QuoteMode m_quoteMode;
+    bool m_bDisplayShark;
+    std::string m_instr;
+    ExpiryDataPtr m_spExpiryData;
+    OptionTradingGridPtr m_spOptionTradingGrid;
+
+    PnlTrackerPtr m_pnlTracker;
+
+    // Counters
+    int32_t m_numCancel = 0;
+    int32_t m_numReject = 0;
+    int32_t m_numFill   = 0;
+};
+
+using UnderlyingTradingDataPtr     = std::shared_ptr<UnderlyingTradingData>;
+using UnderlyingTradingDataWeakPtr = std::weak_ptr<UnderlyingTradingData>;
 
 } // namespace wt_option

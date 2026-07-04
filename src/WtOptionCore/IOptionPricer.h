@@ -1,131 +1,111 @@
 /*!
  * \file IOptionPricer.h
- * \project	WonderTrader
+ * \brief Option pricer interface (migrated from quantbox)
  *
- * \brief Unified Interface for Option Pricing Models
- * 
- * Adapted from longbeach CommPricer/CompositeOptionPricer patterns:
- * - ExpiryInfo-based caching for per-expiry parameters
- * - initValuesCompute/computeValue/finalizeCompute lifecycle
- * - computeValues_FAST/SLOW dual-path support
+ * Original: longbeach::optioncore::IOptionPricer inherited OPConfigurable
+ * and wired up luabind scripting (LuaState, LuabindScripting, LuaStream),
+ * CommandServices, ClientContext, ListenerList, and DECL_EVENT macros.
+ *
+ * Migration:
+ *  - namespace -> wt_option
+ *  - All luabind / LuaStream / LuaState scripting removed
+ *  - OPConfigurable template removed (it only drove luabind config factory)
+ *  - ConfigBase retained as a plain base for concrete Config structs, but the
+ *    virtual-instance factory is gone; construct concrete pricers directly
+ *  - DECL_EVENT(SingleOptionChangedEvent,...) -> std::function callback vector
+ *  - ListenerList<pricingChangedEventSink> -> std::vector<std::function>
+ *  - CommandServicesPtr / ClientContextPtr -> removed from instance(); the
+ *    concrete pricers take only what they need (OptionRisk, grid, etc.)
+ *  - OptionGrid forward-declared; OptionData included via optioncoretypes.h
+ *  - instrument_t/symbol_t -> std::string; expiry_t -> uint32_t
  */
 #pragma once
 
-#include <memory>
+#include "optioncoretypes.h"
+#include "OptionGreeks.h"
+#include "IVolCurve.h"
+
+#include <cstdint>
 #include <string>
-#include <map>
-#include "../Includes/WTSMarcos.h"
+#include <functional>
+#include <memory>
+#include <vector>
 
 namespace wt_option {
 
 class OptionGrid;
 class OptionData;
-class ExpiryData;
-class OptionRisk;
-class CurveFitter;
-class IVolCurve;
-using IVolCurvePtr = std::shared_ptr<IVolCurve>;
+
+class IOptionPricer;
+using IOptionPricerPtr = std::shared_ptr<IOptionPricer>;
 
 class IOptionPricer
 {
 public:
+    typedef std::function<void(IOptionPricer*)> pricingChangedEventSink;
+    typedef std::function<void(IOptionPricer*, OptionData*)> singleOptionChangedEventSink;
+
+public:
     virtual ~IOptionPricer() {}
 
-    //=========================================================================
-    // Core Compute Interface
-    //=========================================================================
-
-    /**
-     * @brief Compute theoretical values for the entire grid
-     * 
-     * Default implementation calls:
-     * 1. initValuesCompute(grid) — build ExpiryInfo caches
-     * 2. computeValue(option) — for each option
-     * 3. finalizeCompute(grid) — cleanup
-     */
     virtual bool computeValues(OptionGrid* grid) = 0;
-
-    /**
-     * @brief Compute implied values (IV) from market prices
-     */
     virtual bool computeImpliedValues(OptionGrid* grid) { return false; }
 
-    //=========================================================================
-    // Lifecycle Methods (from longbeach CommPricer pattern)
-    //=========================================================================
+    virtual bool initValuesCompute(OptionGrid* grid) = 0;
+    virtual void computeValue(OptionData* option) = 0;
+    virtual void finalizeCompute(OptionGrid* grid) = 0;
 
-    /**
-     * @brief Initialize computation state for current cycle
-     * 
-     * Build ExpiryInfo caches: maturity, ATMForward, ATMVol, volCurve.
-     * Called at the start of each computeValues() cycle.
-     */
-    virtual bool initValuesCompute(OptionGrid* grid) { return true; }
+    virtual bool isPanicked() const = 0;
 
-    /**
-     * @brief Compute values for a single option
-     * 
-     * Uses cached ExpiryInfo to avoid redundant per-option lookups.
-     */
-    virtual void computeValue(OptionData* option) {}
+    // GVV curve
+    virtual IVolCurvePtr getVolCurve(uint32_t expiry) const = 0;
+    // fit to market
+    virtual IVolCurvePtr getVolCurve2(uint32_t expiry) const = 0;
+    // sprd fwd vs atmfwd
+    virtual IVolCurvePtr getFwdCurve(uint32_t expiry) const = 0;
 
-    /**
-     * @brief Finalize computation after all options processed
-     * 
-     * Called at the end of each computeValues() cycle.
-     */
-    virtual void finalizeCompute(OptionGrid* grid) {}
-
-    //=========================================================================
-    // Per-Expiry Data Access (cached in ExpiryInfo)
-    //=========================================================================
-
-    /**
-     * @brief Get ATM Volatility for an expiry
-     */
-    virtual double getATMVol(uint32_t expiry) const = 0;
-    virtual void setATMVol(uint32_t expiry, double vol) = 0;
-
-    /**
-     * @brief Get ATM Forward Price for an expiry
-     */
+    virtual double getMaturity(uint32_t expiry) const = 0;
     virtual double getATMForward(uint32_t expiry) const = 0;
 
-    /**
-     * @brief Get Time to Maturity (years)
-     */
-    virtual double getMaturity(uint32_t expiry) const = 0;
+    virtual void   setATMVol(uint32_t expiry, double atmvol) {}
+    virtual double getATMVol(uint32_t expiry) const = 0;
 
-    /**
-     * @brief Get Volatility at specific strike
-     */
-    virtual double getVol(uint32_t expiry, double strike) const = 0;
+    virtual double getFutSprd(uint32_t expiry) const { return 0; }
+    virtual double getATMVolSprd(uint32_t expiry) const { return 0; }
 
-    /**
-     * @brief Get volatility curve for an expiry
-     */
-    virtual IVolCurvePtr getVolCurve(uint32_t expiry) const { return nullptr; }
-
-    //=========================================================================
-    // Control
-    //=========================================================================
-
-    /**
-     * @brief Set reprice flag (force full recalculation)
-     */
     virtual void setReprice(bool bReprice) = 0;
 
-    /**
-     * @brief Called when underlying price changes
-     */
-    virtual void onUnderlyingPriceChanged(double newPrice) {}
+    virtual void    setTraceLevel(int32_t i) = 0;
+    virtual int32_t getTraceLevel() const = 0;
 
-    /**
-     * @brief Check if pricer is in panic mode
-     */
-    virtual bool isPanicked() const { return false; }
+    // Simple callback registration (replaces ListenerList / DECL_EVENT)
+    void addPricingChangedCallback(pricingChangedEventSink cb)
+    { m_pricingChangedCallbacks.push_back(std::move(cb)); }
+    void addSingleOptionChangedCallback(singleOptionChangedEventSink cb)
+    { m_singleOptionChangedCallbacks.push_back(std::move(cb)); }
+
+protected:
+    void firePricingChanged()
+    {
+        for (auto& cb : m_pricingChangedCallbacks) cb(this);
+    }
+    void fireSingleOptionChanged(OptionData* od)
+    {
+        for (auto& cb : m_singleOptionChangedCallbacks) cb(this, od);
+    }
+
+private:
+    std::vector<pricingChangedEventSink>       m_pricingChangedCallbacks;
+    std::vector<singleOptionChangedEventSink>  m_singleOptionChangedCallbacks;
+
+public:
+    // ConfigBase retained as a base for concrete Config structs.
+    class ConfigBase
+    {
+    public:
+        virtual ~ConfigBase() {}
+    };
+    using ConfigBasePtr = std::shared_ptr<ConfigBase>;
 };
-
-using IOptionPricerPtr = std::shared_ptr<IOptionPricer>;
 
 } // namespace wt_option

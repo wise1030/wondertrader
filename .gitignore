@@ -1,3 +1,17 @@
 dist/*
 # IDE/agent local state
 .antigravitycli/
+
+# Build artifacts
+build_stage1/
+build_release/
+build_all/
+*.o
+*.so
+*.a
+
+# Trash directories
+**/_trash/
+
+# WtOptionCore temporary
+src/WtOptionCore/tests/*.o
