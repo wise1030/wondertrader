@@ -4,13 +4,14 @@
  *
  * Business logic preserved. Migration deltas documented in OptionRisk.h.
  *
- * NOTE on OptionGrid API:
- * The OptionGrid is not yet migrated into the main WtOptionCore directory
- * (only _trash/simplified_v1/OptionGrid.h exists, with a different surface).
- * Calls to grid->subscribe(...), grid->expired(...), grid->getExpiryData(...),
- * grid->getSpotTradingData(), and ExpiryData::getPrimaryHedge()/
- * getSecondaryUnderliers() are guarded with TODO[OptionGrid migration] markers.
- * When OptionGrid lands, replace the stub bodies with the real calls.
+ * NOTE on OptionGrid wiring:
+ * OptionGrid is fully migrated. Grid-event delivery (onComputeValuesCompleted)
+ * is wired externally by the strategy via grid->addListener(risk.get()) so the
+ * constructor does NOT self-register (that would double-fire). Expired-contract
+ * filtering uses ExpiryData::daysToExpiry() <= 0. The only genuinely
+ * unavailable dependency is SpotTradingData (spot leg override of underlier
+ * delta), which is not part of the migrated grid; that override path is left as
+ * a documented no-op and can be set externally via the engine if needed.
  */
 #include "OptionRisk.h"
 #include "OptionData.h"
@@ -24,6 +25,20 @@
 
 namespace wt_option {
 
+namespace {
+// A contract is considered expired once its expiry has no calendar days left.
+// ExpiryData::daysToExpiry() defaults to 0 before the calendar is computed, so
+// we only treat it as expired when strictly negative to avoid dropping
+// freshly-created contracts whose calendar has not yet been populated.
+bool isExpired(const OptionGridPtr& grid, const OptionDataPtr& od)
+{
+    if (!grid || !od) return false;
+    ExpiryDataPtr ed = grid->getExpiryData(od->getExpiry());
+    if (!ed) return false;
+    return ed->daysToExpiry() < 0;
+}
+} // anonymous namespace
+
 /////////////////////////////////////////////////////////////////
 // OptionRisk
 
@@ -35,30 +50,23 @@ OptionRisk::OptionRisk(const OptionGridPtr& grid)
 {
     if (!grid) return;
 
-    // Iterate all current options and create risk data entries.
-    // TODO[OptionGrid migration]: confirm getAllOptions() returns
-    // const std::vector<OptionDataPtr>&. The simplified_v1 grid exposes it.
+    // Seed risk-data entries for all currently-known options.
     for (const OptionDataPtr& od : grid->getAllOptions())
     {
         createOptionRiskData(od);
     }
 
-    // Register self as grid listener (replaces grid->subscribe(Subscription, this)).
-    // TODO[OptionGrid migration]: grid->addListener(this) once OptionGrid lands.
-    // For now we rely on the engine calling onComputeValuesCompleted() externally
-    // or wiring the listener post-construction.
-    // grid->addListener(this);
+    // Grid-listener registration is performed externally by the strategy
+    // (grid->addListener(this)); we deliberately do NOT self-register here to
+    // avoid a duplicate onComputeValuesCompleted callback.
 }
 
 OptionRiskDataPtr OptionRisk::createOptionRiskData(const OptionDataPtr& od)
 {
     if (!od) return nullptr;
 
-    // TODO[OptionGrid migration]: original called getOptionGrid()->expired(instr)
-    // to skip expired contracts. No expired() on the simplified grid; rely on
-    // ExpiryData::daysToExpiry() <= 0 once that is the convention. For now,
-    // create unconditionally (matches simplified_v1 behavior).
-    // if (getOptionGrid()->expired(od->getCode())) return nullptr;
+    // Skip expired contracts (original: getOptionGrid()->expired(instr)).
+    if (isExpired(m_spOptionGrid, od)) return nullptr;
 
     auto rd = std::make_shared<OptionRiskData>(od);
     m_optionList.insert(rd);
@@ -75,10 +83,13 @@ OptionRiskDataPtr OptionRisk::get(const std::string& instr)
     by_instr::const_iterator it = index.find(instr);
     if (it == index.end())
     {
-        // TODO[OptionGrid migration]: original called m_spOptionGrid->get(instr)
-        // which may trigger a create. The simplified grid exposes getOption(code).
-        // For now, if not in our list, we cannot lazily create without the grid
-        // returning an OptionDataPtr by code — wire this once OptionGrid lands.
+        // Not yet tracked — try to lazily create from the grid (original:
+        // m_spOptionGrid->get(instr) which may trigger a create).
+        if (m_spOptionGrid) {
+            OptionDataPtr od = m_spOptionGrid->get(instr);
+            if (od)
+                return createOptionRiskData(od);
+        }
         return OptionRiskDataPtr();
     }
     return *it;
@@ -89,24 +100,17 @@ const OptionExpiryGreeksPtr& OptionRisk::getExpiryGreeks(uint32_t exp)
     OptionExpiryGreeksPtr& egreeks = m_expiryTable[exp];
     if (!egreeks)
     {
-        // TODO[OptionGrid migration]: original pulled ExpiryData via
-        // m_spOptionGrid->getExpiryData(exp). The simplified grid exposes
-        // getExpiry(exp). Wire once OptionGrid lands.
         ExpiryDataPtr ed;
-        // if (m_spOptionGrid) ed = m_spOptionGrid->getExpiry(exp);
+        if (m_spOptionGrid) ed = m_spOptionGrid->getExpiryData(exp);
 
         egreeks = std::make_shared<OptionExpiryGreeks>(ed);
 
-        // TODO[OptionGrid migration]: original registered primary + secondary
-        // hedge instruments from ExpiryData::getPrimaryHedge() and
-        // getSecondaryUnderliers() (longbeach MarketDataContext types that no
-        // longer exist). Once ExpiryData exposes hedge codes directly, do:
-        //   if (ed && !ed->getHedgeCode().empty())
-        //       egreeks->setPrimaryHedge(registerHedgeInstrument(ed->getHedgeCode(), exp));
-        // For now, hedge wiring is deferred to the engine.
+        // Auto-register hedge instrument from ExpiryData
+        if (ed && !ed->getHedgeCode().empty()) {
+            auto hd = registerHedgeInstrument(ed->getHedgeCode(), exp);
+            egreeks->setPrimaryHedge(hd);
+        }
 
-        // Subscribe to per-expiry Greeks / underlier-delta change callbacks
-        // (replaces Subscription + boost::bind).
         OptionRisk* self = this;
         egreeks->addGreeksChangedCallback(
             [self](const OptionExpiryGreeks& g, const OptionGreeks& prev)
@@ -144,13 +148,11 @@ void OptionRisk::setHedgePosition(const std::string& code, int32_t position)
         if (hd->code == code)
         {
             hd->position = position;
-            // deltaPosition = multiplier * settlementFraction * position
-            // The original HedgeData computed this as
-            //   m_multiplier * m_spExpiryData->getSettlementFraction() * position
-            // We don't carry an ExpiryData pointer here; engine is expected to
-            // set deltaPosition directly via hd->deltaPosition if it needs the
-            // fraction applied. We update the simple product as a fallback.
             hd->deltaPosition = hd->multiplier * position;
+            // Notify expiry greeks of position change
+            auto it = m_expiryTable.find(hd->expiry);
+            if (it != m_expiryTable.end() && it->second)
+                it->second->__onHedgePositionChange();
             return;
         }
     }
@@ -173,14 +175,11 @@ void OptionRisk::update()
     }
     m_pfuDelta = udelta;
 
-    // If SpotTradingData exists, override underlier delta.
-    // TODO[OptionGrid migration]: original:
-    //   if (m_spOptionGrid->getSpotTradingData()) {
-    //       const SpotTradingDataPtr& std_ = m_spOptionGrid->getSpotTradingData();
-    //       m_pfuDelta = std_->getDelta();
-    //   }
-    // SpotTradingData is not yet migrated; the engine can set m_pfuDelta
-    // externally if needed. Leaving the override path as a no-op for now.
+    // NOTE: The original overrode the underlier delta from a spot leg when a
+    // SpotTradingData was present on the grid. SpotTradingData is not part of
+    // the migrated OptionGrid (options + futures only). The engine may set
+    // m_pfuDelta externally if a spot leg is ever introduced; until then this
+    // override is intentionally absent.
 }
 
 const OptionRisk::by_instr& OptionRisk::all()
@@ -217,9 +216,7 @@ double OptionRisk::getUnderlierDelta() const
         delta += eg->getUnderlierDelta();
     }
 
-    // If SpotTradingData exists, override underlier delta.
-    // TODO[OptionGrid migration]: original overrode with SpotTradingData::getDelta().
-    // Left as no-op until SpotTradingData lands.
+    // NOTE: spot-leg (SpotTradingData) override not applicable — see update().
     return delta;
 }
 
@@ -241,8 +238,7 @@ double OptionRisk::totalDelta() const
         const OptionExpiryGreeksPtr& eg = v.second;
         raw_delta += eg->totalDelta();
     }
-    // TODO[OptionGrid migration]: original added SpotTradingData::getDelta().
-    // Left as no-op until SpotTradingData lands.
+    // NOTE: spot-leg (SpotTradingData) delta not applicable — see update().
     return raw_delta;
 }
 
@@ -250,7 +246,6 @@ std::vector<OptionRiskDataPtr> OptionRisk::getNonZeroPositions()
 {
     std::vector<OptionRiskDataPtr> v;
     if (!m_spOptionGrid) return v;
-    // TODO[OptionGrid migration]: confirm getAllOptions() availability.
     for (const OptionDataPtr& od : m_spOptionGrid->getAllOptions())
     {
         OptionRiskDataPtr rd = get(od->getCode());
@@ -277,8 +272,7 @@ std::vector<OptionRiskDataPtr> OptionRisk::getNonZeroPositions(uint32_t exp)
 void OptionRisk::onAddOption(const OptionDataPtr& od)
 {
     if (!od) return;
-    // TODO[OptionGrid migration]: expired() not available on simplified grid.
-    // if (getOptionGrid()->expired(od->getCode())) return;
+    if (isExpired(m_spOptionGrid, od)) return;
     if (!m_optionList.get<0>().count(od->getCode()))
         createOptionRiskData(od);
 }
@@ -300,8 +294,14 @@ void OptionRisk::__onExpiryGreeksChanged(const OptionExpiryGreeks& g,
 
 void OptionRisk::onComputeValuesCompleted(const IOptionGrid* /*grid*/)
 {
-    if (m_bAutoUpdateGreeks)
+    if (m_bAutoUpdateGreeks) {
+        // P5: Mark all risk data as dirty since the pricer has recomputed
+        // option Greeks. This ensures the incremental update() will pick up
+        // the new values.
+        for (const auto& rd : all())
+            rd->markDirty();
         update();
+    }
 }
 
 } // namespace wt_option

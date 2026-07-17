@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root startpage="Hello">
+	<!--页面路径-->
+    <pagepath>
+        <item from="Hello" to="SelectLevel"/>
+        <item from="SelectLevel" to="SelectLayoutProfessional">
+			<with>
+				<item>Level_Professional</item>
+			</with>
+        </item>
+        <item from="SelectLayoutProfessional" to="MouseFill"/>
+        <item from="MouseFill" to="KeyboardFill"/>
+        <item from="KeyboardFill" to="MouseSendOrder"/>
+        <item from="MouseSendOrder" to="ModifyOrder"/>
+        <item from="ModifyOrder" to="MouseClosePosition"/>
+        <item from="MouseClosePosition" to="IntroOthers"/>
+        <item from="IntroOthers" to="Finish" finish="1"/>
+        <item from="SelectLevel" to="SelectLayoutOld">
+			<with>
+				<item>Level_Old</item>
+			</with>
+        </item>
+        <item from="SelectLayoutOld" to="IntroOld2">
+			<with>
+				<item>1_LayoutOld2</item>
+			</with>
+        </item>
+        <item from="SelectLayoutOld" to="IntroOld1">
+			<with>
+				<item>1_LayoutOld1</item>
+			</with>
+        </item>
+        <item from="SelectLayoutOld" to="IntroOld3">
+			<with>
+				<item>1_LayoutOld3</item>
+			</with>
+        </item>
+        <item from="IntroOld1" to="Finish" finish="1"/>
+        <item from="IntroOld2" to="Finish" finish="1"/>
+        <item from="IntroOld3" to="Finish" finish="1"/>
+    </pagepath>
+
+	<!--标志设置-->
+    <flagset>
+		<!-- 用户水平-->
+        <item page="SelectLevel" item="1">
+            <set>
+				<item>Level_Professional</item>
+				<item>1_LayoutProfessional1</item>
+				<item>skin_Normal</item>
+ 			</set>
+        </item>
+        <item page="SelectLevel" item="2">
+            <set>
+				<item>Level_Old</item>
+				<item>1_LayoutOld1</item>
+				<item>skin_1</item>
+ 			</set>
+        </item>
+		<!-- 套路选择-->
+        <item page="SelectLayoutOld" item="1">
+            <set>
+				<item>1_LayoutOld1</item>
+				<item>skin_1</item>
+ 			</set>
+        </item>
+        <item page="SelectLayoutOld" item="2">
+            <set>
+				<item>1_LayoutOld2</item>
+				<item>skin_Old2</item>
+ 			</set>
+        </item>
+        <item page="SelectLayoutOld" item="3">
+            <set>
+				<item>1_LayoutOld3</item>
+				<item>skin_NormalSmall</item>
+ 			</set>
+        </item>
+        <item page="SelectLayoutProfessional" item="1">
+            <set>
+				<item>1_LayoutProfessional1</item>
+				<item>skin_Normal</item>
+ 			</set>
+        </item>
+        <item page="SelectLayoutProfessional" item="2">
+            <set>
+				<item>1_LayoutProfessional2</item>
+				<item>skin_NormalSmall</item>
+ 			</set>
+        </item>
+        <item page="SelectLayoutProfessional" item="3">
+            <set>
+				<item>1_LayoutProfessional3</item>
+				<item>skin_NormalSmall</item>
+ 			</set>
+        </item>
+        <item page="SelectLayoutProfessional" item="4">
+            <set>
+				<item>1_LayoutProfessional4</item>
+				<item>skin_Normal</item>
+ 			</set>
+        </item>
+		<!-- 功能开关 -->
+        <item page="KeyboardFill" item="Disable">
+            <set>
+				<item>4_DisableKeyboardFill</item>
+			</set>
+        </item>
+        <item page="MouseFill" item="Disable">
+            <set>
+				<item>4_DisableMouseFill</item>
+			</set>
+        </item>
+        <item page="MouseClosePosition" item="Disable">
+            <set>
+				<item>4_DisableMouseClosePosition</item>
+			</set>
+        </item>
+        <item page="MouseSendOrder" item="Disable">
+            <set>
+				<item>4_DisableMouseSendOrder</item>
+			</set>
+        </item>
+        <item page="ModifyOrder" item="Disable">
+            <set>
+				<item>4_DisableModifyOrder</item>
+			</set>
+        </item>
+
+    </flagset>
+</root>

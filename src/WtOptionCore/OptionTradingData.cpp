@@ -50,52 +50,18 @@ void OptionTradingData::onMarketsPriced(const OptionData& od, size_t index)
 
 int32_t OptionTradingData::updateOrders(bool cancel_only)
 {
-    // Phase 2: prefer OptionQuoteManager (complete order lifecycle)
-    if (m_quoteOM) {
-        return m_quoteOM->updateOrders(m_multiMarket, cancel_only);
-    }
+    if (!m_quoteOM) return 0;
 
-    // Fallback: executor path (for backtest without OQM)
-    if (m_multiMarket.empty())
-        return 0;
-
-    int32_t nTrans = 0;
-
-    if (cancel_only)
-    {
-        // Cancel-only path: cancel any live order via the cancel executor.
-        // The original delegated to IOrderManager::updateOrders2(cancel_only=true).
-        // Without an internal order book we simply signal stop; real cancel
-        // tracking is handled by the WT layer via orderId.
-        return 0;
-    }
-
-    // Quote / order path: push desired market through executors.
-    const PriceSize& bid = m_multiMarket.getBestBid();
-    const PriceSize& ask = m_multiMarket.getBestAsk();
-
-    if (m_quoteExecutor)
-    {
-        // Two-legged quote.
-        uint32_t orderId = m_quoteExecutor(
-            bid.px(), static_cast<uint32_t>(bid.sz()),
-            ask.px(), static_cast<uint32_t>(ask.sz()));
-        if (orderId != 0)
-            ++nTrans;
-    }
-    else if (m_orderExecutor)
-    {
-        // Single-leg fallback: send each side independently.
-        if (!bid.empty() && m_orderExecutor(true,  bid.px(), static_cast<uint32_t>(bid.sz())))
-            ++nTrans;
-        if (!ask.empty() && m_orderExecutor(false, ask.px(), static_cast<uint32_t>(ask.sz())))
-            ++nTrans;
-    }
-
-    // Remember what we tried to realize.
+    int32_t txns = m_quoteOM->updateOrders(m_multiMarket, cancel_only);
     m_lastDesiredMarket = m_multiMarket;
-    m_currentMarket = m_multiMarket;
-    return nTrans;
+    if (cancel_only) {
+        m_currentMarket.clear();
+    } else if (txns > 0) {
+        m_currentMarket = m_multiMarket;
+    }
+    OptionDataPtr od = getOptionData();
+    if (od) od->setCurrentMarket(m_currentMarket);
+    return txns;
 }
 
 void OptionTradingData::setActive(bool b)
@@ -103,6 +69,8 @@ void OptionTradingData::setActive(bool b)
     m_bActive = b;
     if (!b)
         m_multiMarket.clear();
+    if (m_quoteOM)
+        m_quoteOM->setActive(b);
 }
 
 bool OptionTradingData::isActive() const

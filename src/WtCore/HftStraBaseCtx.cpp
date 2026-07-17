@@ -8,6 +8,7 @@
  * \brief
  */
 #include "HftStraBaseCtx.h"
+#include "ShareManager.h"
 #include "WtHftEngine.h"
 #include "TraderAdapter.h"
 #include "WtHelper.h"
@@ -983,4 +984,73 @@ void HftStraBaseCtx::log_close(const char* stdCode, bool isLong, uint64_t openTi
 			<< totalprofit << "," << enterTag << "," << exitTag << "\n";
 		_close_logs->write_file(ss.str());
 	}
+}
+
+
+// ============================================================================
+// 双边报价接口(做市商) — 从UFT移植
+// ============================================================================
+
+std::pair<uint32_t, uint32_t> HftStraBaseCtx::stra_quote(const char* stdCode, double bidPrice, double bidQty,
+                                                          double askPrice, double askQty, const char* userTag)
+{
+    if (!_trader)
+        return {0, 0};
+
+    uint32_t localId = _trader->quote(stdCode, bidPrice, bidQty, askPrice, askQty, 0);
+    if (localId == 0)
+    {
+        log_error("Quote failed: {} BID {}@{} ASK {}@{}", stdCode, bidQty, bidPrice, askQty, askPrice);
+        return {0, 0};
+    }
+
+    log_info("Quote placed: {} BID {}@{} ASK {}@{} (local_id={})",
+        stdCode, bidQty, bidPrice, askQty, askPrice, localId);
+
+    return {localId, localId};
+}
+
+bool HftStraBaseCtx::stra_cancel_quote(uint32_t localid)
+{
+    if (!_trader)
+        return false;
+
+    return _trader->cancelQuote(localid);
+}
+
+OrderIDs HftStraBaseCtx::stra_cancel_all(const char* stdCode)
+{
+    if (!_trader)
+        return OrderIDs();
+
+    return _trader->cancelAll(stdCode);
+}
+
+// ============================================================================
+// 热更新参数 — 从UFT移植, 通过 ShareManager 共享内存实现
+// ============================================================================
+
+const char* HftStraBaseCtx::sync_param(const char* name, const char* initVal, bool bForceWrite)
+{
+    return ShareManager::self().allocate_value(_name.c_str(), name, initVal, bForceWrite, false);
+}
+
+double* HftStraBaseCtx::sync_param(const char* name, double initVal, bool bForceWrite)
+{
+    return ShareManager::self().allocate_value(_name.c_str(), name, initVal, bForceWrite, false);
+}
+
+int32_t* HftStraBaseCtx::sync_param(const char* name, int32_t initVal, bool bForceWrite)
+{
+    return ShareManager::self().allocate_value(_name.c_str(), name, initVal, bForceWrite, false);
+}
+
+void HftStraBaseCtx::commit_param_watcher()
+{
+    ShareManager::self().commit_param_watcher(_name.c_str());
+}
+
+void HftStraBaseCtx::on_params_updated()
+{
+    // HftStraContext 会转发给策略
 }

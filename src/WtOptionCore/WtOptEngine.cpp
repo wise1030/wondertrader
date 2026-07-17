@@ -10,7 +10,6 @@
 #include "WtOptContext.h" 
 #include "StandardOptionPricer.h"
 #include "CompositeOptionPricer.h"
-#include "SignalFactory.h"
 #include "OptionGrid.h"
 #include "OptionRisk.h"
 #include "OrderManager.h"
@@ -236,6 +235,15 @@ void WtOptEngine::on_session_end()
 
 void WtOptEngine::on_timer(uint32_t curDate, uint32_t curTime)
 {
+    // Detect minute rollover from the 100ms ticker (curTime is HHMM). When the
+    // minute changes we emit a minute-end event for the *previous* minute before
+    // dispatching the regular timer, so contexts can run curve fitting / periodic
+    // maintenance aligned to minute boundaries.
+    if (_last_min_time != 0 && curTime != _last_min_time) {
+        on_minute_end(curDate, _last_min_time);
+    }
+    _last_min_time = curTime;
+
     for (auto& v : _ctx_map) {
         auto ctx = std::dynamic_pointer_cast<WtOptContext>(v.second);
         if (ctx) {
@@ -244,10 +252,18 @@ void WtOptEngine::on_timer(uint32_t curDate, uint32_t curTime)
     }
 }
 
-// void WtOptEngine::on_minute_end(uint32_t curDate, uint32_t curTime)
-// {
-//     // TODO: Dispatch minute end event to contexts for curve fitting if needed
-// }
+void WtOptEngine::on_minute_end(uint32_t curDate, uint32_t curTime)
+{
+    // Dispatch a minute-end calculation trigger to every context. WtOptContext
+    // routes this to the strategy's on_calculate (used for periodic vol-curve
+    // fitting and time-aligned maintenance).
+    for (auto& v : _ctx_map) {
+        auto ctx = std::dynamic_pointer_cast<WtOptContext>(v.second);
+        if (ctx) {
+            ctx->enqueue_timer(curDate, curTime);
+        }
+    }
+}
 
 OptContextPtr WtOptEngine::getContext(uint32_t id)
 {

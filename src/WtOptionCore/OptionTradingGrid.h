@@ -29,8 +29,8 @@
 #include "IOptionPricer.h"
 #include "OptionQuoteManager.h"
 
-// Forward declaration — IUftStraCtx defined in WT Includes
-namespace wtp { class IUftStraCtx; }
+// Forward declaration — IHftStraCtx defined in WT Includes
+namespace wtp { class IHftStraCtx; }
 
 #include <string>
 #include <map>
@@ -64,11 +64,13 @@ public:
     void setOrderExecutor(OrderExecutor exec)   { m_orderExec  = std::move(exec); }
     void setCancelExecutor(CancelExecutor exec) { m_cancelExec = std::move(exec); }
     void setExchange(const std::string& exchg)  { m_exchange = exchg; }
-    void setUftCtx(wtp::IUftStraCtx* ctx)            { m_uftCtx = ctx; }
+    void setHftCtx(wtp::IHftStraCtx* ctx)            { m_hftCtx = ctx; }
 
     // P11: Per-instrument-type OQM config (option vs future)
     void setOptionOQMConfig(const OptionQuoteManager::Config& cfg) { m_optionOqmCfg = cfg; }
     void setFutureOQMConfig(const OptionQuoteManager::Config& cfg) { m_futureOqmCfg = cfg; }
+    void setHedgeOverride(uint32_t exp, const std::string& hedgeCode) { m_hedgeOverrides[exp] = hedgeCode; }
+    void setQuoteStatistics(wt_option::QuoteStatistics* qs) { m_quoteStats = qs; }
 
     // --- OptionRisk ---
     const OptionRiskPtr& getPositionRisk() const { return m_spPositionRisk; }
@@ -81,6 +83,7 @@ public:
     OptionTradingDataPtr getTradingData(uint32_t exp, strike_t stk, OptionRight right) const;
 
     UnderlyingTradingDataPtr getUnderlyingTradingData(const std::string& code) const;
+    const std::map<std::string, UnderlyingTradingDataPtr>& getAllUnderlyingTradingData() const { return m_tblUnderlyingTradingData; }
     UnderlyingTradingDataPtr getFrontMonthTradingData() const { return m_spFrontMonthTradingData; }
     void setFrontMonthTradingData(UnderlyingTradingDataPtr utd) { m_spFrontMonthTradingData = std::move(utd); }
 
@@ -104,10 +107,11 @@ private:
     OrderExecutor  m_orderExec;
     CancelExecutor m_cancelExec;
     std::string    m_exchange;
-    wtp::IUftStraCtx*   m_uftCtx = nullptr;
+    wtp::IHftStraCtx*   m_hftCtx = nullptr;
     // P11: Per-instrument-type OQM config
     OptionQuoteManager::Config m_optionOqmCfg;
     OptionQuoteManager::Config m_futureOqmCfg;
+    wt_option::QuoteStatistics* m_quoteStats = nullptr;  // non-owning
 
     // Trading object tables
     typedef std::map<std::string, UnderlyingTradingDataPtr> UnderlyingTable;
@@ -115,6 +119,7 @@ private:
 
     typedef std::map<uint32_t, ExpiryTradingDataPtr> ExpiryTable;
     ExpiryTable m_tblExpiryTradingData;
+    std::map<uint32_t, std::string> m_hedgeOverrides;
 
     UnderlyingTradingDataPtr m_spFrontMonthTradingData;
 };

@@ -58,6 +58,9 @@ public:
 
 	HftContextPtr	getContext(uint32_t id);
 
+	// 热更新参数通知 (从UFT移植)
+	void notify_params_update(const char* name);
+
 	void sub_order_queue(uint32_t sid, const char* stdCode);
 	void sub_order_detail(uint32_t sid, const char* stdCode);
 	void sub_transaction(uint32_t sid, const char* stdCode);

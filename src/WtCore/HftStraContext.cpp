@@ -132,6 +132,14 @@ void HftStraContext::on_channel_lost()
 	HftStraBaseCtx::on_channel_lost();
 }
 
+void HftStraContext::on_params_updated()
+{
+	if (_strategy)
+		_strategy->on_params_updated();
+
+	HftStraBaseCtx::on_params_updated();
+}
+
 void HftStraContext::on_entrust(uint32_t localid, const char* stdCode, bool bSuccess, const char* message)
 {
 	if (_strategy)

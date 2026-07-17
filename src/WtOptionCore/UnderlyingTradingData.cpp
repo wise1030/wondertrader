@@ -6,7 +6,7 @@
  * Business logic preserved; only dependency layer replaced.
  */
 #include "UnderlyingTradingData.h"
-
+#include "OptionQuoteManager.h"
 #include "ExpiryData.h"
 
 namespace wt_option {
@@ -44,35 +44,16 @@ int32_t UnderlyingTradingData::getPosition() const
 
 int32_t UnderlyingTradingData::updateOrders(bool cancel_only)
 {
-    if (m_multiMarket.empty())
-        return 0;
+    if (!m_quoteOM) return 0;
 
-    if (cancel_only)
-        return 0;
-
-    int32_t nTrans = 0;
-    const PriceSize& bid = m_multiMarket.getBestBid();
-    const PriceSize& ask = m_multiMarket.getBestAsk();
-
-    if (m_quoteExecutor)
-    {
-        uint32_t orderId = m_quoteExecutor(
-            bid.px(), static_cast<uint32_t>(bid.sz()),
-            ask.px(), static_cast<uint32_t>(ask.sz()));
-        if (orderId != 0)
-            ++nTrans;
-    }
-    else if (m_orderExecutor)
-    {
-        if (!bid.empty() && m_orderExecutor(true,  bid.px(), static_cast<uint32_t>(bid.sz())))
-            ++nTrans;
-        if (!ask.empty() && m_orderExecutor(false, ask.px(), static_cast<uint32_t>(ask.sz())))
-            ++nTrans;
-    }
-
+    int32_t txns = m_quoteOM->updateOrders(m_multiMarket, cancel_only);
     m_lastDesiredMarket = m_multiMarket;
-    m_currentMarket = m_multiMarket;
-    return nTrans;
+    if (cancel_only) {
+        m_currentMarket.clear();
+    } else if (txns > 0) {
+        m_currentMarket = m_multiMarket;
+    }
+    return txns;
 }
 
 void UnderlyingTradingData::setActive(bool b)
@@ -80,6 +61,8 @@ void UnderlyingTradingData::setActive(bool b)
     m_bActive = b;
     if (!b)
         m_multiMarket.clear();
+    if (m_quoteOM)
+        m_quoteOM->setActive(b);
 }
 
 void UnderlyingTradingData::enable()

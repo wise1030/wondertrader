@@ -1,0 +1,24 @@
+[13:40:48.027][main] === QuoteProbe start ===
+[13:40:48.030][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[13:40:48.031][main] instrument=CY609 exchange=CZCE tickOffset=20 qty=2
+[13:40:48.031][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[13:40:48.031][main] log=quote_probe_20260611_134048.log
+[13:40:48.129][OnFrontConnected] trader front connected, sending Authenticate
+[13:40:48.130][ReqAuthenticate] sent ret=0
+[13:40:48.194][OnRspAuthenticate] OK, sending Login
+[13:40:48.388][ReqUserLogin] sent ret=0
+[13:40:48.416][OnRspUserLogin] OK FrontID=7 SessionID=1242103828 MaxOrderRef=1 TradingDay=20260611
+[13:40:48.417][ReqSettlementConfirm] sent ret=0
+[13:40:48.443][OnRspSettlementConfirm] OK
+[13:40:48.446][ReqQryInstrument] sent ret=0 code=CY609
+[13:40:48.474][OnRspQryInstrument] code=CY609 exch=CZCE tick=5.0000 MaxLimitOrderVol=1000 volMult=5
+[13:40:48.474][ReqQryDepthMarketData] sent ret=0
+[13:40:48.503][OnRspQryDepthMarketData] code=CY609 LastPrice=22015.00 Bid1=0.00 Ask1=22020.00 UpLimit=23335.00 DnLimit=21535.00
+[13:40:49.004][ReqQuoteInsert] code=CY609 QuoteRef=1006 BID 2@21915.00 ASK 2@22115.00 (last=22015.00 tick=5.0000 off=20)
+[13:40:49.005][ReqQuoteInsert] API ret=0
+[13:40:49.063][OnRtnOrder] code=CY609 OrdRef=          13 SysID= ExchOrdID=CZCE Dir=1 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=22115.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:40:48 CnclTime=
+[13:40:49.064][OnRtnOrder] code=CY609 OrdRef=          14 SysID= ExchOrdID=CZCE Dir=0 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=21915.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:40:48 CnclTime=
+[13:40:49.065][OnRtnQuote] code=CY609 QuoteRef=1006 SysID= Status=a(?) StatusMsg='报单已提交' BID 2@21915.00 BidOrdSysID= Ask 2@22115.00 AskOrdSysID= Front=7 Session=1242103828 InsTime=13:40:48 CnclTime=
+[13:40:49.067][OnRtnOrder] code=CY609 OrdRef=          13 SysID= ExchOrdID=CZCE Dir=1 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝263:已撤单报单被拒绝CZCE:出错: 不是指定合约的做市商' Price=22115.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:40:48 CnclTime=
+[13:40:49.068][OnRtnOrder] code=CY609 OrdRef=          14 SysID= ExchOrdID=CZCE Dir=0 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝263:已撤单报单被拒绝CZCE:出错: 不是指定合约的做市商' Price=21915.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:40:48 CnclTime=
+[13:40:49.069][OnRtnQuote] code=CY609 QuoteRef=1006 SysID= Status=5(Canceled) StatusMsg='263:已撤单报单被拒绝CZCE:出错: 不是指定合约的做市商' BID 2@21915.00 BidOrdSysID= Ask 2@22115.00 AskOrdSysID= Front=7 Session=1242103828 InsTime=13:40:48 CnclTime=

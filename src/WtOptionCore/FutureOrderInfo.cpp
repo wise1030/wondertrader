@@ -36,7 +36,7 @@ void FutureOrderInfo::captureIssue()
 
     m_atmsig0  = NAN;
     m_pfdelta0 = NAN;
-    // OptionTradingGrid not yet migrated; left as NaN matching the original's
+    // Grid-level snapshot fields left as NaN (not captured at issue time)'s
     // "otg == null" path.
 }
 

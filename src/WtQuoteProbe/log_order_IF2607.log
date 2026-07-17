@@ -1,0 +1,21 @@
+[13:25:56.036][main] === QuoteProbe start ===
+[13:25:56.037][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[13:25:56.037][main] instrument=IF2607 exchange=CFFEX tickOffset=20 qty=1
+[13:25:56.037][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[13:25:56.037][main] log=quote_probe_20260611_132556.log
+[13:25:56.137][OnFrontConnected] trader front connected, sending Authenticate
+[13:25:56.138][ReqAuthenticate] sent ret=0
+[13:25:56.197][OnRspAuthenticate] OK, sending Login
+[13:25:56.366][ReqUserLogin] sent ret=0
+[13:25:56.391][OnRspUserLogin] OK FrontID=7 SessionID=1187971086 MaxOrderRef=1 TradingDay=20260611
+[13:25:56.392][ReqSettlementConfirm] sent ret=0
+[13:25:56.419][OnRspSettlementConfirm] OK
+[13:25:56.420][ReqQryInstrument] sent ret=0 code=IF2607
+[13:25:56.445][OnRspQryInstrument] code=IF2607 exch=CFFEX tick=0.2000 MaxLimitOrderVol=20 volMult=300
+[13:25:56.445][ReqQryDepthMarketData] sent ret=0
+[13:25:56.472][OnRspQryDepthMarketData] code=IF2607 LastPrice=4645.20 Bid1=4644.20 Ask1=4646.20 UpLimit=5140.40 DnLimit=4206.00
+[13:25:56.974][ReqOrderInsert] code=IF2607 OrderRef=2006 BUY 1@4641.20 (last=4645.20 tick=0.2000 off=20)
+[13:25:56.975][ReqOrderInsert] API ret=0
+[13:25:57.006][OnRtnOrder] code=IF2607 OrdRef=2006 SysID= ExchOrdID=CFFEX Dir=0 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=4641.20 Vol=1 Traded=0 Remain=1 Source=0 Type=0 Front=7 Sess=1187971086 InsTime=13:25:56 CnclTime=
+[13:25:57.019][OnRtnOrder] code=IF2607 OrdRef=2006 SysID=      953668 ExchOrdID=CFFEX Dir=0 Status=3(NoTradeQueueing) SubmitStatus=3 StatusMsg='未成交' Price=4641.20 Vol=1 Traded=0 Remain=1 Source=0 Type=0 Front=7 Sess=1187971086 InsTime=13:25:56 CnclTime=
+[13:26:02.059][main] === QuoteProbe end, log=quote_probe_20260611_132556.log ===

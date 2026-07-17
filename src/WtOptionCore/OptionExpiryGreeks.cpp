@@ -59,15 +59,31 @@ double OptionExpiryGreeks::portfolio_delta() const
 
 void OptionExpiryGreeks::update()
 {
-    reset();
-    for (const OptionRiskDataPtr& p : m_expiryOptions)
-    {
-        assert(p && "can't lock OptionRiskData in OptionExpiryGreeks");
-        p->update();
-        accum(p->getPositionGreeks());
+    // P5: Check if any option is dirty. If none are dirty and hedge positions
+    // haven't changed, skip the full reset+accumulate (keep previous values).
+    bool anyDirty = false;
+    for (const OptionRiskDataPtr& p : m_expiryOptions) {
+        if (p && p->isDirty()) { anyDirty = true; break; }
     }
+
+    if (anyDirty) {
+        reset();
+        for (const OptionRiskDataPtr& p : m_expiryOptions)
+        {
+            assert(p && "can't lock OptionRiskData in OptionExpiryGreeks");
+            p->update();
+            accum(p->getPositionGreeks());
+        }
+    } else {
+        // Just clear dirty flags (they should already be clear, but be safe)
+        for (const OptionRiskDataPtr& p : m_expiryOptions) {
+            if (p) p->update();  // no-op when not dirty
+        }
+    }
+
+    // Always recompute hedge deltas (cheap, and hedge positions may change
+    // independently of option Greeks).
     m_udelta = 0;
-    // Aggregate hedge deltas (primary + secondaries).
     std::vector<HedgeDataPtr> hdlist(m_vSecondaryHedge.begin(),
                                      m_vSecondaryHedge.end());
     if (m_spHedgeData)

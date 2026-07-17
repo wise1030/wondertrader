@@ -22,10 +22,10 @@
 #include "OptionPricer2.h"
 #include "ExpiryData.h"
 #include "OptionData.h"
+#include "../WTSTools/WTSLogger.h"
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <stdexcept>
 
 #include <boost/foreach.hpp>
@@ -55,6 +55,21 @@ bool dp_comp(const IVolCurve::datapoint_t& p1, const IVolCurve::datapoint_t& p2)
     return LT(p1.first, p2.first);
 }
 
+// threshold table for good-points minimum (populated by constructor)
+std::map<int32_t, double>& s_threshTable() { static std::map<int32_t, double> t; return t; }
+double evalThresh(int32_t days) {
+    auto& t = s_threshTable();
+    if (t.empty()) return 15;
+    auto it = t.lower_bound(days);
+    if (it == t.end())   return t.rbegin()->second;
+    if (it == t.begin()) return it->second;
+    auto lo = std::prev(it);
+    double x0 = lo->first, x1 = it->first;
+    double y0 = lo->second, y1 = it->second;
+    if (x1 == x0) return y1;
+    return y0 + (y1 - y0) * (days - x0) / (x1 - x0);
+}
+
 // find_range: returns the two map iterators bracketing `key` from below/above
 template<typename Map>
 std::pair<typename Map::iterator, typename Map::iterator>
@@ -75,11 +90,14 @@ find_range(Map& m, double key) {
 // ----------------------------------------------------------------------------
 void PeriodicCurveFitter::FitData::print()
 {
-    BOOST_FOREACH(const IVolCurve::datapoint_t& p, stkvol_points) {
+    std::string pts;
+    for (const auto& p : stkvol_points) {
         double stk = p.first + atm_forward;
-        std::cout << stk << " ";
+        pts += std::to_string(stk) + " ";
     }
-    std::cout << std::endl;
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "FitData exp={} atm_fwd={:.4f} atm_vol={:.4f} pts=[{}]",
+        exp, atm_forward, atm_vol, pts);
 }
 
 // ----------------------------------------------------------------------------
@@ -109,31 +127,13 @@ PeriodicCurveFitter::PeriodicCurveFitter(OptionGrid* grid
     // the original interpolation.
     if (vol_fitting_good_points_thresh.empty())
         throw std::runtime_error("vol_fitting_good_points_thresh is empty!");
-    BOOST_FOREACH(const std::map<int32_t, double>::value_type& v, vol_fitting_good_points_thresh) {
-        std::cout << "vol fitting good points threshold curve, day, " << v.first
-                  << ", val, " << v.second << std::endl;
+    for (const auto& v : vol_fitting_good_points_thresh) {
+        s_threshTable()[v.first] = v.second;
     }
     // m_volFittingGoodPointsThreshCurve left null; doFit uses m_threshTable.
 }
 
-// Internal table mirror for the threshold curve (kept on the side since
-// LinearVolCurve isn't migrated yet).
-namespace {
-std::map<int32_t, double>& s_threshTable() { static std::map<int32_t, double> t; return t; }
-double evalThresh(int32_t days) {
-    auto& t = s_threshTable();
-    if (t.empty()) return 4;
-    auto it = t.lower_bound(days);
-    if (it == t.end())   return t.rbegin()->second;
-    if (it == t.begin()) return it->second;
-    auto lo = std::prev(it);
-    // linear interp between lo and it on the x=days axis
-    double x0 = lo->first, x1 = it->first;
-    double y0 = lo->second, y1 = it->second;
-    if (x1 == x0) return y1;
-    return y0 + (y1 - y0) * (days - x0) / (x1 - x0);
-}
-}
+// Internal threshold table is now in the anonymous namespace above (populated by constructor).
 
 // ----------------------------------------------------------------------------
 bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
@@ -143,17 +143,15 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
 
     // requires an updated computeImpliedValues
     ExpiryDataPtr ed = m_spGrid->getExpiryData(exp);   // host-provided
-    StrikeDataPtr  atm_sd = m_spGrid->getAtmStrike ? m_spGrid->getAtmStrike(exp) : nullptr;
+    if (!ed || !ed->isForwardReady()) return false;    // skip if forward not ready
 
-    if (atm_sd) {
+    StrikeDataPtr  atm_sd = m_spGrid->getAtmStrike(exp);
+    if (!atm_sd) return false;  // no ATM strike data yet
         strike_fwd_map_t strike_fwd;
         strike_vol_map_t strike_vol;
         // iterate strikes for this expiry
-        // Original used m_spGrid->iterStrikesByExpiry(exp); we use the generic
-        // strike_expiry_generator exposed by IOptionGrid.
-        auto range = m_spGrid->iter_strikes_expiry(exp);
-        for (auto it = range.first; it != range.second; ++it) {
-            const std::shared_ptr<StrikeData>& strike = *it;
+        auto strikes = m_spGrid->getStrikesByExpiry(exp);
+        for (const auto& strike : strikes) {
             const OptionDataPtr& call = strike->call();
             const OptionDataPtr& put  = strike->put();
             double stk = strike->getStrikePrice();
@@ -193,8 +191,9 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
             auto p = find_range(strike_vol, atm_forward);
             if (p.first == p.second) {
                 if (p.first == strike_vol.begin() || p.first == strike_vol.end()) {
-                    std::cout << getTime() << " PeriodicCurveFitter, " << exp
-                              << ", cannot interpolate atmvol, exit" << std::endl;
+                    WTSLogger::log_by_cat("strategy", LL_WARN,
+                        "PeriodicCurveFitter exp={} t={:.1f} cannot interpolate atmvol (no vol points near forward), exit",
+                        exp, getTime());
                     return false;
                 }
                 atm_vol = p.first->second;
@@ -251,19 +250,21 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
 
         // fit fwd curve
         if (ed && ed->daysToExpiry() < 7) {
-            std::cout << getTime() << " PeriodicCurveFitter, " << exp
-                      << ", we do not fit stkfwd curve within less than a week to expire." << std::endl;
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "PeriodicCurveFitter exp={} t={:.1f} skip stkfwd fit: <7 days to expire (dte={})",
+                exp, getTime(), ed->daysToExpiry());
         } else if (stkfwd_points.size() < 4) {
-            std::cout << getTime() << " PeriodicCurveFitter, " << exp
-                      << ", only " << stkfwd_points.size()
-                      << " points for fitting stkfwd curve." << std::endl;
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "PeriodicCurveFitter exp={} t={:.1f} skip stkfwd fit: only {} points (need 4)",
+                exp, getTime(), stkfwd_points.size());
         } else if (fwdcurve) {
             fwdcurve->fit(stkfwd_points);
         }
 
         if (stkvol_points.size() < 4 || !has_upside_point || !has_downside_point) {
-            std::cout << getTime() << " PeriodicCurveFitter, " << exp
-                      << ", not enough total or upside or downside points, exit" << std::endl;
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "PeriodicCurveFitter exp={} t={:.1f} not enough vol points: total={} upside={} downside={}, exit",
+                exp, getTime(), stkvol_points.size(), has_upside_point, has_downside_point);
             return false;
         }
 
@@ -276,9 +277,9 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
 
         int32_t good_points_thresh = (int32_t)evalThresh(ed ? ed->daysToExpiry() : 30);
         if ((int)stkvol_points.size() < good_points_thresh) {
-            std::cout << getTime() << " PeriodicCurveFitter, " << exp
-                      << ", number of good points " << stkvol_points.size()
-                      << " lower than thresh " << good_points_thresh << ", exit, ";
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "PeriodicCurveFitter exp={} t={:.1f} good points {} < thresh {}, exit",
+                exp, getTime(), stkvol_points.size(), good_points_thresh);
             fd_new.print();
             return false;
         }
@@ -294,14 +295,13 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
         if (getTraceLevel() >= 1) {
             for (auto& p : stkvol_points) {
                 double stk = p.first + atm_forward;
-                std::cout << getTime() << " PeriodicCurveFitter, " << exp
-                          << ", pts, " << stk << ", " << (atm_vol * p.second) << "\n";
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "PeriodicCurveFitter exp={} t={:.1f} pts stk={:.4f} vol={:.6f}",
+                    exp, getTime(), stk, (atm_vol * p.second));
             }
         }
         return true;
     }
-    return false;
-}
 
 // ----------------------------------------------------------------------------
 void PeriodicCurveFitter::updateFitData(const PeriodicCurveFitter::FitData& fd)
@@ -319,11 +319,11 @@ void PeriodicCurveFitter::updateFitData(const PeriodicCurveFitter::FitData& fd)
         // NOTE: original mutated fd.stkvol_points (non-const ref). We treat
         // FitData as mutable here to preserve the in-place decay behaviour.
         FitData& fd_mut = const_cast<FitData&>(fd);
-        BOOST_FOREACH(const IVolCurve::datapoint_t& p0, stkvol_points_prev) {
+        for (const auto& p0 : stkvol_points_prev) {
             double stk0 = p0.first + atmf_prev;
             double vol0 = p0.second * atmv_prev;
             IVolCurve::datapoint_t* pt = nullptr;
-            BOOST_FOREACH(IVolCurve::datapoint_t& p1, fd_mut.stkvol_points) {
+            for (auto& p1 : fd_mut.stkvol_points) {
                 double stk1 = p1.first + fd.atm_forward;
                 if (EQ(stk0, stk1)) { pt = &p1; break; }
             }
@@ -342,14 +342,27 @@ void PeriodicCurveFitter::updateFitData(const PeriodicCurveFitter::FitData& fd)
 // ----------------------------------------------------------------------------
 bool PeriodicCurveFitter::doFit()
 {
-    // Original checked: today's midnight + start/end window. With ClockMonitor
-    // gone we keep the same check but `today_midnight` is the host's job to set
-    // via setTime(); we treat m_time as seconds-since-epoch and compute the
-    // time-of-day. For simplicity, host is expected to pass time-of-day seconds
-    // directly through setTime for the windowing check to behave identically.
-    double tod = std::fmod(m_time, 86400.0);
-    if (tod < m_volFittingStartTime || tod > m_volFittingEndTime)
+    // Pre-condition: grid must have options and at least one expiry with forward ready
+    if (!m_spGrid || m_spGrid->numOptions() == 0)
         return false;
+
+    // Check at least one expiry has forward ready (i.e., put-call parity succeeded)
+    bool anyForwardReady = false;
+    for (const auto& [exp, ed] : m_spGrid->expiries()) {
+        if (ed && ed->isForwardReady()) {
+            anyForwardReady = true;
+            break;
+        }
+    }
+    if (!anyForwardReady) return false;
+
+    double tod = std::fmod(m_time, 86400.0);
+    if (tod < m_volFittingStartTime || tod > m_volFittingEndTime) {
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "PeriodicCurveFitter doFit skip: tod={:.0f} outside window [{:.0f}, {:.0f}]",
+            tod, m_volFittingStartTime, m_volFittingEndTime);
+        return false;
+    }
 
     m_perfCounter_total = 0.0; // reset (no real clock; logged for parity)
     m_spBlackPricer->computeImpliedValues(m_spGrid);
@@ -366,6 +379,13 @@ void PeriodicCurveFitter::__fitExpiry_imp(
     const std::pair<const uint32_t, std::shared_ptr<ExpiryData>>& v)
 {
     const uint32_t exp = v.first;
+
+    // Skip if forward not ready (put-call parity failed or no market data yet)
+    if (!v.second || !v.second->isForwardReady()) {
+        m_expiryFitStatus[exp] = false;
+        return;
+    }
+
     const IVolCurvePtr& volcurve  = m_spBlackPricer->getVolCurve(exp);
     const IVolCurvePtr& volcurve2 = m_spBlackPricer->getVolCurve2(exp);
     bool fit_ok = fitToExpiry(exp)
@@ -378,8 +398,7 @@ void PeriodicCurveFitter::__fitExpiry_imp(
 bool PeriodicCurveFitter::doFit_imp()
 {
     m_imp_perfCounter_total = 0.0;
-    // serial version is faster (original comment)
-    BOOST_FOREACH(const OptionGrid::ExpiryTable::value_type& v, m_spGrid->expiries()) {
+    for (const auto& v : m_spGrid->expiries()) {
         __fitExpiry_imp(v);
     }
     m_tvLastFit = getTime();
@@ -390,13 +409,15 @@ bool PeriodicCurveFitter::doFit_imp()
 // ADAPTATION: replaces onClockWakeup self-scheduling. Host calls onTimer each
 // tick; we fit when m_period has elapsed since last fit.
 // ----------------------------------------------------------------------------
-void PeriodicCurveFitter::onTimer(double time)
+bool PeriodicCurveFitter::onTimer(double time)
 {
     setTime(time);
     if (time >= m_tvNextFit) {
-        doFit();
+        bool ok = doFit();
         m_tvNextFit = time + m_period;
+        return ok;
     }
+    return false;
 }
 
 } // namespace wt_option

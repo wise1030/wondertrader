@@ -1354,6 +1354,34 @@ void TraderAdapter::onPushQuote(WTSEntrust* quoteInfo)
 	// Log or forward to sinks
 }
 
+OrderIDs TraderAdapter::cancelAll(const char* stdCode)
+{
+	OrderIDs ret;
+
+	bool isAll = strlen(stdCode) == 0;
+	if (_orders != NULL && _orders->size() > 0)
+	{
+		SpinLock lock(_mtx_orders);
+		for (auto it = _orders->begin(); it != _orders->end(); it++)
+		{
+			WTSOrderInfo* orderInfo = (WTSOrderInfo*)it->second;
+			if(!orderInfo->isAlive())
+				continue;
+
+			WTSContractInfo* cInfo = orderInfo->getContractInfo();
+			if (isAll || strcmp(stdCode, cInfo->getFullCode()) == 0)
+			{
+				if(doCancel(orderInfo))
+				{
+					ret.emplace_back(it->first);
+				}
+			}
+		}
+	}
+
+	return ret;
+}
+
 OrderIDs TraderAdapter::cancel(const char* stdCode, bool isBuy, double qty /* = 0 */)
 {
 	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, NULL);

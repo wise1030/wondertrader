@@ -110,11 +110,11 @@ public:
     double  vol_fitting_threshold    = 0.0;
     bool    vol_fitting_to_all_expiries = false;
     int32_t trace_level              = 0;
-    bool    use_tbb_parallel_for     = false;
+    bool    use_parallel_for          = false;  // P1: enable via config "use_parallel"
     bool    use_sprd_vs_atmfwd       = true;
     double  slow_compute_interval    = 0.1;   // seconds
     int32_t expire_greeks_window_bdays = 0;
-    double  bid_offer_vol_spread_cap = 1e9;   // effectively unlimited
+    double  bid_offer_vol_spread_cap = 0.1;  // max IV bid-ask spread (10 vol points), matches quantbox default
     double  volcurve_weight          = 0.0;
 
     static const char* name() { return "BlackPricer"; }
@@ -138,7 +138,7 @@ public:
 
         void setATMV(double atmv);
         // Reads ExpiryData::getForward() directly (no IPriceProvider / grid->getAtmForward)
-        void computeForwardPrice(const ExpiryDataPtr& ed);
+        void computeForwardPrice(OptionGrid* grid, const ExpiryDataPtr& ed);
         void computeMaturity(const ExpiryData* ed);
 
         uint32_t    m_expiry;
@@ -202,6 +202,10 @@ public:
     void   setTime(double t) { m_time = t; }
 
     fitCompletedEventSource& fitCompletedEvent() { return m_fitCompletedEvent; }
+
+    // 暴露 doFit 给定时器调用 (路径1: 独立定时 doFit)
+    bool hasFitter() const { return m_spFitter != nullptr; }
+    bool triggerDoFit();  // 实现在 .cpp 中 (需要 PeriodicCurveFitter 完整类型)
 
 private:
     friend class CompositeOptionPricer;

@@ -1,0 +1,24 @@
+[13:25:36.913][main] === QuoteProbe start ===
+[13:25:36.913][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[13:25:36.913][main] instrument=IF2607 exchange=CFFEX tickOffset=20 qty=1
+[13:25:36.913][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[13:25:36.913][main] log=quote_probe_20260611_132536.log
+[13:25:37.004][OnFrontConnected] trader front connected, sending Authenticate
+[13:25:37.005][ReqAuthenticate] sent ret=0
+[13:25:37.053][OnRspAuthenticate] OK, sending Login
+[13:25:37.251][ReqUserLogin] sent ret=0
+[13:25:37.292][OnRspUserLogin] OK FrontID=7 SessionID=1121255437 MaxOrderRef=1 TradingDay=20260611
+[13:25:37.293][ReqSettlementConfirm] sent ret=0
+[13:25:37.317][OnRspSettlementConfirm] OK
+[13:25:37.318][ReqQryInstrument] sent ret=0 code=IF2607
+[13:25:37.342][OnRspQryInstrument] code=IF2607 exch=CFFEX tick=0.2000 MaxLimitOrderVol=20 volMult=300
+[13:25:37.343][ReqQryDepthMarketData] sent ret=0
+[13:25:37.370][OnRspQryDepthMarketData] code=IF2607 LastPrice=4642.60 Bid1=4641.60 Ask1=4643.60 UpLimit=5140.40 DnLimit=4206.00
+[13:25:37.875][ReqQuoteInsert] code=IF2607 QuoteRef=1006 BID 1@4638.60 ASK 1@4646.60 (last=4642.60 tick=0.2000 off=20)
+[13:25:37.875][ReqQuoteInsert] API ret=0
+[13:25:37.901][OnRtnOrder] code=IF2607 OrdRef=           9 SysID= ExchOrdID=CFFEX Dir=1 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=4646.60 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=13:25:36 CnclTime=
+[13:25:37.902][OnRtnOrder] code=IF2607 OrdRef=          10 SysID= ExchOrdID=CFFEX Dir=0 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=4638.60 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=13:25:36 CnclTime=
+[13:25:37.903][OnRtnQuote] code=IF2607 QuoteRef=1006 SysID= Status=a(?) StatusMsg='报单已提交' BID 1@4638.60 BidOrdSysID= Ask 1@4646.60 AskOrdSysID= Front=7 Session=1121255437 InsTime=13:25:36 CnclTime=
+[13:25:37.948][OnRtnOrder] code=IF2607 OrdRef=           9 SysID= ExchOrdID=CFFEX Dir=1 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝121:已撤单报单被拒绝CFFEX:没有报价权限' Price=4646.60 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=13:25:36 CnclTime=
+[13:25:37.949][OnRtnOrder] code=IF2607 OrdRef=          10 SysID= ExchOrdID=CFFEX Dir=0 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝121:已撤单报单被拒绝CFFEX:没有报价权限' Price=4638.60 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=13:25:36 CnclTime=
+[13:25:37.950][OnRtnQuote] code=IF2607 QuoteRef=1006 SysID= Status=5(Canceled) StatusMsg='121:已撤单报单被拒绝CFFEX:没有报价权限' BID 1@4638.60 BidOrdSysID= Ask 1@4646.60 AskOrdSysID= Front=7 Session=1121255437 InsTime=13:25:36 CnclTime=

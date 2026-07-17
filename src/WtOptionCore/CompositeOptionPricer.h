@@ -63,6 +63,7 @@
 #include "optioncoretypes.h"
 #include "IOptionGridListener.h"
 #include "OptionPricer2.h"
+#include "Signals/ISignal.h"
 
 #include <deque>
 #include <map>
@@ -70,6 +71,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <functional>
 #include <cstdint>
@@ -95,40 +97,14 @@ class OptionExpiryGreeks;       using OptionExpiryGreeksPtr = std::shared_ptr<Op
 class InstrumentMDContext;      using InstrumentMDContextPtr = std::shared_ptr<InstrumentMDContext>;
 class LpSolver;
 
-// ITickListener / TradeTick placeholders (longbeach TickProvider removed) ----
-struct TradeTick {
-    double  price = 0;
-    double  size  = 0;
-    uint64_t msgTime = 0;
-};
-class ITickProvider {
-public:
-    virtual ~ITickProvider() {}
-    virtual bool   isLastTickOK() const { return false; }
-    virtual std::string getInstrument() const { return {}; }
-    virtual void addTickListener(void*) {}
-};
-using ITickProviderPtr = std::shared_ptr<ITickProvider>;
-
-class ITickListener {
-public:
-    virtual ~ITickListener() {}
-    virtual void onTickReceived(const ITickProvider* /*tp*/, const TradeTick& /*tick*/) {}
-};
-
-// Fill listener (replaces longbeach::trading::IFillListener) -----------------
+// OrderStub for fill tracking (trade-shock back-away) ------------------------
 struct OrderStub {
     double fillPrice = 0;
     double fillTime = 0;
     std::string code;
     int dir = 0; // 0=buy, 1=sell
-};  // placeholder for longbeach::trading::Order
-using OrderStubPtr = std::shared_ptr<OrderStub>;
-class IFillListener {
-public:
-    virtual ~IFillListener() {}
-    virtual void onFill(const OrderStubPtr& /*order*/, double /*fill_px*/, uint32_t /*fill_qty*/) {}
 };
+using OrderStubPtr = std::shared_ptr<OrderStub>;
 
 // Side / direction enums (replaces longbeach side_t / dir_t) -----------------
 enum side_t { BID = 0, ASK = 1 };
@@ -174,6 +150,8 @@ public:
     double frontfut_skew_window      = 120.0;
     double deltaflow_window          = 120.0;
     double ema_sprd_vs_atmfwd_window = 120.0;
+    double forward_spread_ema_window  = 120.0;
+    int    min_strikes_for_synthetic = 5;
 
     // compute cadence
     double slow_compute_interval   = 0.1;
@@ -203,6 +181,9 @@ public:
     int32_t max_size_ahead_inside  = 50;
 
     int32_t trace_level = 0;
+
+    // GVV curve blend weight (0=use fitted curve only, 1=use GVV parametric only)
+    double volcurve_weight = 0.0;
 };
 using CompositeOptionPricerConfigPtr = std::shared_ptr<CompositeOptionPricerConfig>;
 
@@ -236,6 +217,7 @@ public:
     // Set expiry risk config (called by strategy to enable quoting)
     void enableExpiry(uint32_t exp, double deltaMin = 0.0, double deltaMax = 1.0);
     void setMaxPosQty(uint32_t exp, int32_t maxQsize, int32_t maxPosStk, int32_t maxPosOpt);
+    void setExpiryCloseParams(uint32_t exp, bool autoClose, int32_t closeThresh);
 
     // --- IOptionPricer ---
     virtual IVolCurvePtr getVolCurve(uint32_t exp) const override;
@@ -256,7 +238,7 @@ public:
     virtual void computeValue(OptionData* option) override;
     void decayGreeks(OptionData* option);
     virtual void computeOurMarkets(OptionData* option, StrikeData* sdata);
-    void         computeOurMarketsFuture(const ExpiryData* ed);
+    void         computeOurMarketsFuture(ExpiryData* ed);
     virtual void finalizeCompute(OptionGrid* grid) override;
 
     virtual bool isPanicked() const override;
@@ -271,7 +253,11 @@ public:
 
     // time (replaces ClockMonitor)
     double getTime() const { return m_time; }
-    void   setTime(double t) { m_time = t; }
+    void setTime(double t) {
+        m_time = t;
+        if (m_spOptionPricer2)
+            m_spOptionPricer2->setTime(t);  // 同步给 OptionPricer2
+    }
 
 private:
     const CompositeOptionPricerConfig& config() const { return m_config; }
@@ -288,7 +274,8 @@ private:
 
     void __computeBidAndAskFuture(double& bid, double& bid_tick_size, double& ask, double& ask_tick_size
         , double mid, double bid_spread, double ask_spread
-        , const PriceSize& ourmkt_bid, const PriceSize& ourmkt_ask);
+        , const PriceSize& ourmkt_bid, const PriceSize& ourmkt_ask
+        , double tick_size = 1.0);
     void __computeBidAndAsk(bo_data* out
         , double mid, double bid_spread, double ask_spread
         , const PriceSize& ourmkt_bid, const PriceSize& ourmkt_ask
@@ -322,16 +309,17 @@ public:
         onFill(order, fill_px, fill_qty);
     }
 
-    // P11: Periodic VolCurve fit (called from on_timer)
-    void triggerPeriodicFit() {
-        double now = getTime();
-        if (now - m_lastFitTime >= m_fitInterval) {
-            m_lastFitTime = now;
-            // Trigger SLOW compute which includes fit
-            m_bReprice = true;
-        }
-    }
+    // Fit interval config (fit triggered by OptionPricer2::triggerDoFit)
     void setFitInterval(double seconds) { m_fitInterval = seconds; }
+
+    // Signal management
+    void setAlphaSignals(std::vector<IAlphaSignal::Ptr> sigs) { m_alphaSignals = std::move(sigs); }
+    void setRiskSignals(std::vector<IRiskSignal::Ptr> sigs) { m_riskSignals = std::move(sigs); }
+    const std::vector<IAlphaSignal::Ptr>& getAlphaSignals() const { return m_alphaSignals; }
+    const std::vector<IRiskSignal::Ptr>& getRiskSignals() const { return m_riskSignals; }
+    double getRiskWidenFactor() const { return m_riskWidenFactor; }
+    double getRiskWidenFactorByCode(const std::string& code) const;
+    void checkRiskSignals();
 
 private:
     void onFitCompleted(const PeriodicCurveFitter& fitter);
@@ -341,7 +329,6 @@ private:
     void continueComputeValues_SLOW();
 
     virtual void onAddOption(const OptionDataPtr& od) override;
-    void onTickReceived(const ITickProvider* tp, const TradeTick& tick);
 
     static bool __compute_interesting(
         side_t s, double new_px, double mkt_px
@@ -372,8 +359,7 @@ private:
     OptionPricer2Ptr m_spOptionPricer2;
 
     bool m_bReprice = true;
-    // P11: Periodic fit scheduling (replaces PeriodicCurveFitter)
-    double m_lastFitTime = 0;
+    // Fit interval (fit triggered by OptionPricer2::triggerDoFit, not COP)
     double m_fitInterval = 60.0;  // seconds (default 1 min, matching quantbox)
     double m_refPrice = 0;
     double m_tvLastCompute = 0;
@@ -437,6 +423,7 @@ private:
 
         bool    enable = false;
         bool    enable_auto_close = false;
+        int32_t close_pos_thresh = 0;
         double  delta_min = 0;
         double  delta_max = 0;
 
@@ -452,7 +439,7 @@ private:
         double  sprd_atmvol = 0;
         double  sprd_corr = 0;
     };
-    std::map<uint32_t, ExpiryRiskConfig> m_mapExpiryRiskConfig;
+    std::unordered_map<uint32_t, ExpiryRiskConfig> m_mapExpiryRiskConfig;
 
     class CVExpiryContext
     {
@@ -478,6 +465,12 @@ private:
         int32_t numcxl = 0, numrej = 0, numpos = 0, numfil = 0;
     };
     std::map<uint32_t, ExpiryDataPub> m_prop_edpub;
+
+    // Signals
+    std::vector<IAlphaSignal::Ptr> m_alphaSignals;
+    std::vector<IRiskSignal::Ptr>  m_riskSignals;
+    SignalContext m_signalCtx;
+    double m_riskWidenFactor = 1.0;
 };
 using CompositeOptionPricerPtr = std::shared_ptr<CompositeOptionPricer>;
 

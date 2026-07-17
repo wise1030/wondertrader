@@ -1,0 +1,24 @@
+[10:54:19.026][main] === QuoteProbe start ===
+[10:54:19.027][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[10:54:19.027][main] instrument=ag2606 exchange=SHFE tickOffset=20 qty=1
+[10:54:19.027][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[10:54:19.027][main] log=quote_probe_20260611_105419.log
+[10:54:19.135][OnFrontConnected] trader front connected, sending Authenticate
+[10:54:19.136][ReqAuthenticate] sent ret=0
+[10:54:19.190][OnRspAuthenticate] OK, sending Login
+[10:54:19.341][ReqUserLogin] sent ret=0
+[10:54:19.369][OnRspUserLogin] OK FrontID=7 SessionID=558235655 MaxOrderRef=1 TradingDay=20260611
+[10:54:19.371][ReqSettlementConfirm] sent ret=0
+[10:54:19.398][OnRspSettlementConfirm] OK
+[10:54:19.409][ReqQryInstrument] sent ret=0 code=ag2606
+[10:54:19.437][OnRspQryInstrument] code=ag2606 exch=SHFE tick=1.0000 MaxLimitOrderVol=500 volMult=15
+[10:54:19.437][ReqQryDepthMarketData] sent ret=0
+[10:54:19.471][OnRspQryDepthMarketData] code=ag2606 LastPrice=24865.00 Bid1=179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.00 Ask1=179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.00 UpLimit=27582.00 DnLimit=24459.00
+[10:54:19.972][ReqQuoteInsert] code=ag2606 QuoteRef=1006 BID 1@24845.00 ASK 1@24885.00 (last=24865.00 tick=1.0000 off=20)
+[10:54:19.972][ReqQuoteInsert] API ret=0
+[10:54:20.014][OnRtnOrder] code=ag2606 OrdRef=           5 SysID= ExchOrdID=SHFE Dir=1 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=24885.00 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=10:54:19 CnclTime=
+[10:54:20.015][OnRtnOrder] code=ag2606 OrdRef=           6 SysID= ExchOrdID=SHFE Dir=0 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=24845.00 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=10:54:19 CnclTime=
+[10:54:20.015][OnRtnQuote] code=ag2606 QuoteRef=1006 SysID= Status=a(?) StatusMsg='报单已提交' BID 1@24845.00 BidOrdSysID= Ask 1@24885.00 AskOrdSysID= Front=7 Session=558235655 InsTime=10:54:19 CnclTime=
+[10:54:20.016][OnRtnOrder] code=ag2606 OrdRef=           5 SysID= ExchOrdID=SHFE Dir=1 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝53:已撤单报单被拒绝SHFE:没有此项交易角色' Price=24885.00 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=10:54:19 CnclTime=
+[10:54:20.016][OnRtnOrder] code=ag2606 OrdRef=           6 SysID= ExchOrdID=SHFE Dir=0 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝53:已撤单报单被拒绝SHFE:没有此项交易角色' Price=24845.00 Vol=1 Traded=0 Remain=1 Source=0 Type=1 Front=0 Sess=0 InsTime=10:54:19 CnclTime=
+[10:54:20.017][OnRtnQuote] code=ag2606 QuoteRef=1006 SysID= Status=5(Canceled) StatusMsg='53:已撤单报单被拒绝SHFE:没有此项交易角色' BID 1@24845.00 BidOrdSysID= Ask 1@24885.00 AskOrdSysID= Front=7 Session=558235655 InsTime=10:54:19 CnclTime=

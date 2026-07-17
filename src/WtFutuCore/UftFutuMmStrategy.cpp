@@ -593,14 +593,16 @@ quoter->setOrderTracker(_order_tracker.get());
 
 // R3 v2: BilateralQuoteStats 已下放到 Per-Quoter 值成员
 //   - 每个 quoter 持值成员，setConfig(min_valid_qty/max_obligation_spread) 来自 quoter 自身 cfg
-//   - sessInfo 通过 ctx->stra_get_comminfo(code)->getSessionInfo() 获取
-//   - sessInfo=nullptr 硬失败：该 quoter 统计 DISABLED（initBilateralStats 内部 WTSLogger::error）
+//   - sessInfo 从 _session_cache 取（on_init 中已用三段式查询并缓存）
+//   - 不再重复调 stra_get_comminfo（两段式 code 查不到品种信息）
 uint32_t stats_ok = 0;
 uint32_t stats_fail = 0;
 for (auto& [code, quoter] : _quoters)
 {
-    WTSCommodityInfo* commInfo = ctx->stra_get_comminfo(code.c_str());
-    WTSSessionInfo* sessInfo = commInfo ? commInfo->getSessionInfo() : nullptr;
+    WTSSessionInfo* sessInfo = nullptr;
+    auto scIt = _session_cache.find(code);
+    if (scIt != _session_cache.end())
+        sessInfo = scIt->second.sessInfo;
     if (quoter->initBilateralStats(sessInfo))
         stats_ok++;
     else

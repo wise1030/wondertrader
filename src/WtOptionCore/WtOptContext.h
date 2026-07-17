@@ -144,6 +144,7 @@ public:
     
     void update_risk();
     void update_pnl();
+    double getPortfolioPnl() const { return _portfolioPnl; }
     
     // Checkpoint/Recovery mechanism
     void save_data();
@@ -297,6 +298,7 @@ private:
     wt_option::OptionGridPtr       _grid;
     wt_option::OptionRiskPtr       _risk;
     wt_option::GridOrderManagerPtr _order_mgr;
+    double _portfolioPnl = 0;  // C9: context-level portfolio PnL
 };
 
 NS_WTP_END

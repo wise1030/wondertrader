@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root>
+    <url_login>http://www.4008207951.com/terminal/login</url_login>
+    <url_brokerlogin>http://www.4008207951.com/terminal/brokerlogin</url_brokerlogin>
+    <url_register>http://www.4008207951.com/terminal/register</url_register>
+    <url_changepassword>http://www.4008207951.com/terminal/chgpassword</url_changepassword>
+    <url_resetpassword>http://www.4008207951.com/terminal/rstpassword</url_resetpassword>
+	  <url_news>https://gio.ren/w/xRxp70R5</url_news>
+    <url_upgrade_book>https://www.shinnytech.com/blog/v2-release-note/</url_upgrade_book>
+    <url_mobile_app>https://www.shinnytech.com/q/</url_mobile_app>
+</root>

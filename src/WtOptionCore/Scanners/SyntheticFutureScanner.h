@@ -1,5 +1,5 @@
 #pragma once
-#include "../IScanModule.h"
+#include "IScanModule.h"
 #include "../OptionData.h"
 #include "../optioncoretypes.h"
 #include <string>

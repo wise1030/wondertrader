@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root Version="260">
+    <m_PaneConfig>
+        <item PaneName="期权报价表" IsVisible="1" HideTitle="0" FastKey="无" Alias=""/>
+        <item PaneName="行权委托单" IsVisible="1" HideTitle="0" FastKey="无" Alias=""/>
+    </m_PaneConfig>
+    <m_ListCtrlColumns>
+        <sequence _key="ListCtrl期权报价表">
+            <item Name="C跌停价" Width="76"/>
+            <item Name="C涨停价" Width="76"/>
+            <item Name="C卖量" Width="58"/>
+            <item Name="C卖价" Width="58"/>
+            <item Name="C买量" Width="58"/>
+            <item Name="C买价" Width="58"/>
+            <item Name="C成交量" Width="76"/>
+            <item Name="C涨跌" Width="58"/>
+            <item Name="C最新价" Width="76"/>
+            <item Name="执行价" Width="69"/>
+            <item Name="P最新价" Width="76"/>
+            <item Name="P涨跌" Width="58"/>
+            <item Name="P成交量" Width="76"/>
+            <item Name="P买价" Width="58"/>
+            <item Name="P买量" Width="58"/>
+            <item Name="P卖量" Width="58"/>
+            <item Name="P卖价" Width="58"/>
+            <item Name="P涨停价" Width="76"/>
+            <item Name="P跌停价" Width="76"/>
+        </sequence>
+        <sequence _key="ListCtrl行权委托单">
+            <item Name="合约" Width="52"/>
+            <item Name="保留头寸申请的持仓方向" Width="196"/>
+            <item Name="开平" Width="52"/>
+            <item Name="投保" Width="52"/>
+            <item Name="执行类型" Width="84"/>
+            <item Name="行权手数" Width="84"/>
+            <item Name="是否保留期货头寸的标记" Width="196"/>
+            <item Name="是否自动平仓" Width="116"/>
+            <item Name="执行结果" Width="84"/>
+            <item Name="详细状态" Width="84"/>
+            <item Name="交易所" Width="68"/>
+            <item Name="报单日期" Width="84"/>
+            <item Name="报单时间" Width="84"/>
+        </sequence>
+    </m_ListCtrlColumns>
+</root>

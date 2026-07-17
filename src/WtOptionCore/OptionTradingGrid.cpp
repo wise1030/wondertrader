@@ -10,6 +10,10 @@
 #include "OptionRisk.h"
 #include "OptionRiskData.h"
 #include "OptionExpiryGreeks.h"
+#include "../Includes/IHftStraCtx.h"
+#include "../Includes/WTSContractInfo.hpp"
+#include "../Share/CodeHelper.hpp"
+#include "../Share/fmtlib.h"
 #include "../WTSTools/WTSLogger.h"
 
 namespace wt_option {
@@ -69,12 +73,32 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     OptionQuoteManager::Config omCfg = m_optionOqmCfg;
     omCfg.exchange = m_exchange;
     omCfg.tick_size = od->getTickSize();
-    auto om = std::make_shared<OptionQuoteManager>(code, omCfg, m_uftCtx);
+    auto om = std::make_shared<OptionQuoteManager>(code, omCfg, m_hftCtx);
+    if (m_quoteStats) om->setQuoteStatistics(m_quoteStats);
     otd->setQuoteManager(om);
 
     // 5. Enable + setActive(false) — wait for channel_ready
     otd->enable();
     otd->setActive(false);
+
+    // 6. Inject fee from commodity info (P0-3 fix)
+    if (m_hftCtx && od->getFee() == 0) {
+        auto ed = od->getExpiryData();
+        if (ed) {
+            std::string commKey = m_exchange + "." + ed->getOptionProduct();
+            WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(commKey.c_str());
+            if (commInfo) {
+                // calcFee(price, qty, offset): offset 0=open, 1=close, 2=closeToday
+                // For volume-based fee (nFeeAlg==0): fee = rate * qty = rate * 1
+                // For amount-based fee (nFeeAlg==1): fee = rate * amount = rate * price * volScale
+                // We use a nominal price for amount-based; volume-based is exact.
+                double mid = od->getMid();
+                double nominalPx = (mid > 0) ? mid : 1.0;
+                double fee = commInfo->calcFee(nominalPx, 1, 0);
+                od->setFee(fee);
+            }
+        }
+    }
 
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "OTG::onAddOption created OTD for {}", code);
@@ -83,6 +107,12 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
 void OptionTradingGrid::onAddExpiry(const ExpiryDataPtr& ed)
 {
     if (!ed) return;
+    auto it = m_hedgeOverrides.find(ed->getExpiry());
+    if (it != m_hedgeOverrides.end() && !it->second.empty()) {
+        ed->setHedgeCode(it->second);
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "OTG hedge override: exp={} hedge={}", ed->getExpiry(), it->second);
+    }
     getExpiryTradingData(ed->getExpiry());
 }
 
@@ -154,6 +184,10 @@ void OptionTradingGrid::enableAll()
         if (od && od->getTradingData())
             od->getTradingData()->setActive(true);
     }
+    for (auto& pair : m_tblUnderlyingTradingData) {
+        if (pair.second)
+            pair.second->setActive(true);
+    }
 }
 
 void OptionTradingGrid::disableAll()
@@ -161,6 +195,10 @@ void OptionTradingGrid::disableAll()
     for (const auto& od : m_spGrid->getAllOptions()) {
         if (od && od->getTradingData())
             od->getTradingData()->setActive(false);
+    }
+    for (auto& pair : m_tblUnderlyingTradingData) {
+        if (pair.second)
+            pair.second->setActive(false);
     }
 }
 
@@ -177,6 +215,40 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
     auto utd = std::make_shared<UnderlyingTradingData>(hedgeCode, ed, shared_from_this());
     etd->setPrimaryUnderlier(utd);
     m_tblUnderlyingTradingData[hedgeCode] = utd;
+
+    // Set tick size + contract size + fee from contract info
+    if (m_hftCtx) {
+        CodeHelper::CodeInfo ci = CodeHelper::extractStdCode(hedgeCode.c_str(), nullptr);
+        std::string prodKey = fmt::format("{}.{}", ci._exchg, ci._product);
+        WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(prodKey.c_str());
+        if (commInfo) {
+            if (commInfo->getPriceTick() > 0)
+                utd->setTickSize(commInfo->getPriceTick());
+            if (commInfo->getVolScale() > 0)
+                utd->setContractSize(commInfo->getVolScale());
+            // Inject fee rate for cost calculation
+            // getFees(price) returns price * m_feePct, so m_feePct = fee_per_lot / volScale
+            double volScale = commInfo->getVolScale();
+            double feePerLot = commInfo->calcFee(1.0, 1, 0);
+            if (volScale > 0 && feePerLot > 0)
+                utd->setFeePct(feePerLot / volScale);
+        }
+    }
+
+    // Create per-future OQM (same pattern as option OTD)
+    if (m_hftCtx) {
+        OptionQuoteManager::Config futOmCfg = m_futureOqmCfg;
+        futOmCfg.exchange = m_exchange;
+        futOmCfg.tick_size = utd->getTickSize();
+        auto futOm = std::make_shared<OptionQuoteManager>(hedgeCode, futOmCfg, m_hftCtx);
+        if (m_quoteStats) futOm->setQuoteStatistics(m_quoteStats);
+        utd->setQuoteManager(futOm);
+    }
+    utd->enable();
+    utd->setActive(false);
+
+    // Bind UTD → ExpiryData (so pricer can access hedge trading data)
+    ed->setHedgeUTD(utd.get());
 
     // Bind expiry greeks from OptionRisk
     if (m_spPositionRisk) {

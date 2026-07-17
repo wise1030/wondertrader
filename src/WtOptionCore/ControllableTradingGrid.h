@@ -13,6 +13,7 @@
 #include "optioncoretypes.h"
 #include "IOptionGridListener.h"
 #include "check_markets.h"
+#include "Scanners/IScanModule.h"  // IScanModule, IScannerListener
 
 #include <string>
 #include <vector>
@@ -34,8 +35,8 @@ struct OptionTraderContext;
 
 // Simplified trading context (replaces longbeach OptionTraderContext)
 struct OptionTraderContext {
-    bool enabled = false;
-    bool panicked = false;
+    std::atomic<bool> enabled{false};
+    std::atomic<bool> panicked{false};
     std::function<double()> getTimeFn;
     double getTime() const { return getTimeFn ? getTimeFn() : 0; }
 };
@@ -50,14 +51,17 @@ struct PendingQuote {
     uint32_t bidQ = 0;
     double askP = 0;
     uint32_t askQ = 0;
-    bool isCancel = false;  // true = cancel only
+    bool isCancel = false;
+    bool isFuture = false;
+    UPDATE_TYPE utype = UT_NONE;
+    int32_t rank = 0;
 };
 
 using OrderExecutor = std::function<int32_t(const std::string& code, bool isBuy, double price, uint32_t qty)>;
 using CancelExecutor = std::function<int32_t(const std::string& code)>;
 using QuoteExecutor = std::function<int32_t(const std::string& code, double bidP, uint32_t bidQ, double askP, uint32_t askQ)>;
 
-class ControllableTradingGrid : public OptionGridListener {
+class ControllableTradingGrid : public OptionGridListener, public IScannerListener {
 public:
     ControllableTradingGrid(OptionGridPtr grid, OptionTraderContextPtr ctx);
     virtual ~ControllableTradingGrid();
@@ -66,6 +70,11 @@ public:
     void setOrderExecutor(OrderExecutor exec) { m_orderExec = std::move(exec); }
     void setCancelExecutor(CancelExecutor exec) { m_cancelExec = std::move(exec); }
     void setQuoteExecutor(QuoteExecutor exec) { m_quoteExec = std::move(exec); }
+
+    // Scanner combo execution callback (set by strategy to bridge to IHftStraCtx)
+    using ScannerExecuteFn = std::function<void(const std::string& code, double edge,
+                                                 const OptionData* od)>;
+    void setScannerExecuteFn(ScannerExecuteFn fn) { m_scannerExec = std::move(fn); }
 
     // TPS control
     int32_t getMaxTransactionsPerSec() const { return m_maxTransactionsPerSec; }
@@ -87,8 +96,8 @@ public:
     void addScanner(std::shared_ptr<IScanModule> scanner);
     void removeScanner(std::shared_ptr<IScanModule> scanner);
 
-    // Option hit callback (from scanners)
-    void onOptionHit(OptionData* od, int32_t index);
+    // IScannerListener: called when a scanner detects an opportunity
+    void onScannerHit(const ScannerHitEvent& event) override;
 
     // Phase 8: Operations
     void tradingStopMidDay();
@@ -97,16 +106,9 @@ public:
 
 private:
     void onRefresh();
-    int32_t updateOrders(
-        const std::vector<std::shared_ptr<OptionTradingData>>& optList,
-        const std::vector<std::shared_ptr<UnderlyingTradingData>>& udlList);
 
     int32_t rankOption(const std::shared_ptr<OptionTradingData>& otd, UPDATE_TYPE utype);
     int32_t rankFuture(const std::shared_ptr<UnderlyingTradingData>& utd, UPDATE_TYPE utype);
-
-    // Combine desired markets from pricer with current order state
-    void combineMarkets(const OptionData& od,
-        std::vector<std::shared_ptr<OptionTradingData>>& outList);
 
     OptionGridPtr m_grid;
     OptionTraderContextPtr m_ctx;
@@ -120,6 +122,7 @@ public:
     OrderExecutor m_orderExec;
     CancelExecutor m_cancelExec;
     QuoteExecutor m_quoteExec;
+    ScannerExecuteFn m_scannerExec;
 
     // TPS control
     int32_t m_maxTransactionsPerSec = 50;
@@ -127,6 +130,7 @@ public:
     int32_t m_txCount = 0;
     double m_lastTransactionUpdateTime = 0;
     int32_t m_txDrop = 0;
+    std::vector<PendingQuote> m_droppedQuotes;  // B16: dropped quotes for retry
 
     // Pending quote queue (collected in refresh, drained by worker)
     std::vector<PendingQuote> m_pendingQuotes;
@@ -138,6 +142,7 @@ public:
     std::set<std::string> m_optUpdateSet;
     std::set<std::string> m_udlUpdateSet;
     std::map<std::string, bool> m_bUpdatedMap;
+    std::map<uint32_t, bool> m_expiryReady;  // B15: expiry readiness tracking
 
     int32_t m_traceLevel = 0;
 };

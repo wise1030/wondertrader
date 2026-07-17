@@ -24,6 +24,7 @@
 #include "optioncoretypes.h"
 #include "OptionValues.h"
 #include "OptionData.h"
+#include "PnlTracker.h"
 
 #include <cstdint>
 #include <string>
@@ -106,6 +107,12 @@ public:
     int32_t getNumReject() const { return m_numReject; }
     int32_t getNumFill() const   { return m_numFill; }
 
+    PnlTrackerPtr getPnlTracker() {
+        if (!m_pnlTracker)
+            m_pnlTracker = std::make_shared<PnlTracker>();
+        return m_pnlTracker;
+    }
+
     void setUpdateRank(double r) { m_updateRank = r; }
     double getUpdateRank() const { return m_updateRank; }
     double getDelta() const;
@@ -151,6 +158,8 @@ protected:
 
     double m_updateRank;
     QuoteMode m_quoteMode;
+
+    PnlTrackerPtr m_pnlTracker;
 };
 
 using OptionTradingDataPtr     = std::shared_ptr<OptionTradingData>;

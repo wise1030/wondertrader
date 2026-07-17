@@ -27,8 +27,9 @@
  *  - getHedgeInstruments() now returns vector<HedgeDataPtr> (was
  *    vector<InstrumentContextPtr>); the original returned InstrumentContexts
  *    which we no longer have.
- *  - SpotTradingData override path: stubbed (grid->getSpotTradingData() is not
- *    yet available — OptionGrid is not migrated). Marked TODO.
+ *  - SpotTradingData override path: not applicable — the migrated OptionGrid
+ *    carries options + futures only (no spot leg). The override is a
+ *    documented no-op; the engine may set the underlier delta externally.
  *
  * Business logic preserved:
  *   createOptionRiskData, onAddOption, update, all(), all() const,

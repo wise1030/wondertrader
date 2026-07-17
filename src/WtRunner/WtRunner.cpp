@@ -13,6 +13,7 @@
 #include "../WtCore/CtaStraContext.h"
 #include "../WtCore/HftStraContext.h"
 #include "../WtCore/WtDiffExecuter.h"
+#include "../WtCore/ShareManager.h"
 
 #include "../Includes/WTSVariant.hpp"
 #include "../Includes/WTSContractInfo.hpp"
@@ -158,6 +159,15 @@ bool WtRunner::config(const std::string& filename)
 
 	//初始化数据管理
 	initDataMgr();
+
+	// 初始化共享内存热更新 (仅 HFT 引擎, 从 WtUftRunner 移植)
+	if (_is_hft && _config->has("share_domain"))
+	{
+		WTSVariant* cfg = _config->get("share_domain");
+		ShareManager::self().set_engine(&_hft_engine);
+		ShareManager::self().initialize(cfg->getCString("module"));
+		ShareManager::self().init_domain(cfg->getCString("name"));
+	}
 
 	if (!initActionPolicy())
 		return false;
@@ -586,6 +596,10 @@ void WtRunner::run(bool bAsync /* = false */)
 		_traders.run();
 
 		_engine->run();
+
+		// 启动共享内存参数监控 (HFT 热更新)
+		if (_is_hft)
+			ShareManager::self().start_watching(2);
 
 		if(!bAsync)
 		{

@@ -66,7 +66,8 @@ public:
 
     // ADAPTATION: replaces onClockWakeup. Host calls this on each timer tick;
     // PeriodicCurveFitter decides whether to fit based on m_period elapsed.
-    void   onTimer(double time);
+    // Returns true if doFit was called (fit attempted), false if period not elapsed.
+    bool   onTimer(double time);
 
     // Host sets current time (replaces ClockMonitor::getTime())
     double getTime() const { return m_time; }

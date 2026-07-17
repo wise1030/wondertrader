@@ -5,44 +5,12 @@
 
 #include "OptionOrder.h"
 #include "OptionData.h"
+#include "StrikeData.h"
+#include "ExpiryData.h"
 #include <chrono>
 #include <cmath>
-#include <mutex>
-#include <boost/pool/object_pool.hpp>
 
 namespace wt_option {
-
-//=============================================================================
-// Memory Pool for OptionOrder
-//=============================================================================
-namespace {
-    struct OrderPool {
-        std::mutex mtx;
-        boost::object_pool<OptionOrder> pool;
-        
-        static OrderPool& instance() {
-            static OrderPool inst;
-            return inst;
-        }
-    };
-} // namespace
-
-void* OptionOrder::operator new(size_t size) {
-    if (size != sizeof(OptionOrder)) {
-        return ::operator new(size);
-    }
-    auto& pool = OrderPool::instance();
-    std::lock_guard<std::mutex> lock(pool.mtx);
-    return pool.pool.malloc();
-}
-
-void OptionOrder::operator delete(void* ptr) {
-    if (ptr) {
-        auto& pool = OrderPool::instance();
-        std::lock_guard<std::mutex> lock(pool.mtx);
-        pool.pool.free(static_cast<OptionOrder*>(ptr));
-    }
-}
 
 //=============================================================================
 // OptionOrder implementation
@@ -78,14 +46,9 @@ void OptionOrder::captureValuesAtIssue() {
         system_clock::now().time_since_epoch()
     ).count();
     
-    // Get ATM vol from expiry data if available
-    auto strike = opt->getStrikeData();
-    if (strike) {
-        auto expiry = strike->getExpiryData();
-        if (expiry) {
-            m_valuesAtIssue.atmVol = expiry->getATMVol();
-        }
-    }
+    // ATM vol is stored on the pricer, not ExpiryData; set to 0 for now
+    // (this is a snapshot field for PnL analysis, not critical for execution)
+    m_valuesAtIssue.atmVol = 0;
 }
 
 

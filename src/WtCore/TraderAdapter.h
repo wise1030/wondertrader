@@ -169,6 +169,9 @@ public:
 	OrderIDs cancel(const char* stdCode, bool isBuy, double qty = 0);
 	bool	cancelQuote(uint32_t localid);
 
+	// 撤销某合约全部活委托(从UFT移植)
+	OrderIDs cancelAll(const char* stdCode);
+
 	inline bool	isTradeEnabled(const char* stdCode) const;
 
 	bool	checkCancelLimits(const char* stdCode);

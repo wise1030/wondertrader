@@ -330,6 +330,9 @@ double GvvVolCurve::eval(double x) const {
     if (!m_initialized) {
         return 1.0;
     }
+    if (std::isnan(m_maturity) || m_maturity <= 0) {
+        return 1.0;
+    }
     
     try {
         // Calculate ATM vol from model parameters
@@ -459,7 +462,8 @@ double GvvVolCurve::fitWithAlpha(double alpha, const DataSet& points,
         X2[i] = temp * temp;
         
         // Weight: exp(-beta * x^2 / (atmVol^2 * T))
-        W[i] = std::exp(-m_beta * xi * xi / (m_atmVol * m_atmVol * m_maturity));
+        double effMat = (std::isnan(m_maturity) || m_maturity <= 0) ? 1.0 : m_maturity;
+        W[i] = std::exp(-m_beta * xi * xi / (m_atmVol * m_atmVol * effMat));
     }
     
     double chisq;

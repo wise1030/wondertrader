@@ -1,0 +1,516 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root>
+    <m_SplitterLayout Type="2">
+        <SplitterPos>669</SplitterPos>
+        <pSplitter1 Type="2">
+            <SplitterPos>233</SplitterPos>
+            <pSplitter1 Type="2">
+                <SplitterPos>48</SplitterPos>
+                <pSplitter1 Type="0">
+                    <PaneNames>
+                        <item>资金账户</item>
+                    </PaneNames>
+                    <CurrentTab>0</CurrentTab>
+                </pSplitter1>
+                <pSplitter2 Type="0">
+                    <PaneNames>
+                        <item>报价表</item>
+                        <item>期权报价表</item>
+                        <item>报价块</item>
+                        <item>合约列表</item>
+                    </PaneNames>
+                    <CurrentTab>0</CurrentTab>
+                </pSplitter2>
+            </pSplitter1>
+            <pSplitter2 Type="2">
+                <SplitterPos>235</SplitterPos>
+                <pSplitter1 Type="1">
+                    <SplitterPos>270</SplitterPos>
+                    <pSplitter1 Type="0">
+                        <PaneNames>
+                            <item>标准下单板</item>
+                        </PaneNames>
+                        <CurrentTab>0</CurrentTab>
+                    </pSplitter1>
+                    <pSplitter2 Type="0">
+                        <PaneNames>
+                            <item>未成交单</item>
+                            <item>所有委托单</item>
+                            <item>预埋单</item>
+                            <item>行权委托单</item>
+                        </PaneNames>
+                        <CurrentTab>0</CurrentTab>
+                    </pSplitter2>
+                </pSplitter1>
+                <pSplitter2 Type="1">
+                    <SplitterPos>507</SplitterPos>
+                    <pSplitter1 Type="0">
+                        <PaneNames>
+                            <item>持仓</item>
+                        </PaneNames>
+                        <CurrentTab>0</CurrentTab>
+                    </pSplitter1>
+                    <pSplitter2 Type="0">
+                        <PaneNames>
+                            <item>成交记录</item>
+                        </PaneNames>
+                        <CurrentTab>0</CurrentTab>
+                    </pSplitter2>
+                </pSplitter2>
+            </pSplitter2>
+        </pSplitter1>
+        <pSplitter2 Type="0">
+            <PaneNames>
+                <item>状态栏</item>
+            </PaneNames>
+            <CurrentTab>0</CurrentTab>
+        </pSplitter2>
+    </m_SplitterLayout>
+    <m_MainFrameWidth>1026</m_MainFrameWidth>
+    <m_MainFrameHeight>738</m_MainFrameHeight>
+    <m_bMaximized>0</m_bMaximized>
+    <m_PaneConfig>
+        <item PaneName="报价表" IsVisible="1" HideTitle="0" FastKey="F1" Alias="" />
+        <item PaneName="报价块" IsVisible="1" HideTitle="0" FastKey=" " Alias="" />
+        <item PaneName="报价图" IsVisible="0" HideTitle="0" FastKey=" " Alias="" />
+        <item PaneName="标准下单板" IsVisible="1" HideTitle="0" FastKey="小键盘 +" Alias="" />
+        <item PaneName="成交记录" IsVisible="1" HideTitle="0" FastKey="F4" Alias="" />
+        <item PaneName="期权报价表" IsVisible="1" HideTitle="0" FastKey="无" Alias=""/>
+        <item PaneName="持仓" IsVisible="1" HideTitle="0" FastKey="F3" Alias="" />
+        <item PaneName="合约列表" IsVisible="1" HideTitle="0" FastKey="F6" Alias="" />
+        <item PaneName="横条下单板" IsVisible="0" HideTitle="0" FastKey=" " Alias="" />
+        <item PaneName="多档行情" IsVisible="0" HideTitle="0" FastKey=" " Alias="" />
+        <item PaneName="竖条下单板" IsVisible="0" HideTitle="0" FastKey=" " Alias="" />
+        <item PaneName="所有委托单" IsVisible="1" HideTitle="0" FastKey="F5" Alias="" />
+        <item PaneName="行权委托单" IsVisible="1" HideTitle="0" FastKey="无" Alias=""/>
+        <item PaneName="未成交单" IsVisible="1" HideTitle="0" FastKey="F2" Alias="" />
+        <item PaneName="预埋单" IsVisible="1" HideTitle="0" FastKey="F7" Alias="预埋单条件单" />
+        <item PaneName="状态栏" IsVisible="1" HideTitle="1" FastKey=" " Alias="" />
+        <item PaneName="资金账户" IsVisible="1" HideTitle="1" FastKey=" " Alias="" />
+    </m_PaneConfig>
+    <m_FixPane>0</m_FixPane>
+    <m_ShowPaneFastKeyOnLabel>1</m_ShowPaneFastKeyOnLabel>
+    <m_AlwayseTop>0</m_AlwayseTop>
+    <m_PopFrameTopMost>1</m_PopFrameTopMost>
+    <m_LayeredWindowAlpha>0</m_LayeredWindowAlpha>
+    <m_MinimizeToTray>0</m_MinimizeToTray>
+    <m_AutoLockTime>0</m_AutoLockTime>
+    <m_InputInstrumentByMouse>1</m_InputInstrumentByMouse>
+    <m_InputInstrumentByShortName>1</m_InputInstrumentByShortName>
+    <m_InputPriceByMouse>1</m_InputPriceByMouse>
+    <m_bPriceInputPlus>1</m_bPriceInputPlus>
+    <m_InputVolumeByMouse>1</m_InputVolumeByMouse>
+    <m_DefaultVolumes>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+        <item>10</item>
+        <item>15</item>
+        <item>20</item>
+        <item>50</item>
+    </m_DefaultVolumes>
+    <m_AutoStoreOrder>0</m_AutoStoreOrder>
+    <m_DefualtCloseVolumeSelect>0</m_DefualtCloseVolumeSelect>
+    <m_bAltSwitchAutoClose>0</m_bAltSwitchAutoClose>
+    <m_bCancelBeforeInsert>0</m_bCancelBeforeInsert>
+    <m_OffsetAutoOrderPanel>0</m_OffsetAutoOrderPanel>
+    <m_13MoveNext>0</m_13MoveNext>
+    <m_PriceReturnMakeOrder>0</m_PriceReturnMakeOrder>
+    <m_SwitchInstFillVolume>1</m_SwitchInstFillVolume>
+    <m_SimMarketPrice>1</m_SimMarketPrice>
+    <m_LocalConditionOrder>1</m_LocalConditionOrder>
+    <m_VolumeSplit>0</m_VolumeSplit>
+    <m_CleanAllPositionsKey> </m_CleanAllPositionsKey>
+    <m_bStopLossToServer>0</m_bStopLossToServer>
+    <m_StopLossPriceSelector>每笔开仓价</m_StopLossPriceSelector>
+    <m_StopLossOrderPrice DescType="市价" PriceAdjust="0" Price="0" />
+    <m_bCancelOrderBeforeStopLoss>1</m_bCancelOrderBeforeStopLoss>
+    <m_StopLossConfig />
+    <m_DefaultVolumeMultiple>1</m_DefaultVolumeMultiple>
+    <m_VolumeMultipleFastKeys />
+    <m_bPromptTrade>1</m_bPromptTrade>
+    <m_bPromptOrder>1</m_bPromptOrder>
+    <m_bPromptOrderErr>1</m_bPromptOrderErr>
+    <m_bSoundTrade>0</m_bSoundTrade>
+    <m_bSoundOrder>0</m_bSoundOrder>
+    <m_bSoundOrderErr>1</m_bSoundOrderErr>
+    <m_OrderPanelNeedConfirm>1</m_OrderPanelNeedConfirm>
+    <m_bAutoPriceFollow>0</m_bAutoPriceFollow>
+    <m_SoundClosePreparationTime>180</m_SoundClosePreparationTime>
+    <m_bSoundPromptClose>0</m_bSoundPromptClose>
+    <m_VPanelItems>
+        <item ItemName="合约" />
+        <item ItemName="买卖" />
+        <item ItemName="开平" />
+        <item ItemName="手数" />
+        <item ItemName="价格" />
+    </m_VPanelItems>
+    <m_OrderPanelFastKey>
+        <OrderPanelBuy>1</OrderPanelBuy>
+        <OrderPanelSell>3</OrderPanelSell>
+        <OrderPanelOpen>1</OrderPanelOpen>
+        <OrderPanelCloseToday>2</OrderPanelCloseToday>
+        <OrderPanelClose>3</OrderPanelClose>
+        <OrderPanelAuto>0</OrderPanelAuto>
+    </m_OrderPanelFastKey>
+    <m_bEnableOrderFastkey>0</m_bEnableOrderFastkey>
+    <m_OrderFastKeys>
+        <item>
+            <KeyCode>1</KeyCode>
+            <Direction>买　</Direction>
+            <PriceSelector>卖一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>3</KeyCode>
+            <Direction>　卖</Direction>
+            <PriceSelector>买一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>4</KeyCode>
+            <Direction>买　</Direction>
+            <PriceSelector>买一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>6</KeyCode>
+            <Direction>　卖</Direction>
+            <PriceSelector>卖一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>7</KeyCode>
+            <Direction>买　</Direction>
+            <PriceSelector>卖一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>填单后光标到价格</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>9</KeyCode>
+            <Direction>　卖</Direction>
+            <PriceSelector>买一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>填单后光标到价格</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>小键盘 1</KeyCode>
+            <Direction>买　</Direction>
+            <PriceSelector>卖一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>小键盘 3</KeyCode>
+            <Direction>　卖</Direction>
+            <PriceSelector>买一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>小键盘 4</KeyCode>
+            <Direction>买　</Direction>
+            <PriceSelector>买一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>小键盘 6</KeyCode>
+            <Direction>　卖</Direction>
+            <PriceSelector>卖一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>发出报单(带确认)</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>小键盘 7</KeyCode>
+            <Direction>买　</Direction>
+            <PriceSelector>卖一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>填单后光标到价格</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+        <item>
+            <KeyCode>小键盘 9</KeyCode>
+            <Direction>　卖</Direction>
+            <PriceSelector>买一价</PriceSelector>
+            <PriceAdjust>0</PriceAdjust>
+            <Action>填单后光标到价格</Action>
+            <EffectiveArea>报价表</EffectiveArea>
+        </item>
+    </m_OrderFastKeys>
+    <m_FillOrderPanelWhenMakeOrder>0</m_FillOrderPanelWhenMakeOrder>
+    <m_ReturnToQuoteListAfterMakeOrder>0</m_ReturnToQuoteListAfterMakeOrder>
+    <m_MouseQuoteSingleAction>填单后光标到价格</m_MouseQuoteSingleAction>
+    <m_MouseQuoteDoubleAction>发出报单(带确认)</m_MouseQuoteDoubleAction>
+    <m_MouseQuoteActionDirectionSelect>0</m_MouseQuoteActionDirectionSelect>
+    <m_AllowCtrlChangeDirection>1</m_AllowCtrlChangeDirection>
+    <m_MousePositionSingleAction>填单后光标到价格</m_MousePositionSingleAction>
+    <m_MousePositionDoubleAction>发出报单(带确认)</m_MousePositionDoubleAction>
+    <m_QuoteAlwaysOpen>0</m_QuoteAlwaysOpen>
+    <m_QuoteUseClickedVolume>0</m_QuoteUseClickedVolume>
+    <m_MousePriceAdjust>0</m_MousePriceAdjust>
+    <m_bMouseCancelOrder>1</m_bMouseCancelOrder>
+    <m_bConfirmBeforeCancel>1</m_bConfirmBeforeCancel>
+    <m_bHideCancelButton>0</m_bHideCancelButton>
+    <m_bModifyOrder>1</m_bModifyOrder>
+    <m_bConfirmBeforeModify>1</m_bConfirmBeforeModify>
+    <m_bPromptCancelOrder>1</m_bPromptCancelOrder>
+    <m_bPromptCancelOrderErr>1</m_bPromptCancelOrderErr>
+    <m_bSoundCancelOrder>0</m_bSoundCancelOrder>
+    <m_bSoundCancelOrderErr>1</m_bSoundCancelOrderErr>
+    <m_bSoundExchangeStatus>1</m_bSoundExchangeStatus>
+    <m_bPromptTradingNotice>1</m_bPromptTradingNotice>
+    <m_bEnableOrderActionFastkey>1</m_bEnableOrderActionFastkey>
+    <m_OrderActionFastKeys>
+        <item>
+            <KeyCode>Delete</KeyCode>
+            <Action>撤销选中单</Action>
+        </item>
+        <item>
+            <KeyCode>Ctrl + Delete</KeyCode>
+            <Action>全部撤单</Action>
+        </item>
+        <item>
+            <KeyCode>小键盘 *</KeyCode>
+            <Action>改手数</Action>
+        </item>
+        <item>
+            <KeyCode>小键盘 -</KeyCode>
+            <Action>撤销选中单</Action>
+        </item>
+        <item>
+            <KeyCode>小键盘 /</KeyCode>
+            <Action>改价格</Action>
+        </item>
+        <item>
+            <KeyCode>~</KeyCode>
+            <Action>撤销最后一个单</Action>
+        </item>
+        <item>
+            <KeyCode>\</KeyCode>
+            <Action>按对手价改单</Action>
+        </item>
+    </m_OrderActionFastKeys>
+    <m_ReturnToQuoteListAfterOrderAction>1</m_ReturnToQuoteListAfterOrderAction>
+    <m_VolumeLimit>0</m_VolumeLimit>
+    <m_PriceLimit>0</m_PriceLimit>
+    <m_PriceBidAskRangeLimit>0</m_PriceBidAskRangeLimit>
+    <m_ClearOrderPanelSelector>0</m_ClearOrderPanelSelector>
+    <m_MaxOpenVolume>0</m_MaxOpenVolume>
+    <m_MaxOpenCount>0</m_MaxOpenCount>
+    <m_MaxCancelCount>0</m_MaxCancelCount>
+    <m_OpenLimitCFFEXOnly>1</m_OpenLimitCFFEXOnly>
+    <m_LossPercentLimit>0</m_LossPercentLimit>
+    <m_RiskLimit>0</m_RiskLimit>
+    <m_bReportSummary>1</m_bReportSummary>
+    <m_bReportTradeStat>1</m_bReportTradeStat>
+    <m_bReportPositionDetail>1</m_bReportPositionDetail>
+    <m_bReportClosedPostion>1</m_bReportClosedPostion>
+    <m_bReportIndicator>0</m_bReportIndicator>
+    <m_PluginFileNames />
+    <m_ListCtrlColumns>
+        <sequence _key="ListCtrl报价表">
+            <item Name="合约" Width="69" />
+            <item Name="合约名" Width="84" />
+            <item Name="最新价" Width="64" />
+            <item Name="涨跌" Width="54" />
+            <item Name="买价" Width="70" />
+            <item Name="买量" Width="58" />
+            <item Name="卖价" Width="74" />
+            <item Name="卖量" Width="57" />
+            <item Name="成交量" Width="83" />
+            <item Name="持仓量" Width="70" />
+            <item Name="涨停价" Width="64" />
+            <item Name="跌停价" Width="64" />
+            <item Name="今开盘" Width="64" />
+            <item Name="昨结算" Width="64" />
+            <item Name="最高价" Width="64" />
+            <item Name="最低价" Width="64" />
+            <item Name="现量" Width="48" />
+            <item Name="涨跌幅" Width="72" />
+            <item Name="昨收盘" Width="65" />
+            <item Name="成交额" Width="118" />
+            <item Name="交易所" Width="64" />
+            <item Name="行情更新时间" Width="112" />
+        </sequence>
+        <sequence _key="ListCtrl成交记录">
+            <item Name="成交编号" Width="72" />
+            <item Name="合约" Width="62" />
+            <item Name="买卖" Width="44" />
+            <item Name="开平" Width="44" />
+            <item Name="成交价格" Width="68" />
+            <item Name="成交手数" Width="68" />
+            <item Name="成交时间" Width="69" />
+            <item Name="报单编号" Width="72" />
+            <item Name="成交类型" Width="72" />
+            <item Name="投保" Width="44" />
+            <item Name="交易所" Width="58" />
+        </sequence>
+        <sequence _key="ListCtrl成交统计">
+            <item Name="合约" Width="62" />
+            <item Name="交易所" Width="58" />
+            <item Name="买卖" Width="44" />
+            <item Name="开平" Width="44" />
+            <item Name="成交均价" Width="76" />
+            <item Name="成交手数" Width="72" />
+            <item Name="手续费" Width="60" />
+            <item Name="投保" Width="48" />
+        </sequence>
+        <sequence _key="ListCtrl持仓">
+            <item Name="合约" Width="63" />
+            <item Name="买卖" Width="44" />
+            <item Name="总持仓" Width="58" />
+            <item Name="昨仓" Width="44" />
+            <item Name="今仓" Width="44" />
+            <item Name="可平量" Width="58" />
+            <item Name="持仓均价" Width="76" />
+            <item Name="持仓盈亏" Width="88" />
+            <item Name="占用保证金" Width="100" />
+            <item Name="投保" Width="44" />
+            <item Name="交易所" Width="68" />
+        </sequence>
+        <sequence _key="ListCtrl持仓明细">
+            <item Name="成交编号" Width="72" />
+            <item Name="合约" Width="63" />
+            <item Name="买卖" Width="44" />
+            <item Name="手数" Width="44" />
+            <item Name="开仓价" Width="60" />
+            <item Name="占用保证金" Width="88" />
+            <item Name="持仓类型" Width="72" />
+            <item Name="投保" Width="44" />
+            <item Name="开仓时间" Width="80" />
+            <item Name="持仓盈亏" Width="85" />
+            <item Name="平仓盈亏" Width="72" />
+            <item Name="交易所" Width="68" />
+            <item Name="组合状态" Width="84" />
+        </sequence>
+        <sequence _key="ListCtrl合约列表">
+            <item Name="品种代码" Width="72" />
+            <item Name="合约" Width="61" />
+            <item Name="合约名" Width="96" />
+            <item Name="交易所" Width="58" />
+            <item Name="合约乘数" Width="72" />
+            <item Name="最小价格变动单位" Width="84" />
+            <item Name="品种类型" Width="70" />
+            <item Name="最后日期" Width="80" />
+            <item Name="保证金" Width="100" />
+            <item Name="手续费" Width="86" />
+        </sequence>
+        <sequence _key="ListCtrl所有委托单">
+            <item Name="报单编号" Width="72" />
+            <item Name="合约" Width="62" />
+            <item Name="买卖" Width="44" />
+            <item Name="开平" Width="44" />
+            <item Name="挂单状态" Width="72" />
+            <item Name="报单价格" Width="72" />
+            <item Name="报单手数" Width="72" />
+            <item Name="未成交手数" Width="86" />
+            <item Name="成交手数" Width="72" />
+            <item Name="详细状态" Width="189" />
+            <item Name="报单时间" Width="72" />
+            <item Name="最后成交时间" Width="101" />
+            <item Name="成交均价" Width="72" />
+            <item Name="冻结保证金" Width="86" />
+            <item Name="冻结手续费" Width="86" />
+            <item Name="投保" Width="44" />
+            <item Name="交易所" Width="58" />
+        </sequence>
+        <sequence _key="ListCtrl未成交单">
+            <item Name="报单编号" Width="69" />
+            <item Name="合约" Width="60" />
+            <item Name="买卖" Width="44" />
+            <item Name="开平" Width="44" />
+            <item Name="报单手数" Width="68" />
+            <item Name="未成交手数" Width="82" />
+            <item Name="报单价格" Width="69" />
+            <item Name="报单时间" Width="69" />
+            <item Name="冻结保证金" Width="83" />
+            <item Name="冻结手续费" Width="82" />
+        </sequence>
+        <sequence _key="ListCtrl预埋单">
+            <item Name="类型" Width="123" />
+            <item Name="状态" Width="58" />
+            <item Name="触发条件" Width="160" />
+            <item Name="合约" Width="59" />
+            <item Name="买卖" Width="44" />
+            <item Name="开平" Width="44" />
+            <item Name="报单价格" Width="74" />
+            <item Name="报单手数" Width="70" />
+            <item Name="投保" Width="44" />
+            <item Name="交易所" Width="58" />
+            <item Name="预埋时间" Width="77" />
+        </sequence>
+        <sequence _key="ListCtrl组合持仓">
+            <item Name="合约" Width="120" />
+            <item Name="买卖" Width="50" />
+            <item Name="手数" Width="50" />
+            <item Name="开仓均价" Width="70" />
+            <item Name="投保" Width="50" />
+            <item Name="保证金" Width="80" />
+        </sequence>
+        <sequence _key="ListCtrl期权报价表">
+            <item Name="C跌停价" Width="76"/>
+            <item Name="C涨停价" Width="76"/>
+            <item Name="C卖量" Width="58"/>
+            <item Name="C卖价" Width="58"/>
+            <item Name="C买量" Width="58"/>
+            <item Name="C买价" Width="58"/>
+            <item Name="C成交量" Width="76"/>
+            <item Name="C涨跌" Width="58"/>
+            <item Name="C最新价" Width="76"/>
+            <item Name="执行价" Width="69"/>
+            <item Name="P最新价" Width="76"/>
+            <item Name="P涨跌" Width="58"/>
+            <item Name="P成交量" Width="76"/>
+            <item Name="P买价" Width="58"/>
+            <item Name="P买量" Width="58"/>
+            <item Name="P卖量" Width="58"/>
+            <item Name="P卖价" Width="58"/>
+            <item Name="P涨停价" Width="76"/>
+            <item Name="P跌停价" Width="76"/>
+        </sequence>
+        <sequence _key="ListCtrl行权委托单">
+            <item Name="合约" Width="52"/>
+            <item Name="保留头寸申请的持仓方向" Width="196"/>
+            <item Name="开平" Width="52"/>
+            <item Name="投保" Width="52"/>
+            <item Name="执行类型" Width="84"/>
+            <item Name="行权手数" Width="84"/>
+            <item Name="是否保留期货头寸的标记" Width="196"/>
+            <item Name="是否自动平仓" Width="116"/>
+            <item Name="执行结果" Width="84"/>
+            <item Name="详细状态" Width="84"/>
+            <item Name="交易所" Width="68"/>
+            <item Name="报单日期" Width="84"/>
+            <item Name="报单时间" Width="84"/>
+        </sequence>
+        <sequence _key="资金账户">
+            <item Name="静态权益" Width="64" />
+            <item Name="平仓盈亏" Width="64" />
+            <item Name="持仓盈亏" Width="64" />
+            <item Name="浮动盈亏" Width="64" />
+            <item Name="动态权益" Width="64" />
+            <item Name="占用保证金" Width="64" />
+            <item Name="下单冻结" Width="64" />
+            <item Name="冻结权利金" Width="64" />
+            <item Name="可用资金" Width="64" />
+            <item Name="风险度" Width="68" />
+        </sequence>
+    </m_ListCtrlColumns>
+</root>

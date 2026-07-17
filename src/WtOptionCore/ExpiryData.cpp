@@ -21,6 +21,7 @@ ExpiryData::ExpiryData(uint32_t expiry, const std::string& optionProduct)
     : m_expiry(expiry)
     , m_optionProduct(optionProduct)
 {
+    m_emaForwardSpread.setWindow(120.0);
 }
 
 void ExpiryData::setRiskFreeRate(double r) {
@@ -84,6 +85,9 @@ void ExpiryData::updateDaysToExpiration(uint32_t currentDate, uint32_t expiratio
     m_expirationDate = expirationDate;
     m_daysToExpiration = countCalendarDays(currentDate, expirationDate);
     m_bdaysToExpiration = countTradingDays(currentDate, expirationDate);
+    // Prevent bdays=0 leading to maturity=0 (causes division by zero in GvvVolCurve)
+    if (m_bdaysToExpiration == 0 && m_daysToExpiration > 0)
+        m_bdaysToExpiration = 1;
     // Recalculate discount factor
     m_discountFactor = exp(m_riskFreeRate * m_daysToExpiration / -365.0);
 }
@@ -117,7 +121,15 @@ double ExpiryData::getPremiumFadeFraction() const {
 }
 
 double ExpiryData::getMaturity() const {
-    return (bdaysToExpiry() + getIntradayFraction()) / 252.0;
+    double m = (bdaysToExpiry() + getIntradayFraction()) / 252.0;
+    return std::max(m, 1.0 / 252.0);
+}
+
+void ExpiryData::setSyntheticForward(double synFwd, double underlyingPrice, double time) {
+    if (synFwd > 0 && underlyingPrice > 0) {
+        m_forwardSpread = synFwd - underlyingPrice;
+        m_emaForwardSpread.update(time, m_forwardSpread);
+    }
 }
 
 } // namespace wt_option

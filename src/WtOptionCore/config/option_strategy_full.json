@@ -1,0 +1,234 @@
+{
+    "underlyingCode": "SHFE.cu2506",
+    "optionProduct": "cu",
+    "exchange": "SHFE",
+    "riskFreeRate": 0.02,
+    "maxTPS": 50,
+    "pricerType": "composite_mm",
+    "use_parallel": false,
+
+    "minComputeInterval": 0.02,
+    "sessionSchedule": {
+        "enabled": true,
+        "stopLeadSeconds": 30,
+        "resumeLagSeconds": 0
+    },
+
+    "riskFreeRateCurve": [
+        {"days": 1,   "rate": 0.015},
+        {"days": 30,  "rate": 0.018},
+        {"days": 90,  "rate": 0.020},
+        {"days": 180, "rate": 0.022},
+        {"days": 365, "rate": 0.025}
+    ],
+
+    "wgt_vegaflow": 0.3,
+    "wgt_frontfut_skew": 0.2,
+    "wgt_deltaflow": 0.2,
+    "wgt_atmsig": 0.3,
+    "wgt_rollema": 0.2,
+    "sticky_base": 0.5,
+    "improve_retreat_ratio": 3.0,
+
+    "pricer": {
+        "slow_compute_interval": 0.1,
+        "trade_shock_interval": 60,
+        "panic_blackout_interval": 300,
+        "risk_prem_opt": 0.0,
+        "risk_prem_fut": 0.0,
+        "rp_quote": 0.0,
+        "enable_auto_close": false,
+        "close_pos_thresh": 1,
+        "reduce_large_size": 100,
+        "interesting_ticks_opt": 5,
+        "interesting_ticks_fut": 5,
+        "ema_roll_front_fut_window": 120,
+        "vegaflow_window": 120,
+        "frontatmv_flow_window": 120,
+        "frontfut_skew_window": 120,
+        "deltaflow_window": 120,
+        "ema_sprd_vs_atmfwd_window": 120,
+        "blackCalc": {
+            "volCurve": {
+                "fitter": {
+                    "start_time": 0,
+                    "end_time": 86400,
+                    "period": 60,
+                    "decay_window": 300,
+                    "threshold": 0,
+                    "fit_all_expiries": false,
+                    "good_points_thresh": [
+                        {"days": 0, "thresh": 15}
+                    ]
+                }
+            }
+        }
+    },
+
+    "orderManager": {
+        "riskFilters": {
+            "option": {
+                "enabled": true,
+                "max_order_size": 100,
+                "max_order_size_reject": false,
+                "min_sell_price": 0.0001,
+                "max_position": 50,
+                "max_position_mode": 0,
+                "max_cancel_soft": 100,
+                "max_cancel_hard": 200,
+                "max_new_orders_hard_flat": 100,
+                "max_new_orders_reject": 200
+            },
+            "future": {
+                "enabled": true,
+                "max_order_size": 100,
+                "max_order_size_reject": false,
+                "min_sell_price": 0.0001,
+                "max_position": 10,
+                "max_position_mode": 0,
+                "max_cancel_soft": 100,
+                "max_cancel_hard": 200,
+                "max_new_orders_hard_flat": 100,
+                "max_new_orders_reject": 200
+            }
+        },
+        "option": {
+            "enable_quote_api": true,
+            "avoid_trade": true,
+            "check_potential_position": false,
+            "leave_outer_orders": true,
+            "hard_flat_after_n_fills": -1,
+            "reject_max_new_orders": -1,
+            "cancel_timeout_ms": 3000,
+            "max_orders_per_code": 10,
+            "stp_enabled": true,
+            "ttl_ms": 5000
+        },
+        "future": {
+            "enable_quote_api": true,
+            "check_potential_position": true,
+            "avoid_trade": false,
+            "leave_outer_orders": false,
+            "hard_flat_after_n_fills": -1,
+            "reject_max_new_orders": -1,
+            "cancel_timeout_ms": 3000,
+            "max_orders_per_code": 5,
+            "stp_enabled": true,
+            "ttl_ms": 5000
+        }
+    },
+
+    "expiries": [
+        {
+            "expiry": 202506,
+            "enable": true,
+            "hedgeCode": "SHFE.cu2506",
+            "secondaryHedgeCodes": [],
+            "delta_min": 0.05,
+            "delta_max": 0.95,
+            "sprd_fwd": 0.01,
+            "sprd_atmvol": 0.1,
+            "sprd_corr": 0.0,
+            "max_pos_fut": 10,
+            "max_pos_stk": 50,
+            "max_pos_opt": 50,
+            "max_qsize": 5,
+            "enable_auto_close": false,
+            "close_pos_thresh": 0,
+            "include_future": true,
+            "min_strikes_for_synthetic": 1
+        },
+        {
+            "expiry": 202507,
+            "enable": true,
+            "hedgeCode": "SHFE.cu2507",
+            "secondaryHedgeCodes": ["SHFE.cu2508"],
+            "delta_min": 0.1,
+            "delta_max": 0.9,
+            "sprd_fwd": 0.02,
+            "sprd_atmvol": 0.15,
+            "sprd_corr": 0.0,
+            "max_pos_fut": 5,
+            "max_pos_stk": 30,
+            "max_pos_opt": 30,
+            "max_qsize": 3,
+            "enable_auto_close": false,
+            "close_pos_thresh": 0,
+            "include_future": true,
+            "min_strikes_for_synthetic": 1
+        }
+    ],
+
+    "signals": {
+        "alpha": [
+            {
+                "enable": true,
+                "type": "VegaFlow",
+                "weight": 0.3,
+                "params": {
+                    "window_sec": 120,
+                    "threshold": 0.5
+                }
+            },
+            {
+                "enable": true,
+                "type": "DeltaFlow",
+                "weight": 0.2,
+                "params": {
+                    "window_sec": 120,
+                    "threshold": 0.5
+                }
+            }
+        ],
+        "risk": [
+            {
+                "enable": true,
+                "type": "Toxicity",
+                "params": {
+                    "max_adverse_fills": 3,
+                    "window_sec": 60,
+                    "widen_factor": 2.0,
+                    "recovery_sec": 300,
+                    "max_fill_rate_per_min": 10,
+                    "panic_adverse_fills": 6
+                }
+            },
+            {
+                "enable": true,
+                "type": "PnlLimit",
+                "params": {
+                    "max_daily_loss": 100000
+                }
+            }
+        ]
+    },
+
+    "scanners": [
+        {
+            "type": "MMScanner",
+            "name": "mm_main",
+            "enable": true,
+            "priority": 0
+        },
+        {
+            "type": "SpreadScanner",
+            "name": "spread_1",
+            "enable": false,
+            "priority": 1
+        },
+        {
+            "type": "ButterflyScanner",
+            "name": "butterfly_1",
+            "enable": false,
+            "priority": 2
+        }
+    ],
+
+    "optionValueWriter": {
+        "enable": false,
+        "outputDir": ".",
+        "startTime": 0,
+        "endTime": 86400,
+        "outputPeriod": 5.0
+    }
+}

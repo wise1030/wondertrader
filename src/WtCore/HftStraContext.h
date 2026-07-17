@@ -48,6 +48,7 @@ public:
 	virtual void on_channel_ready() override;
 
 	virtual void on_channel_lost() override;
+	virtual void on_params_updated() override;
 
 	virtual void on_entrust(uint32_t localid, const char* stdCode, bool bSuccess, const char* message) override;
 

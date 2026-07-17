@@ -9,19 +9,22 @@
  * call-put parity, vol-curve weighting, maturity via Business252 equivalent,
  * decay) is preserved.
  *
- * Dependencies not yet migrated (OptionGrid, OptionRisk) are forward-declared;
- * methods that need them are stubbed with TODO markers. This file will not
- * link until those components land.
+ * This is the v1 theoretical pricer. The canonical production pricer is
+ * OptionPricer2 / CompositeOptionPricer; v1 is kept as a lightweight reference
+ * pricer used by unit tests and simple configs. It now iterates the migrated
+ * OptionGrid directly (getAllStrikes / getAllOptions).
  */
 #include "OptionPricer.h"
 #include "ExpiryData.h"
 #include "OptionData.h"
+#include "OptionGrid.h"
 #include "StrikeData.h"
 #include "BlackCalc.h"
 #include "BlackImpliedCalculator.h"
 
 #include "LinearVolCurve.h"
-// #include "GvvVolCurve.h"  // TODO: needs GSL
+// GvvVolCurve is available (GSL replaced by WLS3); v1 defaults to LinearVolCurve
+// and lets the engine wire concrete curves via getExpiryInfo.
 #include "ConstantVolCurve.h"
 
 #include "../WTSTools/WTSLogger.h"
@@ -39,13 +42,57 @@ namespace wt_option {
 void OptionPricer::ExpiryInfo::computeForwardPrice(
     OptionGrid* grid, ExpiryData* ed, double atm_forward_range)
 {
-    // TODO[OptionGrid migration]: the original iterated grid->iterExpiry(),
-    // matched call/put pairs near ATM, and computed implied forward + spread
-    // via put-call parity. This requires OptionGrid's iteration API which is
-    // not yet migrated. For now we leave m_atmforward/m_futsprd at defaults;
-    // OptionPricer2's ExpiryInfo::computeForwardPrice has the same logic and
-    // will be the canonical implementation once the grid lands.
-    (void)grid; (void)ed; (void)atm_forward_range;
+    // Compute the implied ATM forward via put-call parity, averaging over the
+    // strikes closest to the current forward guess (original iterated the
+    // expiry's strikes near ATM). forward = strike + (callMid - putMid)/DF.
+    if (!grid || !ed) return;
+
+    const double spot = grid->getUnderlyingPrice();
+    if (spot <= 0) return;
+
+    const uint32_t exp = ed->getExpiry();
+    const double discount = ed->getDiscountFactor();
+
+    // Reference forward for the "near ATM" window: prefer any prior value,
+    // else the discounted-carry theoretical forward from spot.
+    double refFwd = std::isnan(m_atmforward) ? ed->getForwardTheo(spot) : m_atmforward;
+    if (std::isnan(refFwd) || refFwd <= 0) refFwd = spot;
+
+    double sumFwd = 0.0, sumSprd = 0.0;
+    int32_t n = 0;
+
+    for (const auto& sd : grid->getStrikesByExpiry(exp)) {
+        if (!sd) continue;
+        const double k = sd->getStrikePrice();
+        if (atm_forward_range > 0 && std::fabs(k - refFwd) > atm_forward_range)
+            continue;
+
+        const OptionDataPtr& c = sd->call();
+        const OptionDataPtr& p = sd->put();
+        if (!c || !p) continue;
+
+        const double cMid = c->getMid();
+        const double pMid = p->getMid();
+        if (cMid <= 0 || pMid <= 0) continue;
+
+        // put-call parity: F = K + (C - P) / DF
+        const double fwd = k + (cMid - pMid) / (discount > 0 ? discount : 1.0);
+        // spread proxy from bid/ask width of the pair
+        const double cSprd = (c->getAsk() > 0 && c->getBid() > 0) ? (c->getAsk() - c->getBid()) : 0.0;
+        const double pSprd = (p->getAsk() > 0 && p->getBid() > 0) ? (p->getAsk() - p->getBid()) : 0.0;
+
+        sumFwd  += fwd;
+        sumSprd += 0.5 * (cSprd + pSprd);
+        ++n;
+    }
+
+    if (n > 0) {
+        m_atmforward = sumFwd / n;
+        m_futsprd    = sumSprd / n;
+    } else if (std::isnan(m_atmforward)) {
+        // Fall back to theoretical carry forward if no quoted pairs available.
+        m_atmforward = ed->getForwardTheo(spot);
+    }
 }
 
 void OptionPricer::ExpiryInfo::computeMaturity(ExpiryData* ed)
@@ -108,34 +155,56 @@ double OptionPricer::getATMVolSprd(uint32_t exp) const { return getExpiryInfo(ex
 // ---------------------------------------------------------------------------
 bool OptionPricer::computeValues(OptionGrid* grid)
 {
-    if (initValuesCompute(grid))
-    {
-        // TODO[OptionGrid migration]: iterate grid->getAllOptions() and call
-        // computeValue on each. The grid's option-by-instrument index is not
-        // yet migrated.
-        finalizeCompute(grid);
+    if (!grid) return false;
+    if (!initValuesCompute(grid))
         return false;
+
+    // Price every option in the grid (strike-wise call/put pairs).
+    for (const auto& sd : grid->getAllStrikes())
+    {
+        if (!sd) continue;
+        if (sd->call()) computeValue(sd->call().get());
+        if (sd->put())  computeValue(sd->put().get());
     }
+
+    finalizeCompute(grid);
+    firePricingChanged();
     return true;
 }
 
 bool OptionPricer::computeImpliedValues(OptionGrid* grid)
 {
-    // TODO[OptionGrid migration]: iterate options, setup black calc info,
-    // call computeImpliedValues(option, ...).
-    (void)grid;
+    if (!grid) return false;
+
+    for (const auto& od : grid->getAllOptions())
+    {
+        if (!od) continue;
+        auto ed = od->getExpiryData();
+        if (!ed) continue;
+        uint32_t exp = od->getExpiry();
+        double forward  = getATMForward(exp);
+        double maturity = getMaturity(exp);
+        double discount = ed->getDiscountFactor();
+        computeImpliedValues(od.get(), forward, maturity, discount);
+    }
     return true;
 }
 
 bool OptionPricer::initValuesCompute(OptionGrid* grid)
 {
-    // TODO[OptionGrid migration]: original read grid->getUnderlyingPxP()-
-    // >getRefPrice(), built a QuantLib ComputeState (calendar, day counter,
-    // flat vol TS), then for each expiry computed forward price + maturity.
-    // The migrated version delegates maturity to ExpiryData::getMaturity()
-    // (which uses IBaseDataMgr business-day count) and forward price to
-    // ExpiryInfo::computeForwardPrice (stubbed until grid lands).
-    (void)grid;
+    if (!grid) return false;
+
+    // For each expiry: refresh maturity (delegated to ExpiryData) and the
+    // implied ATM forward + spread via put-call parity.
+    for (const auto& v : grid->expiries())
+    {
+        const ExpiryDataPtr& ed = v.second;
+        if (!ed) continue;
+        ExpiryInfoPtr ei = getExpiryInfo(ed->getExpiry());
+        ei->m_spExpiryData = ed.get();
+        ei->computeMaturity(ed.get());
+        ei->computeForwardPrice(grid, ed.get(), config().atm_forward_range);
+    }
     return true;
 }
 
@@ -247,9 +316,11 @@ void OptionPricer::computeImpliedValues(
 
 void OptionPricer::finalizeCompute(OptionGrid* grid)
 {
-    // TODO[OptionGrid migration]: iterate grid->getAllOptions() and call
-    // od->notifyMarketsPriced(0) on each.
-    (void)grid;
+    if (!grid) return;
+    for (const auto& od : grid->getAllOptions())
+    {
+        if (od) od->notifyMarketsPriced(0);
+    }
 }
 
 } // namespace wt_option

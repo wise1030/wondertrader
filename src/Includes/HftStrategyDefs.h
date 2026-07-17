@@ -122,6 +122,9 @@ public:
 	 */
 	virtual void on_entrust(uint32_t localid, bool bSuccess, const char* message, const char* userTag) {}
 
+	// P10: 热更新参数回调(从UFT移植)
+	virtual void on_params_updated() {}
+
 protected:
 	std::string _id;
 };

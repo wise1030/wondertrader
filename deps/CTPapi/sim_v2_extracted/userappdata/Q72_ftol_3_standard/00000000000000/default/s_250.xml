@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="GB2312"?>
+<root type="element">
+    <child type="element" name="3151">
+        <Background type="color" color="#FFFFF5"/>
+        <ItemText type="color" color="#000000"/>
+        <colBgEvenRow type="color" color="#FFFFF5"/>
+        <colBgOddRow type="color" color="#FFFFF5"/>
+        <ListFont type="font" height="-16" face="Arial" width="0" weight="0"/>
+        <child type="element" name="C买价">
+            <Background type="color" color="#FFDDDD"/>
+            <TextUpdate type="color" color="#FF0000"/>
+            <TextUpdate2 type="color" color="#00BB00"/>
+            <FontNormal type="font" height="-16" face="Arial" width="0" weight="0"/>
+            <FontUpdate type="font" height="-16" face="Arial" width="0" weight="700"/>
+        </child>
+        <child type="element" name="C买量">
+            <Background type="color" color="#FFDDDD"/>
+        </child>
+        <child type="element" name="C卖价">
+            <Background type="color" color="#DDFFDD"/>
+            <TextUpdate type="color" color="#FF0000"/>
+            <TextUpdate2 type="color" color="#00BB00"/>
+            <FontNormal type="font" height="-16" face="Arial" width="0" weight="0"/>
+            <FontUpdate type="font" height="-16" face="Arial" width="0" weight="700"/>
+        </child>
+        <child type="element" name="C卖量">
+            <Background type="color" color="#DDFFDD"/>
+        </child>
+        <child type="element" name="C最新价">
+            <TextUpdate type="color" color="#FF0000"/>
+            <TextUpdate2 type="color" color="#00BB00"/>
+            <FontNormal type="font" height="-16" face="Arial" width="0" weight="0"/>
+            <FontUpdate type="font" height="-16" face="Arial" width="0" weight="700"/>
+        </child>
+        <child type="element" name="执行价">
+            <Background type="color" color="#FFFFDD"/>
+        </child>
+        <child type="element" name="P买价">
+            <Background type="color" color="#FFDDDD"/>
+            <TextUpdate type="color" color="#FF0000"/>
+            <TextUpdate2 type="color" color="#00BB00"/>
+            <FontNormal type="font" height="-16" face="Arial" width="0" weight="0"/>
+            <FontUpdate type="font" height="-16" face="Arial" width="0" weight="700"/>
+        </child>
+        <child type="element" name="P买量">
+            <Background type="color" color="#FFDDDD"/>
+        </child>
+        <child type="element" name="P卖价">
+            <Background type="color" color="#DDFFDD"/>
+            <TextUpdate type="color" color="#FF0000"/>
+            <TextUpdate2 type="color" color="#00BB00"/>
+            <FontNormal type="font" height="-16" face="Arial" width="0" weight="0"/>
+            <FontUpdate type="font" height="-16" face="Arial" width="0" weight="700"/>
+        </child>
+        <child type="element" name="P卖量">
+            <Background type="color" color="#DDFFDD"/>
+        </child>
+        <child type="element" name="P最新价">
+            <TextUpdate type="color" color="#FF0000"/>
+            <TextUpdate2 type="color" color="#00BB00"/>
+            <FontNormal type="font" height="-16" face="Arial" width="0" weight="0"/>
+            <FontUpdate type="font" height="-16" face="Arial" width="0" weight="700"/>
+        </child>
+    </child>
+</root>

@@ -118,6 +118,19 @@ public:
 	 */
 	virtual uint32_t	stra_exit_short(const char* stdCode, double price, double qty, const char* userTag, bool isToday = false, int flag = 0) override;
 
+	// 双边报价(做市商) — 从UFT移植
+	virtual std::pair<uint32_t, uint32_t> stra_quote(const char* stdCode, double bidPrice, double bidQty,
+														double askPrice, double askQty, const char* userTag = "") override;
+	virtual bool stra_cancel_quote(uint32_t localid) override;
+	virtual OrderIDs stra_cancel_all(const char* stdCode) override;
+
+	// 热更新参数 — 从UFT移植
+	virtual const char* sync_param(const char* name, const char* initVal = "", bool bForceWrite = false) override;
+	virtual double* sync_param(const char* name, double initVal = 0, bool bForceWrite = false) override;
+	virtual int32_t* sync_param(const char* name, int32_t initVal = 0, bool bForceWrite = false) override;
+	virtual void commit_param_watcher() override;
+	virtual void on_params_updated() override;
+
 	virtual WTSCommodityInfo* stra_get_comminfo(const char* stdCode) override;
 
 	virtual WTSKlineSlice* stra_get_bars(const char* stdCode, const char* period, uint32_t count) override;

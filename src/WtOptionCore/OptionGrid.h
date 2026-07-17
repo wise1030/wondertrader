@@ -88,6 +88,19 @@ public:
     void setUnderlyingPrice(double price);
     void onUnderlyingTick(double price);
 
+    // --- Compute time (set by pricer before computeValues for EMA updates) ---
+    void setComputeTime(double t) { m_computeTime = t; }
+    double getComputeTime() const { return m_computeTime; }
+
+    // --- Per-expiry underlying routing ---
+    // Register a contract code as the pricing underlying for a specific expiry.
+    // When that contract's tick arrives, the corresponding ExpiryData gets its
+    // own underlying price (separate from the global m_underlyingPrice).
+    void setExpiryUnderlying(uint32_t expiry, const std::string& code);
+    bool isExpiryUnderlying(const std::string& code) const {
+        return m_expiryUnderlyingMap.find(code) != m_expiryUnderlyingMap.end();
+    }
+
     // --- Option pricer ---
     void setOptionPricer(IOptionPricerPtr pricer) { m_optionPricer = pricer; }
     IOptionPricerPtr getOptionPricer() const { return m_optionPricer; }
@@ -100,6 +113,22 @@ public:
     void setFrontMonth(uint32_t exp) { m_frontMonth = exp; }
     uint32_t getFrontMonth() const { return m_frontMonth; }
     void setFrontMonthExpiryData(ExpiryDataPtr ed) { m_frontMonthExpiry = ed; }
+    // B6: Re-evaluate front month on session begin (roll expired contracts)
+    void reevaluateFrontMonth();
+
+    // Refresh daysToExpiration for all expiries (call on session begin)
+    void refreshExpiryDays();
+
+    // --- Risk-free rate (B2: flat or curve-based per expiry) ---
+    void setRiskFreeRate(double r) { m_riskFreeRate = r; }
+    double getRiskFreeRate() const { return m_riskFreeRate; }
+    // Rate curve: maps days-to-expiry -> annualized rate. If set, each expiry
+    // gets its rate from the curve via linear interpolation; otherwise the
+    // flat m_riskFreeRate is used.
+    void setRateCurve(const std::vector<std::pair<double, double>>& curve) {
+        m_rateCurve = curve;
+    }
+    double getRateForDays(int32_t days) const;
 
     // --- ATM strike ---
     StrikeDataPtr getAtmStrike(uint32_t expiry);
@@ -128,6 +157,11 @@ public:
     // P10: Current trading date (set by strategy from stra_get_date)
     void setCurrentDate(uint32_t d) { m_currentDate = d; }
     uint32_t getCurrentDate() const { return m_currentDate; }
+
+    // Forward stale timeout (microseconds). When validCount drops below minStrikes,
+    // forwardReady stays true for this duration before being set to false.
+    void setForwardStaleTimeoutUs(uint64_t us) { m_forwardStaleTimeoutUs = us; }
+    uint64_t getForwardStaleTimeoutUs() const { return m_forwardStaleTimeoutUs; }
 
 private:
     OptionDataPtr __createOption(const std::string& stdCode);
@@ -162,6 +196,16 @@ private:
     double m_underlyingPrice = 0;
     mutable std::shared_mutex m_priceMutex;
 
+    // Per-expiry underlying: contract code -> list of expiries that use it as pricing underlying
+    std::unordered_map<std::string, std::vector<uint32_t>> m_expiryUnderlyingMap;
+
+    // Compute time for EMA updates
+    double m_computeTime = 0;
+
+    // Risk-free rate (B2)
+    double m_riskFreeRate = 0;
+    std::vector<std::pair<double, double>> m_rateCurve; // (days, rate) sorted by days
+
     // Front month
     uint32_t m_frontMonth = 0;
     ExpiryDataPtr m_frontMonthExpiry;
@@ -181,6 +225,9 @@ private:
 
     // Thread safety for container modification
     mutable std::shared_mutex m_gridMutex;
+
+    // Forward stale timeout (microseconds, default 5s)
+    uint64_t m_forwardStaleTimeoutUs = 5000000;
 };
 
 } // namespace wt_option

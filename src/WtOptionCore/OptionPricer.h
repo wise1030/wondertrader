@@ -5,7 +5,7 @@
  * Original: longbeach::optioncore::OptionPricer inherited OptionPricerImp and
  * used QuantLib (VanillaOption, AnalyticEuropeanEngine, Business252 day count,
  * impliedVolatility solver). It also depended on ClockMonitor, CommandServices,
- * ClientContext, OptionRisk, OptionGrid (not yet migrated), and BSplineVolCurve.
+ * ClientContext, OptionRisk, OptionGrid, and BSplineVolCurve.
  *
  * Migration:
  *  - namespace -> wt_option
@@ -15,8 +15,7 @@
  *  - CommandServices / ClientContext -> removed
  *  - expiry_t -> uint32_t
  *  - boost::shared_ptr -> std::shared_ptr, boost::tuple -> std::tuple
- *  - OptionRisk / OptionGrid kept as forward-declared dependencies (not yet
- *    migrated; this file will not compile until they land, per task spec)
+ *  - OptionRisk and OptionGrid are fully migrated and linked.
  */
 #pragma once
 

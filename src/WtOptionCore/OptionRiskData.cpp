@@ -59,10 +59,13 @@ double OptionRiskData::getContractSize() const
 
 void OptionRiskData::update()
 {
+    // P5: Skip recompute if nothing changed since last update.
+    if (!m_dirty) return;
     ExpiryDataPtr ed = m_spOptionData->getExpiryData();
     double risk_mult = ed ? ed->getRiskMultiplier() : 1.0;
     double mult = getPosition() * getContractSize();
     m_positionGreeks.apply(mult * risk_mult, m_spOptionData->greeks());
+    m_dirty = false;
 }
 
 const OptionGreeks& OptionRiskData::getPositionGreeks() const
@@ -112,6 +115,7 @@ void OptionRiskData::addFill(int32_t qty, double price, uint64_t time)
     if (time > m_lastFillTime)
         m_lastFillTime = time;
     m_position += qty;
+    m_dirty = true;  // P5: mark dirty on fill
 }
 
 void OptionRiskData::removeListener(OptionRiskDataListener* l)

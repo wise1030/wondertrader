@@ -69,11 +69,17 @@ public:
     const OptionGreeks& getPositionGreeks() const;
     int32_t            getPosition() const;
 
+    // P5: Dirty tracking for incremental Greeks update.
+    // Marked dirty when position, offset, or underlying option Greeks change.
+    // Cleared after update() is called.
+    bool isDirty() const { return m_dirty; }
+    void markDirty() { m_dirty = true; }
+
     /// Direct position setter (replaces IPositionListener push model).
-    void setPosition(int32_t pos) { m_position = pos; }
+    void setPosition(int32_t pos) { m_position = pos; m_dirty = true; }
 
     /// Optional external offset (replaces shared_vector<IPositionOffset*>).
-    void setOffset(int32_t off) { m_offset = off; }
+    void setOffset(int32_t off) { m_offset = off; m_dirty = true; }
 
     // ---- Trade-Shock protection: fill tracking (task-required) ----
     /// Record a fill. qty>0 = buy, qty<0 = sell. Updates last fill prices/time.
@@ -105,6 +111,9 @@ private:
     double   m_lastBuyFillPrice;
     double   m_lastSellFillPrice;
     uint64_t m_lastFillTime;
+
+    // P5: dirty flag for incremental update
+    bool m_dirty = true;  // start dirty so first update() runs
 
     std::vector<OptionRiskDataListener*> m_listeners;
 };

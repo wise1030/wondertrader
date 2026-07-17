@@ -205,8 +205,13 @@ void WtOptContext::update_risk()
 
 void WtOptContext::update_pnl()
 {
-    // Simplified PnL update logic if needed at context level
-    // Actual strategy PnL is usually handled within the strategy logic
+    // C9: PnL tracking responsibility:
+    // - HftOptionStrategy (active path): handles PnL directly via per-instrument
+    //   PnlTracker in on_batch_complete, feeds portfolio PnL to PnlLimitSignal.
+    //   This context-level method is NOT called in the HFT path.
+    // - WtOptContext (legacy path): _portfolioPnl is set externally by
+    //   WtOptionStrategy after it computes portfolio PnL from its own PnlTrackers.
+    // No computation here - the strategy owns the PnL data.
 }
 
 //=============================================================================

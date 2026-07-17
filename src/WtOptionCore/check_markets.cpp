@@ -22,8 +22,8 @@ UPDATE_TYPE check_side(const PriceSize& desired, const PriceSize& current)
     if (d_empty && c_empty)
         return UT_NONE;
 
-    // Both non-empty: compare price (size changes are just updates too).
-    if (desired.px() != current.px())
+    // Both non-empty: compare price AND size.
+    if (desired.px() != current.px() || desired.sz() != current.sz())
         return UT_UPDATE;
 
     return UT_NONE;

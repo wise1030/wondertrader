@@ -9,8 +9,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(OPTION_CORE_SOURCES
     # Skeleton
-    UftOptionStrategy.cpp
-    UftOptionStraFact.cpp
+    HftOptionStrategy.cpp
+    HftOptionStraFact.cpp
     OptionAsyncEventProcessor.cpp
 
     # Math
@@ -31,10 +31,12 @@ set(OPTION_CORE_SOURCES
     OptionPricer.cpp
     OptionPricer2.cpp
     CompositeOptionPricer.cpp
+    GammaScalpOptionPricer.cpp
 
     # Vol curves (GSL replaced by WLS3)
     LinearVolCurve.cpp
     GvvVolCurve.cpp
+    PeriodicCurveFitter.cpp
 
     # Risk + Trading data
     OptionRisk.cpp
@@ -45,6 +47,18 @@ set(OPTION_CORE_SOURCES
 
     # PnL
     PnlTracker.cpp
+
+    # Quote statistics
+    QuoteStatistics.cpp
+
+    # B7: Attribute publishing for monitoring
+    AttributePublisher.cpp
+
+    # B9: Expiration simulator
+    ExpirationSimulator.cpp
+
+    # B10: Option value writer
+    OptionValueWriter.cpp
 
     # Execution scheduling
     ControllableTradingGrid.cpp
@@ -61,10 +75,30 @@ set(OPTION_CORE_SOURCES
     Scanners/GarchScanner.cpp
     Scanners/LowBidsScanner.cpp
     Scanners/SimplexScanner.cpp
+
+    # Scanner base (IScanModule implementation + ScannerFactory)
+    Scanners/IScanModule.cpp
+
+    # Combo order execution (multi-leg scanner orders)
+    ComboOrders.cpp
+    OptionOrder.cpp
+    BaseOrder.cpp
+
+    # Signals
+    Signals/SignalFactory.cpp
+    Signals/AlphaSignals.cpp
+    Signals/RiskSignals.cpp
+
+    # Enhancement modules (borrowed from quantbox)
+    RiskFilterChain.cpp
+    PositionOffsetMgr.cpp
+    PositionGuard.cpp
+    FillPriceChecker.cpp
+    RiskLimitsEx.cpp
 )
 
 set(OPTION_CORE_HEADERS
-    UftOptionStrategy.h
+    HftOptionStrategy.h
     OptionAsyncEventProcessor.h
     optioncoretypes.h
     OptionGreeks.h
@@ -99,11 +133,14 @@ set(OPTION_CORE_HEADERS
     OptionOrderInfo.h
     FutureOrderInfo.h
     PnlTracker.h
+    QuoteStatistics.h
     OptionList.h
     CompositeOptionPricer.h
+    GammaScalpOptionPricer.h
     ControllableTradingGrid.h
     check_markets.h
-    IScanModule.h
+    Scanners/IScanModule.h
+    ComboOrders.h
     ScannerInfo.h
     Scanners/MMScanner.h
     Scanners/ButterflyScanner.h
@@ -114,6 +151,19 @@ set(OPTION_CORE_HEADERS
     Scanners/GarchScanner.h
     Scanners/LowBidsScanner.h
     Scanners/SimplexScanner.h
+
+    # Signal framework
+    Signals/ISignal.h
+    Signals/SignalFactory.h
+    Signals/AlphaSignals.h
+    Signals/RiskSignals.h
+
+    # Enhancement modules
+    RiskFilterChain.h
+    PositionOffsetMgr.h
+    PositionGuard.h
+    FillPriceChecker.h
+    RiskLimitsEx.h
 )
 
 add_library(WtOptionCore SHARED ${OPTION_CORE_SOURCES} ${OPTION_CORE_HEADERS})
@@ -123,7 +173,6 @@ target_include_directories(WtOptionCore PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../Includes
     ${CMAKE_CURRENT_SOURCE_DIR}/../Share
     ${CMAKE_CURRENT_SOURCE_DIR}/../WtCore
-    ${CMAKE_CURRENT_SOURCE_DIR}/../WtUftCore
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSTools
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSUtils
     ${CMAKE_CURRENT_SOURCE_DIR}/../build_all/compat_inc
@@ -131,7 +180,6 @@ target_include_directories(WtOptionCore PUBLIC
 )
 
 target_link_libraries(WtOptionCore PUBLIC
-    WtUftCore
     WtCore
     WTSTools
     Share
@@ -163,3 +211,20 @@ endif()
 
 install(TARGETS WtOptionCore ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
 install(FILES ${OPTION_CORE_HEADERS} DESTINATION include/WtOptionCore)
+
+# ============================================================================
+# Unit Tests
+# ============================================================================
+enable_testing()
+
+# Test: CTG ranking + risk
+add_executable(test_ctg_ranking tests/test_ctg_ranking.cpp)
+target_link_libraries(test_ctg_ranking PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_ctg_ranking PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_ctg_ranking COMMAND test_ctg_ranking)
+
+# Test: Enhancement modules (RiskFilterChain, PositionOffsetMgr, PositionGuard, FillPriceChecker, RiskLimitsEx)
+add_executable(test_enhancements tests/test_enhancements.cpp)
+target_link_libraries(test_enhancements PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_enhancements PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_enhancements COMMAND test_enhancements)

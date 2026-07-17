@@ -1,0 +1,16 @@
+[13:35:51.124][main] === QuoteProbe start ===
+[13:35:51.125][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[13:35:51.125][main] instrument=CY2609 exchange=CZCE tickOffset=20 qty=2
+[13:35:51.125][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[13:35:51.125][main] log=quote_probe_20260611_133551.log
+[13:35:51.212][OnFrontConnected] trader front connected, sending Authenticate
+[13:35:51.212][ReqAuthenticate] sent ret=0
+[13:35:51.252][OnRspAuthenticate] OK, sending Login
+[13:35:51.445][ReqUserLogin] sent ret=0
+[13:35:51.470][OnRspUserLogin] OK FrontID=7 SessionID=1215102993 MaxOrderRef=1 TradingDay=20260611
+[13:35:51.470][ReqSettlementConfirm] sent ret=0
+[13:35:51.491][OnRspSettlementConfirm] OK
+[13:35:51.492][ReqQryInstrument] sent ret=0 code=CY2609
+[13:35:51.514][ReqQryDepthMarketData] sent ret=0
+[13:35:52.036][sendQuote] ERROR: lastPrice=0, abort
+[13:35:52.138][main] === QuoteProbe end, log=quote_probe_20260611_133551.log ===

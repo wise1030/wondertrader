@@ -124,7 +124,12 @@ public:
     MultiMarket& multiMarket() { return m_multiMarket; }
     const MultiMarket& getLastDesiredMarket() const { return m_lastDesiredMarket; }
     const MultiMarket& getCurrentMarket() const     { return m_currentMarket; }
+    void setCurrentMarket(const MultiMarket& mkt) { m_currentMarket = mkt; }
     int32_t updateOrders(bool cancel_only = false);
+
+    // Per-contract QuoteManager (same pattern as OptionTradingData)
+    void setQuoteManager(std::shared_ptr<class OptionQuoteManager> om) { m_quoteOM = std::move(om); }
+    std::shared_ptr<class OptionQuoteManager> getQuoteManager() const { return m_quoteOM; }
 
     // Executor hooks (replaces IOrderManager / ITrader) — same semantics as OptionTradingData.
     void setOrderExecutor(OTDOrderExecutor oe)   { m_orderExecutor  = std::move(oe); }
@@ -145,7 +150,11 @@ public:
 
     double getContractSize() const { return m_contractSize; }
     void setContractSize(double cs) { m_contractSize = cs; }
+    void setFeePct(double feepct) { m_feePct = feepct; }
     double getFees(double price) const;
+
+    double getTickSize() const { return m_tickSize; }
+    void setTickSize(double ts) { m_tickSize = ts; }
 
     const MultiMarket& ourMarket() const { return values(0).ourMarket(); }
     MultiMarket& ourMarket() { return values(0).ourMarket(); }
@@ -189,10 +198,13 @@ protected:
 
     bool m_bActive;
 
+    std::shared_ptr<class OptionQuoteManager> m_quoteOM;
+
     // Market (replaces InstrumentMDContext / IBook)
     double m_bid = 0;
     double m_ask = 0;
     double m_contractSize = 1.0;
+    double m_tickSize = 1.0;
     double m_feePct = 0;
 
     double m_fwd;

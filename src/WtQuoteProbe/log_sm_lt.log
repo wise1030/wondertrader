@@ -1,0 +1,24 @@
+[10:45:27.209][main] === QuoteProbe start ===
+[10:45:27.209][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[10:45:27.209][main] instrument=ag2606 exchange=SHFE tickOffset=20 qty=1
+[10:45:27.209][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[10:45:27.209][main] log=quote_probe_20260611_104527.log
+[10:45:27.308][OnFrontConnected] trader front connected, sending Authenticate
+[10:45:27.308][ReqAuthenticate] sent ret=0
+[10:45:27.367][OnRspAuthenticate] OK, sending Login
+[10:45:27.577][ReqUserLogin] sent ret=0
+[10:45:27.613][OnRspUserLogin] OK FrontID=7 SessionID=555810822 MaxOrderRef=1 TradingDay=20260611
+[10:45:27.613][ReqSettlementConfirm] sent ret=0
+[10:45:27.641][OnRspSettlementConfirm] OK
+[10:45:27.642][ReqQryInstrument] sent ret=0 code=ag2606
+[10:45:27.671][OnRspQryInstrument] code=ag2606 exch=SHFE tick=1.0000 MaxLimitOrderVol=500 volMult=15
+[10:45:27.671][ReqQryDepthMarketData] sent ret=0
+[10:45:27.713][OnRspQryDepthMarketData] code=ag2606 LastPrice=26021.00 Bid1=179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.00 Ask1=179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.00 UpLimit=27582.00 DnLimit=24459.00
+[10:45:28.220][ReqQuoteInsert] code=ag2606 QuoteRef=1006 BID 1@26001.00 ASK 1@26041.00 (last=26021.00 tick=1.0000 off=20)
+[10:45:28.220][ReqQuoteInsert] API ret=0
+[10:45:28.248][OnRtnOrder] code=ag2606 OrdRef=           3 SysID= Dir=1 Status=a(Unknown) Price=26041.00 Vol=1 Traded=0 Remain=1 Source=0 OrderType=1 QuoteRef=?
+[10:45:28.249][OnRtnOrder] code=ag2606 OrdRef=           4 SysID= Dir=0 Status=a(Unknown) Price=26001.00 Vol=1 Traded=0 Remain=1 Source=0 OrderType=1 QuoteRef=?
+[10:45:28.250][OnRtnQuote] code=ag2606 QuoteRef=1006 SysID= Status=a(?) BID 1@26001.00 BidOrdSysID= Ask 1@26041.00 AskOrdSysID= Front=7 Session=555810822 InsertTime=10:45:27
+[10:45:28.261][OnRtnOrder] code=ag2606 OrdRef=           3 SysID= Dir=1 Status=5(Canceled) Price=26041.00 Vol=1 Traded=0 Remain=1 Source=0 OrderType=1 QuoteRef=?
+[10:45:28.261][OnRtnOrder] code=ag2606 OrdRef=           4 SysID= Dir=0 Status=5(Canceled) Price=26001.00 Vol=1 Traded=0 Remain=1 Source=0 OrderType=1 QuoteRef=?
+[10:45:28.262][OnRtnQuote] code=ag2606 QuoteRef=1006 SysID= Status=5(Canceled) BID 1@26001.00 BidOrdSysID= Ask 1@26041.00 AskOrdSysID= Front=7 Session=555810822 InsertTime=10:45:27

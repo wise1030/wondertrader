@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root>
+	<item _key="快期默认方案" type="element">
+		<child type="element" name="3101">
+			<RowMargin type="int" value="0" />
+			<Background type="color" color="#FFFFF5" />
+			<ItemText type="color" color="#000000" />
+			<colBgEvenRow type="color" color="#FFFFF5" />
+			<colBgOddRow type="color" color="#FFFFF5" />
+			<ListFont type="font" height="-16" face="Arial" />
+			<child type="element" name="合约">
+				<Text type="color" color="#706010" />
+				<FontNormal type="font" height="-16" face="Arial" weight="700" />
+			</child>
+			<child type="element" name="买价">
+				<Background type="color" color="#FFDDDD" />
+				<TextUpdate type="color" color="#FF0000" />
+				<TextUpdate2 type="color" color="#00BB00" />
+				<FontNormal type="font" height="-16" face="Arial" />
+				<FontUpdate type="font" height="-16" face="Arial" weight="700" />
+			</child>
+			<child type="element" name="买量">
+				<Background type="color" color="#FFDDDD" />
+			</child>
+			<child type="element" name="卖价">
+				<Background type="color" color="#DDFFDD" />
+				<TextUpdate type="color" color="#FF0000" />
+				<TextUpdate2 type="color" color="#00BB00" />
+				<FontNormal type="font" height="-16" face="Arial" />
+				<FontUpdate type="font" height="-16" face="Arial" weight="700" />
+			</child>
+			<child type="element" name="卖量">
+				<Background type="color" color="#DDFFDD" />
+			</child>
+			<child type="element" name="涨跌">
+				<Text type="color" color="#CC3333" />
+				<child type="element" name="-">
+					<TextColor type="color" color="#008000" />
+				</child>
+			</child>
+			<child type="element" name="最新价">
+				<TextUpdate type="color" color="#FF0000" />
+				<TextUpdate2 type="color" color="#00BB00" />
+				<FontNormal type="font" height="-16" face="Arial" />
+				<FontUpdate type="font" height="-16" face="Arial" weight="700" />
+			</child>
+		</child>
+		<child type="element" name="listctrl">
+			<Background type="color" color="#FFFFF5" />
+			<FocusBottom type="color" color="#FFFF00" />
+			<FocusTop type="color" color="#FFFF00" />
+			<HeaderBackground type="color" color="#FFFFF5" />
+			<HeaderBorder type="color" color="#FFFFF5" />
+			<HeaderHighlight type="color" color="#EEEEEE" />
+			<HeaderShadow type="color" color="#A9A9A9" />
+			<HeaderSplitter type="color" color="#A9A9A9" />
+			<HeaderSplitterShadow type="color" color="#FFFFF5" />
+			<HeaderText type="color" color="#000000" />
+			<HyperLink type="color" color="#FFFF00" />
+			<ItemFocus type="color" color="#FFFF00" />
+			<ItemText type="color" color="#000000" />
+			<NoFocusBottom type="color" color="#EBEBEB" />
+			<NoFocusInner type="color" color="#999999" />
+			<NoFocusOuter type="color" color="#DCDCDC" />
+			<NoFocusTop type="color" color="#FAFAFA" />
+			<SelectBottom type="color" color="#A2F0DA" />
+			<SelectInner type="color" color="#FFFFF5" />
+			<SelectOuter type="color" color="#AAC8F5" />
+			<SelectTop type="color" color="#E0F0FF" />
+			<colBgEvenRow type="color" color="#FFFFF5" />
+			<colBgOddRow type="color" color="#F0F0F0" />
+			<colStatBg type="color" color="#CCCCCC" />
+			<colStatText type="color" color="#FF6666" />
+			<ListFont type="font" height="-14" face="Arial" />
+		</child>
+	</item>
+	<item _key="黑色报价表1" type="element">
+		<child type="element" name="3101">
+			<RowMargin type="int" value="0" />
+			<Background type="color" color="#000000" />
+			<HeaderBackground type="color" color="#000000" />
+			<HeaderText type="color" color="#E6FFF3" />
+			<ItemText type="color" color="#E6FFF3" />
+			<NoFocusBottom type="color" color="#000000" />
+			<NoFocusInner type="color" color="#FFFF00" />
+			<NoFocusOuter type="color" color="#000000" />
+			<NoFocusTop type="color" color="#000000" />
+			<SelectBottom type="color" color="#000000" />
+			<SelectInner type="color" color="#FFFF00" />
+			<SelectOuter type="color" color="#000000" />
+			<SelectTop type="color" color="#000000" />
+			<colBgEvenRow type="color" color="#000000" />
+			<colBgOddRow type="color" color="#000000" />
+			<ListFont type="font" height="-14" face="宋体" />
+			<child type="element" name="合约">
+				<Text type="color" color="#F0F000" />
+			</child>
+			<child type="element" name="合约名">
+				<RefColumn type="string" value="合约" />
+			</child>
+			<child type="element" name="买价">
+				<RefColumn type="string" value="涨跌" />
+			</child>
+			<child type="element" name="卖价">
+				<RefColumn type="string" value="涨跌" />
+			</child>
+			<child type="element" name="涨跌">
+				<Text type="color" color="#FF6060" />
+				<child type="element" name="-">
+					<TextColor type="color" color="#00FFC0" />
+				</child>
+			</child>
+			<child type="element" name="涨跌幅">
+				<RefColumn type="string" value="涨跌" />
+			</child>
+			<child type="element" name="最新价">
+				<RefColumn type="string" value="涨跌" />
+			</child>
+		</child>
+		<child type="element" name="listctrl">
+			<Background type="color" color="#FFFFFF" />
+			<FocusBottom type="color" color="#FFFF00" />
+			<FocusTop type="color" color="#FFFF00" />
+			<HeaderBackground type="color" color="#F0F3F5" />
+			<HeaderBorder type="color" color="#F0F3F5" />
+			<HeaderHighlight type="color" color="#EEEEEE" />
+			<HeaderShadow type="color" color="#A9A9A9" />
+			<HeaderSplitter type="color" color="#A9A9A9" />
+			<HeaderSplitterShadow type="color" color="#F0F3F5" />
+			<HeaderText type="color" color="#000000" />
+			<HyperLink type="color" color="#FFFF00" />
+			<ItemFocus type="color" color="#FFFF00" />
+			<ItemText type="color" color="#000000" />
+			<NoFocusBottom type="color" color="#EBEBEB" />
+			<NoFocusInner type="color" color="#999999" />
+			<NoFocusOuter type="color" color="#DCDCDC" />
+			<NoFocusTop type="color" color="#FAFAFA" />
+			<SelectBottom type="color" color="#A2F0DA" />
+			<SelectInner type="color" color="#F0F3F5" />
+			<SelectOuter type="color" color="#AAC8F5" />
+			<SelectTop type="color" color="#E0F0FF" />
+			<colBgEvenRow type="color" color="#FFFFE0" />
+			<colBgOddRow type="color" color="#E0FFE0" />
+			<colStatBg type="color" color="#CCCCCC" />
+			<colStatText type="color" color="#FF6666" />
+			<ListFont type="font" height="-12" face="宋体" />
+		</child>
+	</item>
+	<item _key="黑色报价表2" type="element">
+		<child type="element" name="3101">
+			<RowMargin type="int" value="0" />
+			<Background type="color" color="#000000" />
+			<HeaderBackground type="color" color="#000000" />
+			<HeaderText type="color" color="#E6FFF3" />
+			<ItemText type="color" color="#E6FFF3" />
+			<NoFocusBottom type="color" color="#333333" />
+			<NoFocusInner type="color" color="#DCDCDC" />
+			<NoFocusOuter type="color" color="#000000" />
+			<NoFocusTop type="color" color="#333333" />
+			<SelectBottom type="color" color="#4C4C4C" />
+			<SelectInner type="color" color="#E6FAFA" />
+			<SelectOuter type="color" color="#E6FAFA" />
+			<SelectTop type="color" color="#4C4C4C" />
+			<colBgEvenRow type="color" color="#000000" />
+			<colBgOddRow type="color" color="#000000" />
+			<ListFont type="font" height="-16" face="宋体" weight="700" />
+			<child type="element" name="合约">
+				<Text type="color" color="#CBAC00" />
+			</child>
+			<child type="element" name="买价">
+				<TextUpdate type="color" color="#CC3333" />
+				<TextUpdate2 type="color" color="#33CC33" />
+			</child>
+			<child type="element" name="卖价">
+				<TextUpdate type="color" color="#CC3333" />
+				<TextUpdate2 type="color" color="#33CC33" />
+			</child>
+			<child type="element" name="涨跌">
+				<Text type="color" color="#CC3333" />
+				<child type="element" name="-">
+					<TextColor type="color" color="#33CC33" />
+				</child>
+			</child>
+			<child type="element" name="最新价">
+				<TextUpdate type="color" color="#CC3333" />
+				<TextUpdate2 type="color" color="#33CC33" />
+			</child>
+		</child>
+		<child type="element" name="listctrl">
+			<Background type="color" color="#FFFFFF" />
+			<FocusBottom type="color" color="#FFFF00" />
+			<FocusTop type="color" color="#FFFF00" />
+			<HeaderBackground type="color" color="#FFFFFF" />
+			<HeaderBorder type="color" color="#FFFFFF" />
+			<HeaderHighlight type="color" color="#EEEEEE" />
+			<HeaderShadow type="color" color="#A9A9A9" />
+			<HeaderSplitter type="color" color="#A9A9A9" />
+			<HeaderSplitterShadow type="color" color="#FFFFFF" />
+			<HeaderText type="color" color="#000000" />
+			<HyperLink type="color" color="#FFFF00" />
+			<ItemFocus type="color" color="#FFFF00" />
+			<ItemText type="color" color="#000000" />
+			<NoFocusBottom type="color" color="#EBEBEB" />
+			<NoFocusInner type="color" color="#999999" />
+			<NoFocusOuter type="color" color="#DCDCDC" />
+			<NoFocusTop type="color" color="#FAFAFA" />
+			<SelectBottom type="color" color="#A2F0DA" />
+			<SelectInner type="color" color="#FFFFFF" />
+			<SelectOuter type="color" color="#AAC8F5" />
+			<SelectTop type="color" color="#E0F0FF" />
+			<colBgEvenRow type="color" color="#FFFFFF" />
+			<colBgOddRow type="color" color="#F0F0F0" />
+			<colStatBg type="color" color="#CCCCCC" />
+			<colStatText type="color" color="#FF6666" />
+			<ListFont type="font" height="-12" face="Arial" />
+		</child>
+	</item>
+	<item _key="灰色报价表" type="element">
+		<child type="element" name="3101">
+			<RowMargin type="int" value="4" />
+			<Background type="color" color="#E6E6E6" />
+			<HeaderBackground type="color" color="#E6E6E6" />
+			<HeaderText type="color" color="#000000" />
+			<ItemText type="color" color="#000000" />
+			<NoFocusBottom type="color" color="#E6E6E6" />
+			<NoFocusInner type="color" color="#888888" />
+			<NoFocusOuter type="color" color="#888888" />
+			<NoFocusTop type="color" color="#E6E6E6" />
+			<SelectBottom type="color" color="#E6E6E6" />
+			<SelectInner type="color" color="#000000" />
+			<SelectOuter type="color" color="#000000" />
+			<SelectTop type="color" color="#E6E6E6" />
+			<colBgEvenRow type="color" color="#E6E6E6" />
+			<colBgOddRow type="color" color="#DDDDDD" />
+			<ListFont type="font" height="-18" face="新宋体" weight="700" />
+			<child type="element" name="合约">
+				<Text type="color" color="#000000" />
+			</child>
+			<child type="element" name="买价">
+				<TextUpdate type="color" color="#3333CC" />
+			</child>
+			<child type="element" name="卖价">
+				<TextUpdate type="color" color="#3333CC" />
+			</child>
+			<child type="element" name="涨跌">
+				<Text type="color" color="#FF0000" />
+				<child type="element" name="-">
+					<TextColor type="color" color="#00CC00" />
+				</child>
+			</child>
+			<child type="element" name="最新价">
+				<TextUpdate type="color" color="#3333CC" />
+			</child>
+		</child>
+	</item>	
+	<item _key="无色报价表" type="element">
+		<child type="element" name="3101">
+		</child>
+	</item>	
+</root>

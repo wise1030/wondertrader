@@ -28,13 +28,17 @@ void PnlTracker::onPriceUpdate(double bid, double ask) {
 void PnlTracker::onFill(bool isBuy, uint32_t qty, double price) {
     int32_t sign = isBuy ? 1 : -1;
     m_curturnover += m_multiplier * qty * price;
-    // Realized PnL: previous position * price change - fees
     m_lastpnl = m_lastpnl + m_multiplier * m_lastpos * (price - m_lastfillpx)
                 - m_multiplier * qty * price * m_feepct;
     m_lastfillpx = price;
     m_lastpos += sign * static_cast<int32_t>(qty);
     m_fillsz += qty;
-    // Update curpnl after fill
+    m_curpnl = m_lastpnl;
+}
+
+void PnlTracker::initPosition(int32_t position, double costBasis) {
+    m_lastpos = position;
+    m_lastfillpx = costBasis;
     m_curpnl = m_lastpnl;
 }
 

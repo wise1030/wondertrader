@@ -1,0 +1,5 @@
+[10:44:29.738][main] === QuoteProbe start ===
+[10:44:29.738][main] front=tcp://180.96.49.192:59205 broker=4600 user=010531
+[10:44:29.739][main] instrument=ag2606 exchange=SHFE tickOffset=20 qty=1
+[10:44:29.739][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[10:44:29.739][main] log=quote_probe_20260611_104429.log

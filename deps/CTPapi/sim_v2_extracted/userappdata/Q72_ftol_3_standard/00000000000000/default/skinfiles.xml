@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root>
+	<item _key="标准配色方案">skin_Normal.xml</item>
+	<item _key="传统配色方案1">skin_1.xml</item>
+	<item _key="传统配色方案2">skin_Old2.xml</item>
+<!--
+	<item _key="快期黑色风格">skin_black.xml</item>
+	<item _key="快期平面风格">skin_flat.xml</item>
+-->	
+</root>

@@ -2,15 +2,19 @@
  * \file StrikeData.cpp
  * \brief StrikeData implementation (migrated from quantbox)
  *
- * Original longbeach version constructed concrete OptionData objects via
- * boost::make_shared and bumped an option counter on ExpiryData. Those
- * dependencies (OptionData ctor, ExpiryData::num_options(), trading data
- * accessor) are not yet migrated, so the bodies here are guarded to keep
- * the file compilable today. The structure and intent are preserved; once
- * OptionData / ExpiryData / OptionTradingData are migrated, #define
- * WT_OPT_HAS_OPTIONDATA to re-enable the real bodies.
+ * The migrated OptionGrid builds strikes via createWT() + setCall()/setPut()
+ * (see OptionGrid::__findOrCreateStrike / __createOption). The legacy
+ * create(mdc, src, ed, instr_c, instr_p) factory is retained only for
+ * source-compatibility with the original longbeach call sites and is not used
+ * by the migrated grid; it builds the StrikeData shell without instantiating
+ * OptionData (the migrated grid owns option construction).
+ *
+ * getImpliedVol()/getPosition() now delegate to the migrated OptionData /
+ * OptionTradingData, which are fully available.
  */
 #include "StrikeData.h"
+#include "OptionData.h"
+#include "OptionTradingData.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -23,17 +27,9 @@ StrikeDataPtr StrikeData::create(const MarketDataContextPtr& /*mdc*/
     , const instrument_t& instr_c
     , const instrument_t& /*instr_p*/ )
 {
-    // Original body constructed two OptionData objects (call + put) and
-    // registered them on the strike + expiry. OptionData is not yet
-    // migrated, so we cannot instantiate it here. We still build the
-    // StrikeData shell with the call instrument's strike.
-    StrikeDataPtr stkd(new StrikeData(ed, instr_c.strike));
-    // TODO[OptionData migration]:
-    //   OptionDataPtr odc = std::make_shared<OptionData>(mdc, stkd, instr_c, src);
-    //   OptionDataPtr odp = std::make_shared<OptionData>(mdc, stkd, instr_p, src);
-    //   stkd->__setCall(odc); stkd->__setPut(odp);
-    //   ed->num_options() += 2;
-    return stkd;
+    // Legacy factory: build the StrikeData shell only. The migrated grid uses
+    // createWT() + setCall()/setPut() to attach OptionData objects it owns.
+    return StrikeDataPtr(new StrikeData(ed, instr_c.strike));
 }
 
 StrikeData::StrikeData(const ExpiryDataPtr& ed, double strike_px)
@@ -45,31 +41,34 @@ StrikeData::StrikeData(const ExpiryDataPtr& ed, double strike_px)
 
 const expiry_t& StrikeData::getExpiry() const
 {
-    // Original: return m_spExpiryData->getExpiry();
-    // ExpiryData is incomplete here. Callers that need the expiry should
-    // obtain it directly from the ExpiryDataPtr once that type is migrated.
+    // The migrated expiry key is a uint32_t on ExpiryData; callers needing the
+    // numeric expiry use getExpiryData()->getExpiry(). This legacy string-based
+    // accessor is retained for source-compat and returns an empty value.
     static const expiry_t empty;
     return empty;
 }
 
 double StrikeData::getImpliedVol() const
 {
-    // Original: return call()->values().getImpliedVol();
-    // Requires OptionData -> OptionValues. Not available until OptionData
-    // is migrated; return NaN to signal "no data".
-    if (!call()) return std::nan("");
-    // TODO[OptionData migration]: return call()->values().getImpliedVol();
+    // Prefer the call's implied vol (original semantics); fall back to the put.
+    if (call()) return call()->getImpliedVol();
+    if (put())  return put()->getImpliedVol();
     return std::nan("");
 }
 
 int32_t StrikeData::getPosition() const
 {
-    // Original:
-    //   return call()->getTradingData()->getPosition()
-    //        + put()->getTradingData()->getPosition();
-    // OptionTradingData is not yet migrated. Return 0 (no position known)
-    // rather than crashing on null trading data.
-    return 0;
+    // call_pos + put_pos via each leg's OptionTradingData (if present).
+    int32_t pos = 0;
+    if (call()) {
+        auto otd = call()->getTradingData();
+        if (otd) pos += otd->getPosition();
+    }
+    if (put()) {
+        auto otd = put()->getTradingData();
+        if (otd) pos += otd->getPosition();
+    }
+    return pos;
 }
 
 } // namespace wt_option

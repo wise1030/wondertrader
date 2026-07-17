@@ -1,0 +1,508 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root type="element">
+    <child type="element" name="1435">
+        <child type="element" name="编号">
+            <RefColumn type="string" value="当前状态"/>
+        </child>
+        <child type="element" name="当前状态">
+            <child type="element" name="已停止">
+                <TextColor type="color" color="#909090"/>
+            </child>
+			<child type="element" name="非交易时间">
+                <TextColor type="color" color="#DD8888"/>
+            </child>
+            <child type="element" name="已完成">
+                <TextColor type="color" color="#008000"/>
+            </child>
+        </child>
+        <child type="element" name="合约">
+            <RefColumn type="string" value="当前状态"/>
+        </child>
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000"/>
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333"/>
+            </child>
+        </child>
+    </child>
+    <child type="element" name="3000">
+        <labelcolor type="color" color="#E6FFF3" />
+        <moneycolor type="color" color="#E6FFF3" />
+        <bgbanner type="brush" color="#6D6D6D" />
+        <fontAccount type="font" height="-14" face="宋体" />
+        <labelfont type="font" height="-12" face="Arial" />
+        <moneyfont type="font" height="-18" face="Arial" weight="700" />
+        <child type="element" name="可用资金">
+            <textcolor type="color" color="#DDBB00" />
+            <textfont type="font" height="-20" face="Arial" weight="700" />
+        </child>
+    </child>
+    <child type="element" name="3101">
+        <Background type="color" color="#000000" />
+        <HeaderBackground type="color" color="#000000" />
+        <HeaderText type="color" color="#E6FFF3" />
+        <ItemText type="color" color="#E6FFF3" />
+        <NoFocusBottom type="color" color="#000000" />
+        <NoFocusInner type="color" color="#FFFF00" />
+        <NoFocusOuter type="color" color="#000000" />
+        <NoFocusTop type="color" color="#000000" />
+        <SelectBottom type="color" color="#000000" />
+        <SelectInner type="color" color="#FFFF00" />
+        <SelectOuter type="color" color="#000000" />
+        <SelectTop type="color" color="#000000" />
+        <colBgEvenRow type="color" color="#000000" />
+        <colBgOddRow type="color" color="#000000" />
+        <ListFont type="font" height="-14" face="宋体" />
+        <child type="element" name="合约">
+            <Text type="color" color="#F0F000" />
+        </child>
+        <child type="element" name="合约名">
+            <RefColumn type="string" value="合约" />
+        </child>
+        <child type="element" name="买价">
+            <RefColumn type="string" value="涨跌" />
+        </child>
+        <child type="element" name="卖价">
+            <RefColumn type="string" value="涨跌" />
+        </child>
+        <child type="element" name="涨跌">
+            <Text type="color" color="#FF6060" />
+            <child type="element" name="-">
+                <TextColor type="color" color="#00FFC0" />
+            </child>
+        </child>
+        <child type="element" name="涨跌幅">
+            <RefColumn type="string" value="涨跌" />
+        </child>
+        <child type="element" name="最新价">
+            <RefColumn type="string" value="涨跌" />
+        </child>
+    </child>
+    <child type="element" name="3300">
+        <textfont type="font" height="12" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="3301">
+        <edittextfont type="font" height="-20" face="Arialblack" weight="700" />
+        <focusedittextfont type="font" height="-20" face="Arialblack" weight="700" />
+    </child>
+    <child type="element" name="3302">
+        <edittextfont type="font" height="-20" face="Arialblack" weight="700" />
+        <focusedittextfont type="font" height="-20" face="Arialblack" weight="700" />
+    </child>
+    <child type="element" name="3303">
+        <edittextfont type="font" height="-20" face="Arialblack" weight="700" />
+        <focusedittextfont type="font" height="-20" face="Arialblack" weight="700" />
+    </child>
+    <child type="element" name="3310">
+        <imagelist type="imagelist" path="images/standard/RadioBuy.bmp" count="12" />
+    </child>
+    <child type="element" name="3311">
+        <imagelist type="imagelist" path="images/standard/RadioSell.bmp" count="12" />
+    </child>
+    <child type="element" name="3312">
+        <imagelist type="imagelist" path="images/standard/RadioOpen.bmp" count="12" />
+    </child>
+    <child type="element" name="3313">
+        <imagelist type="imagelist" path="images/standard/RadioCloseToday.bmp" count="12" />
+    </child>
+    <child type="element" name="3314">
+        <imagelist type="imagelist" path="images/standard/RadioClose.bmp" count="12" />
+    </child>
+    <child type="element" name="3319">
+        <imagelist type="imagelist" path="images/standard/CheckPrice.bmp" count="12" mask="#FFFF00" />
+    </child>
+    <child type="element" name="3321">
+        <imagelist type="imagelist" path="images/standard/CheckOffset.bmp" count="12" mask="#FFFF00" />
+    </child>
+    <child type="element" name="3327">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3328">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3329">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3331">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3336">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3341">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3346">
+        <textfont type="font" height="-12" face="Arial" />
+    </child>
+    <child type="element" name="3350">
+        <bgimage type="imagelist" path="images/standard/standbgimage.bmp" count="1" />
+    </child>
+    <child type="element" name="3401">
+        <child type="element" name="持仓盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+        <child type="element" name="浮动盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+        <child type="element" name="平仓盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+        <child type="element" name="总盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+    </child>
+    <child type="element" name="3402">
+        <child type="element" name="持仓盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+        <child type="element" name="浮动盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+        <child type="element" name="平仓盈亏">
+            <Text type="color" color="#CC3333" />
+            <Text1 type="color" color="#008000" />
+        </child>
+    </child>
+    <child type="element" name="3403">
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+    </child>
+    <child type="element" name="3501">
+        <child type="element" name="挂单状态">
+            <child type="element" name="部分成交">
+                <TextColor type="color" color="#008080" />
+            </child>
+            <child type="element" name="错误">
+                <TextColor type="color" color="#FF0000" />
+            </child>
+            <child type="element" name="全部成交">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="未成交">
+                <TextColor type="color" color="#808000" />
+            </child>
+            <child type="element" name="已撤单">
+                <TextColor type="color" color="#808000" />
+            </child>
+            <child type="element" name="已撤余单">
+                <TextColor type="color" color="#808000" />
+            </child>
+        </child>
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+    </child>
+    <child type="element" name="3800">
+        <edittextfont type="font" height="-14" face="宋体" weight="700" />
+        <focusedittextfont type="font" height="-14" face="宋体" weight="700" />
+        <textfont type="font" height="12" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="3900">
+        <edittextfont type="font" height="-14" face="宋体" weight="700" />
+        <focusedittextfont type="font" height="-14" face="宋体" weight="700" />
+        <textfont type="font" height="12" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="3910">
+        <bgcolor type="color" color="#FFFFFF" />
+        <bgbrush type="brush" color="#FFFFFF" />
+        <textfont type="font" height="12" face="宋体" />
+    </child>
+    <child type="element" name="3911">
+        <bgcolor type="color" color="#FFFFFF" />
+        <bgbrush type="brush" color="#FFFFFF" />
+        <textfont type="font" height="12" face="宋体" />
+    </child>
+    <child type="element" name="3912">
+        <bgcolor type="color" color="#FFFFFF" />
+        <bgbrush type="brush" color="#FFFFFF" />
+        <textfont type="font" height="12" face="宋体" />
+    </child>
+    <child type="element" name="3913">
+        <bgcolor type="color" color="#FFFFFF" />
+        <bgbrush type="brush" color="#FFFFFF" />
+        <textfont type="font" height="12" face="宋体" />
+    </child>
+    <child type="element" name="4000">
+        <bgcolor type="color" color="#F0F3F5" />
+        <textcolor type="color" color="#000000" />
+        <bgbrush type="brush" color="#F0F3F5" />
+        <textfont type="font" height="-14" face="Arialblack" weight="700" />
+    </child>
+    <child type="element" name="4101">
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+    </child>    
+    <child type="element" name="4102">
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+    </child>    
+    <child type="element" name="4201">
+        <child type="element" name="触发条件">
+            <RefColumn type="string" value="状态" />
+        </child>
+        <child type="element" name="类型">
+            <RefColumn type="string" value="状态" />
+        </child>
+        <child type="element" name="买卖">
+            <child type="element" name="　">
+                <TextColor type="color" color="#008000" />
+            </child>
+            <child type="element" name="买">
+                <TextColor type="color" color="#CC3333" />
+            </child>
+        </child>
+        <child type="element" name="状态">
+            <child type="element" name="已发送">
+                <TextColor type="color" color="#DD8888" />
+            </child>
+        </child>
+    </child>
+    <child type="element" name="4210">
+        <textcolor type="color" color="#CC3333" />
+        <textfont type="font" height="-12" face="宋体" />
+    </child>
+    <child type="element" name="4220">
+        <textfont type="font" height="-14" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="7002">
+        <textfont type="font" height="-14" face="宋体" />
+    </child>
+    <child type="element" name="7400">
+        <bkmode type="int" value="1" />
+        <bgbrush type="brush" color="#FFFFFE" />
+        <bgimage type="bitmap" path="images/bg_login.jpg" />
+        <textfont type="font" height="12" face="宋体" />
+    </child>
+    <child type="element" name="7401">
+        <imagelist type="imagelist" path="images/check_saveuser.bmp" count="12" mask="#E0DFE3" />
+    </child>
+    <child type="element" name="7405">
+        <bkmode type="int" value="0" />
+    </child>
+    <child type="element" name="7406">
+        <bkmode type="int" value="0" />
+    </child>
+    <child type="element" name="ControlInstrument">
+        <ptLeftTop type="point" x="2" y="1" />
+        <keytextcol type="color" color="#000000" />
+        <keytextcolsel type="color" color="#000000" />
+        <keybg type="bitmap" path="images/standard/ctrlinskeybg.jpg" />
+        <key1 type="imagelist" path="images/standard/ctrlkey1.jpg" count="2" />
+        <key2 type="imagelist" path="images/standard/ctrlkey2.jpg" count="2" />
+        <key3 type="imagelist" path="images/standard/ctrlkey3.jpg" count="2" />
+        <keyfont type="font" height="12" face="宋体" />
+        <keyfontsel type="font" height="12" face="宋体" />
+    </child>
+    <child type="element" name="ControlPassword">
+        <ptLeftTop type="point" x="2" y="1" />
+        <keytextcol type="color" color="#000000" />
+        <keytextcolsel type="color" color="#000000" />
+        <keybg type="bitmap" path="images/standard/ctrlpwdkeybg.jpg" />
+        <key1 type="imagelist" path="images/standard/ctrlkey1.jpg" count="2" />
+        <key2 type="imagelist" path="images/standard/ctrlkey2.jpg" count="2" />
+        <key3 type="imagelist" path="images/standard/ctrlkey3.jpg" count="2" />
+        <keyfont type="font" height="-15" face="宋体" />
+        <keyfontsel type="font" height="-16" face="宋体" />
+    </child>
+    <child type="element" name="ControlPrice">
+        <ptLeftTop type="point" x="2" y="1" />
+        <ptRightBottom type="point" x="138" y="140" />
+        <tabekybdpos type="point" x="60" y="142" />
+        <tabmorepos type="point" x="10" y="142" />
+        <keytextcol type="color" color="#000000" />
+        <keytextcolsel type="color" color="#000000" />
+        <keybg type="bitmap" path="images/standard/ctrlpricekeybg.jpg" />
+        <key1 type="imagelist" path="images/standard/ctrlkey1.jpg" count="2" />
+        <key2 type="imagelist" path="images/standard/ctrlkey2.jpg" count="2" />
+        <key3 type="imagelist" path="images/standard/ctrlkey3.jpg" count="2" />
+        <tabkeybd type="imagelist" path="images/standard/RadioSell.bmp" count="12" />
+        <tabmore type="imagelist" path="images/standard/RadioBuy.bmp" count="12" />
+        <keyfont type="font" height="-12" face="宋体" />
+        <keyfontsel type="font" height="-13" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="ControlVolume">
+        <ptLeftTop type="point" x="2" y="1" />
+        <ptRightBottom type="point" x="138" y="140" />
+        <keytextcol type="color" color="#000000" />
+        <keytextcolsel type="color" color="#000000" />
+        <keybg type="bitmap" path="images/standard/ctrlvolkeybg.jpg" />
+        <key1 type="imagelist" path="images/standard/ctrlkey1.jpg" count="2" />
+        <key2 type="imagelist" path="images/standard/ctrlkey2.jpg" count="2" />
+        <key3 type="imagelist" path="images/standard/ctrlkey3.jpg" count="2" />
+        <keyfont type="font" height="-12" face="宋体" />
+        <keyfontsel type="font" height="-13" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="ScrollBar">
+        <rightbottom type="color" color="#F0F3F5" />
+        <FrameEdge type="pen" color="#AAAAAA" style="0" width="1" />
+        <HScroll type="bitmap" path="images/standard/ScrollBarH.bmp" />
+        <VScroll type="bitmap" path="images/standard/ScrollBarV.bmp" />
+    </child>
+    <child type="element" name="SplitPane">
+        <clrBtnFace type="color" color="#F0F3F5" />
+        <clrBtnFaceFocus type="color" color="#F0F3F5" />
+        <clrBtnHighlight type="color" color="#A9A9A9" />
+        <clrBtnHighlightFocus type="color" color="#A9A9A9" />
+        <clrBtnShadow type="color" color="#F8F8F8" />
+        <clrBtnShadowFocus type="color" color="#F8F8F8" />
+        <clrBtnSplitter type="color" color="#A9A9A9" />
+        <clrBtnSplitterFocus type="color" color="#A9A9A9" />
+        <clrBtnText type="color" color="#A9A9A9" />
+        <clrBtnTextFocus type="color" color="#A9A9A9" />
+        <clrHighlight type="color" color="#FF0000" />
+        <clrHighlightFocus type="color" color="#FF0000" />
+        <clrHighlightHotTrack type="color" color="#0052AF" />
+        <clrHighlightHotTrackFocus type="color" color="#0052AF" />
+        <clrSelectedTab type="color" color="#F8F8F8" />
+        <clrSelectedTabFocus type="color" color="#F0F3F5" />
+        <clrTextInactive type="color" color="#888888" />
+        <clrTextInactiveFocus type="color" color="#000000" />
+        <clrTextSelected type="color" color="#888888" />
+        <clrTextSelectedFocus type="color" color="#000000" />
+        <hBrushBackground type="brush" color="#F8F8F8" />
+        <hBrushBackgroundFocus type="brush" color="#DDDDDD" />
+    </child>
+    <child type="element" name="Splitter">
+        <brushSplitter type="brush" color="#E0E0E0" />
+    </child>
+    <child type="element" name="button">
+        <textcolor type="color" color="#000000" />
+        <textdisable type="color" color="#7F7F7F" />
+        <Button type="bitmap" path="images/standard/Button.bmp" />
+        <CheckBox type="imagelist" path="images/standard/CheckBox.bmp" count="8" />
+        <RadioButton type="imagelist" path="images/standard/RadioButton.bmp" count="8" />
+        <textfont type="font" height="-12" face="宋体" weight="600" />
+        <textfontCheck type="font" height="-12" face="宋体" />
+    </child>
+    <child type="element" name="dialog">
+        <bgbrush type="brush" color="#F0F3F5" />
+        <textfont type="font" height="-12" face="宋体" />
+    </child>
+    <child type="element" name="edit">
+        <editbgcolor type="color" color="#F0F3F5" />
+        <edittextcolor type="color" color="#505050" />
+        <focuseditbgcolor type="color" color="#F1F1F1" />
+        <focusedittextcolor type="color" color="#000000" />
+        <editbgbrush type="brush" color="#F0F3F5" />
+        <focuseditbgbrush type="brush" color="#F0F0F0" />
+        <edittextfont type="font" height="-12" face="宋体" weight="700" />
+        <focusedittextfont type="font" height="-12" face="宋体" weight="700" />
+    </child>
+    <child type="element" name="listctrl">
+        <Background type="color" color="#FFFFFF" />
+        <FocusBottom type="color" color="#FFFF00" />
+        <FocusTop type="color" color="#FFFF00" />
+        <HeaderBackground type="color" color="#F0F3F5" />
+        <HeaderBorder type="color" color="#F0F3F5" />
+        <HeaderHighlight type="color" color="#EEEEEE" />
+        <HeaderShadow type="color" color="#A9A9A9" />
+        <HeaderSplitter type="color" color="#A9A9A9" />
+        <HeaderSplitterShadow type="color" color="#F0F3F5" />
+        <HeaderText type="color" color="#000000" />
+        <HyperLink type="color" color="#FFFF00" />
+        <ItemFocus type="color" color="#FFFF00" />
+        <ItemText type="color" color="#000000" />
+        <NoFocusBottom type="color" color="#EBEBEB" />
+        <NoFocusInner type="color" color="#999999" />
+        <NoFocusOuter type="color" color="#DCDCDC" />
+        <NoFocusTop type="color" color="#FAFAFA" />
+        <SelectBottom type="color" color="#A2F0DA" />
+        <SelectInner type="color" color="#F0F3F5" />
+        <SelectOuter type="color" color="#AAC8F5" />
+        <SelectTop type="color" color="#E0F0FF" />
+        <colBgEvenRow type="color" color="#FFFFE0" />
+        <colBgOddRow type="color" color="#E0FFE0" />
+        <colStatBg type="color" color="#CCCCCC" />
+        <colStatText type="color" color="#FF6666" />
+        <ListFont type="font" height="-12" face="宋体" />
+    </child>
+    <child type="element" name="quoteblock">
+        <ask1_pos type="point" x="98" y="46" />
+        <askvol1_pos type="point" x="125" y="70" />
+        <bid1_pos type="point" x="12" y="46" />
+        <bidvol1_pos type="point" x="10" y="70" />
+        <high_pos type="point" x="120" y="31" />
+        <inst_pos type="point" x="4" y="6" />
+        <last_pos type="point" x="90" y="13" />
+        <low_pos type="point" x="33" y="31" />
+        <oi_pos type="point" x="22" y="93" />
+        <update_pos type="point" x="140" y="15" />
+        <vol_pos type="point" x="114" y="93" />
+        <ask1_color type="color" color="#000000" />
+        <askvol1_color type="color" color="#000000" />
+        <bid1_color type="color" color="#000000" />
+        <bidvol1_color type="color" color="#000000" />
+        <high_color type="color" color="#000000" />
+        <inst_color type="color" color="#01537D" />
+        <last_color type="color" color="#0000FF" />
+        <low_color type="color" color="#000000" />
+        <oi_color type="color" color="#000000" />
+        <update_color type="color" color="#000000" />
+        <vol_color type="color" color="#000000" />
+        <imagelist type="imagelist" path="images/standard/QuoteBlock.jpg" count="10" />
+        <ask1_font type="font" height="22" face="Arialblack" weight="700" />
+        <askvol1_font type="font" height="15" face="Arial" />
+        <bid1_font type="font" height="22" face="Arialblack" weight="700" />
+        <bidvol1_font type="font" height="15" face="Arial" />
+        <high_font type="font" height="13" face="Arial" />
+        <inst_font type="font" height="25" face="Arial" weight="700" />
+        <last_font type="font" height="16" face="Arial" />
+        <low_font type="font" height="13" face="Arial" />
+        <oi_font type="font" height="13" face="Arial" />
+        <update_font type="font" height="14" face="Arial" />
+        <vol_font type="font" height="13" face="Arial" />
+    </child>
+    <child type="element" name="static">
+        <bgcolor type="color" color="#F0F3F5" />
+        <textcolor type="color" color="#000000" />
+        <bgbrush type="brush" color="#F0F3F5" />
+    </child>
+</root>

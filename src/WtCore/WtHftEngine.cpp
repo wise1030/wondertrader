@@ -366,3 +366,16 @@ WTSTransSlice* WtHftEngine::get_transaction_slice(uint32_t sid, const char* code
 {
 	return _data_mgr->get_transaction_slice(code, count);
 }
+// 热更新参数通知 — 从UFT移植
+void WtHftEngine::notify_params_update(const char* name)
+{
+	for(auto& v : _ctx_map)
+	{
+		const HftContextPtr& context = v.second;
+		if(strcmp(context->name(), name) == 0)
+		{
+			context->on_params_updated();
+			break;
+		}
+	}
+}

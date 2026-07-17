@@ -29,6 +29,8 @@
 #include "OptionData.h"
 #include "OptionValues.h"
 #include "OptionGreeks.h"
+#include "GvvVolCurve.h"
+#include "PeriodicCurveFitter.h"
 
 #include <limits>
 #include <cmath>
@@ -44,13 +46,11 @@
 // #include <tbb/parallel_for.h>  // Replaced by OpenMP
 #include <omp.h>
 
-// Forward-declared sibling types not yet migrated (filled in at link time)
+// Forward declarations for sibling types (definitions pulled in as needed)
 namespace wt_option {
-class OptionGrid;          // see IOptionGrid.h
-class OptionRisk;          // not yet migrated
+class OptionGrid;          // see IOptionGrid.h / OptionGrid.h
+class OptionRisk;          // OptionRisk.h
 class StrikeData;          // StrikeData.h
-class GvvVolCurve;         // GvvVolCurve.h
-class PeriodicCurveFitter; // PeriodicCurveFitter.h
 class ExpiryData;          // ExpiryData.h
 class OptionData;          // OptionData.h
 
@@ -111,10 +111,13 @@ void OptionPricer2::ExpiryInfo::setATMV(double atmv)
     m_prop_atmv = round_to_precision(atmv, 0.0001);
 }
 
-void OptionPricer2::ExpiryInfo::computeForwardPrice(const ExpiryDataPtr& ed)
+void OptionPricer2::ExpiryInfo::computeForwardPrice(OptionGrid* grid, const ExpiryDataPtr& ed)
 {
-    // ADAPTATION: read ExpiryData::getForward() directly (no grid->getAtmForward / IPriceProvider)
-    if (ed) {
+    // 通过 grid->getAtmForward 触发 __getBestSyntheticPrice 初始化 forward
+    // 与 quantbox 一致: grid->getAtmForward(expiry) 而非直接读 ed->getForward()
+    if (grid && ed) {
+        m_atmforward = grid->getAtmForward(ed->getExpiry());
+    } else if (ed) {
         m_atmforward = ed->getForward();
     }
     if (!std::isnan(m_atmforward)) {
@@ -150,11 +153,36 @@ OptionPricer2::OptionPricer2(const OptionPricer2Config& c,
     , m_prop_atmsig(0.0)
     , m_bReprice(true)
 {
-    std::cout << "OptionPricer2 created" << std::endl;
-    // PeriodicCurveFitter wiring deferred until PeriodicCurveFitter is migrated.
-    // Original code created m_spFitter here when config().enable_fitter was set,
-    // then registered the fitCompleted event. That wiring belongs in the host
-    // (WtOptContext) once both pieces are constructed.
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OptionPricer2 created (fitter={}, start={:.0f}, end={:.0f})",
+        config().enable_fitter, config().vol_fitting_start_time, config().vol_fitting_end_time);
+
+    // 创建 PeriodicCurveFitter (与 quantbox 一致, 使用配置参数)
+    if (config().enable_fitter && m_grid) {
+        auto self = std::shared_ptr<OptionPricer2>(this, [](OptionPricer2*){});
+        // Use config values; fall back to sensible defaults if not set
+        double startTime  = config().vol_fitting_start_time;
+        double endTime    = config().vol_fitting_end_time;
+        double decayWin   = config().vol_fitting_decay_window > 0 ? config().vol_fitting_decay_window : 300.0;
+        double period     = config().vol_fitting_period > 0 ? config().vol_fitting_period : 60.0;
+        double threshold  = config().vol_fitting_threshold;
+        bool   fitAll     = config().vol_fitting_to_all_expiries;
+        // Default good-points thresh if not configured
+        auto threshMap = config().vol_fitting_good_points_thresh;
+        if (threshMap.empty()) threshMap = {{0, 15}};
+
+        m_spFitter = std::make_shared<PeriodicCurveFitter>(
+            m_grid, self,
+            startTime, endTime,
+            threshMap,
+            decayWin,
+            period,
+            threshold,
+            fitAll
+        );
+        m_spFitter->setTraceLevel(config().trace_level);
+    }
+
     setTraceLevel(config().trace_level);
     // m_spPositionRisk->setOptionPricer(this);  // host responsibility
 }
@@ -182,10 +210,9 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
         ei = std::make_shared<ExpiryInfo>(exp);
         ei->m_atmforward = NAN;
         ei->m_atmvol = m_defaultVolatility;
-        // Factory removed — vol curves constructed directly in WT
-        // if (config().volcurve)  ei->m_spVolCurve  = IVolCurve::instance(*config().volcurve);
-        // if (config().volcurve2) ei->m_spVolCurve2 = IVolCurve::instance(*config().volcurve2);
-        // if (config().fwdcurve)  ei->m_spFwdCurve  = IVolCurve::instance(*config().fwdcurve);
+        // 创建波动率曲线 (与 quantbox 一致, 但不依赖 Lua config)
+        ei->m_spVolCurve  = std::make_shared<GvvVolCurve>();
+        ei->m_spVolCurve2 = std::make_shared<GvvVolCurve>();
         // hardcode defaults (preserve original)
         ei->m_futsprd = 1.0;
         ei->m_atmvolsprd = 0.2;
@@ -244,7 +271,8 @@ bool OptionPricer2::computeValues(OptionGrid* grid)
         // os-style trace removed; nothing required here
     }
     if (refPrice <= std::numeric_limits<double>::min()) {
-        std::cout << "Warning: bad underlying price: " << refPrice << std::endl;
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "Warning: bad underlying price: {:.6f}", refPrice);
         return false;
     }
 
@@ -268,7 +296,7 @@ bool OptionPricer2::computeValues(OptionGrid* grid)
     }
 
     {
-        if (config().use_tbb_parallel_for)
+        if (config().use_parallel_for)
         {
             // ensure expiry infos exist
             for (const auto& v : grid->expiries()) {
@@ -301,8 +329,12 @@ bool OptionPricer2::computeValues(OptionGrid* grid)
         finalizeCompute(grid);
     }
 
-    if (m_spFitter && getTime() > 0 /* m_spFitter->getLastFitTime() */ ) {
-        // m_spFitter->doFit();  // re-enabled once PeriodicCurveFitter is wired by host
+    if (m_spFitter && getTime() > m_spFitter->getLastFitTime()) {
+        m_spFitter->setTime(getTime());  // 同步时间给 fitter
+        WTSLogger::log_by_cat("strategy", LL_INFO, "doFit triggered getTime={:.1f} lastFit={:.1f}",
+            getTime(), m_spFitter->getLastFitTime());
+        bool fitOk = m_spFitter->doFit();
+        WTSLogger::log_by_cat("strategy", LL_INFO, "doFit result={}", fitOk);
     }
     m_perfCounter.stop();
     return true;
@@ -370,6 +402,11 @@ bool OptionPricer2::computeImpliedValues(OptionGrid* grid)
     m_tvLastComputeImplied = getTime();
 
     m_perfCounter.start();
+    // initValuesCompute is called here because doFit() -> computeImpliedValues
+    // may run BEFORE CompositeOptionPricer::computeValues (e.g., in on_timer).
+    // Without it, IV calculation uses stale forward/maturity from previous cycle.
+    // When called from CompositeOptionPricer::computeValues_SLOW (after init),
+    // the guard m_tvLastComputeImplied prevents double-execution.
     initValuesCompute(grid);
 
     {
@@ -397,7 +434,7 @@ bool OptionPricer2::initValuesCompute(OptionGrid* grid)
     {
         const ExpiryDataPtr& ed = v.second;
         const ExpiryInfoPtr& ei = getExpiryInfo(ed->getExpiry());
-        ei->computeForwardPrice(ed);
+        ei->computeForwardPrice(grid, ed);
         ei->computeMaturity(ed.get());
 
         if (config().expire_greeks_window_bdays > 0
@@ -420,9 +457,10 @@ void __computeTheoreticalValues(OptionData* option, OptionValues& other_values,
 {
     OptionValues& values = option->values(idx);
     values.setPriced(false);
-    // fees: original read option->getInstrumentMDContext()->getFees(mid).
-    // Migrated OptionData has no MD context; default fees to 0.
-    values.m_fees = 0.0;
+    // fees: per-contract transaction fee from contract info (wired onto
+    // OptionData by the strategy from stra_get_comminfo). Original read
+    // option->getInstrumentMDContext()->getFees(mid).
+    values.m_fees = option->getFee();
     bool bcompute = !std::isnan(bci->m_forward) && GT(bci->m_forward, 0)
                   && GE(bci->m_maturity, 0);
     if (!bcompute) {
@@ -606,6 +644,16 @@ void OptionPricer2::computeImpliedValues(OptionData* option,
     double mid = option->getMid();
     double ask = mkt.ask;
 
+    // Pre-condition: forward and maturity must be valid for IV calculation
+    if (std::isnan(bci.m_forward) || bci.m_forward <= 0 ||
+        std::isnan(bci.m_maturity) || bci.m_maturity <= 0 ||
+        std::isnan(bci.m_discount) || bci.m_discount <= 0) {
+        values.m_impliedVol = -1;
+        values.m_impliedBidVol = -1;
+        values.m_impliedAskVol = -1;
+        return;
+    }
+
     double iv_bid = -1, iv_mid = -1, iv_ask = -1;
     if (bid > 0 && ask > 0) {
         try {
@@ -641,10 +689,33 @@ void OptionPricer2::computeImpliedValues(OptionData* option,
 
 void OptionPricer2::finalizeCompute(OptionGrid* grid)
 {
+    if (!grid) return;
+    const size_t idx = getValuesIndex();
     for (const auto& od : grid->getAllOptions()) {
-        // od->notifyMarketsPriced(0);  // IOptionDataListener plumbing not yet wired
+        if (od) od->notifyMarketsPriced(idx);
     }
-    (void)grid;
 }
 
+} // namespace wt_option
+
+// ============================================================================
+// triggerDoFit - 路径1: 定时器触发 doFit (与 quantbox onClockWakeup 等价)
+// ============================================================================
+namespace wt_option {
+bool OptionPricer2::triggerDoFit()
+{
+    if (!m_spFitter) return false;
+
+    // Use onTimer() so the fitter's m_period interval is respected.
+    // onTimer() returns true only if doFit() was actually called (period elapsed).
+    // doFit() internally checks anyForwardReady + time window, returning false if skipped.
+    m_spFitter->setTime(getTime());
+    bool ok = m_spFitter->onTimer(getTime());
+    if (ok) {
+        WTSLogger::log_by_cat("strategy", LL_INFO, "triggerDoFit fit completed time={:.1f}", getTime());
+        for (auto& sink : m_fitCompletedEvent)
+            sink(*m_spFitter);
+    }
+    return ok;
+}
 } // namespace wt_option

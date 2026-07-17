@@ -30,6 +30,7 @@ namespace wt_option {
 
 class IVolCurve;
 using IVolCurvePtr = std::shared_ptr<IVolCurve>;
+class UnderlyingTradingData;  // forward declare — hedge trading data
 
 class ExpiryData {
 public:
@@ -63,6 +64,26 @@ public:
     void setForward(double fwd) { m_fwd = fwd; }
     double getForward() const { return m_fwd; }
 
+    // Synthetic forward (from put-call parity) + forward spread signal
+    void setSyntheticForward(double synFwd, double underlyingPrice, double time);
+    double getForwardSpread() const { return m_forwardSpread; }
+    EMAFilter& emaForwardSpread() { return m_emaForwardSpread; }
+
+    // Min strikes for put-call parity (configurable, default 1 to match quantbox:
+    // only needs 1 valid contributor (option pair OR future) to compute forward)
+    void setMinStrikesForSynthetic(int n) { m_minStrikesForSynthetic = n; }
+    int getMinStrikesForSynthetic() const { return m_minStrikesForSynthetic; }
+
+    // Include future mid in synthetic forward (quantbox design: SHFE/DCE/CZCE/INE = true)
+    void setIncludeFuture(bool b) { m_includeFuture = b; }
+    bool getIncludeFuture() const { return m_includeFuture; }
+
+    // Future market data (set by OptionGrid from underlying tick)
+    void setFutureMid(double mid, double spread) { m_futureMid = mid; m_futureSpread = spread; m_futureValid = (mid > 0 && spread > 0); }
+    bool isFutureValid() const { return m_futureValid; }
+    double getFutureMid() const { return m_futureMid; }
+    double getFutureSpread() const { return m_futureSpread; }
+
     // Maturity = (bdays + intradayFraction) / 252
     double getIntradayFraction() const;
     double getSettlementFraction() const;
@@ -73,11 +94,28 @@ public:
     void setVolCurve(IVolCurvePtr curve) { m_volCurve = std::move(curve); }
     IVolCurvePtr getVolCurve() const { return m_volCurve; }
 
+    // Underlying type
+    enum class UnderlyingType { Future, Index };
+    void setUnderlyingType(UnderlyingType t) { m_underlyingType = t; }
+    UnderlyingType getUnderlyingType() const { return m_underlyingType; }
+
+    // Per-expiry underlying price (set by onTick when this expiry's underlying receives a tick)
+    void setUnderlyingPrice(double px) { m_underlyingPrice = px; m_underlyingPriceValid = (px > 0); }
+    double getUnderlyingPrice() const { return m_underlyingPrice; }
+    bool isUnderlyingPriceValid() const { return m_underlyingPriceValid; }
+
     // Hedge instrument
     void setHedgeCode(const std::string& code) { m_hedgeCode = code; }
     const std::string& getHedgeCode() const { return m_hedgeCode; }
+    void setUnderlyingCode(const std::string& code) { m_underlyingCode = code; }
+    const std::string& getUnderlyingCode() const { return m_underlyingCode; }
     void setOptionVsFutureRatio(int32_t ratio) { m_optionVsFutureRatio = ratio; }
     int32_t getOptionVsFutureRatio() const { return m_optionVsFutureRatio; }
+
+    // Hedge trading data (set by OTG, read by pricer)
+    void setHedgeUTD(UnderlyingTradingData* utd) { m_hedgeUTD = utd; }
+    UnderlyingTradingData* getHedgeUTD() { return m_hedgeUTD; }
+    const UnderlyingTradingData* getHedgeUTD() const { return m_hedgeUTD; }
 
     // Risk parameters
     void setRiskMultiplier(double m) { m_riskMultiplier = m; }
@@ -96,6 +134,11 @@ public:
     // Readiness
     void setForwardReady(bool ready) { m_forwardReady = ready; }
     bool isForwardReady() const { return m_forwardReady; }
+
+    // Sticky forward: track last time forward was valid.
+    // When validCount drops, we keep forwardReady=true until timeout expires.
+    void setLastValidForwardTime(uint64_t t) { m_lastValidForwardTime = t; }
+    uint64_t getLastValidForwardTime() const { return m_lastValidForwardTime; }
     void setFitReady(bool ready) { m_fitReady = ready; }
     bool isFitReady() const { return m_fitReady; }
     bool isValuesReady() const { return m_forwardReady && m_fitReady; }
@@ -115,7 +158,13 @@ private:
     uint32_t m_expiry;          // YYYYMM
     std::string m_optionProduct;
     std::string m_stdPID;       // for isHoliday (e.g. "SHFE.cu")
-    std::string m_hedgeCode;    // underlying/future code for hedging
+    std::string m_underlyingCode;  // pricing reference (index or future)
+    std::string m_hedgeCode;    // tradeable hedge instrument (may differ from underlying)
+    UnderlyingType m_underlyingType = UnderlyingType::Future;
+    double m_underlyingPrice = 0;
+    bool m_underlyingPriceValid = false;
+
+    UnderlyingTradingData* m_hedgeUTD = nullptr;  // set by OTG (raw ptr, non-owning)
 
     wtp::IBaseDataMgr* m_bdMgr = nullptr;
     wtp::WTSSessionInfo* m_sessionInfo = nullptr;
@@ -143,6 +192,18 @@ private:
     double m_fwd = NAN;
     bool m_forwardReady = false;
     bool m_fitReady = false;
+    uint64_t m_lastValidForwardTime = 0;  // last time forwardReady was set to true (for sticky semantics)
+
+    // Synthetic forward spread (from put-call parity)
+    double m_forwardSpread = 0;       // syntheticForward - underlyingPrice
+    EMAFilter m_emaForwardSpread;    // forward spread EMA (signal)
+    int m_minStrikesForSynthetic = 1; // min valid contributors (1 = any single source, matches quantbox)
+
+    // Future market data for synthetic forward (quantbox: future mid participates in weighted avg)
+    bool m_includeFuture = true;       // include future mid in forward calculation (default true for commodity options)
+    double m_futureMid = 0;           // future mid price
+    double m_futureSpread = 0;        // future bid-ask spread
+    bool m_futureValid = false;        // future market data valid
 
     EMAFilter m_emaRollVsFront;
 

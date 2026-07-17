@@ -1,0 +1,18 @@
+[13:38:03.538][main] === QuoteProbe start ===
+[13:38:03.538][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[13:38:03.539][main] instrument=CY2609 exchange=CZCE tickOffset=20 qty=2
+[13:38:03.539][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[13:38:03.539][main] log=quote_probe_20260611_133803.log
+[13:38:03.648][OnFrontConnected] trader front connected, sending Authenticate
+[13:38:03.649][ReqAuthenticate] sent ret=0
+[13:38:03.711][OnRspAuthenticate] OK, sending Login
+[13:38:03.886][ReqUserLogin] sent ret=0
+[13:38:03.928][OnRspUserLogin] OK FrontID=7 SessionID=1228275730 MaxOrderRef=1 TradingDay=20260611
+[13:38:03.929][ReqSettlementConfirm] sent ret=0
+[13:38:03.968][OnRspSettlementConfirm] OK
+[13:38:03.969][ReqQryInstrument] sent ret=0 code=CY2609
+[13:38:03.999][ReqQryDepthMarketData] sent ret=0
+[13:38:04.531][ReqQuoteInsert] code=CY2609 QuoteRef=1006 BID 2@13900.00 ASK 2@14100.00 (last=14000.00 tick=5.0000 off=20)
+[13:38:04.531][ReqQuoteInsert] API ret=0
+[13:38:04.564][OnRspQuoteInsert] REJECTED id=16 msg=CTP:找不到合约 QuoteRef=1006 code=CY2609
+[13:38:04.566][OnErrRtnQuoteInsert] id=16 msg=CTP:找不到合约 QuoteRef=1006 code=CY2609

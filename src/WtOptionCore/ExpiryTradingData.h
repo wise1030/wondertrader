@@ -43,16 +43,6 @@ public:
     const UnderlyingTradingDataPtr& getPrimaryUnderlier() const { return m_spUnderlyingTradingData; }
     const std::vector<UnderlyingTradingDataPtr>& secondary_underliers() const { return m_vSecondaryUTD; }
 
-    void setForward(double fwd)
-    {
-        const UnderlyingTradingDataPtr& utd = getPrimaryUnderlier();
-        if (utd) utd->setFwd(fwd);
-        for (const UnderlyingTradingDataPtr& s : secondary_underliers())
-        {
-            if (s) s->setFwd(fwd);
-        }
-    }
-
     const OptionExpiryGreeksPtr& getExpiryGreeks() { return m_spExpiryGreeks; }
     EMAFilter& getVegaflowFilter() { return m_vegaflow_filter; }
     EMAFilter& getDeltaflowFilter() { return m_deltaflow_filter; }

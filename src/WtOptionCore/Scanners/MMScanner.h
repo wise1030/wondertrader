@@ -3,7 +3,7 @@
  * \brief Market Making Scanner — scans for MM opportunities
  */
 #pragma once
-#include "../IScanModule.h"
+#include "IScanModule.h"
 #include "../OptionData.h"
 #include "../OptionValues.h"
 #include "../optioncoretypes.h"

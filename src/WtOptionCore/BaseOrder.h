@@ -5,10 +5,11 @@
 
 #pragma once
 
-#include "OptionTypes.h"
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
+#include <functional>
 
 namespace wt_option {
 

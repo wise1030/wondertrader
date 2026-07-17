@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "../OptionTypes.h"
+#include "../optioncoretypes.h"
 #include "../OptionData.h"
 #include "../OptionGrid.h"
 #include <memory>
@@ -55,32 +55,37 @@ public:
 class IScanModule {
 public:
     IScanModule(const std::string& name);
+    IScanModule() = default;  // backward compat for stub-derived scanners
     virtual ~IScanModule() = default;
-    
-    // Identity
-    const std::string& getName() const { return m_name; }
-    
+
+    // Identity - returns by value for stub compat
+    virtual std::string getName() const { return m_name; }
+
     // Lifecycle
     virtual void onStart() {}
     virtual void onStop() {}
-    
+
     // Enable/disable
     bool isEnabled() const { return m_enabled; }
     void setEnabled(bool enabled);
     virtual void onEnable() {}
     virtual void onDisable() {}
-    
+
     // Processing
     virtual void onTick(const OptionGrid* grid) {}
     virtual void onOptionUpdate(OptionData* option) {}
     virtual void onUnderlyingUpdate(double price) {}
-    
+
     // Panic handling
     virtual void onPanic() {}
-    
+
     // Refresh
     virtual void refresh() {}
-    
+
+    // Stub compat: onOptionHit - called when a scanner detects a hit.
+    // Default implementation delegates to onOptionUpdate.
+    virtual void onOptionHit(OptionData* od, int32_t valueIndex) { (void)valueIndex; onOptionUpdate(od); }
+
     // Listeners
     void addListener(IScannerListener* listener);
     void removeListener(IScannerListener* listener);

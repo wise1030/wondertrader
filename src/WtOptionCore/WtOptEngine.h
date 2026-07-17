@@ -82,7 +82,7 @@ public:
     //==========================================================================
     
     void on_timer(uint32_t curDate, uint32_t curTime);
-    // void on_minute_end(uint32_t curDate, uint32_t curTime);
+    void on_minute_end(uint32_t curDate, uint32_t curTime);
     
     //==========================================================================
     // TraderAdapter integration
@@ -116,6 +116,7 @@ private:
     
     WTSVariant*         _opt_cfg;
     bool                _is_initialized;
+    uint32_t            _last_min_time = 0;  // last HHMM seen (for minute-end detection)
     
     //==========================================================================
     // Threading Infrastructure

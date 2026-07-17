@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root>
+    <servers>
+        <item>0:121.41.124.17:7001</item>
+        <item>0:121.41.124.175:7001</item>
+        <item>0:121.41.124.14:7001</item>
+        <item>0:121.41.124.129:7001</item>
+        <item>0:121.41.124.161:7001</item>
+    </servers>
+</root>

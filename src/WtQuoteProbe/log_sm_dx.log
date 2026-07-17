@@ -1,0 +1,6 @@
+[10:45:08.514][main] === QuoteProbe start ===
+[10:45:08.514][main] front=tcp://180.96.49.192:59205 broker=4600 user=010531
+[10:45:08.514][main] instrument=ag2606 exchange=SHFE tickOffset=20 qty=1
+[10:45:08.514][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[10:45:08.515][main] log=quote_probe_20260611_104508.log
+[10:45:08.559][OnRspError] id=4040 msg=CTP:API Front shake hand err: decode err rid=0

@@ -7,13 +7,12 @@
 
 #pragma once
 
-#include "OptionTypes.h"
+#include "optioncoretypes.h"
 #include "OptionGreeks.h"
 #include <memory>
 #include <string>
 #include <functional>
 #include <vector>
-#include <boost/pool/object_pool.hpp>
 #include "BaseOrder.h"
 
 namespace wt_option {
@@ -45,9 +44,13 @@ struct ValuesAtIssue {
  */
 class OptionOrder : public BaseOrder {
 public:
-    // Memory pooling optimizations
-    static void* operator new(size_t size);
-    static void operator delete(void* ptr);
+    // NOTE: OptionOrder is always allocated via std::make_shared (see
+    // OrderManager / WtOptContext), which uses the global allocator. A prior
+    // custom boost::object_pool operator new/delete was removed: it was unsafe
+    // (operator new fell back to ::operator new for size mismatches while
+    // operator delete unconditionally returned memory to the pool, risking
+    // heap corruption for any derived type) and never actually exercised
+    // because make_shared bypasses class-level operator new.
 
     OptionOrder(uint32_t orderId, OptionDataPtr option, 
                 OrderDir dir, double price, uint32_t qty);

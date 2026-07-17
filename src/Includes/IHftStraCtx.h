@@ -10,6 +10,7 @@
 #pragma once
 #include <stdint.h>
 #include <string>
+#include <utility>
 #include "ExecuteDefs.h"
 
 #include "../Includes/WTSMarcos.h"
@@ -127,6 +128,33 @@ public:
 	 */
 	virtual uint32_t	stra_exit_short(const char* stdCode, double price, double qty, const char* userTag, bool isToday = false, int flag = 0) { return 0; }
 
+	/*
+	 *	双边报价接口(做市商)
+	 *	@stdCode	合约代码
+	 *	@bidPrice	买价
+	 *	@bidQty		买量
+	 *	@askPrice	卖价
+	 *	@askQty		卖量
+	 *	@userTag	用户标签
+	 *	@return		std::pair<bidOrderId, askOrderId>
+	 */
+	virtual std::pair<uint32_t, uint32_t> stra_quote(const char* stdCode, double bidPrice, double bidQty,
+														double askPrice, double askQty, const char* userTag = "") { return {0, 0}; }
+
+	/*
+	 *	撤销双边报价
+	 *	@localid	本地单号
+	 *	@return		是否成功
+	 */
+	virtual bool		stra_cancel_quote(uint32_t localid) { return false; }
+
+	/*
+	 *	撤销某合约全部委托
+	 *	@stdCode	合约代码
+	 *	@return		被撤的本地单号列表
+	 */
+	virtual OrderIDs	stra_cancel_all(const char* stdCode) { return OrderIDs(); }
+
 	virtual WTSCommodityInfo* stra_get_comminfo(const char* stdCode) = 0;
 	virtual WTSKlineSlice*	stra_get_bars(const char* stdCode, const char* period, uint32_t count) = 0;
 	virtual WTSTickSlice*	stra_get_ticks(const char* stdCode, uint32_t count) = 0;
@@ -163,6 +191,20 @@ public:
 	virtual void stra_save_user_data(const char* key, const char* val) {}
 
 	virtual const char* stra_load_user_data(const char* key, const char* defVal = "") { return defVal; }
+
+	//==========================================================================
+	// Hot-update params (热更新参数, 从UFT移植)
+	// sync_param 返回共享内存指针, 外部进程修改后策略实时读取最新值
+	// commit_param_watcher 注册监听, 参数变化时触发 on_params_updated
+	//==========================================================================
+	virtual void on_params_updated() {}
+
+	virtual const char*	sync_param(const char* name, const char* initVal = "", bool bForceWrite = false) { return nullptr; }
+	virtual double*	sync_param(const char* name, double initVal = 0, bool bForceWrite = false) { return nullptr; }
+	virtual uint32_t* sync_param(const char* name, uint32_t initVal = 0, bool bForceWrite = false) { return nullptr; }
+	virtual int32_t*	sync_param(const char* name, int32_t initVal = 0, bool bForceWrite = false) { return nullptr; }
+
+	virtual void	commit_param_watcher() {}
 
 protected:
 	std::string _name;

@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<root>
+	<ProductShortChinese>
+		<item ProductName="sc" Alias="原油"/>
+		<item ProductName="IF" Alias="股指"/>
+		<item ProductName="ag" Alias="白银"/>
+		<item ProductName="cu" Alias="铜"/>
+		<item ProductName="rb" Alias="螺纹钢"/>
+		<item ProductName="ru" Alias="橡胶"/>
+		<item ProductName="zn" Alias="锌"/>
+		<item ProductName="bu" Alias="沥青"/>
+		<item ProductName="i" Alias="铁矿石"/>
+		<item ProductName="hc" Alias="热轧板"/>
+		<item ProductName="au" Alias="黄金"/>
+		<item ProductName="pb" Alias="铅"/>
+		<item ProductName="fu" Alias="燃油"/>
+		<item ProductName="al" Alias="铝"/>
+		<item ProductName="TF" Alias="国债"/>
+		<item ProductName="IC" Alias="中500"/>
+		<item ProductName="IH" Alias="上50"/>
+		<item ProductName="CF" Alias="棉花"/>
+		<item ProductName="SR" Alias="白糖"/>
+		<item ProductName="TA" Alias="PTA"/>
+		<item ProductName="WH" Alias="强麦"/>
+		<item ProductName="MA" Alias="甲醇"/>
+		<item ProductName="FG" Alias="玻璃"/>
+		<item ProductName="JR" Alias="粳稻"/>
+		<item ProductName="OI" Alias="菜油"/>
+		<item ProductName="PM" Alias="普麦"/>
+		<item ProductName="RI" Alias="早籼稻"/>
+		<item ProductName="RM" Alias="菜粕"/>
+		<item ProductName="RS" Alias="菜籽"/>
+		<item ProductName="ZC" Alias="动力煤"/>
+		<item ProductName="LR" Alias="晚籼稻"/>
+		<item ProductName="SF" Alias="硅铁"/>
+		<item ProductName="SM" Alias="锰硅"/>
+		<item ProductName="y" Alias="豆油"/>
+		<item ProductName="c" Alias="黄玉米"/>
+		<item ProductName="l" Alias="聚乙烯"/>
+		<item ProductName="p" Alias="棕榈"/>
+		<item ProductName="j" Alias="焦炭"/>
+		<item ProductName="a" Alias="豆一"/>
+		<item ProductName="m" Alias="豆粕"/>
+		<item ProductName="b" Alias="豆二"/>
+		<item ProductName="jm" Alias="焦煤"/>
+		<item ProductName="bb" Alias="细木板"/>
+		<item ProductName="fb" Alias="纤维板"/>
+		<item ProductName="i" Alias="铁矿石"/>
+		<item ProductName="jd" Alias="鸡蛋"/>
+		<item ProductName="v" Alias="聚氯乙烯"/>
+		<item ProductName="pp" Alias="聚丙烯"/>
+		<item ProductName="cs" Alias="淀粉"/>
+		<item ProductName="ni" Alias="镍"/>
+		<item ProductName="sn" Alias="锡"/>
+		<item ProductName="CY" Alias="棉纱"/>
+		<item ProductName="AP" Alias="苹果"/>
+		<item ProductName="sp" Alias="纸浆"/>
+		<item ProductName="eg" Alias="甘醇"/>
+		<item ProductName="CJ" Alias="红枣"/>
+		<item ProductName="pg" Alias="石油气"/>
+  </ProductShortChinese>
+	<ProductNames>
+		<item ProductName="sc" Alias="中质含硫原油" />
+		<item ProductName="IF" Alias="股指"/>
+		<item ProductName="ag" Alias="白银"/>
+		<item ProductName="cu" Alias="铜"/>
+		<item ProductName="rb" Alias="螺纹钢"/>
+		<item ProductName="ru" Alias="天然橡胶"/>
+		<item ProductName="zn" Alias="锌"/>
+		<item ProductName="pb" Alias="铅"/>
+		<item ProductName="au" Alias="黄金"/>
+		<item ProductName="fu" Alias="燃料油"/>
+		<item ProductName="al" Alias="铝"/>
+		<item ProductName="wr" Alias="线材"/>
+		<item ProductName="bu" Alias="石油沥青"/>
+		<item ProductName="hc" Alias="热轧卷板"/>
+		<item ProductName="TF" Alias="国债"/>
+		<item ProductName="IC" Alias="中证500指数" />
+		<item ProductName="IH" Alias="上证50指数" />
+		<item ProductName="CF" Alias="一号棉花"/>
+		<item ProductName="FG" Alias="玻璃"/>
+		<item ProductName="JR" Alias="粳稻"/>
+		<item ProductName="MA" Alias="甲醇"/>
+		<item ProductName="OI" Alias="菜籽油"/>
+		<item ProductName="PM" Alias="普通小麦"/>
+		<item ProductName="RI" Alias="早籼稻"/>
+		<item ProductName="RM" Alias="菜籽粕"/>
+		<item ProductName="RS" Alias="油菜籽"/>
+		<item ProductName="SR" Alias="白砂糖"/>
+		<item ProductName="TA" Alias="精对苯二甲酸"/>
+		<item ProductName="ZC" Alias="动力煤"/>
+		<item ProductName="WH" Alias="优质强筋小麦"/>
+		<item ProductName="LR" Alias="晚籼稻"/>
+		<item ProductName="SF" Alias="硅铁"/>
+		<item ProductName="SM" Alias="锰硅"/>
+		<item ProductName="a" Alias="黄大豆1号"/>
+		<item ProductName="b" Alias="黄大豆2号"/>
+		<item ProductName="bb" Alias="细木工板"/>
+		<item ProductName="fb" Alias="中密度纤维板"/>
+		<item ProductName="i" Alias="铁矿石"/>
+		<item ProductName="j" Alias="冶金焦炭"/>
+		<item ProductName="jd" Alias="鸡蛋"/>
+		<item ProductName="jm" Alias="焦煤"/>
+		<item ProductName="l" Alias="线型低密度聚乙烯"/>
+		<item ProductName="c" Alias="黄玉米"/>
+		<item ProductName="m" Alias="豆粕"/>
+		<item ProductName="y" Alias="豆油"/>
+		<item ProductName="p" Alias="棕榈油"/>
+		<item ProductName="v" Alias="聚氯乙烯"/>
+		<item ProductName="pp" Alias="聚丙烯"/>
+		<item ProductName="cs" Alias="玉米淀粉"/>
+		<item ProductName="ni" Alias="镍" />
+		<item ProductName="sn" Alias="锡" />
+		<item ProductName="CY" Alias="棉纱" />
+		<item ProductName="AP" Alias="苹果" />
+		<item ProductName="sp" Alias="纸浆"/>
+		<item ProductName="eg" Alias="乙二醇"/>
+		<item ProductName="CJ" Alias="红枣"/>
+		<item ProductName="pg" Alias="液化石油气"/>
+	</ProductNames>
+	<ProductNameAlias>
+		<item ProductName="sc" Alias="zhongzhihanliuyuanyou" />
+		<item ProductName="a" Alias="hddy"/>
+		<item ProductName="a" Alias="dadouyi"/>
+		<item ProductName="b" Alias="hdde"/>
+		<item ProductName="b" Alias="dadouer"/>
+		<item ProductName="c" Alias="yumi"/>
+		<item ProductName="c" Alias="hym"/>
+		<item ProductName="m" Alias="dp"/>
+		<item ProductName="m" Alias="doupo"/>
+		<item ProductName="y" Alias="dy"/>
+		<item ProductName="y" Alias="douyou"/>
+		<item ProductName="p" Alias="zonglvyou"/>
+		<item ProductName="p" Alias="zly"/>
+		<item ProductName="l" Alias="sl"/>
+		<item ProductName="l" Alias="jyx"/>
+		<item ProductName="j" Alias="jt"/>
+		<item ProductName="ag" Alias="baiyin"/>
+		<item ProductName="ag" Alias="by"/>
+		<item ProductName="al" Alias="lv"/>
+		<item ProductName="al" Alias="hl"/>
+		<item ProductName="au" Alias="huangjin"/>
+		<item ProductName="au" Alias="hj"/>
+		<item ProductName="cu" Alias="tong"/>
+		<item ProductName="cu" Alias="ht"/>
+		<item ProductName="fu" Alias="ry"/>
+		<item ProductName="fu" Alias="rly"/>
+		<item ProductName="ru" Alias="tj"/>
+		<item ProductName="ru" Alias="xj"/>
+		<item ProductName="ru" Alias="trxj"/>
+		<item ProductName="zn" Alias="xin"/>
+		<item ProductName="zn" Alias="hx"/>
+		<item ProductName="pb" Alias="qian"/>
+		<item ProductName="IF" Alias="gz"/>
+		<item ProductName="ME" Alias="jiachun"/>
+		<item ProductName="ME" Alias="jc"/>
+		<item ProductName="ME" Alias="jj"/>
+		<item ProductName="ME" Alias="jiujing"/>
+		<item ProductName="TF" Alias="gz"/>
+		<item ProductName="TF" Alias="guozhai"/>
+		<item ProductName="IC" Alias="zz" />
+		<item ProductName="IH" Alias="sz" />
+		<item ProductName="CF" Alias="mh"/>
+		<item ProductName="CF" Alias="mianhua"/>
+		<item ProductName="OI" Alias="cy"/>
+		<item ProductName="OI" Alias="czy"/>
+		<item ProductName="SR" Alias="bt"/>
+		<item ProductName="SR" Alias="bst"/>
+		<item ProductName="TA" Alias="pta"/>
+		<item ProductName="TA" Alias="jdbejs"/>
+		<item ProductName="WH" Alias="qm"/>
+		<item ProductName="WH" Alias="yzqjxm"/>
+		<item ProductName="PM" Alias="pm"/>
+		<item ProductName="PM" Alias="ptxm"/>
+		<item ProductName="rb" Alias="lwg"/>
+		<item ProductName="wr" Alias="xc"/>
+		<item ProductName="v" Alias="jlyx"/>
+		<item ProductName="RI" Alias="zxd"/>
+		<item ProductName="jm" Alias="jiaomei"/>
+		<item ProductName="FG" Alias="boli"/>
+		<item ProductName="FG" Alias="bl"/>
+		<item ProductName="RM" Alias="cp"/>
+		<item ProductName="RM" Alias="czp"/>
+		<item ProductName="RM" Alias="caizipo"/>
+		<item ProductName="RS" Alias="cz"/>
+		<item ProductName="RS" Alias="ycz"/>
+		<item ProductName="RS" Alias="youcaizi"/>
+		<item ProductName="TC" Alias="dlm"/>
+		<item ProductName="bu" Alias="lq"/>
+		<item ProductName="bu" Alias="shiyouliqing"/>
+		<item ProductName="bu" Alias="liqing"/>
+		<item ProductName="i" Alias="tks"/>
+		<item ProductName="i" Alias="tiekuangshi"/>
+		<item ProductName="hc" Alias="rzjb"/>
+		<item ProductName="hc" Alias="rezhajuanban"/>
+		<item ProductName="bb" Alias="xmb"/>
+		<item ProductName="bb" Alias="ximugongban"/>
+		<item ProductName="fb" Alias="xwb"/>
+		<item ProductName="fb" Alias="zhongmiduxianweiban"/>
+		<item ProductName="pp" Alias="jbx"/>
+		<item ProductName="pp" Alias="jubingxi"/>
+		<item ProductName="LR" Alias="wxd"/>
+		<item ProductName="SF" Alias="gt"/>
+		<item ProductName="SM" Alias="mg"/>
+		<item ProductName="cs" Alias="ymdf"/>
+		<item ProductName="cs" Alias="dianfen"/>
+		<item ProductName="ni" Alias="nie" />
+		<item ProductName="sn" Alias="xi" />
+		<item ProductName="CY" Alias="ms" />
+		<item ProductName="CY" Alias="miansha" />
+		<item ProductName="AP" Alias="pingguo" />
+		<item ProductName="sp" Alias="zhijiang"/>
+		<item ProductName="sp" Alias="zj"/>
+		<item ProductName="eg" Alias="yierchun"/>
+		<item ProductName="eg" Alias="ganchun"/>
+		<item ProductName="eg" Alias="yec"/>
+		<item ProductName="CJ" Alias="hz"/>
+		<item ProductName="CJ" Alias="hongzao"/>
+		<item ProductName="pg" Alias="yehuashiyouqi"/>
+		<item ProductName="pg" Alias="yehua"/>
+		<item ProductName="pg" Alias="yh"/>
+  </ProductNameAlias>
+</root>

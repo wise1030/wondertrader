@@ -1,0 +1,216 @@
+[13:08:37.877][main] === QuoteProbe start ===
+[13:08:37.877][main] front=tcp://58.240.131.69:59205 broker=4600 user=010531
+[13:08:37.877][main] instrument=MA609 exchange=CZCE tickOffset=20 qty=2
+[13:08:37.877][main] appid=hyzb_trader_1.0 authcode_tail=...4G6J pass_len=9
+[13:08:37.878][main] log=quote_probe_20260611_130837.log
+[13:08:37.973][OnFrontConnected] trader front connected, sending Authenticate
+[13:08:37.974][ReqAuthenticate] sent ret=0
+[13:08:38.028][OnRspAuthenticate] OK, sending Login
+[13:08:38.237][ReqUserLogin] sent ret=0
+[13:08:38.262][OnRspUserLogin] OK FrontID=7 SessionID=649789452 MaxOrderRef=1 TradingDay=20260611
+[13:08:38.263][ReqSettlementConfirm] sent ret=0
+[13:08:38.289][OnRspSettlementConfirm] OK
+[13:08:38.290][ReqQryInstrument] sent ret=0 code=MA609
+[13:08:38.322][OnRspQryInstrument] code=MA609 exch=CZCE tick=1.0000 MaxLimitOrderVol=1000 volMult=10
+[13:08:38.323][OnRspQryInstrument] code=MA609C1900 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.323][OnRspQryInstrument] code=MA609C1925 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.323][OnRspQryInstrument] code=MA609C1950 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.324][OnRspQryInstrument] code=MA609C1975 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.324][OnRspQryInstrument] code=MA609C2000 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.324][OnRspQryInstrument] code=MA609C2025 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.325][OnRspQryInstrument] code=MA609C2050 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.325][OnRspQryInstrument] code=MA609C2075 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.325][OnRspQryInstrument] code=MA609C2100 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.326][OnRspQryInstrument] code=MA609C2125 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.326][OnRspQryInstrument] code=MA609C2150 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.326][OnRspQryInstrument] code=MA609C2175 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.326][OnRspQryInstrument] code=MA609C2200 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.326][OnRspQryInstrument] code=MA609C2225 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.327][OnRspQryInstrument] code=MA609C2250 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.327][OnRspQryInstrument] code=MA609C2275 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.327][OnRspQryInstrument] code=MA609C2300 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.327][OnRspQryInstrument] code=MA609C2325 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.327][OnRspQryInstrument] code=MA609C2350 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.328][OnRspQryInstrument] code=MA609C2375 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.328][OnRspQryInstrument] code=MA609C2400 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.328][OnRspQryInstrument] code=MA609C2425 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.328][OnRspQryInstrument] code=MA609C2450 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.328][OnRspQryInstrument] code=MA609C2475 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.328][OnRspQryInstrument] code=MA609C2500 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.329][OnRspQryInstrument] code=MA609C2550 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.329][OnRspQryInstrument] code=MA609C2600 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.329][OnRspQryInstrument] code=MA609C2650 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.329][OnRspQryInstrument] code=MA609C2700 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.329][OnRspQryInstrument] code=MA609C2750 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.330][OnRspQryInstrument] code=MA609C2800 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.330][OnRspQryInstrument] code=MA609C2850 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.330][OnRspQryInstrument] code=MA609C2900 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.330][OnRspQryInstrument] code=MA609C2950 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.330][OnRspQryInstrument] code=MA609C3000 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.331][OnRspQryInstrument] code=MA609C3050 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.331][OnRspQryInstrument] code=MA609C3100 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.331][OnRspQryInstrument] code=MA609C3150 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.331][OnRspQryInstrument] code=MA609C3200 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.331][OnRspQryInstrument] code=MA609C3250 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.331][OnRspQryInstrument] code=MA609C3300 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.332][OnRspQryInstrument] code=MA609C3350 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.332][OnRspQryInstrument] code=MA609C3400 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.332][OnRspQryInstrument] code=MA609C3450 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.332][OnRspQryInstrument] code=MA609C3500 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.332][OnRspQryInstrument] code=MA609C3550 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.332][OnRspQryInstrument] code=MA609C3600 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.333][OnRspQryInstrument] code=MA609C3650 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.333][OnRspQryInstrument] code=MA609P1900 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.335][OnRspQryInstrument] code=MA609P1925 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.335][OnRspQryInstrument] code=MA609P1950 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.335][OnRspQryInstrument] code=MA609P1975 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.336][OnRspQryInstrument] code=MA609P2000 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.336][OnRspQryInstrument] code=MA609P2025 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.336][OnRspQryInstrument] code=MA609P2050 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.336][OnRspQryInstrument] code=MA609P2075 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.336][OnRspQryInstrument] code=MA609P2100 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.337][OnRspQryInstrument] code=MA609P2125 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.337][OnRspQryInstrument] code=MA609P2150 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.337][OnRspQryInstrument] code=MA609P2175 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.337][OnRspQryInstrument] code=MA609P2200 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.338][OnRspQryInstrument] code=MA609P2225 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.341][OnRspQryInstrument] code=MA609P2250 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.341][OnRspQryInstrument] code=MA609P2275 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.341][OnRspQryInstrument] code=MA609P2300 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.342][OnRspQryInstrument] code=MA609P2325 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.342][OnRspQryInstrument] code=MA609P2350 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.342][OnRspQryInstrument] code=MA609P2375 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.342][OnRspQryInstrument] code=MA609P2400 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.342][OnRspQryInstrument] code=MA609P2425 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.343][OnRspQryInstrument] code=MA609P2450 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.343][OnRspQryInstrument] code=MA609P2475 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.343][OnRspQryInstrument] code=MA609P2500 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.343][OnRspQryInstrument] code=MA609P2550 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.343][OnRspQryInstrument] code=MA609P2600 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.344][OnRspQryInstrument] code=MA609P2650 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.344][OnRspQryInstrument] code=MA609P2700 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.344][OnRspQryInstrument] code=MA609P2750 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.344][OnRspQryInstrument] code=MA609P2800 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.344][OnRspQryInstrument] code=MA609P2850 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.344][OnRspQryInstrument] code=MA609P2900 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.345][OnRspQryInstrument] code=MA609P2950 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.345][OnRspQryInstrument] code=MA609P3000 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.345][OnRspQryInstrument] code=MA609P3050 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.345][OnRspQryInstrument] code=MA609P3100 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.345][OnRspQryInstrument] code=MA609P3150 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.345][OnRspQryInstrument] code=MA609P3200 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.346][OnRspQryInstrument] code=MA609P3250 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.346][OnRspQryInstrument] code=MA609P3300 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.346][OnRspQryInstrument] code=MA609P3350 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.346][OnRspQryInstrument] code=MA609P3400 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.346][OnRspQryInstrument] code=MA609P3450 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.347][OnRspQryInstrument] code=MA609P3500 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.347][OnRspQryInstrument] code=MA609P3550 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.347][OnRspQryInstrument] code=MA609P3600 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.347][OnRspQryInstrument] code=MA609P3650 exch=CZCE tick=0.5000 MaxLimitOrderVol=200 volMult=10
+[13:08:38.347][ReqQryDepthMarketData] sent ret=0
+[13:08:38.380][OnRspQryDepthMarketData] code=MA609C2275 LastPrice=628.50 Bid1=558.00 Ask1=0.00 UpLimit=802.50 DnLimit=454.50
+[13:08:38.381][OnRspQryDepthMarketData] code=MA609C2650 LastPrice=294.50 Bid1=409.50 Ask1=455.00 UpLimit=468.50 DnLimit=120.50
+[13:08:38.381][OnRspQryDepthMarketData] code=MA609C2050 LastPrice=846.50 Bid1=766.50 Ask1=0.00 UpLimit=1020.50 DnLimit=672.50
+[13:08:38.381][OnRspQryDepthMarketData] code=MA609C3000 LastPrice=179.00 Bid1=0.00 Ask1=183.50 UpLimit=272.00 DnLimit=0.50
+[13:08:38.384][OnRspQryDepthMarketData] code=MA609P2600 LastPrice=29.00 Bid1=27.50 Ask1=200.00 UpLimit=215.50 DnLimit=0.50
+[13:08:38.384][OnRspQryDepthMarketData] code=MA609C2700 LastPrice=256.50 Bid1=0.00 Ask1=396.00 UpLimit=430.50 DnLimit=82.50
+[13:08:38.384][OnRspQryDepthMarketData] code=MA609C1950 LastPrice=945.00 Bid1=868.00 Ask1=0.00 UpLimit=1119.00 DnLimit=771.00
+[13:08:38.384][OnRspQryDepthMarketData] code=MA609P2500 LastPrice=21.50 Bid1=20.50 Ask1=21.00 UpLimit=202.00 DnLimit=0.50
+[13:08:38.385][OnRspQryDepthMarketData] code=MA609C2225 LastPrice=676.00 Bid1=606.50 Ask1=0.00 UpLimit=850.00 DnLimit=502.00
+[13:08:38.385][OnRspQryDepthMarketData] code=MA609C2025 LastPrice=871.00 Bid1=791.50 Ask1=0.00 UpLimit=1045.00 DnLimit=697.00
+[13:08:38.385][OnRspQryDepthMarketData] code=MA609C3600 LastPrice=11.50 Bid1=37.50 Ask1=41.00 UpLimit=185.50 DnLimit=0.50
+[13:08:38.385][OnRspQryDepthMarketData] code=MA609C3500 LastPrice=46.00 Bid1=46.50 Ask1=51.00 UpLimit=190.50 DnLimit=0.50
+[13:08:38.386][OnRspQryDepthMarketData] code=MA609C3150 LastPrice=117.00 Bid1=119.00 Ask1=121.00 UpLimit=232.00 DnLimit=0.50
+[13:08:38.386][OnRspQryDepthMarketData] code=MA609P2650 LastPrice=34.00 Bid1=33.00 Ask1=34.50 UpLimit=225.50 DnLimit=0.50
+[13:08:38.386][OnRspQryDepthMarketData] code=MA609C2300 LastPrice=604.50 Bid1=734.50 Ask1=0.00 UpLimit=778.50 DnLimit=430.50
+[13:08:38.386][OnRspQryDepthMarketData] code=MA609C2100 LastPrice=797.50 Bid1=726.00 Ask1=0.00 UpLimit=971.50 DnLimit=623.50
+[13:08:38.387][OnRspQryDepthMarketData] code=MA609C2425 LastPrice=488.00 Bid1=614.00 Ask1=0.00 UpLimit=662.00 DnLimit=314.00
+[13:08:38.387][OnRspQryDepthMarketData] code=MA609C1900 LastPrice=994.50 Bid1=918.00 Ask1=0.00 UpLimit=1168.50 DnLimit=820.50
+[13:08:38.387][OnRspQryDepthMarketData] code=MA609C2125 LastPrice=773.00 Bid1=701.00 Ask1=0.00 UpLimit=947.00 DnLimit=599.00
+[13:08:38.387][OnRspQryDepthMarketData] code=MA609C2500 LastPrice=420.50 Bid1=543.50 Ask1=591.50 UpLimit=594.50 DnLimit=246.50
+[13:08:38.387][OnRspQryDepthMarketData] code=MA609P3550 LastPrice=667.50 Bid1=0.00 Ask1=563.00 UpLimit=841.50 DnLimit=493.50
+[13:08:38.388][OnRspQryDepthMarketData] code=MA609C3050 LastPrice=152.50 Bid1=158.50 Ask1=0.00 UpLimit=256.00 DnLimit=0.50
+[13:08:38.388][OnRspQryDepthMarketData] code=MA609C2475 LastPrice=443.00 Bid1=567.50 Ask1=615.00 UpLimit=617.00 DnLimit=269.00
+[13:08:38.388][OnRspQryDepthMarketData] code=MA609C2200 LastPrice=700.00 Bid1=629.00 Ask1=0.00 UpLimit=874.00 DnLimit=526.00
+[13:08:38.388][OnRspQryDepthMarketData] code=MA609C3450 LastPrice=53.00 Bid1=54.50 Ask1=0.00 UpLimit=194.00 DnLimit=0.50
+[13:08:38.388][OnRspQryDepthMarketData] code=MA609C2350 LastPrice=557.50 Bid1=487.00 Ask1=0.00 UpLimit=731.50 DnLimit=383.50
+[13:08:38.389][OnRspQryDepthMarketData] code=MA609C2375 LastPrice=534.00 Bid1=662.00 Ask1=0.00 UpLimit=708.00 DnLimit=360.00
+[13:08:38.389][OnRspQryDepthMarketData] code=MA609C3200 LastPrice=103.00 Bid1=0.00 Ask1=0.00 UpLimit=222.00 DnLimit=0.50
+[13:08:38.389][OnRspQryDepthMarketData] code=MA609P3050 LastPrice=166.00 Bid1=159.00 Ask1=164.50 UpLimit=411.50 DnLimit=63.50
+[13:08:38.389][OnRspQryDepthMarketData] code=MA609P3000 LastPrice=137.50 Bid1=134.00 Ask1=0.00 UpLimit=377.50 DnLimit=29.50
+[13:08:38.390][OnRspQryDepthMarketData] code=MA609C2250 LastPrice=652.00 Bid1=581.00 Ask1=0.00 UpLimit=826.00 DnLimit=478.00
+[13:08:38.390][OnRspQryDepthMarketData] code=MA609P3100 LastPrice=193.00 Bid1=188.50 Ask1=191.50 UpLimit=448.50 DnLimit=100.50
+[13:08:38.390][OnRspQryDepthMarketData] code=MA609P2375 LastPrice=17.00 Bid1=11.50 Ask1=15.00 UpLimit=191.00 DnLimit=0.50
+[13:08:38.390][OnRspQryDepthMarketData] code=MA609C3550 LastPrice=29.00 Bid1=41.50 Ask1=48.50 UpLimit=188.00 DnLimit=0.50
+[13:08:38.391][OnRspQryDepthMarketData] code=MA609P2150 LastPrice=6.50 Bid1=6.00 Ask1=0.00 UpLimit=180.50 DnLimit=0.50
+[13:08:38.391][OnRspQryDepthMarketData] code=MA609C2150 LastPrice=748.50 Bid1=677.50 Ask1=0.00 UpLimit=922.50 DnLimit=574.50
+[13:08:38.391][OnRspQryDepthMarketData] code=MA609P2450 LastPrice=22.50 Bid1=16.00 Ask1=16.50 UpLimit=196.50 DnLimit=0.50
+[13:08:38.391][OnRspQryDepthMarketData] code=MA609P2950 LastPrice=115.50 Bid1=0.00 Ask1=0.00 UpLimit=346.00 DnLimit=0.50
+[13:08:38.391][OnRspQryDepthMarketData] code=MA609C3300 LastPrice=76.50 Bid1=78.50 Ask1=79.50 UpLimit=207.50 DnLimit=0.50
+[13:08:38.392][OnRspQryDepthMarketData] code=MA609P2250 LastPrice=10.00 Bid1=8.00 Ask1=10.00 UpLimit=184.00 DnLimit=0.50
+[13:08:38.392][OnRspQryDepthMarketData] code=MA609P2750 LastPrice=50.00 Bid1=50.00 Ask1=51.00 UpLimit=252.00 DnLimit=0.50
+[13:08:38.392][OnRspQryDepthMarketData] code=MA609P2000 LastPrice=3.50 Bid1=4.50 Ask1=5.00 UpLimit=177.50 DnLimit=0.50
+[13:08:38.392][OnRspQryDepthMarketData] code=MA609P2400 LastPrice=18.50 Bid1=13.00 Ask1=15.00 UpLimit=192.50 DnLimit=0.50
+[13:08:38.392][OnRspQryDepthMarketData] code=MA609C3650 LastPrice=36.00 Bid1=36.00 Ask1=0.00 UpLimit=183.50 DnLimit=0.50
+[13:08:38.393][OnRspQryDepthMarketData] code=MA609P3500 LastPrice=620.50 Bid1=0.00 Ask1=0.00 UpLimit=794.50 DnLimit=446.50
+[13:08:38.393][OnRspQryDepthMarketData] code=MA609P1900 LastPrice=2.00 Bid1=3.00 Ask1=0.00 UpLimit=176.00 DnLimit=0.50
+[13:08:38.393][OnRspQryDepthMarketData] code=MA609C2800 LastPrice=302.00 Bid1=0.00 Ask1=311.50 UpLimit=364.00 DnLimit=16.00
+[13:08:38.395][OnRspQryDepthMarketData] code=MA609C3400 LastPrice=59.50 Bid1=0.00 Ask1=0.00 UpLimit=197.50 DnLimit=0.50
+[13:08:38.395][OnRspQryDepthMarketData] code=MA609C1925 LastPrice=969.50 Bid1=1103.50 Ask1=0.00 UpLimit=1143.50 DnLimit=795.50
+[13:08:38.395][OnRspQryDepthMarketData] code=MA609P2700 LastPrice=41.50 Bid1=40.50 Ask1=200.00 UpLimit=237.50 DnLimit=0.50
+[13:08:38.395][OnRspQryDepthMarketData] code=MA609P2075 LastPrice=4.50 Bid1=4.50 Ask1=7.50 UpLimit=178.50 DnLimit=0.50
+[13:08:38.395][OnRspQryDepthMarketData] code=MA609C2900 LastPrice=237.00 Bid1=237.00 Ask1=241.50 UpLimit=311.00 DnLimit=0.50
+[13:08:38.396][OnRspQryDepthMarketData] code=MA609C2600 LastPrice=334.50 Bid1=454.50 Ask1=499.50 UpLimit=508.50 DnLimit=160.50
+[13:08:38.396][OnRspQryDepthMarketData] code=MA609P2475 LastPrice=18.00 Bid1=17.50 Ask1=18.50 UpLimit=199.50 DnLimit=0.50
+[13:08:38.396][OnRspQryDepthMarketData] code=MA609C2850 LastPrice=271.50 Bid1=0.00 Ask1=275.50 UpLimit=336.00 DnLimit=0.50
+[13:08:38.396][OnRspQryDepthMarketData] code=MA609P2050 LastPrice=4.00 Bid1=4.50 Ask1=7.50 UpLimit=178.00 DnLimit=0.50
+[13:08:38.397][OnRspQryDepthMarketData] code=MA609C3350 LastPrice=67.00 Bid1=69.00 Ask1=71.00 UpLimit=202.50 DnLimit=0.50
+[13:08:38.397][OnRspQryDepthMarketData] code=MA609P2175 LastPrice=7.50 Bid1=6.00 Ask1=28.00 UpLimit=181.50 DnLimit=0.50
+[13:08:38.397][OnRspQryDepthMarketData] code=MA609P2900 LastPrice=94.00 Bid1=92.00 Ask1=200.00 UpLimit=317.00 DnLimit=0.50
+[13:08:38.397][OnRspQryDepthMarketData] code=MA609C2950 LastPrice=201.00 Bid1=207.50 Ask1=0.00 UpLimit=290.00 DnLimit=0.50
+[13:08:38.397][OnRspQryDepthMarketData] code=MA609P2350 LastPrice=15.00 Bid1=10.50 Ask1=19.00 UpLimit=189.00 DnLimit=0.50
+[13:08:38.398][OnRspQryDepthMarketData] code=MA609P2425 LastPrice=20.50 Bid1=14.00 Ask1=15.00 UpLimit=194.50 DnLimit=0.50
+[13:08:38.398][OnRspQryDepthMarketData] code=MA609P3200 LastPrice=353.00 Bid1=249.00 Ask1=268.50 UpLimit=527.00 DnLimit=179.00
+[13:08:38.398][OnRspQryDepthMarketData] code=MA609C2325 LastPrice=581.00 Bid1=509.00 Ask1=0.00 UpLimit=755.00 DnLimit=407.00
+[13:08:38.398][OnRspQryDepthMarketData] code=MA609P2275 LastPrice=11.00 Bid1=8.50 Ask1=9.00 UpLimit=185.00 DnLimit=0.50
+[13:08:38.409][OnRspQryDepthMarketData] code=MA609C1975 LastPrice=920.50 Bid1=843.00 Ask1=0.00 UpLimit=1094.50 DnLimit=746.50
+[13:08:38.414][OnRspQryDepthMarketData] code=MA609P2125 LastPrice=6.00 Bid1=5.50 Ask1=10.00 UpLimit=180.00 DnLimit=0.50
+[13:08:38.414][OnRspQryDepthMarketData] code=MA609C2175 LastPrice=724.50 Bid1=653.50 Ask1=0.00 UpLimit=898.50 DnLimit=550.50
+[13:08:38.414][OnRspQryDepthMarketData] code=MA609P3250 LastPrice=395.50 Bid1=286.00 Ask1=386.00 UpLimit=569.50 DnLimit=221.50
+[13:08:38.414][OnRspQryDepthMarketData] code=MA609C2450 LastPrice=465.00 Bid1=590.00 Ask1=638.50 UpLimit=639.00 DnLimit=291.00
+[13:08:38.414][OnRspQryDepthMarketData] code=MA609P1975 LastPrice=3.00 Bid1=2.50 Ask1=10.00 UpLimit=177.00 DnLimit=0.50
+[13:08:38.415][OnRspQryDepthMarketData] code=MA609P3450 LastPrice=574.00 Bid1=0.00 Ask1=0.00 UpLimit=748.00 DnLimit=400.00
+[13:08:38.416][OnRspQryDepthMarketData] code=MA609C2750 LastPrice=340.50 Bid1=0.00 Ask1=0.00 UpLimit=395.50 DnLimit=47.50
+[13:08:38.416][OnRspQryDepthMarketData] code=MA609P2200 LastPrice=8.00 Bid1=7.00 Ask1=0.00 UpLimit=182.00 DnLimit=0.50
+[13:08:38.416][OnRspQryDepthMarketData] code=MA609C2075 LastPrice=822.00 Bid1=741.50 Ask1=0.00 UpLimit=996.00 DnLimit=648.00
+[13:08:38.416][OnRspQryDepthMarketData] code=MA609C2000 LastPrice=895.50 Bid1=1029.00 Ask1=0.00 UpLimit=1069.50 DnLimit=721.50
+[13:08:38.417][OnRspQryDepthMarketData] code=MA609P2850 LastPrice=76.50 Bid1=74.50 Ask1=200.00 UpLimit=292.50 DnLimit=0.50
+[13:08:38.417][OnRspQryDepthMarketData] code=MA609P3300 LastPrice=438.00 Bid1=320.00 Ask1=357.00 UpLimit=612.00 DnLimit=264.00
+[13:08:38.417][OnRspQryDepthMarketData] code=MA609P2300 LastPrice=12.50 Bid1=10.00 Ask1=10.50 UpLimit=186.50 DnLimit=0.50
+[13:08:38.419][OnRspQryDepthMarketData] code=MA609P1925 LastPrice=2.50 Bid1=3.00 Ask1=3.50 UpLimit=176.50 DnLimit=0.50
+[13:08:38.419][OnRspQryDepthMarketData] code=MA609P2800 LastPrice=62.50 Bid1=0.00 Ask1=200.00 UpLimit=270.50 DnLimit=0.50
+[13:08:38.419][OnRspQryDepthMarketData] code=MA609P3150 LastPrice=224.50 Bid1=219.50 Ask1=222.00 UpLimit=487.00 DnLimit=139.00
+[13:08:38.419][OnRspQryDepthMarketData] code=MA609C2550 LastPrice=377.00 Bid1=497.50 Ask1=0.00 UpLimit=551.00 DnLimit=203.00
+[13:08:38.419][OnRspQryDepthMarketData] code=MA609P1950 LastPrice=2.50 Bid1=3.50 Ask1=5.00 UpLimit=176.50 DnLimit=0.50
+[13:08:38.420][OnRspQryDepthMarketData] code=MA609P2100 LastPrice=5.00 Bid1=4.50 Ask1=5.50 UpLimit=179.00 DnLimit=0.50
+[13:08:38.420][OnRspQryDepthMarketData] code=MA609P3400 LastPrice=527.50 Bid1=0.00 Ask1=431.00 UpLimit=701.50 DnLimit=353.50
+[13:08:38.420][OnRspQryDepthMarketData] code=MA609C2400 LastPrice=511.00 Bid1=639.00 Ask1=0.00 UpLimit=685.00 DnLimit=337.00
+[13:08:38.420][OnRspQryDepthMarketData] code=MA609C3250 LastPrice=87.00 Bid1=89.50 Ask1=91.50 UpLimit=214.50 DnLimit=0.50
+[13:08:38.421][OnRspQryDepthMarketData] code=MA609P3650 LastPrice=763.50 Bid1=0.00 Ask1=656.50 UpLimit=937.50 DnLimit=589.50
+[13:08:38.421][OnRspQryDepthMarketData] code=MA609P2225 LastPrice=9.00 Bid1=7.50 Ask1=13.50 UpLimit=183.00 DnLimit=0.50
+[13:08:38.421][OnRspQryDepthMarketData] code=MA609P3600 LastPrice=715.50 Bid1=586.50 Ask1=0.00 UpLimit=889.50 DnLimit=541.50
+[13:08:38.421][OnRspQryDepthMarketData] code=MA609C3100 LastPrice=135.50 Bid1=0.00 Ask1=0.00 UpLimit=243.00 DnLimit=0.50
+[13:08:38.421][OnRspQryDepthMarketData] code=MA609P2550 LastPrice=24.50 Bid1=22.50 Ask1=23.50 UpLimit=208.00 DnLimit=0.50
+[13:08:38.422][OnRspQryDepthMarketData] code=MA609P3350 LastPrice=482.50 Bid1=0.00 Ask1=394.00 UpLimit=656.50 DnLimit=308.50
+[13:08:38.422][OnRspQryDepthMarketData] code=MA609P2325 LastPrice=13.50 Bid1=10.00 Ask1=18.00 UpLimit=187.50 DnLimit=0.50
+[13:08:38.422][OnRspQryDepthMarketData] code=MA609P2025 LastPrice=3.50 Bid1=4.00 Ask1=6.50 UpLimit=177.50 DnLimit=0.50
+[13:08:38.422][OnRspQryDepthMarketData] code=MA609 LastPrice=3042.00 Bid1=0.00 Ask1=3035.00 UpLimit=3068.00 DnLimit=2720.00
+[13:08:38.923][ReqQuoteInsert] code=MA609 QuoteRef=1006 BID 2@3032.00 ASK 2@3052.00 (last=3042.00 tick=0.5000 off=20)
+[13:08:38.923][ReqQuoteInsert] API ret=0
+[13:08:38.953][OnRtnOrder] code=MA609 OrdRef=           7 SysID= ExchOrdID=CZCE Dir=1 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=3052.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:08:38 CnclTime=
+[13:08:38.954][OnRtnOrder] code=MA609 OrdRef=           8 SysID= ExchOrdID=CZCE Dir=0 Status=a(Unknown) SubmitStatus=0 StatusMsg='报单已提交' Price=3032.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:08:38 CnclTime=
+[13:08:38.955][OnRtnQuote] code=MA609 QuoteRef=1006 SysID= Status=a(?) StatusMsg='报单已提交' BID 2@3032.00 BidOrdSysID= Ask 2@3052.00 AskOrdSysID= Front=7 Session=649789452 InsTime=13:08:38 CnclTime=
+[13:08:39.027][OnRtnOrder] code=MA609 OrdRef=           7 SysID= ExchOrdID=CZCE Dir=1 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝707:已撤单报单被拒绝CZCE:出错: 指定商品不在本交易节交易' Price=3052.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:08:38 CnclTime=
+[13:08:39.028][OnRtnOrder] code=MA609 OrdRef=           8 SysID= ExchOrdID=CZCE Dir=0 Status=5(Canceled) SubmitStatus=4 StatusMsg='已撤单报单被拒绝707:已撤单报单被拒绝CZCE:出错: 指定商品不在本交易节交易' Price=3032.00 Vol=2 Traded=0 Remain=2 Source=0 Type=1 Front=0 Sess=0 InsTime=13:08:38 CnclTime=
+[13:08:39.029][OnRtnQuote] code=MA609 QuoteRef=1006 SysID= Status=5(Canceled) StatusMsg='707:已撤单报单被拒绝CZCE:出错: 指定商品不在本交易节交易' BID 2@3032.00 BidOrdSysID= Ask 2@3052.00 AskOrdSysID= Front=7 Session=649789452 InsTime=13:08:38 CnclTime=

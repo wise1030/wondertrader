@@ -34,6 +34,29 @@ enum UPDATE_TYPE {
 template<typename T> using shared_ptr = std::shared_ptr<T>;
 template<typename T> using weak_ptr = std::weak_ptr<T>;
 
+// ---------------------------------------------------------------------------
+// Time helper — unify seconds-of-day across HFT / Option contexts.
+//
+// WonderTrader contract (see WtEngine / *StraContext):
+//   stra_get_time() → HHMM   (4 digits, e.g. 0901)
+//   stra_get_secs() → SSmmm  (5 digits: seconds*1000 + milliseconds)
+//
+// Returns seconds-of-day as a double (including fractional milliseconds), which
+// is what the pricers' FAST/SLOW scheduler and the TPS limiter expect. Works
+// with any context type exposing stra_get_time()/stra_get_secs().
+template<typename Ctx>
+inline double ctxTimeSeconds(Ctx* ctx)
+{
+    if (!ctx) return 0.0;
+    uint32_t hhmm = ctx->stra_get_time();   // HHMM
+    uint32_t ssms = ctx->stra_get_secs();   // SSmmm
+    uint32_t hh = hhmm / 100;
+    uint32_t mm = hhmm % 100;
+    uint32_t ss = ssms / 1000;
+    uint32_t ms = ssms % 1000;
+    return hh * 3600.0 + mm * 60.0 + ss + ms / 1000.0;
+}
+
 // Forward declarations
 class OptionGreeks;
 class StrikeData;

@@ -12,9 +12,8 @@
  * - fmt::print -> WTSLogger or printf
  * - instrument_t -> std::string (option->getCode())
  * - expiry_t -> uint32_t
- * - OptionTradingData is not yet wired to OptionData; where the original used
- *   otd->xxx(), we use option->values(0).xxx() / option->isActive() etc.
- *   When OptionTradingGrid lands, the OTD-specific calls can be restored.
+ * - OptionTradingData is wired to OptionData via OptionTradingGrid.
+ * - UnderlyingTradingData is wired to ExpiryData via setHedgeUTD().
  */
 #include "../WTSTools/WTSLogger.h"
 #include "CompositeOptionPricer.h"
@@ -144,6 +143,14 @@ CompositeOptionPricer::CompositeOptionPricer(
     m_ema_frontfut.setWindow(config().frontfut_skew_window);
     m_ema_deltaflow.setWindow(config().deltaflow_window);
     m_ema_roll_front_fut.setWindow(config().ema_roll_front_fut_window);
+
+    // 注册 fitCompleted 回调 (与 quantbox 一致)
+    if (m_spOptionPricer2) {
+        auto& fce = m_spOptionPricer2->fitCompletedEvent();
+        fce.push_back([this](const PeriodicCurveFitter& fitter) {
+            this->onFitCompleted(fitter);
+        });
+    }
 }
 
 CompositeOptionPricer::~CompositeOptionPricer() {
@@ -169,6 +176,12 @@ void CompositeOptionPricer::setMaxPosQty(uint32_t exp, int32_t maxQsize, int32_t
     erc.max_qsize = maxQsize;
     erc.max_pos_stk = maxPosStk;
     erc.max_pos_opt = maxPosOpt;
+}
+
+void CompositeOptionPricer::setExpiryCloseParams(uint32_t exp, bool autoClose, int32_t closeThresh) {
+    auto& erc = m_mapExpiryRiskConfig[exp];
+    erc.enable_auto_close = autoClose;
+    erc.close_pos_thresh = closeThresh;
 }
 
 // ============================================================================
@@ -271,6 +284,7 @@ bool CompositeOptionPricer::computeValues(OptionGrid* grid) {
     } else {
         m_bReprice = false;
         m_tvLastSlowCompute = getTime();
+        WTSLogger::log_by_cat("strategy", LL_INFO, "SLOW compute triggered tv_diff={:.3f}", tv_diff);
         computeValues_SLOW(grid);
     }
     return true;
@@ -328,6 +342,9 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
                 itm ? itm->getCode() : "null", expiry_ready);
         }
         if (!expiry_ready) {
+            // Reset priced flag so stale theoretical values don't pass inputs_good
+            otm->values(0).setPriced(false);
+            itm->values(0).setPriced(false);
             otm->values(0).alpha().clear();
             otm->values(0).adj().clear();
             itm->values(0).alpha().clear();
@@ -367,8 +384,8 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
     // Futures
     for (const auto& v : grid->expiries()) {
         const ExpiryDataPtr& ed = v.second;
-        // UnderlyingTradingData not yet wired to ExpiryData in migrated grid;
-        // when available, updateDistortValuesFuture/computeOurMarketsFuture apply.
+        // A3: UnderlyingTradingData is wired to ExpiryData via setHedgeUTD().
+        // updateDistortValuesFuture updates forward + applies risk adjustments.
         if (!ed->isForwardReady()) {
             computeOurMarketsFuture(ed.get());
         } else {
@@ -407,6 +424,9 @@ void CompositeOptionPricer::computeValues_SLOW(OptionGrid* grid) {
 
         bool expiry_ready = ed && ed->isForwardReady();
         if (!expiry_ready) {
+            // Reset priced flag so stale theoretical values don't pass inputs_good
+            otm->values(0).setPriced(false);
+            itm->values(0).setPriced(false);
             otm->values(0).alpha().clear();
             otm->values(0).adj().clear();
             itm->values(0).alpha().clear();
@@ -451,6 +471,9 @@ void CompositeOptionPricer::computeValues_SLOW(OptionGrid* grid) {
 // initValuesCompute — setup CVContext, EMA updates, risk shifts
 // ============================================================================
 bool CompositeOptionPricer::initValuesCompute(OptionGrid* grid) {
+    // Set compute time on grid for EMA updates in __getBestSyntheticPrice
+    grid->setComputeTime(getTime());
+
     for (uint32_t exp : m_active_expiries) {
         CVExpiryContext& exp_cxt = m_cvContext.exp_cxt[exp];
         const ExpiryRiskConfig& erc = m_mapExpiryRiskConfig[exp];
@@ -493,7 +516,7 @@ bool CompositeOptionPricer::initValuesCompute(OptionGrid* grid) {
     // Roll EMA: 0.001*frontfut - frontfwd
     double rollema = 0.0;
     if (m_frontfut > 0 && m_frontfwd > 0 && !std::isnan(m_frontfwd)) {
-        double roll_front_fut_vs_fwd = 0.001 * m_frontfut - m_frontfwd;
+        double roll_front_fut_vs_fwd = m_frontfut - m_frontfwd;
         m_ema_roll_front_fut.update(getTime(), roll_front_fut_vs_fwd);
         rollema = m_ema_roll_front_fut.isOK()
             ? roll_front_fut_vs_fwd - m_ema_roll_front_fut.getMean()
@@ -507,8 +530,26 @@ bool CompositeOptionPricer::initValuesCompute(OptionGrid* grid) {
     }
 
     // Delegate init to sub-pricer
-    if (m_spOptionPricer2)
+    if (m_spOptionPricer2) {
         m_spOptionPricer2->initValuesCompute(grid);
+        // Set GVV blend weight per expiry (quantbox: COP sets OP2's gvv_weight
+        // from a notifiable property; here we use config. 0=fitted curve, 1=GVV)
+        for (uint32_t exp : m_active_expiries) {
+            m_spOptionPricer2->setGvvWeight(exp, config().volcurve_weight);
+        }
+    }
+
+    // Feed signal context
+    m_signalCtx.time = getTime();
+    m_signalCtx.underlyingPrice = m_frontfut;
+    m_signalCtx.frontForward = m_frontfwd;
+    m_signalCtx.frontAtmVol = m_frontatmv;
+    m_signalCtx.grid = m_grid;
+    for (auto& sig : m_alphaSignals)
+        sig->onBatchStart(m_signalCtx);
+
+    // Check risk signals
+    checkRiskSignals();
 
     updateRiskShiftsDelta(grid);
     updateRiskShiftsVega(grid);
@@ -569,8 +610,9 @@ bool CompositeOptionPricer::updateDistortValues(OptionData* option) {
         return false;
     }
 
-    // fees
-    black_values.m_fees = 0; // TODO: from contract info when wired
+    // fees — per-contract transaction fee from contract info (wired onto
+    // OptionData by the strategy from stra_get_comminfo). Falls back to 0.
+    black_values.m_fees = option->getFee();
 
     if (!black_values.isPriced()) {
         black_values.adj().total = NAN;
@@ -601,14 +643,31 @@ bool CompositeOptionPricer::updateDistortValues(OptionData* option) {
 bool CompositeOptionPricer::updateDistortValuesFuture(ExpiryData* ed) {
     uint32_t exp = ed->getExpiry();
     if (!m_active_expiries.count(exp)) return false;
-    // UnderlyingTradingData not yet wired; just update forward
-    return updateTheoreticalValuesFuture(ed);
+    // A3: UnderlyingTradingData is wired to ExpiryData via setHedgeUTD().
+    // Update the theoretical forward, then apply distort values if UTD is active.
+    if (!updateTheoreticalValuesFuture(ed)) return false;
+
+    // Apply future risk adjustment (alpha/adjustments on the UTD)
+    UnderlyingTradingData* utd = ed->getHedgeUTD();
+    if (utd && utd->isActive()) {
+        UnderlyingValues& uv = utd->values(0);
+        uv.adj().clear();
+        double adj = risk_adjustment_future(ed);
+        uv.adj().risk = adj;
+        uv.adj().total = uv.adj().risk;
+    }
+    return true;
 }
 
 bool CompositeOptionPricer::updateTheoreticalValuesFuture(ExpiryData* ed) {
     double F = m_spOptionPricer2 ? m_spOptionPricer2->getATMForward(ed->getExpiry()) : NAN;
     if (std::isnan(F) || EQ(F, 0)) return false;
-    ed->setForward(F);
+    // ed->setForward(F) removed: m_fwd is already set by __getBestSyntheticPrice
+    // (called via grid->getAtmForward -> __getBestSyntheticPrice).
+    // F here is a cached copy of the same value.
+    // Propagate forward to UTD so AttributePublisher and other consumers see it
+    UnderlyingTradingData* utd = ed->getHedgeUTD();
+    if (utd) utd->setFwd(F);
     return true;
 }
 
@@ -646,11 +705,12 @@ double CompositeOptionPricer::__getOptionCosts(OptionData* option, double /*mid*
         ? erc_it->second : m_mapExpiryRiskConfig[exp];
     double fwdsprd = __getForwardSpread(exp);
     double atmvolsprd = __getAtmvolSpread(exp);
-    double delta = std::abs(black_greeks.delta());
+    double delta = black_greeks.delta();
     double core_spread = std::sqrt(
-          black_greeks.delta() * black_greeks.delta() * fwdsprd * fwdsprd
+          delta * delta * fwdsprd * fwdsprd
         + black_greeks.vega() * black_greeks.vega() * atmvolsprd * atmvolsprd
         + 2.0 * delta * fwdsprd * black_greeks.vega() * atmvolsprd * erc.sprd_corr);
+    delta = std::abs(delta);
     // fees done in updateDistortValues
     core_spread += 2.0 * black_values.m_fees;
     return core_spread / 2.0;
@@ -716,15 +776,17 @@ void CompositeOptionPricer::__computeBidAndAsk(
 void CompositeOptionPricer::__computeBidAndAskFuture(
     double& bid, double& bid_tick_size, double& ask, double& ask_tick_size,
     double mid, double bid_spread, double ask_spread,
-    const PriceSize& ourmkt_bid, const PriceSize& ourmkt_ask) {
+    const PriceSize& ourmkt_bid, const PriceSize& ourmkt_ask,
+    double tick_size) {
+    if (tick_size <= 0) tick_size = 1e-6;
     bid = std::max(0.0, mid - bid_spread);
-    bid_tick_size = 1.0; // TODO: from contract info
+    bid_tick_size = tick_size;  // from contract info (UnderlyingTradingData::getTickSize)
     if (!ourmkt_bid.empty()) {
         bid = __apply_sticky_params(BID, ourmkt_bid, bid, bid_tick_size);
     }
 
     ask = mid + ask_spread;
-    ask_tick_size = 1.0;
+    ask_tick_size = tick_size;
     ask = std::max(ask_tick_size, ask);
     if (!ourmkt_ask.empty()) {
         ask = __apply_sticky_params(ASK, ourmkt_ask, ask, ask_tick_size);
@@ -794,12 +856,21 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
 
     // Debug: first few calls
     static int mmDebugCount = 0;
-    bool dbg = (mmDebugCount < 10);
+    bool dbg = (mmDebugCount < 5) || (mmDebugCount % 1000 == 0);
     if (dbg) mmDebugCount++;
 
     auto erc_it = m_mapExpiryRiskConfig.find(exp);
-    const ExpiryRiskConfig& erc = (erc_it != m_mapExpiryRiskConfig.end())
-        ? erc_it->second : m_mapExpiryRiskConfig[exp];
+    if (erc_it == m_mapExpiryRiskConfig.end() || !erc_it->second.enable) {
+        // 到期月未启用: 跳过定价和报单
+        if (mmDebugCount < 5) {
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "computeOurMarkets {} exp={} SKIP: erc not found or not enabled", option->getCode(), exp);
+        }
+        black_values.ourMarket().clear();
+        option->setActive(false);
+        return;
+    }
+    const ExpiryRiskConfig& erc = erc_it->second;
 
     if (dbg) {
         WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -833,6 +904,8 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
 
     // spread
     double our_cost = __getOptionCosts(option, mid);
+    double widen = getRiskWidenFactorByCode(option->getCode());
+    our_cost *= widen;
     double bid_spread = our_cost;
     double ask_spread = our_cost;
 
@@ -886,7 +959,12 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
         bid = std::max(bid, bid_tick_size);
     }
 
-    int32_t stk_pos = 0;  // TODO: sdata->getPosition() when wired
+    int32_t stk_pos = 0;
+    if (sdata) {
+        double call_pos = sdata->call() ? sdata->call()->getPosition() : 0;
+        double put_pos  = sdata->put()  ? sdata->put()->getPosition()  : 0;
+        stk_pos = static_cast<int32_t>(call_pos + put_pos);
+    }
 
     if (!option->isActive()) {
         // make sure our_market starts as blank slate if its currently not active
@@ -916,17 +994,22 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     } else if (qmode == QM_AUTO && is_within_delta_range) {
         enable_bid = true;
         enable_ask = true;
-        // auto_close: AUTO↔CLOSE automatic switching
-        if (erc.enable_auto_close && otd && otd->getQuoteMode() == QM_AUTO)
-            otd->setQuoteMode(QM_CLOSE);
+        if (erc.enable_auto_close && otd) {
+            int32_t pos = otd->getPosition();
+            if (pos != 0)
+                otd->setQuoteMode(QM_CLOSE);
+        }
     } else if (qmode == QM_CLOSE) {
-        // Only quote the side that reduces position
         int32_t pos = otd ? otd->getPosition() : static_cast<int32_t>(option->getPosition());
-        double close_thresh = 0;  // close_pos_thresh from erc
-        if (pos < -close_thresh) enable_bid = true;
-        if (pos > close_thresh) enable_ask = true;
-        if (!erc.enable_auto_close && otd && otd->getQuoteMode() == QM_CLOSE)
-            otd->setQuoteMode(QM_AUTO);
+        if (pos == 0) {
+            if (otd) otd->setQuoteMode(QM_AUTO);
+            enable_bid = true;
+            enable_ask = true;
+        } else {
+            double close_thresh = erc.close_pos_thresh;
+            if (pos < -close_thresh) enable_bid = true;
+            if (pos > close_thresh) enable_ask = true;
+        }
     }
 
     active = enable_bid || enable_ask;
@@ -1005,14 +1088,18 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
 // ============================================================================
 // computeOurMarketsFuture — compute our bid/ask for underlying future
 // ============================================================================
-void CompositeOptionPricer::computeOurMarketsFuture(const ExpiryData* ed) {
+void CompositeOptionPricer::computeOurMarketsFuture(ExpiryData* ed) {
     uint32_t exp = ed->getExpiry();
-    // UnderlyingTradingData not yet wired to ExpiryData in the migrated grid.
-    // When wired, the full future-market logic applies. For now we compute
-    // forward-based markets conservatively.
+    UnderlyingTradingData* utd = ed->getHedgeUTD();
+
+    if (!utd || !utd->isActive()) {
+        if (utd) utd->ourMarket().clear();
+        return;
+    }
 
     double mid = ed->getForward();
     if (!ed->isForwardReady() || std::isnan(mid) || mid <= 0) {
+        utd->ourMarket().clear();
         return;
     }
 
@@ -1026,12 +1113,13 @@ void CompositeOptionPricer::computeOurMarketsFuture(const ExpiryData* ed) {
     double core_spread = exp_cxt.primary_future_spread;
     double bid_spread = 0.5 * core_spread;
     double ask_spread = 0.5 * core_spread;
-    double tick_size = 1.0;  // TODO: from contract info
+    double tick_size = utd->getTickSize();
+    if (tick_size <= 0) tick_size = 1e-6;
 
     bid_spread = std::max(bid_spread, (0.5 + config().sticky_base) * tick_size);
     ask_spread = std::max(ask_spread, (0.5 + config().sticky_base) * tick_size);
 
-    // risk adjustment (simplified — full version reads UnderlyingTradingData)
+    // risk adjustment
     double adj = risk_adjustment_future(ed);
     ask_spread = std::max(0.0, ask_spread + adj);
     bid_spread = std::max(0.0, bid_spread - adj);
@@ -1039,7 +1127,9 @@ void CompositeOptionPricer::computeOurMarketsFuture(const ExpiryData* ed) {
     // bid/ask
     double bid, bid_tick_size, ask, ask_tick_size;
     __computeBidAndAskFuture(bid, bid_tick_size, ask, ask_tick_size,
-        mid, bid_spread, ask_spread, PriceSize(), PriceSize());
+        mid, bid_spread, ask_spread,
+        utd->ourMarket().getBestBid(), utd->ourMarket().getBestAsk(),
+        tick_size);
     bid = round_to_tick_by_side(bid, tick_size, BID, mid);
     ask = round_to_tick_by_side(ask, tick_size, ASK, mid);
 
@@ -1048,8 +1138,23 @@ void CompositeOptionPricer::computeOurMarketsFuture(const ExpiryData* ed) {
         ask += tick_size;
     }
 
-    // When UnderlyingTradingData is wired, size + activate/deactivate logic
-    // from original lines 1497-1561 applies here.
+    // Write directly to UTD's ourMarket
+    MultiMarket& mkt = utd->ourMarket();
+    if (erc.enable && bid > 0 && ask > 0) {
+        int32_t fut_pos = utd->getPosition();
+        int32_t bid_size = std::min(erc.max_pos_fut, std::max(0, erc.max_pos_fut - fut_pos));
+        int32_t ask_size = std::min(erc.max_pos_fut, std::max(0, erc.max_pos_fut + fut_pos));
+        if (bid_size > 0)
+            mkt.setBest(BID, PriceSize(bid, bid_size));
+        else
+            mkt.eraseBids();
+        if (ask_size > 0)
+            mkt.setBest(ASK, PriceSize(ask, ask_size));
+        else
+            mkt.eraseAsks();
+    } else {
+        mkt.clear();
+    }
 }
 
 // ============================================================================
@@ -1373,16 +1478,29 @@ void CompositeOptionPricer::alpha_adjustment(OptionData* option) {
     double delta = black_values.greeks().delta();
     double vega = black_values.greeks().vega();
 
-    // vega-based alpha
+    // If signals are configured, read alpha from them
+    if (!m_alphaSignals.empty()) {
+        double vega_total = 0, delta_total = 0;
+        for (const auto& sig : m_alphaSignals) {
+            if (!sig->isEnabled()) continue;
+            double w = sig->getWeight();
+            vega_total  += sig->getVegaAdjust(option, m_signalCtx) * w;
+            delta_total += sig->getDeltaAdjust(option, m_signalCtx) * w;
+        }
+        black_values.alpha().vega_total = vega_total;
+        black_values.alpha().delta_total = delta_total;
+        black_values.alpha().total += vega * vega_total + delta * delta_total;
+        return;
+    }
+
+    // Fallback: hardcoded alpha (backward compat when no signals configured)
     {
         ExpiryDataPtr ed = option->getExpiryData();
         double mat = ed ? ed->getMaturity() : 0.25;
-        double mat_adjusted = std::max(0.01, mat) / 0.25;  // normalized by three months
+        double mat_adjusted = std::max(0.01, mat) / 0.25;
         double vfl = m_ema_vegaflow.getSum() / std::sqrt(mat_adjusted);
-
         double frontfut_skew = m_prop_frontfut_skew / std::sqrt(mat_adjusted);
         double frontatmv_flow = m_prop_frontatmv_flow / std::sqrt(mat_adjusted);
-
         black_values.alpha().vegaflow = vfl;
         black_values.alpha().frontfut_skew = frontfut_skew;
         black_values.alpha().frontatmv_flow = frontatmv_flow;
@@ -1391,16 +1509,11 @@ void CompositeOptionPricer::alpha_adjustment(OptionData* option) {
             + frontatmv_flow * config().wgt_frontatmv_flow;
         black_values.alpha().total += vega * black_values.alpha().vega_total;
     }
-
-    // delta-based alpha
     {
         double rollema = m_prop_rollema;
         double dfl = m_ema_deltaflow.getSum();
         double atmsig = 0;
-        if (m_grid) {
-            atmsig = m_grid->getAtmSig() * m_frontfwd * 1e-4;
-        }
-
+        if (m_grid) atmsig = m_grid->getAtmSig() * m_frontfwd * 1e-4;
         black_values.alpha().rollema = rollema;
         black_values.alpha().deltaflow = dfl;
         black_values.alpha().atmsig = atmsig;
@@ -1416,7 +1529,6 @@ void CompositeOptionPricer::alpha_adjustment(OptionData* option) {
 // ============================================================================
 void CompositeOptionPricer::risk_adjustment(OptionData* option) {
     uint32_t exp = option->getExpiry();
-    double adj = 0.0;
     ExpiryDataPtr ed = option->getExpiryData();
     OptionValues& black_values = option->values(0);
     const OptionGreeks& ogreeks = black_values.greeks();
@@ -1436,7 +1548,6 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
         double shift = ed ? ed->getRiskShiftDelta() : 0;
         double delta_adj = shift * og;
         black_values.adj().delta_risk = delta_adj;
-        adj += delta_adj;
 
         if (raDbg) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -1456,7 +1567,6 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
         double shift = black_values.getRiskShiftVega();
         double vega_adj = shift * og;
         black_values.adj().vega_risk = vega_adj;
-        adj += vega_adj;
 
         if (raDbg) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -1477,8 +1587,11 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
     double cov = (markup != 0) ? h / markup : 0;
     cov = sign(cov) * std::min(markup, std::fabs(cov));
 
-    black_values.adj().total_risk = black_values.adj().vega_risk2
-        + black_values.adj().delta_risk2 - cov;
+    black_values.adj().total_risk = black_values.adj().delta_risk
+        + black_values.adj().vega_risk
+        + black_values.adj().delta_risk2
+        + black_values.adj().vega_risk2
+        - cov;
 
     if (raDbg) {
         WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -1504,8 +1617,10 @@ double CompositeOptionPricer::risk_adjustment_future(const ExpiryData* ed) {
 void CompositeOptionPricer::onFill(const OrderStubPtr& order, double fill_px, uint32_t fill_qty) {
     if (!order) return;
 
+    order->fillTime = getTime();
+    order->fillPrice = fill_px;
+
     const std::string& instr = order->code;
-    // Record last buy/sell for trade shock back-away
     if (order->dir == BUY) {
         m_instrument_lastbuy[instr] = order;
     } else if (order->dir == SELL) {
@@ -1523,11 +1638,16 @@ void CompositeOptionPricer::onFill(const OrderStubPtr& order, double fill_px, ui
 void CompositeOptionPricer::onFitCompleted(const PeriodicCurveFitter&) {
     // force a compute of values because fit could have changed
     m_tvLastCompute = 0;
+    // Set CompositeOptionPricer's m_bReprice (NOT OptionPricer2's) to force SLOW path
+    m_bReprice = true;
     if (m_spOptionPricer2) {
         m_spOptionPricer2->setReprice(true);
-        if (m_grid) {
-            m_spOptionPricer2->computeValues(m_grid);
-        }
+    }
+    // Route through OptionGrid::computeValues (NOT pricer.computeValues directly)
+    // so that __notifyComputeCompleted fires -> CTG listener -> refresh() auto-triggers.
+    // This ensures ourMarket is collected into pending quotes.
+    if (m_grid) {
+        m_grid->computeValues(this);
     }
     firePricingChanged();
 }
@@ -1604,56 +1724,24 @@ void CompositeOptionPricer::onAddOption(const OptionDataPtr& od) {
         }
     }
     od->values().ema_sprd_vs_atmfwd().setWindow(config().ema_sprd_vs_atmfwd_window);
-}
 
-// ============================================================================
-// onTickReceived — vega flow / delta flow accumulation
-// ============================================================================
-void CompositeOptionPricer::onTickReceived(const ITickProvider* tp, const TradeTick& tick) {
-    if (!tp || tick.price <= 0) return;
-
-    // Find the option for this instrument
-    if (!m_grid) return;
-    OptionDataPtr od = m_grid->get(tp->getInstrument());
-    if (!od) return;
-
-    uint32_t exp = od->getExpiry();
-    OptionValues& values = od->values();
-
-    if (tp->isLastTickOK() && values.isPriced()) {
-        double ticksz = tick.size;
-        double tickpx = tick.price;
-        double best_bid = od->getBid();
-        double best_ask = od->getAsk();
-
-        double theo = std::min(std::max(values.theo(), best_bid), best_ask);
-        double s = 0.0;
-        if (GT(tickpx, theo)) s = 1.0;
-        else if (LT(tickpx, theo)) s = -1.0;
-
-        double maturity = getMaturity(exp);
-        double delta_val = std::fabs(values.greeks().delta());
-        // We only care about the most liquid region.
-        if ((delta_val < 0.2) || (delta_val > 0.8))
-            return;
-
-        // Accumulate Vega Flow
-        double ve = s * std::sqrt(ticksz) * values.greeks().vega() * maturity;
-        m_ema_vegaflow.update(tick.msgTime, ve);
-
-        // Accumulate Delta Flow
-        double de = s * std::sqrt(ticksz) * values.greeks().delta() / maturity;
-        m_ema_deltaflow.update(tick.msgTime, de);
+    // Set per-expiry synthetic forward parameters
+    auto ed = od->getExpiryData();
+    if (ed) {
+        ed->setMinStrikesForSynthetic(config().min_strikes_for_synthetic);
+        ed->emaForwardSpread().setWindow(config().forward_spread_ema_window);
     }
 }
+
 
 // ============================================================================
 // finalizeCompute
 // ============================================================================
 void CompositeOptionPricer::finalizeCompute(OptionGrid* grid) {
-    // Notify all options that markets are priced
+    if (!grid) return;
+    // Notify all options that markets are (re)priced (index 0 = primary values).
     for (const auto& od : grid->getAllOptions()) {
-        // od->notifyMarketsPriced(0) — not in migrated OptionData; no-op
+        if (od) od->notifyMarketsPriced(0);
     }
 }
 
@@ -1685,6 +1773,34 @@ void CompositeOptionPricer::continueComputeValues_SLOW() {
     // this should cause a FAST compute to round things out
     resetLastComputeTime();
     firePricingChanged();
+}
+
+// ============================================================================
+// checkRiskSignals — check all risk signals, trigger panic/widen
+// ============================================================================
+void CompositeOptionPricer::checkRiskSignals() {
+    m_riskWidenFactor = 1.0;
+    for (const auto& sig : m_riskSignals) {
+        if (!sig->isEnabled()) continue;
+        sig->onBatchEnd();
+        RiskAction act = sig->getAction();
+        if (act == RiskAction::Panic) {
+            setPanic();
+            return;
+        }
+        if (act == RiskAction::Widen) {
+            m_riskWidenFactor = std::max(m_riskWidenFactor, sig->getWidenFactor());
+        }
+    }
+}
+
+double CompositeOptionPricer::getRiskWidenFactorByCode(const std::string& code) const {
+    double f = m_riskWidenFactor;
+    for (const auto& sig : m_riskSignals) {
+        if (!sig->isEnabled()) continue;
+        f = std::max(f, sig->getWidenFactorByCode(code));
+    }
+    return f;
 }
 
 } // namespace wt_option

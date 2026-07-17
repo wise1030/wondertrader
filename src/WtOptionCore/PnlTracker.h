@@ -28,6 +28,9 @@ public:
     // Call on every fill (realized PnL)
     void onFill(bool isBuy, uint32_t qty, double price);
 
+    // Initialize overnight position with previous close as cost basis
+    void initPosition(int32_t position, double costBasis);
+
     // Queries
     double getCurTurnover() const { return m_curturnover; }
     double getCurPnl() const { return m_curpnl; }
