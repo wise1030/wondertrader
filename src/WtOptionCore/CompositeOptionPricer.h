@@ -154,7 +154,7 @@ public:
     int    min_strikes_for_synthetic = 5;
 
     // compute cadence
-    double slow_compute_interval   = 0.1;
+    double slow_compute_interval   = 15.0;
     double trade_shock_interval    = 60.0;
     double panic_blackout_interval = 300.0;
 

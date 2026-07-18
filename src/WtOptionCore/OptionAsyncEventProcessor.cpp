@@ -1,47 +1,39 @@
 /*!
  * \file OptionAsyncEventProcessor.cpp
- * \brief Async Event Processor Implementation (Phase 2 — Full Async Layer)
+ * \brief Async Event Processor implementation (double-queue architecture)
  *
- * Worker loop: batch drain → tick dedup → process events → batch complete callback
- * All session events also go through queue (fixes WtOptEngine sync session bug)
+ * P0-A fix: MD events go to SPSC _md_queue (single producer),
+ * trader events go to mutex-protected _trader_queue (multi-producer safe).
  */
 #include "OptionAsyncEventProcessor.h"
-
-#include "../Includes/WTSDataDef.hpp"
-#include "../WTSTools/WTSLogger.h"
 #include "../Share/TimeUtils.hpp"
-
-#include <algorithm>
+#include "../WTSTools/WTSLogger.h"
+#include "../Includes/WTSDataDef.hpp"
+#include <cstring>
 
 namespace wt_option {
 
 //=============================================================================
 // AsyncEvent factory methods
 //=============================================================================
-
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_tick(const char* code, WTSTickData* t)
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_tick(const char* stdCode, WTSTickData* t)
 {
     AsyncEvent ev;
     ev.type = Tick;
-    ev.setCode(code);
-    if (t) {
-        ev.tick.price = t->price();
-        ev.tick.bid = t->bidprice(0);
-        ev.tick.ask = t->askprice(0);
-        ev.tick.bidQty = t->bidqty(0);
-        ev.tick.askQty = t->askqty(0);
-        ev.tick.preClose = t->preclose();
-        ev.tick.tradeVolume = t->volume();  // trade volume for vega/delta flow
-        ev.tick.actionTime = t->actiontime();
-        ev.tick.updateTime = TimeUtils::getLocalTimeNow();
-    }
+    ev.setCode(stdCode);
+    ev.tick.price = t->price();
+    ev.tick.bid = t->bidprice(0);
+    ev.tick.ask = t->askprice(0);
+    ev.tick.bidQty = t->bidqty(0);
+    ev.tick.askQty = t->askqty(0);
+    ev.tick.preClose = t->preclose();
+    ev.tick.tradeVolume = t->volume();
+    ev.tick.actionTime = t->actiontime();
+    ev.tick.updateTime = TimeUtils::getLocalTimeNow();
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_timer(uint32_t d, uint32_t t)
-{
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_timer(uint32_t d, uint32_t t) {
     AsyncEvent ev;
     ev.type = Timer;
     ev.timer.date = d;
@@ -49,12 +41,10 @@ OptionAsyncEventProcessor::AsyncEvent::make_timer(uint32_t d, uint32_t t)
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_trade(const char* code, uint32_t id, bool buy, double v, double p)
-{
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_trade(const char* stdCode, uint32_t id, bool buy, double v, double p) {
     AsyncEvent ev;
     ev.type = Trade;
-    ev.setCode(code);
+    ev.setCode(stdCode);
     ev.trade.localid = id;
     ev.trade.isBuy = buy;
     ev.trade.vol = v;
@@ -62,13 +52,11 @@ OptionAsyncEventProcessor::AsyncEvent::make_trade(const char* code, uint32_t id,
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_order(const char* code, uint32_t id, bool buy,
-                                                   double tq, double lq, double p, bool canc)
-{
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_order(const char* stdCode, uint32_t id, bool buy,
+                                   double tq, double lq, double p, bool canc) {
     AsyncEvent ev;
     ev.type = Order;
-    ev.setCode(code);
+    ev.setCode(stdCode);
     ev.order.localid = id;
     ev.order.isBuy = buy;
     ev.order.totalQty = tq;
@@ -78,30 +66,24 @@ OptionAsyncEventProcessor::AsyncEvent::make_order(const char* code, uint32_t id,
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_session(uint32_t tdate, bool isBegin)
-{
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_session(uint32_t tdate, bool isBegin) {
     AsyncEvent ev;
     ev.type = Session;
-    ev.session.isBegin = isBegin;
     ev.session.tdate = tdate;
+    ev.session.isBegin = isBegin;
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_position(const char* code, bool isLong, double newvol)
-{
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_position(const char* stdCode, bool isLong, double newvol) {
     AsyncEvent ev;
     ev.type = Position;
-    ev.setCode(code);
+    ev.setCode(stdCode);
     ev.position.isLong = isLong;
     ev.position.newvol = newvol;
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent
-OptionAsyncEventProcessor::AsyncEvent::make_channel(bool isReady)
-{
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_channel(bool isReady) {
     AsyncEvent ev;
     ev.type = Channel;
     ev.channel.isReady = isReady;
@@ -111,10 +93,10 @@ OptionAsyncEventProcessor::AsyncEvent::make_channel(bool isReady)
 //=============================================================================
 // Constructor / Destructor
 //=============================================================================
-
 OptionAsyncEventProcessor::OptionAsyncEventProcessor()
     : _worker_running(false)
 {
+    _trader_queue.reserve(256);
 }
 
 OptionAsyncEventProcessor::~OptionAsyncEventProcessor()
@@ -125,18 +107,16 @@ OptionAsyncEventProcessor::~OptionAsyncEventProcessor()
 //=============================================================================
 // Control
 //=============================================================================
-
 void OptionAsyncEventProcessor::start()
 {
-    if (_worker_running) return;
     _worker_running = true;
     _worker = std::thread(&OptionAsyncEventProcessor::worker_loop, this);
-    WTSLogger::log_by_cat("strategy", LL_INFO, "OptionAsyncEventProcessor started");
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OptionAsyncEventProcessor started (double-queue: md_spsc + trader_mutex)");
 }
 
 void OptionAsyncEventProcessor::stop()
 {
-    if (!_worker_running) return;
     _worker_running = false;
     _worker_cv.notify_all();
     if (_worker.joinable()) _worker.join();
@@ -144,28 +124,18 @@ void OptionAsyncEventProcessor::stop()
 }
 
 //=============================================================================
-// Producer interface (lock-free, called from CTP callback threads)
+// MD thread producers (SPSC, single producer = MD callback thread)
 //=============================================================================
-
-inline bool OptionAsyncEventProcessor::lf_push(const AsyncEvent& ev)
-{
-    // Try lock-free push first (wait-free, no allocation)
-    if (_lf_queue.push(ev))
-        return true;
-    // Ring buffer full -> fall back to overflow queue under mutex
-    {
-        std::lock_guard<std::mutex> lock(_overflow_mtx);
-        _overflow_queue.push_back(ev);
-    }
-    return true;
-}
-
 void OptionAsyncEventProcessor::enqueue_tick(const char* stdCode, WTSTickData* newTick)
 {
     if (!_worker_running) return;
-    if (!lf_push(AsyncEvent::make_tick(stdCode, newTick))) {
-        _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        return;
+    AsyncEvent ev = AsyncEvent::make_tick(stdCode, newTick);
+    if (!_md_queue.push(ev)) {
+        // Ring full -> overflow
+        {
+            std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+            _md_overflow.push_back(std::move(ev));
+        }
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
@@ -174,32 +144,36 @@ void OptionAsyncEventProcessor::enqueue_tick(const char* stdCode, WTSTickData* n
 void OptionAsyncEventProcessor::enqueue_timer(uint32_t curDate, uint32_t curTime)
 {
     if (!_worker_running) return;
-    if (!lf_push(AsyncEvent::make_timer(curDate, curTime))) {
-        _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        return;
+    AsyncEvent ev = AsyncEvent::make_timer(curDate, curTime);
+    if (!_md_queue.push(ev)) {
+        std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+        _md_overflow.push_back(std::move(ev));
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
 
+//=============================================================================
+// Trader/main thread producers (mutex-protected, multi-producer safe)
+//=============================================================================
 void OptionAsyncEventProcessor::enqueue_trade(uint32_t localid, const char* stdCode, bool isBuy, double vol, double price)
 {
     if (!_worker_running) return;
-    if (!lf_push(AsyncEvent::make_trade(stdCode, localid, isBuy, vol, price))) {
-        _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        return;
+    {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        _trader_queue.push_back(AsyncEvent::make_trade(stdCode, localid, isBuy, vol, price));
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
 
 void OptionAsyncEventProcessor::enqueue_order(uint32_t localid, const char* stdCode, bool isBuy,
-                                               double totalQty, double leftQty, double price, bool isCanceled)
+                                                double totalQty, double leftQty, double price, bool isCanceled)
 {
     if (!_worker_running) return;
-    if (!lf_push(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled))) {
-        _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        return;
+    {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        _trader_queue.push_back(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled));
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
@@ -208,7 +182,10 @@ void OptionAsyncEventProcessor::enqueue_order(uint32_t localid, const char* stdC
 void OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
 {
     if (!_worker_running) return;
-    lf_push(AsyncEvent::make_session(tdate, isBegin));
+    {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        _trader_queue.push_back(AsyncEvent::make_session(tdate, isBegin));
+    }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
@@ -216,7 +193,10 @@ void OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
 void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLong, double newvol)
 {
     if (!_worker_running) return;
-    lf_push(AsyncEvent::make_position(stdCode, isLong, newvol));
+    {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        _trader_queue.push_back(AsyncEvent::make_position(stdCode, isLong, newvol));
+    }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
@@ -224,56 +204,90 @@ void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLon
 void OptionAsyncEventProcessor::enqueue_channel(bool isReady)
 {
     if (!_worker_running) return;
-    lf_push(AsyncEvent::make_channel(isReady));
+    {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        _trader_queue.push_back(AsyncEvent::make_channel(isReady));
+    }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
 
 //=============================================================================
-// Worker loop — batch drain + tick dedup + process + batch complete
+// Helper: check if any queue has events
 //=============================================================================
+bool OptionAsyncEventProcessor::has_events() const
+{
+    // Check MD SPSC queue (lock-free read)
+    if (!_md_queue.empty()) return true;
+    // Check MD overflow (requires lock, but rare)
+    // Check trader queue (requires lock)
+    // We use try_lock to avoid blocking in the predicate;
+    // if we can't get the lock, assume there might be events.
+    return true;  // conservative: always return true to avoid missing events
+}
 
+//=============================================================================
+// Worker loop — drain both queues into unified batch
+//=============================================================================
 void OptionAsyncEventProcessor::worker_loop()
 {
-    // Pre-allocate reusable event buffer to eliminate per-batch heap allocation
     std::vector<AsyncEvent> events;
     events.reserve(256);
 
     while (_worker_running) {
         events.clear();
 
-        // Wait for events using condition variable (no mutex on the queue itself)
+        // Wait for events (cv with 100us timeout as fallback)
         {
-            std::unique_lock<std::mutex> lock(_overflow_mtx);
+            std::unique_lock<std::mutex> lock(_worker_sleep_mtx);
             _worker_cv.wait_for(lock, std::chrono::microseconds(100), [this]() {
-                return !_worker_running || !_lf_queue.empty() || !_overflow_queue.empty();
+                return !_worker_running || !_md_queue.empty() || !_trader_queue.empty();
             });
         }
         if (!_worker_running) break;
 
-        // Drain lock-free queue using consume_one (wait-free, no mutex)
+        // 1. Drain MD SPSC queue (wait-free, no mutex)
         while (events.size() < 1024) {
-            bool got = _lf_queue.consume_one([&events](AsyncEvent& ev) {
+            bool got = _md_queue.consume_one([&events](AsyncEvent& ev) {
                 events.push_back(std::move(ev));
             });
             if (!got) break;
         }
 
-        // Drain overflow queue (rare path, under mutex)
+        // 2. Drain MD overflow (rare, under mutex)
         {
-            std::lock_guard<std::mutex> lock(_overflow_mtx);
-            for (auto& oev : _overflow_queue) {
+            std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+            for (auto& oev : _md_overflow) {
                 if (events.size() >= 1024) break;
                 events.push_back(std::move(oev));
             }
-            _overflow_queue.clear();
+            _md_overflow.clear();
+        }
+
+        // 3. Drain trader queue (swap under mutex for minimal lock time)
+        {
+            std::vector<AsyncEvent> trader_batch;
+            {
+                std::lock_guard<std::mutex> lock(_trader_mtx);
+                trader_batch.swap(_trader_queue);
+            }
+            for (auto& tev : trader_batch) {
+                if (events.size() >= 1024) {
+                    // Put back events that didn't fit (rare)
+                    std::lock_guard<std::mutex> lock(_trader_mtx);
+                    _trader_queue.insert(_trader_queue.begin(),
+                        std::make_move_iterator(trader_batch.begin()),
+                        std::make_move_iterator(trader_batch.end()));
+                    break;
+                }
+                events.push_back(std::move(tev));
+            }
         }
 
         if (events.empty()) continue;
 
-        // E1: try/catch prevents worker crash from BlackCalc exceptions
         try {
-            // P3: O(N) bucket sort replaces O(N log N) stable_sort
+            // O(N) bucket sort
             std::vector<AsyncEvent*> bk_sess, bk_chan, bk_pos, bk_trade, bk_order, bk_timer;
             bool has_tick = false;
             for (auto& ev : events) {
@@ -288,6 +302,7 @@ void OptionAsyncEventProcessor::worker_loop()
                     default: break;
                 }
             }
+            // Process in priority order: session → channel → position → trade → order → timer
             for (auto* ev : bk_sess)  if (_cbs.on_session)  _cbs.on_session(ev->session.tdate, ev->session.isBegin);
             for (auto* ev : bk_chan)  if (_cbs.on_channel) _cbs.on_channel(ev->channel.isReady);
             for (auto* ev : bk_pos)   if (_cbs.on_position) _cbs.on_position(ev->getCode(), ev->position.isLong, ev->position.newvol);
@@ -296,7 +311,7 @@ void OptionAsyncEventProcessor::worker_loop()
             for (auto* ev : bk_timer) if (_cbs.on_timer)   _cbs.on_timer(ev->timer.date, ev->timer.time);
 
             if (has_tick) {
-                // P0-4 fix: string_view key dedup by content (not pointer address)
+                // string_view key dedup by content
                 std::unordered_map<std::string_view, const TickData*> active_ticks;
                 active_ticks.reserve(64);
                 for (auto& ev : events) {
@@ -305,24 +320,11 @@ void OptionAsyncEventProcessor::worker_loop()
                 }
                 if (_cbs.on_tick_batch) _cbs.on_tick_batch();
 
-                // Process underlying ticks first, then option ticks.
-                // This ensures computeValues (triggered by underlying tick)
-                // uses the latest option market snapshots.
-                // We can't distinguish underlying from option here, so we
-                // rely on the consumer (HftOptionStrategy::on_tick) to handle
-                // ordering internally. The unordered_map iteration order is
-                // non-deterministic, but on_tick for the underlying sets
-                // _underlyingChanged=true, and computeValues is deferred to
-                // on_batch_complete (debounced), so all ticks are applied
-                // before compute runs. This is safe.
                 for (auto& [code, tick] : active_ticks) {
                     if (_cbs.on_tick) _cbs.on_tick(std::string(code), *tick);
                 }
             }
 
-            // on_batch_complete always runs (even for tickless batches) so that
-            // position/trade/order/session/channel events are properly reflected
-            // via computeValues + refresh + drainPendingQuotes.
             if (_cbs.on_batch_complete) _cbs.on_batch_complete();
         } catch (const std::exception& e) {
             WTSLogger::log_by_cat("strategy", LL_ERROR,
@@ -332,11 +334,15 @@ void OptionAsyncEventProcessor::worker_loop()
                 "Async worker unknown exception (batch skipped)");
         }
 
-        // Queue saturation monitor (lock-free read, no mutex needed)
-        size_t queue_size = _lf_queue.read_available();
+        // Queue saturation monitor
+        size_t queue_size = _md_queue.read_available();
         {
-            std::lock_guard<std::mutex> lock(_overflow_mtx);
-            queue_size += _overflow_queue.size();
+            std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+            queue_size += _md_overflow.size();
+        }
+        {
+            std::lock_guard<std::mutex> lock(_trader_mtx);
+            queue_size += _trader_queue.size();
         }
         if (queue_size > 3200) {
             uint64_t now = TimeUtils::getLocalTimeNow();

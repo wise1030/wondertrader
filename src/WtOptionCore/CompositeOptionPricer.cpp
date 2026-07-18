@@ -144,6 +144,12 @@ CompositeOptionPricer::CompositeOptionPricer(
     m_ema_deltaflow.setWindow(config().deltaflow_window);
     m_ema_roll_front_fut.setWindow(config().ema_roll_front_fut_window);
 
+    // Copy hedge/lambda params from config (P0-D fix)
+    m_prop_hedge_ratio_delta = config().hedge_ratio_delta;
+    m_prop_hedge_ratio_vega  = config().hedge_ratio_vega;
+    m_prop_lambda_vega_decay = config().lambda_vega_decay;
+    m_prop_lambda_vega_wing  = config().lambda_vega_wing;
+
     // 注册 fitCompleted 回调 (与 quantbox 一致)
     if (m_spOptionPricer2) {
         auto& fce = m_spOptionPricer2->fitCompletedEvent();
@@ -284,7 +290,6 @@ bool CompositeOptionPricer::computeValues(OptionGrid* grid) {
     } else {
         m_bReprice = false;
         m_tvLastSlowCompute = getTime();
-        WTSLogger::log_by_cat("strategy", LL_INFO, "SLOW compute triggered tv_diff={:.3f}", tv_diff);
         computeValues_SLOW(grid);
     }
     return true;
@@ -312,16 +317,6 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
         m_exp_numfil[exp] = 0;
     }
 
-    // Debug: log first few FAST compute cycles
-    static int fastDebugCount = 0;
-    bool fastDbg = (fastDebugCount < 5);
-    if (fastDbg) {
-        fastDebugCount++;
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "CompositeOptionPricer FAST #{} refPrice={} strikes={} options={} active_expiries={}",
-            fastDebugCount, m_refPrice, grid->numStrikes(), grid->numOptions(), m_active_expiries.size());
-    }
-
     int skipCount = 0, procCount = 0;
     for (const auto& sd : grid->getAllStrikes()) {
         const OptionDataPtr& otm = sd->getStrikePrice() < m_refPrice ? sd->put() : sd->call();
@@ -335,12 +330,6 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
 
         // We do not need fit ready to quote.
         bool expiry_ready = ed && ed->isForwardReady();
-        if (fastDbg && procCount <= 2) {
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "FAST strike {} otm={} itm={} exp_ready={}",
-                sd->getStrikePrice(), otm ? otm->getCode() : "null",
-                itm ? itm->getCode() : "null", expiry_ready);
-        }
         if (!expiry_ready) {
             // Reset priced flag so stale theoretical values don't pass inputs_good
             otm->values(0).setPriced(false);
@@ -374,11 +363,6 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
 
         uint32_t exp = ed ? ed->getExpiry() : 0;
         // OTD counters not available without OptionTradingGrid wiring; skip accumulation
-    }
-
-    if (fastDbg) {
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "FAST strikes: processed={} skipped={}", procCount, skipCount);
     }
 
     // Futures
@@ -452,6 +436,25 @@ void CompositeOptionPricer::computeValues_SLOW(OptionGrid* grid) {
     }
 
     computeImpliedValues(grid);
+
+    // Diagnostic: count priced options after SLOW main loop
+    {
+        static int s_slowDiag = 0;
+        if (s_slowDiag < 10) {
+            s_slowDiag++;
+            int priced = 0, notReady = 0;
+            for (const auto& od : grid->getAllOptions()) {
+                if (!od) continue;
+                if (od->values(0).isPriced()) priced++;
+            }
+            for (const auto& v : grid->expiries()) {
+                if (v.second && !v.second->isForwardReady()) notReady++;
+            }
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "SLOW #{}: priced={}/{} fwdNotReady expiries={}",
+                s_slowDiag, priced, grid->numOptions(), notReady);
+        }
+    }
 
     for (const auto& v : grid->expiries()) {
         const ExpiryDataPtr& ed = v.second;
@@ -627,15 +630,6 @@ bool CompositeOptionPricer::updateDistortValues(OptionData* option) {
     // risk
     risk_adjustment(option);
     black_values.adj().total = black_values.adj().total_risk;
-
-    // Debug: trace NaN
-    static int udDebug = 0;
-    if (++udDebug <= 3) {
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "updateDistort {} alpha.total={} adj.total={} adj.total_risk={}",
-            option->getCode(), black_values.alpha().total,
-            black_values.adj().total, black_values.adj().total_risk);
-    }
 
     return true;
 }
@@ -854,29 +848,13 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     uint32_t exp = option->getExpiry();
     OptionValues& black_values = option->values(0);
 
-    // Debug: first few calls
-    static int mmDebugCount = 0;
-    bool dbg = (mmDebugCount < 5) || (mmDebugCount % 1000 == 0);
-    if (dbg) mmDebugCount++;
-
     auto erc_it = m_mapExpiryRiskConfig.find(exp);
     if (erc_it == m_mapExpiryRiskConfig.end() || !erc_it->second.enable) {
-        // 到期月未启用: 跳过定价和报单
-        if (mmDebugCount < 5) {
-            WTSLogger::log_by_cat("strategy", LL_WARN,
-                "computeOurMarkets {} exp={} SKIP: erc not found or not enabled", option->getCode(), exp);
-        }
         black_values.ourMarket().clear();
         option->setActive(false);
         return;
     }
     const ExpiryRiskConfig& erc = erc_it->second;
-
-    if (dbg) {
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "computeOurMarkets {} exp={} erc_found={} erc.enable={}",
-            option->getCode(), exp, (erc_it != m_mapExpiryRiskConfig.end()), erc.enable);
-    }
 
     double alpha_val = black_values.alpha().total;
     double adj_val = black_values.adj().total;
@@ -887,13 +865,6 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
         && !std::isnan(adj_val)
         && !EQZ(mid)
         && option->getBid() > 0 && option->getAsk() > 0;
-
-    if (dbg) {
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "computeOurMarkets {} priced={} mid={} bid={} ask={} alpha={} adj={} inputs_good={}",
-            option->getCode(), black_values.isPriced(), mid, option->getBid(), option->getAsk(),
-            alpha_val, adj_val, inputs_good);
-    }
 
     if (!inputs_good) {
         black_values.ourMarket().clear();
@@ -1027,16 +998,12 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
         bool valid = erc.enable && (bid_size > 0);
         if (!valid) {
             multmkt.eraseBids();
-            if (dbg) WTSLogger::log_by_cat("strategy", LL_INFO,
-                "computeOurMarkets {} bid INVALID enable={} bid_size={}", option->getCode(), erc.enable, bid_size);
         } else {
             bid = round_to_tick_by_side(bid, tick_size, BID, mid);
             PriceSize new_bid(bid, bid_size);
             PriceSize old_bid = multmkt.getBest(BID);
             if (old_bid.empty() || !EQ(old_bid.px(), bid) || old_bid.sz() != bid_size) {
                 multmkt.setBest(BID, new_bid);
-                if (dbg) WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "computeOurMarkets {} SET bid={}x{}", option->getCode(), bid, bid_size);
             }
         }
     }
@@ -1533,10 +1500,6 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
     OptionValues& black_values = option->values(0);
     const OptionGreeks& ogreeks = black_values.greeks();
 
-    // Debug: first few calls — trace NaN source
-    static int raDebug = 0;
-    bool raDbg = (++raDebug <= 3);
-
     // delta risk
     {
         double og = ogreeks.delta();
@@ -1548,13 +1511,6 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
         double shift = ed ? ed->getRiskShiftDelta() : 0;
         double delta_adj = shift * og;
         black_values.adj().delta_risk = delta_adj;
-
-        if (raDbg) {
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "risk_adj {} delta: og={} rp_delta={} cost={} shift={} delta_adj={} normRiskDelta={}",
-                option->getCode(), og, rp_delta, cost_delta, shift, delta_adj,
-                ed ? ed->getNormRiskDelta() : -999);
-        }
     }
 
     // vega risk
@@ -1567,13 +1523,6 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
         double shift = black_values.getRiskShiftVega();
         double vega_adj = shift * og;
         black_values.adj().vega_risk = vega_adj;
-
-        if (raDbg) {
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "risk_adj {} vega: og={} rp_vega={} cost={} shift={} vega_adj={} vega_risk_norm={}",
-                option->getCode(), og, rp_vega, cost_vega, shift, vega_adj,
-                black_values.vega_risk_norm);
-        }
     }
 
     // covariance adjustment
@@ -1592,14 +1541,6 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
         + black_values.adj().delta_risk2
         + black_values.adj().vega_risk2
         - cov;
-
-    if (raDbg) {
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "risk_adj {} total_risk={} vega_risk2={} delta_risk2={} cov={} markup={} h={}",
-            option->getCode(), black_values.adj().total_risk,
-            black_values.adj().vega_risk2, black_values.adj().delta_risk2,
-            cov, markup, h);
-    }
 }
 
 // ============================================================================

@@ -2,18 +2,13 @@
  * \file OptionAsyncEventProcessor.h
  * \brief Async Event Processor for Option Market-Making
  *
- * Extracted from WtOptContext's queue + worker_loop pattern.
- * All events (tick/trade/order/timer/session) go through a queue,
- * processed in batch by a single worker thread with tick deduplication.
+ * P0-A fix: Double-queue architecture to fix SPSC multi-producer UB.
+ * - _md_queue (SPSC): tick + timer events from MD callback thread (single producer)
+ * - _trader_queue (mutex vector): trade/order/position/session/channel events
+ *   from trader SPI thread and/or framework main thread (multi-producer safe)
  *
- * Key design (preserved from WtOptContext):
- * 1. Callback threads (CTP md/trader) only enqueue, zero blocking
- * 2. Worker drains batch, dedup ticks by code (last wins), process once
- * 3. After batch: risk update once + order update once (single pass)
- * 4. Queue saturation monitor (78% threshold)
- *
- * Phase 2: Full async layer with callback hooks
- * Phase 3: Business integration (pricing/risk/orders in worker)
+ * Worker drains both queues into a unified batch, preserving the original
+ * processing order: session → channel → position → trade → order → timer → tick.
  */
 #pragma once
 
@@ -37,7 +32,6 @@ using wtp::WTSTickData;
 
 namespace wt_option {
 
-// Lightweight tick data for queue (slimmed from ~300B WTSTickStruct to ~72B)
 struct TickData {
     double price = 0;
     double bid = 0;
@@ -45,45 +39,26 @@ struct TickData {
     double bidQty = 0;
     double askQty = 0;
     double preClose = 0;
-    double tradeVolume = 0;  // trade volume (for vega/delta flow signals)
+    double tradeVolume = 0;
     uint32_t actionTime = 0;
     uint64_t updateTime = 0;
 };
 
-// Session event data
 struct SessionEvent {
     enum Type { Begin, End } type;
     uint32_t tdate = 0;
 };
 
-// Callbacks interface — strategy implements these, processor calls them in worker thread
 struct AsyncCallbacks {
-    // Batch start: all ticks drained + deduped, before individual on_tick calls
     std::function<void()> on_tick_batch;
-
-    // Per-code tick (called for each code that had an update, with latest tick)
     std::function<void(const std::string& code, const TickData& tick)> on_tick;
-
-    // Trade fill
     std::function<void(const std::string& code, uint32_t localid, bool isBuy, double vol, double price)> on_trade;
-
-    // Order status update
     std::function<void(const std::string& code, uint32_t localid, bool isBuy,
                        double totalQty, double leftQty, double price, bool isCanceled)> on_order;
-
-    // Timer
     std::function<void(uint32_t curDate, uint32_t curTime)> on_timer;
-
-    // Session begin/end
     std::function<void(uint32_t tdate, bool isBegin)> on_session;
-
-    // Position update (async to avoid data race with worker thread)
     std::function<void(const std::string& code, bool isLong, double newvol)> on_position;
-
-    // Channel ready/lost (async)
     std::function<void(bool isReady)> on_channel;
-
-    // Post-batch: risk update + order update (single pass, once per batch)
     std::function<void()> on_batch_complete;
 };
 
@@ -93,16 +68,15 @@ public:
     OptionAsyncEventProcessor();
     ~OptionAsyncEventProcessor();
 
-    // Control
     void start();
     void stop();
-
-    // Set callbacks (must be called before start)
     void setCallbacks(const AsyncCallbacks& cbs) { _cbs = cbs; }
 
-    // Producer interface (called from CTP callback threads, non-blocking)
+    // MD thread producers (single-producer SPSC)
     void enqueue_tick(const char* stdCode, WTSTickData* newTick);
     void enqueue_timer(uint32_t curDate, uint32_t curTime);
+
+    // Trader/main thread producers (multi-producer, mutex-protected)
     void enqueue_trade(uint32_t localid, const char* stdCode, bool isBuy, double vol, double price);
     void enqueue_order(uint32_t localid, const char* stdCode, bool isBuy,
                        double totalQty, double leftQty, double price, bool isCanceled);
@@ -110,16 +84,14 @@ public:
     void enqueue_position(const char* stdCode, bool isLong, double newvol);
     void enqueue_channel(bool isReady);
 
-    // Statistics
     uint64_t totalEvents() const { return _total_events.load(std::memory_order_relaxed); }
     uint64_t queueDrops() const { return _queue_drops.load(std::memory_order_relaxed); }
 
-private:
-    // Async event - fixed-size for trivially copyable (enables lock-free)
-    // code uses char[32] instead of std::string to avoid heap allocation
+public:
+    // AsyncEvent is public so factory methods can be defined in .cpp
     struct AsyncEvent {
         enum Type { Tick, Timer, Trade, Order, Session, Position, Channel, Custom } type;
-        uint32_t optId; // UINT32_MAX = underlying or non-option
+        uint32_t optId;
 
         TickData tick;
         struct { uint32_t date; uint32_t time; } timer;
@@ -128,7 +100,7 @@ private:
         struct { bool isBegin; uint32_t tdate; } session;
         struct { bool isLong; double newvol; } position;
         struct { bool isReady; } channel;
-        char code[32]; // fixed-length code (replaces std::string)
+        char code[32];
 
         AsyncEvent() : type(Custom), optId(UINT32_MAX) { code[0] = '\0'; }
 
@@ -148,37 +120,39 @@ private:
         static AsyncEvent make_channel(bool isReady);
     };
 
-    // Lock-free push helper (returns false only on critical failure)
-    bool lf_push(const AsyncEvent& ev);
-
-    // Lock-free SPSC queue (single producer = HFT callback thread,
-    // single consumer = worker thread). Boost::lockfree::spsc_queue
-    // provides wait-free push/pop without mutex contention.
-    // Falls back to mutex if the ring buffer is full (overflow path).
+    // === MD queue: SPSC (single producer = MD thread) ===
     static constexpr size_t QUEUE_CAPACITY = 4096;
-    boost::lockfree::spsc_queue<AsyncEvent, boost::lockfree::capacity<QUEUE_CAPACITY>> _lf_queue;
+    mutable boost::lockfree::spsc_queue<AsyncEvent, boost::lockfree::capacity<QUEUE_CAPACITY>> _md_queue;
 
-    // Overflow fallback: when the lock-free ring is full, events go here
-    // under a mutex. This is rare (only under extreme burst) but ensures
-    // no events are silently dropped on ring overflow.
-    std::mutex _overflow_mtx;
-    std::vector<AsyncEvent> _overflow_queue;
+    // MD overflow fallback (rare: ring full)
+    std::mutex _md_overflow_mtx;
+    std::vector<AsyncEvent> _md_overflow;
+
+    // === Trader queue: mutex-protected (multi-producer safe) ===
+    // Trader events (trade/order/position/session/channel) are ~100-500/s,
+    // negligible compared to tick ~10000/s. Mutex contention is near-zero.
+    std::mutex _trader_mtx;
+    mutable std::vector<AsyncEvent> _trader_queue;
 
     // Worker thread
     std::thread _worker;
     std::atomic<bool> _worker_running;
     std::condition_variable _worker_cv;
+    std::mutex _worker_sleep_mtx;  // mutex for cv wait only (not for queue access)
 
     // Statistics
     std::atomic<uint64_t> _queue_drops{0};
     std::atomic<uint64_t> _total_events{0};
     uint64_t _last_warning_time{0};
 
-    // Callbacks (set by strategy before start)
+    // Callbacks
     AsyncCallbacks _cbs;
 
     // Worker loop
     void worker_loop();
+
+    // Helper: check if any queue has events
+    bool has_events() const;
 };
 
 using OptionAsyncEventProcessorPtr = std::shared_ptr<OptionAsyncEventProcessor>;

@@ -654,7 +654,20 @@ double OptionGrid::__getBestSyntheticPrice(const ExpiryDataPtr& ed) {
         ed->setSyntheticForward(synFwd, underlyingPrice, time);
         ed->setForward(synFwd);
         ed->setForwardReady(true);
-        ed->setLastValidForwardTime(static_cast<uint64_t>(time * 1e6));  // refresh sticky timer
+        ed->setLastValidForwardTime(static_cast<uint64_t>(time * 1e6));
+
+        // Diagnostic: first few forward computations
+        {
+            static int s_fwdDiag = 0;
+            if (s_fwdDiag < 20) {
+                s_fwdDiag++;
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "FWD OK #{} exp={} fwd={:.2f} validCount={} (options={} future={}) underlying={:.2f}",
+                    s_fwdDiag, ed->getExpiry(), synFwd, validCount,
+                    validCount - (ed->isFutureValid() ? 1 : 0),
+                    ed->isFutureValid() ? 1 : 0, underlyingPrice);
+            }
+        }  // refresh sticky timer
 
         // Second pass: update per-strike ema_sprd_vs_atmfwd with the SPREAD
         // (strikeForward - synFwd), NOT the absolute strikeForward.

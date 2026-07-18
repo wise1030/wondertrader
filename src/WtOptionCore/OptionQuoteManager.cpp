@@ -248,33 +248,6 @@ void OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
             return;
         }
 
-        // Enhancement: PositionOffsetMgr integration
-        // If we have a PositionOffsetMgr, check how to route the order
-        if (m_positionOffset) {
-            int32_t closeableToday = m_positionOffset->getCloseableToday(isBuy);
-            int32_t closeablePrev = m_positionOffset->getCloseablePrev(isBuy);
-
-            // If this is a close order (opposite direction to position)
-            bool isClose = (isBuy && m_position < 0) || (!isBuy && m_position > 0);
-            if (isClose && (closeableToday > 0 || closeablePrev > 0)) {
-                // Use explicit close API instead of quote
-                // This properly sets the offset flag (CLOSETODAY / CLOSE)
-                // The strategy's executeOrder method will route to stra_exit_long/short
-                WTSLogger::log_by_cat("strategy", LL_DEBUG,
-                    "OQM: {} close routing: today={} prev={} (pos={})",
-                    m_code, closeableToday, closeablePrev, m_position);
-
-                // Cancel existing quote on this side first
-                if (canCancel()) cancelSide(isBuy);
-
-                // Route via stra_exit_long/short through the strategy
-                // The actual routing is done by HftOptionStrategy which checks
-                // the PositionOffsetMgr breakdown and calls the appropriate API
-                // Here we just cancel; the strategy will handle the close order
-                return;
-            }
-        }
-
         // Standard path: cancel old + send new quote
         if (canCancel()) {
             // Cancel orders at different prices

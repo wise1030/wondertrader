@@ -109,6 +109,9 @@ void OptionPricer2::ExpiryInfo::setATMV(double atmv)
 {
     m_atmvol = atmv;
     m_prop_atmv = round_to_precision(atmv, 0.0001);
+    // Propagate to vol curves (critical for GVV fit: m_atmvol scales vi and volvol2)
+    if (m_spVolCurve)  m_spVolCurve->setATMVol(atmv);
+    if (m_spVolCurve2) m_spVolCurve2->setATMVol(atmv);
 }
 
 void OptionPricer2::ExpiryInfo::computeForwardPrice(OptionGrid* grid, const ExpiryDataPtr& ed)
@@ -253,6 +256,7 @@ void OptionPricer2::__doComputeValueStrikeVec(const std::vector<StrikeData*>& v,
     // pair otm and itm options to apply put-call parity
     const OptionDataPtr& otm = spx < refpx ? sd->put()  : sd->call();
     const OptionDataPtr& itm = spx < refpx ? sd->call() : sd->put();
+    if (!otm || !itm) return;  // skip single-sided strikes during dynamic discovery
     __computeValue(otm.get(), itm.get());
     decayGreeks(otm.get());
     decayGreeks(itm.get());
@@ -318,6 +322,7 @@ bool OptionPricer2::computeValues(OptionGrid* grid)
             {
                 OptionDataPtr otm = sd->getStrikePrice() < refPrice ? sd->put()  : sd->call();
                 OptionDataPtr itm = sd->getStrikePrice() < refPrice ? sd->call() : sd->put();
+                if (!otm || !itm) continue;  // skip single-sided strikes during dynamic discovery
                 otm->values(getValuesIndex()).setPriced(false);
                 itm->values(getValuesIndex()).setPriced(false);
                 computeValue(otm.get());
@@ -330,11 +335,11 @@ bool OptionPricer2::computeValues(OptionGrid* grid)
     }
 
     if (m_spFitter && getTime() > m_spFitter->getLastFitTime()) {
-        m_spFitter->setTime(getTime());  // 同步时间给 fitter
-        WTSLogger::log_by_cat("strategy", LL_INFO, "doFit triggered getTime={:.1f} lastFit={:.1f}",
-            getTime(), m_spFitter->getLastFitTime());
+        m_spFitter->setTime(getTime());
         bool fitOk = m_spFitter->doFit();
-        WTSLogger::log_by_cat("strategy", LL_INFO, "doFit result={}", fitOk);
+        if (fitOk) {
+            WTSLogger::log_by_cat("strategy", LL_INFO, "doFit success expiry count updated");
+        }
     }
     m_perfCounter.stop();
     return true;
@@ -464,13 +469,6 @@ void __computeTheoreticalValues(OptionData* option, OptionValues& other_values,
     bool bcompute = !std::isnan(bci->m_forward) && GT(bci->m_forward, 0)
                   && GE(bci->m_maturity, 0);
     if (!bcompute) {
-        static int skipCount = 0;
-        if (skipCount < 3) {
-            skipCount++;
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "__computeTheo skip {} forward={} maturity={} vol={}",
-                option->getCode(), bci->m_forward, bci->m_maturity, values.m_theoVol);
-        }
         return;
     }
 
@@ -500,18 +498,6 @@ void __computeTheoreticalValues(OptionData* option, OptionValues& other_values,
                  values.m_theoVol * std::sqrt(bci->m_maturity), bci->m_discount);
     values.setForward(bci->m_forward);
     values.setTheo(std::max(0.0, bc.value()));
-
-    {
-        static int bcCount = 0;
-        if (bcCount < 3) {
-            bcCount++;
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "BlackCalc {} type={} K={} F={} sigma={} df={} value={} delta={} vega={}",
-                option->getCode(), (int)bci->m_optionType, bci->m_strike, bci->m_forward,
-                values.m_theoVol * std::sqrt(bci->m_maturity), bci->m_discount,
-                bc.value(), bc.delta(), bc.vega(bci->m_maturity));
-        }
-    }
 
     values.greeks().delta() = bc.delta();
     values.greeks().gamma() = bc.gamma();
@@ -549,8 +535,10 @@ void OptionPricer2::computeValue(OptionData* option)
     std::shared_ptr<BlackCalculatorInfo> bci = __setupBlackCalculatorInfo(option);
 
     // other side for put-call parity
-    OptionValues& other_values = m_grid->get(exp, option->getStrike(),
-        option->getRight() == OR_Call ? OR_Put : OR_Call)->values(getValuesIndex());
+    auto other_od = m_grid->get(exp, option->getStrike(),
+        option->getRight() == OR_Call ? OR_Put : OR_Call);
+    if (!other_od) { values.setPriced(false); return; }
+    OptionValues& other_values = other_od->values(getValuesIndex());
     __computeTheoreticalValues(option, other_values, bci.get(), getValuesIndex());
 }
 

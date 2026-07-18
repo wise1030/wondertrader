@@ -168,6 +168,23 @@ set(OPTION_CORE_HEADERS
 
 add_library(WtOptionCore SHARED ${OPTION_CORE_SOURCES} ${OPTION_CORE_HEADERS})
 
+# PERF: Aggressive optimization for HFT low-latency
+# -O3: maximum optimization level
+# -march=native: use all available CPU instructions (AVX2/FMA)
+# -flto: link-time optimization for cross-TU inlining
+# -ffinite-math-only: assume no NaN/Inf (faster sqrt/exp), but we use NAN as sentinel
+#   so we use -fno-math-errno instead which only removes errno overhead from sqrt
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(WtOptionCore PRIVATE
+        -O3
+        -march=native
+        -flto
+        -fno-math-errno
+        -fno-trapping-math
+    )
+    target_link_options(WtOptionCore PRIVATE -flto)
+endif()
+
 target_include_directories(WtOptionCore PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../Includes

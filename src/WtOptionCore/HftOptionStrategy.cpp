@@ -722,6 +722,12 @@ void HftOptionStrategy::setupPricer()
         copCfg.improve_retreat_ratio = pCfg->has("improve_retreat_ratio") ? pCfg->getDouble("improve_retreat_ratio") :
             (pCfg->has("quoting") ? pCfg->get("quoting")->getDouble("improve_retreat_ratio") : 3.0);
 
+        // Hedge ratios and lambda params (P0-D fix)
+        copCfg.hedge_ratio_delta = pCfg->has("hedge_ratio_delta") ? pCfg->getDouble("hedge_ratio_delta") : 0.0;
+        copCfg.hedge_ratio_vega  = pCfg->has("hedge_ratio_vega")  ? pCfg->getDouble("hedge_ratio_vega")  : 0.0;
+        copCfg.lambda_vega_decay = pCfg->has("lambda_vega_decay") ? pCfg->getDouble("lambda_vega_decay") : 0.0;
+        copCfg.lambda_vega_wing  = pCfg->has("lambda_vega_wing")  ? pCfg->getDouble("lambda_vega_wing")  : 0.0;
+
         // GVV blend weight
         {
             WTSVariant* bcCfg = pCfg->get("blackCalc");
