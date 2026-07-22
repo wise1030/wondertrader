@@ -88,13 +88,11 @@ enum class RiskAction
 {
     NONE,               ///< No action
     WARN,               ///< Log warning
-    WIDEN_SPREAD,       ///< Widen quotes
-    REDUCE_SIZE,        ///< Reduce order sizes
+    WIDEN_SPREAD,       ///< Widen quotes (策略性软响应: util 0.8→×1.5, 0.9→×2.0)
     BLOCK_SIDE_LONG,    ///< Block opening long positions
     BLOCK_SIDE_SHORT,   ///< Block opening short positions
-    BLOCK_CONTRACT_OPENING, ///< Block opening orders on the specific breached contract
     PAUSE_QUOTING,      ///< Stop quoting temporarily (auto-recovery)
-    FLATTEN_POSITION,   ///< Exit all positions
+    FLATTEN_POSITION,   ///< Exit all positions (breachCount 持续高位升级)
     HALT_TRADING        ///< Stop all trading (irreversible, requires manual intervention)
 };
 
@@ -112,11 +110,16 @@ struct RateLimits
     double position_breach_pause_threshold;  ///< POSITION_NET 利用率触发 PAUSE_QUOTING (default 1.2)
     double delta_critical_mult;              ///< Delta critical 倍数 (default 1.5)
     double delta_warning_mult;              ///< Delta warning 倍数 (default 0.8)
+
+    // R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
+    double position_warning_l1;              ///< util L1 → WIDEN_SPREAD ×1.5 (default 0.8)
+    double position_warning_l2;              ///< util L2 → WIDEN_SPREAD ×2.0 (default 0.9)
     
     // 升级响应阈值
     uint32_t widen_threshold;               ///< breachCount 触发 WIDEN_SPREAD (default 1)
-    uint32_t pause_threshold;               ///< breachCount 触发 PAUSE_QUOTING (default 2)
-    uint32_t flatten_threshold;             ///< breachCount 触发 FLATTEN_POSITION (default 3)
+    // H3: pause_threshold 已删除 — PAUSE 实际走 long_breach&&short_breach 路径,
+    //     breachCount 升级只到 FLATTEN (比 PAUSE 更激进, 跳过中间挡合理)
+    uint32_t flatten_threshold;             ///< breachCount 触发 FLATTEN_POSITION (default 2; checkRiskLimits 最多产生 EXPOSURE+POSITION_NET=2 BREACH)
     
     RateLimits()
         : max_orders_per_sec(50)
@@ -128,9 +131,10 @@ struct RateLimits
         , position_breach_pause_threshold(1.2)
         , delta_critical_mult(1.5)
         , delta_warning_mult(0.8)
+        , position_warning_l1(0.8)
+        , position_warning_l2(0.9)
         , widen_threshold(1)
-        , pause_threshold(2)
-        , flatten_threshold(3)
+        , flatten_threshold(2)
     {}
     
     static RateLimits fromVariant(wtp::WTSVariant* v) {
@@ -144,9 +148,10 @@ struct RateLimits
         r.position_breach_pause_threshold = FutuConfig::readDouble(v, "positionBreachPauseThreshold", 1.2);
         r.delta_critical_mult = FutuConfig::readDouble(v, "deltaCriticalMult", 1.5);
         r.delta_warning_mult = FutuConfig::readDouble(v, "deltaWarningMult", 0.8);
+        r.position_warning_l1 = FutuConfig::readDouble(v, "positionWarningL1", 0.8);
+        r.position_warning_l2 = FutuConfig::readDouble(v, "positionWarningL2", 0.9);
         r.widen_threshold = FutuConfig::readUInt32(v, "widenThreshold", 1);
-        r.pause_threshold = FutuConfig::readUInt32(v, "pauseThreshold", 2);
-        r.flatten_threshold = FutuConfig::readUInt32(v, "flattenThreshold", 3);
+        r.flatten_threshold = FutuConfig::readUInt32(v, "flattenThreshold", 2);
         return r;
     }
 };
@@ -315,12 +320,23 @@ public:
     void recordCancel();
     void recordTrade();
     
+    /// 读侧剔除过期样本 — 旧实现只在 record 时推进窗口,
+    /// 停止报单后旧时间戳永不过期 → RATE 误报持续存在.
+    void pruneRateWindows(uint64_t now);
+    
     //==========================================================================
     // Risk Checks - using Portfolio data
     //==========================================================================
     
     /// Check all risk limits using Portfolio data
     std::vector<RiskViolation> checkRiskLimits(const FutuPortfolio* portfolio);
+    
+    /// 零堆分配版本: 复用调用方缓冲 (热路径每 tick 调用)
+    void checkRiskLimits(const FutuPortfolio* portfolio, std::vector<RiskViolation>& violations);
+
+    /// R2.2: 策略性软响应检查 (util 0.8/0.9 → WIDEN_SPREAD, 不产生硬 violation)
+    /// 由 Coordinator 在 checkRiskLimits 之前调用, soft action 不阻断 hard check
+    RiskAction checkSoftLimits(const FutuPortfolio* portfolio) const;
     
     /// Pre-trade position limit check: can we place bid/ask for this contract?
     /// v3 软风控：不再硬 BLOCK，返回 utilization 让 Quoter 做 qty 衰减；
@@ -339,7 +355,7 @@ public:
                                           const UnifiedOrderTracker* tracker) const;
     
     /// Check rate limits only
-    bool checkRateLimits() const;
+    bool checkRateLimits();
     
     /// Get current rate counts (ring buffer size)
     inline uint32_t getOrdersPerSec() const {

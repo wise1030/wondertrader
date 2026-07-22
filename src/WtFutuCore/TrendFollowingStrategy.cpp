@@ -173,6 +173,7 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
                 signal.confidence = calculateConfidence(_trend_state);
                 signal.suggested_size = calculatePositionSize(_trend_state);
                 signal.reason = "Uptrend confirmed, following spread expansion";
+                _trend_state.entry_price = state.current_price;
             }
             else if (_trend_state.trend_direction < 0)
             {
@@ -181,6 +182,7 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
                 signal.confidence = calculateConfidence(_trend_state);
                 signal.suggested_size = calculatePositionSize(_trend_state);
                 signal.reason = "Downtrend confirmed, following spread contraction";
+                _trend_state.entry_price = state.current_price;
             }
         }
     }

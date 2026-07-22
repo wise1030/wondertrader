@@ -221,6 +221,9 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
         }
         // Previous batch settled
         _inflight_qty = 0;
+        // 记录上一轮成交(接线 updateRoundFill — 旧代码从未被调用,
+        // _total_filled 恒 0, estimateFillRate 永远走初始估算分支)
+        updateRoundFill(snap);
     }
 
     // --- Recompute remaining from fresh net delta ---
@@ -404,10 +407,13 @@ double CloseoutExecutor::computePrice(PriceTier tier, bool is_buy,
     switch (tier)
     {
         case PriceTier::PASSIVE:
-            return is_buy ? ask - tick : bid + tick;
+            // 被动档: 挂同侧 +1 tick (买=bid+tick, 卖=ask-tick)。
+            // 旧代码方向反了(买=ask-tick/卖=bid+tick), 宽价差时变成贴对手价的激进价。
+            return is_buy ? bid + tick : ask - tick;
 
         case PriceTier::MID_PASSIVE:
-            return mid;
+            // tick 对齐: 奇数 tick 价差时裸 mid 是半 tick 非法价, 会被交易所拒单
+            return std::floor(mid / tick + 0.5) * tick;
 
         case PriceTier::AGGRESSIVE:
             return is_buy ? ask : bid;

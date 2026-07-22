@@ -67,10 +67,10 @@ struct ValidQuoteSnapshot
 struct BilateralStatsConfig
 {
     double  min_valid_qty;              ///< 累计深度阈值（手），如 ao=10
-    double  max_obligation_spread;      ///< 做市义务最大宽度（tick），如 50
+    double  bilateral_stats_max_spread_ticks;      ///< 统计判断的义务宽度上限(tick); 值由 FutuQuoter 从 obligation_max_spread_ticks 注入 (统一: 挂在哪=统计到哪)
 
     BilateralStatsConfig()
-        : min_valid_qty(10.0), max_obligation_spread(50.0) {}
+        : min_valid_qty(10.0), bilateral_stats_max_spread_ticks(50.0) {}
 };
 
 /// 双边报价统计结果
@@ -182,7 +182,7 @@ public:
         if (!snapshot.has_valid_bid || !snapshot.has_valid_ask)
             return false;
         double spread = snapshot.getSpreadTicks();
-        if (spread <= 0 || spread > _cfg.max_obligation_spread)
+        if (spread <= 0 || spread > _cfg.bilateral_stats_max_spread_ticks)
             return false;
         return true;
     }

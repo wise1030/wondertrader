@@ -14,6 +14,7 @@
 
 #include "SpreadArbitrageTypes.h"
 #include "SpreadCalculator.h"
+#include "ISpreadStrategy.h"
 #include <memory>
 
 namespace futu {
@@ -61,11 +62,34 @@ struct MeanReversionConfig
 // Mean Reversion Strategy
 //==============================================================================
 
-class MeanReversionStrategy
+class MeanReversionStrategy : public ISpreadStrategy
 {
 public:
     MeanReversionStrategy();
     ~MeanReversionStrategy() = default;
+    
+    //==========================================================================
+    // ISpreadStrategy Interface
+    //==========================================================================
+    
+    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time) override;
+    
+    /// 均值回归无每 tick 内部状态更新 (状态完全来自 SpreadState)
+    void update(const SpreadState& /*state*/, uint64_t /*timestamp*/) override {}
+    
+    void configure(const SpreadPairConfig& cfg) override
+    {
+        _config.entry_z_threshold = cfg.entry_z_threshold;
+        _config.exit_z_threshold = cfg.exit_z_threshold;
+        _config.stop_loss_z = cfg.stop_loss_z;
+        _config.max_position = cfg.max_spread_position;
+        _config.convergence_timeout = cfg.convergence_timeout;
+        _config.add_safety_ratio = cfg.add_safety_ratio;
+    }
+    
+    void reset() override;
+    
+    const char* typeName() const override { return "mean_reversion"; }
     
     //==========================================================================
     // Configuration
@@ -75,25 +99,11 @@ public:
     const MeanReversionConfig& getConfig() const { return _config; }
     
     //==========================================================================
-    // Signal Generation
-    //==========================================================================
-    
-    /// Generate trading signal based on current state
-    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time);
-    
-    //==========================================================================
     // Position Size Calculation
     //==========================================================================
     
     /// Calculate position size based on Z-Score
     double calculatePositionSize(double zscore) const;
-    
-    //==========================================================================
-    // State
-    //==========================================================================
-    
-    /// Reset internal state
-    void reset();
     
     /// Get strategy name
     static constexpr const char* getName() { return "MeanReversion"; }

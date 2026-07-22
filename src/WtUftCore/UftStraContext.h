@@ -22,6 +22,7 @@ class UftStrategy;
 NS_WTP_BEGIN
 class WtUftEngine;
 class TraderAdapter;
+class EventNotifier;  // R1: 告警外发通道 (WtUftRunner 注入, 策略层通过 ctx 获取)
 
 class UftStraContext : public IUftStraCtx, public ITrdNotifySink
 {
@@ -33,6 +34,11 @@ public:
 	UftStrategy* get_stragety() { return _strategy; }
 
 	void setTrader(TraderAdapter* trader);
+
+	/// R1: EventNotifier 注入 (WtUftRunner 在创建 ctx 后调用)
+	void setEventNotifier(EventNotifier* notifier) { _event_notifier = notifier; }
+	/// R1: 获取 EventNotifier (策略层在 on_init 中通过 dynamic_cast 获取)
+	EventNotifier* getEventNotifier() const { return _event_notifier; }
 
 public:
 	virtual uint32_t id() { return _context_id; }
@@ -338,6 +344,7 @@ private:
 	uint32_t		_context_id;
 	WtUftEngine*	_engine;
 	TraderAdapter*	_trader;
+	EventNotifier*	_event_notifier = nullptr;  ///< R1: 告警外发通道 (WtUftRunner 注入)
 	uint32_t		_tradingday;
 
 	UftStrategy*	_strategy;

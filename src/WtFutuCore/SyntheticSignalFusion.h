@@ -186,6 +186,10 @@ public:
     /// Fuse all signals into synthetic transaction
     SyntheticTransactionData fuse();
     
+    /// 是否至少有一个输入源有数据 — 无数据时 fuse() 输出全零,
+    /// 调用方不应把空结果回灌到下游(会覆盖有效 alpha 通道)
+    bool hasAnySource() const { return _has_tick_inf || _has_book_sig || _has_calibration; }
+    
     /// Get fused trade imbalance (for MicroAlphaEngine)
     FusedTradeImbalance getFusedImbalance() const;
     

@@ -25,10 +25,11 @@ void PerformanceMonitor::recordTickToQuote(uint64_t latencyNs)
     _current_latency_ns[static_cast<int>(LatencyType::TICK_TO_QUOTE)].store(
         latencyNs, std::memory_order_relaxed);
     
-    // Warn if latency exceeds threshold (100 microseconds = 100,000 ns)
-    if (latencyNs > 100000)
+    // H5: 改用 yaml 配置的 _latency_threshold_ns (此前硬编码 100000, yaml 调整无效)
+    if (latencyNs > _latency_threshold_ns)
     {
-        WTSLogger::warn("[PERF] High tick-to-quote latency: {} us", latencyNs / 1000.0);
+        WTSLogger::warn("[PERF] High tick-to-quote latency: {} us (threshold={} us)",
+            latencyNs / 1000.0, _latency_threshold_ns / 1000.0);
     }
 }
 

@@ -42,8 +42,12 @@ ELSE()
     # GCC/Clang - 与 WtUftCore 保持一致的编译选项
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
     
-    # Release mode optimizations (不使用 -flto 以避免跨库 ABI 问题)
-    SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math")
+    # Release mode optimizations
+    # 注意: 不使用 -ffast-math — 它隐含 -ffinite-math-only, NaN/Inf 检查会被优化掉,
+    # 风控/PnL 代码一旦出现 NaN, 所有 < 比较恒 false, 风控静默失效.
+    # 用以下子集保留大部分数值优化, 同时不破坏 NaN 语义:
+    SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+    SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fno-math-errno -fno-trapping-math -ffp-contract=fast")
     SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -funroll-loops")
     SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fno-omit-frame-pointer")
 ENDIF()

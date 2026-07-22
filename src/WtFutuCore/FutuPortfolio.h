@@ -29,6 +29,8 @@ NS_WTP_END
 
 namespace futu {
 
+class SpreadArbitrageManager;  // B5: 过冲保险丝回调目标 (前向声明)
+
 /// Portfolio/inventory parameters
 struct PortfolioParams
 {
@@ -246,6 +248,10 @@ public:
 
     /// Update daily_pnl for a contract (daily_pnl = unrealized_pnl + realized_pnl)
     void updateDailyPnL(const std::string& code);
+
+    /// 新交易日重置所有合约的日内 PnL (realized/unrealized/daily)。
+    /// 持仓与均价保留(隔夜持仓的浮盈从当日开盘价重新累计由 markToMarket 负责)。
+    void resetDailyPnl();
     
     //==========================================================================
     // Position Updates
@@ -256,6 +262,21 @@ public:
     
     /// Update position with average cost
     void updatePosition(const std::string& code, double position, double avgCost = 0);
+
+    //==========================================================================
+    // B5: 过冲保险丝 (ARB_SELF_CLOSE_DESIGN v2.1)
+    //   sign-flip (+N → -M) 且该 leg 有活跃 arb 平仓 intent 时触发.
+    //   无 intent 的 flip 是 MM 正常做市行为, 不报 (hasActiveCloseIntent 内含
+    //   "leg 属于某 pair" 判定, 无需另查 isLegInActivePair).
+    //==========================================================================
+    void setArbManager(SpreadArbitrageManager* mgr) { _arb_manager = mgr; }
+
+private:
+    /// sign-flip 检测 (onPositionUpdate / updatePosition 两入口共用, .cpp 实现)
+    void checkOvershootSignFlip(const char* code, double prev, double now);
+    SpreadArbitrageManager* _arb_manager = nullptr;
+
+public:
     
     //==========================================================================
     // Portfolio Risk Metrics (inline, no allocation)
@@ -504,6 +525,22 @@ public:
     /// Compute hedge action
     HedgeAction computeHedge(double target_delta = 0) const;
     
+    //==========================================================================
+    // PnL Snapshot for cross-thread access (arb thread)
+    // Main thread publishes via publishPnLSnapshot(), arb thread reads via
+    // getSnapshot*(). Atomic<double> on x86-64 is lock-free (~10ns).
+    //==========================================================================
+    void publishPnLSnapshot() {
+        _snapshot_unrealized_pnl.store(getTotalUnrealizedPnL(), std::memory_order_relaxed);
+        _snapshot_total_pnl.store(getTotalPnL(), std::memory_order_relaxed);
+    }
+    double getSnapshotUnrealizedPnL() const {
+        return _snapshot_unrealized_pnl.load(std::memory_order_relaxed);
+    }
+    double getSnapshotTotalPnL() const {
+        return _snapshot_total_pnl.load(std::memory_order_relaxed);
+    }
+
 private:
     PortfolioParams _params;
     std::string _anchor_code;
@@ -512,6 +549,9 @@ private:
     
     /// O(1) contract lookup map (stores index, not pointer, to avoid dangling pointer on vector resize)
     wtp::wt_hashmap<std::string, size_t> _code_to_state;
+    
+    std::atomic<double> _snapshot_unrealized_pnl{0};
+    std::atomic<double> _snapshot_total_pnl{0};
 };
 
 } // namespace futu

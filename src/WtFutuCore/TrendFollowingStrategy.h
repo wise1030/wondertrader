@@ -13,6 +13,7 @@
 #pragma once
 
 #include "SpreadArbitrageTypes.h"
+#include "ISpreadStrategy.h"
 #include "SpreadCalculator.h"
 #include "../Share/RingBuffer.hpp"
 #include <memory>
@@ -98,11 +99,35 @@ struct TrendState
 // Trend Following Strategy
 //==============================================================================
 
-class TrendFollowingStrategy
+class TrendFollowingStrategy : public ISpreadStrategy
 {
 public:
     TrendFollowingStrategy();
     ~TrendFollowingStrategy() = default;
+    
+    //==========================================================================
+    // ISpreadStrategy Interface
+    //==========================================================================
+    
+    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time) override;
+    
+    void update(const SpreadState& state, uint64_t timestamp) override
+    {
+        updateSpread(state.current_spread, timestamp);
+    }
+    
+    void configure(const SpreadPairConfig& cfg) override
+    {
+        _config.fast_ma_period = cfg.trend_ma_fast;
+        _config.slow_ma_period = cfg.trend_ma_slow;
+        _config.max_position = cfg.max_spread_position;
+        _config.stop_loss_pct = cfg.stop_loss_pct;
+        _config.max_trend_bars = cfg.max_trend_bars;
+    }
+    
+    void reset() override;
+    
+    const char* typeName() const override { return "trend_following"; }
     
     //==========================================================================
     // Configuration
@@ -119,13 +144,6 @@ public:
     void updateSpread(double spread, uint64_t timestamp);
     
     //==========================================================================
-    // Signal Generation
-    //==========================================================================
-    
-    /// Generate trading signal based on current state
-    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time);
-    
-    //==========================================================================
     // Analysis
     //==========================================================================
     
@@ -135,11 +153,6 @@ public:
     /// Get trend direction (-1, 0, 1)
     int getTrendDirection() const { return _trend_state.trend_direction; }
     
-    //==========================================================================
-    // State
-    //==========================================================================
-    
-    void reset();
     static constexpr const char* getName() { return "TrendFollowing"; }
     
 private:

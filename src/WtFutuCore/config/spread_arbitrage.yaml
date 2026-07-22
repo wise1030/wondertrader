@@ -1,0 +1,108 @@
+# ============================================================
+# 跨期价差套利子系统配置示例
+# ------------------------------------------------------------
+# 分层职责:
+#   config.yaml      = 策略身份 + 业务参数
+#   coordinator.yaml = 模块开关 + 信号/毒性参数
+#   本文件            = 套利 pair 配置 + 风控 + 子策略参数
+# ============================================================
+spread_arbitrage:
+  enabled: true
+  enhance_market_making: true       # 套利信号增强做市
+  primary_strategy: "mean_reversion"  # 主策略: mean_reversion / trend_following / pairs_trading / statistical_arb
+  use_hybrid_strategy: false        # 多策略混合模式 (当前仅单策略)
+  max_total_position: 20            # 组合最大持仓
+  max_pairs: 3                      # 最大 pair 数
+  min_signal_confidence: 0.3        # 最小信号置信度
+  signal_cooldown_ms: 2000          # 信号冷却 (ms, 每 pair 独立)
+  minProfitThresholdTicks: 1.0      # A10: 开仓信号最低利润门槛 (ticks)
+                                    # 语义: ≥ 2×(taker_spread+fee) - maker_rebate
+                                    # 价格调整成本超此阈值则拒单 (此前未接线, 恒放行)
+
+  # ============================================================
+  # C0: 套利分级平仓配置 (ARB_SELF_CLOSE_DESIGN v2.1)
+  # ------------------------------------------------------------
+  # 设计哲学: CLOSE 保持 B-3 抑制 (MM maker 消耗, 赚 spread + 免 fee)
+  #           STOP_LOSS 立即 taker (止损成本 << 继续亏损)
+  #           TIMEOUT 走 maker (挂 mid, 超时升级)
+  # 灰度路径: C1(stop_loss) → C2(timeout_exit); CLOSE 永不解禁
+  # 默认 enabled=false = 纯 B-3 行为, 与改造前完全一致
+  # ============================================================
+  arb_close:
+    enabled: false                      # 总开关 (false = 纯 B-3)
+
+    allow_signals:
+      close_long: false                 # 永不解禁 (B-3 特性)
+      close_short: false                # 永不解禁
+      timeout_exit: false               # C2 阶段启用
+      stop_loss: false                  # C1 阶段启用 (最高优先级)
+
+    stop_loss_policy:                   # 止损执行策略: FAK + 对手价
+      order_flag: 1                     # 0=GFD 1=FAK 2=FOK
+      price_offset_ticks: 0
+      timeout_ms: 1000
+      upgrade_to_taker: false
+
+    timeout_policy:                     # 超时执行策略: GFD mid, 30s 升级
+      order_flag: 0
+      price_offset_ticks: 0
+      timeout_ms: 30000
+      upgrade_to_taker: true
+
+    max_close_size_pct: 0.5             # 单次平仓量上限 (vs spread_position)
+    close_in_flight_timeout_ms: 5000    # B4: 平仓 in_flight 超时
+    oversold_protection: true           # B5: 过冲保险丝 (sign-flip 检测)
+    overshoot_cooldown_ms: 3600000      # B5: 触发后 pair 冷却 1h
+    intent_broadcast: true              # B1+B2: Coordinator 同侧抑制协同
+
+  # ============================================================
+  # 价差对配置
+  # ============================================================
+  pairs:
+    - id: "ag0812"
+      leg1: "SHFE.ag.ag2608"        # 近月合约
+      leg2: "SHFE.ag.ag2612"        # 远月合约
+      ratio: 1.0                    # 对冲比率 leg1 (leg1:leg2 = ratio:ratio2)
+      # ratio2: 1.0                 # A1: 对冲比率 leg2 (可选, 默认 1.0; 此前硬编码不可配)
+      entryZScore: 2.0             # 入场 Z-Score 阈值
+      exitZScore: 0.5              # 出场 Z-Score 阈值
+      stopLossZ: 4.0               # A9: 止损 Z-Score (此前无加载, 恒为默认 4.0)
+      stopLossPct: 0.02            # 止损百分比 (趋势跟踪用)
+      maxTrendBars: 50             # 最大趋势 bar 数
+      addSafetyRatio: 0.75         # 加仓安全比率
+      maxPosition: 20              # 单 pair 最大仓位
+      # windowSize: 200             # 回看窗口 (可选)
+
+  # ============================================================
+  # 套利风控参数 (SpreadRiskManager)
+  # 数据源: 全组合 PnL (FutuPortfolio.getTotalPnL, 含 MM+套利)
+  #   drawdown = peak_pnl - current_pnl
+  #   drawdown > portfolioStopLoss*0.8 → CRITICAL alert
+  #   drawdown > portfolioStopLoss       → EMERGENCY alert
+  # F4: updatePortfolioPnL 已接线 (generateSignals 入口), drawdown 计算生效
+  # H4: portfolioStopLoss 从 yaml 加载 (此前用编译期默认 50000, yaml 不生效)
+  # ============================================================
+  risk_limits:
+    portfolioStopLoss: 50000.0       # 组合峰值回撤止损线 (元)
+    maxTotalPosition: 50.0           # 最大总价差持仓 (手)
+    maxSinglePair: 20.0              # 单 pair 最大持仓 (手)
+    maxCorrelationBreak: 0.3         # 协同破裂阈值
+    maxDivergenceZscore: 5.0         # 最大 z-score 发散
+    maxDivergenceTime: 7200          # 最大发散持续秒数
+
+  # ============================================================
+  # 统计子策略默认参数 (全局默认, per-pair 可覆盖)
+  # A9: 键名已与代码加载对齐, 本段从死配置变为真实默认值来源
+  # ============================================================
+  statistical:
+    meanReversion:
+      entryZThreshold: 2.0
+      exitZThreshold: 0.5           # A9: 补全 (代码读 exitZThreshold)
+      stopLossZ: 3.0
+      addSafetyRatio: 0.75
+    pairsTrading:
+      lookbackWindow: 100
+      entryZThreshold: 2.0
+    trendFollowing:
+      stopLossPct: 0.02
+      maxTrendBars: 50

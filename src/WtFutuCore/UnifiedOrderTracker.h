@@ -110,10 +110,13 @@ struct UnifiedOrderInfo
     char        code[MAX_CODE_LEN];
     double      price;
     double      qty;
+    double      filled_qty;     ///< 累计成交量 (部分成交跟踪)
+    double      original_qty;   ///< 原始下单量 (track 时赋值, 不被 updateOrderQty 改写)
     double      place_mid;      ///< Mid price at placement
     uint64_t    place_time;
     uint64_t    last_check;
     uint64_t    last_inv_cancel_check;
+    uint64_t    cancel_time;        ///< 首次观察到 PENDING_CANCEL 的时刻 (超时清扫用)
     OrderFlags  flags;
     CancelReason cancel_reason;
     
@@ -134,8 +137,8 @@ struct UnifiedOrderInfo
         cancel_reason = CancelReason::NONE;
     }
     
-    UnifiedOrderInfo() : order_id(0), level_index(0), price(0), qty(0), place_mid(0),
-        place_time(0), last_check(0), last_inv_cancel_check(0),
+    UnifiedOrderInfo() : order_id(0), level_index(0), price(0), qty(0), filled_qty(0), original_qty(0), place_mid(0),
+        place_time(0), last_check(0), last_inv_cancel_check(0), cancel_time(0),
         flags(OrderFlags::NONE), cancel_reason(CancelReason::NONE) {
         memset(code, 0, MAX_CODE_LEN);
     }
@@ -153,6 +156,7 @@ struct UnifiedTrackerConfig
     double      sticky_threshold;
     uint32_t    inv_limit_cooldown_ms;
     uint32_t    max_cancel_rate;
+    uint32_t    pending_cancel_timeout_ms;  ///< 撤单 ack 超时, 超时强制 untrack (默认 5000)
     
     // Self-trade prevention
     bool        stp_enabled;
@@ -162,6 +166,7 @@ struct UnifiedTrackerConfig
     UnifiedTrackerConfig() 
         : max_orders(20), max_age_ms(10000), price_deviation(3.0),
           sticky_threshold(2.0), inv_limit_cooldown_ms(2000), max_cancel_rate(10),
+          pending_cancel_timeout_ms(5000),
           stp_enabled(true), stp_allow_same_price(false), stp_min_price_gap(1.0) {}
 };
 
@@ -388,6 +393,11 @@ public:
     inline const std::vector<UnifiedOrderInfo>& getOrders() const { return _orders; }
     inline uint32_t getOrderCount() const { return _order_count; }
     
+    /// 订单集世代号: track/untrack 时递增。
+    /// 调用方(如策略主线程)可缓存上次同步的世代号, 未变化时跳过
+    /// MM 订单快照的全量深拷贝(updateMMOrders), 消除热路径无效拷贝.
+    uint64_t getGeneration() const { return _generation; }
+    
     //==========================================================================
     // Per-Contract Query
     //==========================================================================
@@ -446,7 +456,7 @@ public:
     // 注：STATE_CHANGE 和 PRICE_DEVIATION 已移除，由 FutuQuoter 粘性逻辑处理
     //==========================================================================
     
-    std::vector<CancelAction> checkAutoCancel(
+    const std::vector<CancelAction>& checkAutoCancel(
         const std::string& code, uint64_t currentTime, double currentMid, double tickSize,
         bool stateChanged, bool inventoryLimitHit, double current_risk_delta);
     
@@ -474,6 +484,21 @@ public:
     const UnifiedTrackerStats& getStats() const { return _stats; }
     
     void recordFilled() { _stats.orders_filled++; }
+
+    /// 记录一笔成交, 返回 true 表示该订单已完全成交(可安全 untrack)。
+    /// 部分成交时订单保持跟踪: 残留活单仍需参与自成交检查/在途量统计/sticky 判断。
+    /// 未跟踪的订单(如 OrderRouter 的单)返回 false, 调用方无需处理。
+    bool recordOrderFill(uint32_t orderId, double qty)
+    {
+        auto it = _order_index.find(orderId);
+        if (it == _order_index.end()) return false;
+        UnifiedOrderInfo& order = _orders[it->second];
+        order.filled_qty += qty;
+        // 用 original_qty (不被 updateOrderQty 改写) 判定完全成交。
+        // 若用 order.qty: onOrder 部分成交分支会调 updateOrderQty 把 qty 改写为剩余量,
+        // 导致 filled_qty >= remaining_qty 提前成立 → 多次部分成交的 MM 单被提前 untrack。
+        return order.filled_qty >= order.original_qty - 1e-9;
+    }
     void recordDuplicateCancel() { _stats.duplicate_cancels++; }
     
     bool shouldCancelDueToRate(uint64_t currentTime);
@@ -527,7 +552,13 @@ private:
     std::vector<uint32_t> _free_slots;
     wtp::wt_hashmap<uint32_t, uint32_t> _order_index;  // orderId -> vector index
     uint32_t _order_count;
+    uint64_t _generation = 0;   ///< 订单集世代号(track/untrack 递增)
     uint32_t _total_cancels;
+    
+    // checkAutoCancel 复用缓冲 (每 tick 调用, 避免重复堆分配; 主线程单线程访问)
+    std::vector<CancelAction> _actions_buf;
+    std::vector<size_t> _active_indices_buf;
+    std::vector<uint32_t> _stale_buf;
     
     // Place times for lifetime calculation
     wtp::wt_hashmap<uint32_t, uint64_t> _order_place_times;

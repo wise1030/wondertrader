@@ -105,35 +105,6 @@ public:
         return true;
     }
     
-    /**
-     * @brief Push an element, overwrite oldest if full
-     * 
-     * 修复方案：生产者不再直接修改 _head（消费者索引），
-     * 而是通过 _drop_count 原子计数器通知消费者跳过元素。
-     * 消费者在 tryPop 时检查 _drop_count 并跳过对应数量的元素。
-     * 这保证了 SPSC 语义：_head 只由消费者写，_tail 只由生产者写。
-     */
-    bool pushOverwrite(const T& item)
-    {
-        const size_t current_tail = _tail.load(std::memory_order_relaxed);
-        const size_t next_tail = (current_tail + 1) & (Capacity - 1);
-        
-        bool overwritten = false;
-        
-        if (next_tail == _head.load(std::memory_order_acquire))
-        {
-            // 队列满：增加 drop 计数器，消费者会跳过对应数量的元素
-            // 不再由生产者修改 _head，避免数据竞争
-            _drop_count.fetch_add(1, std::memory_order_release);
-            overwritten = true;
-        }
-        
-        new (&_buffer[current_tail * sizeof(T)]) T(item);
-        _tail.store(next_tail, std::memory_order_release);
-        
-        return overwritten;
-    }
-    
     //==========================================================================
     // Consumer Interface (called from consumer thread only)
     //==========================================================================
@@ -252,8 +223,9 @@ private:
     alignas(64) std::atomic<size_t> _tail;
     alignas(64) std::atomic<size_t> _drop_count{0};  // drop计数器，用于pushOverwrite
     
-    // Buffer storage
-    alignas(alignof(T)) char _buffer[Capacity * sizeof(T)];
+    // Buffer storage — 同样 64B 对齐, 否则首元素与 _drop_count 共享 cache line
+    // (生产者写 buffer[0] 与消费者读 drop_count 互踩 false sharing)
+    alignas(64) char _buffer[Capacity * sizeof(T)];
 };
 
 //==============================================================================

@@ -66,9 +66,12 @@ struct ArbOrderRequest
     double qty;                     ///< Order quantity
     uint64_t timestamp;             ///< Request timestamp
     uint32_t request_id;            ///< Unique request ID
-    
+    int  order_flag;                ///< OrderFlag: 0=GFD 1=FAK 2=FOK (C0 execution_policy)
+    bool is_close;                  ///< 平仓单标记 (B3 主线程精判 + 对手价替换用)
+
     ArbOrderRequest()
-        : is_buy(true), price(0), qty(0), timestamp(0), request_id(0) {}
+        : is_buy(true), price(0), qty(0), timestamp(0), request_id(0)
+        , order_flag(0), is_close(false) {}
 };
 
 //==============================================================================
@@ -151,6 +154,11 @@ public:
     void setConfig(const AsyncArbConfig& config) { _config = config; }
     const AsyncArbConfig& getConfig() const { return _config; }
     
+    /// 直接开关套利 (避免 getConfig→改副本→setConfig 的整 struct atomic 拷贝).
+    /// 用于 channel_lost 停套利 / channel_ready 恢复等高频联动.
+    void setEnabled(bool enabled) { _config.enabled.store(enabled, std::memory_order_release); }
+    bool isEnabled() const { return _config.enabled.load(std::memory_order_acquire); }
+    
     void setArbitrageManager(SpreadArbitrageManager* manager) { _arb_manager = manager; }
     void setSelfTradePrevention(SelfTradePrevention* stp) { _stp = stp; }
 
@@ -220,7 +228,7 @@ public:
     void updateTickSize(const std::string& code, double tickSize);
     
     /// Set minimum profit threshold for arbitrage (reject if below)
-    void setMinProfitThreshold(double threshold) { _min_profit_threshold = threshold; }
+    void setMinProfitThreshold(double threshold) { _min_profit_threshold.store(threshold, std::memory_order_relaxed); }
     
     //==========================================================================
     // Orphan Leg Auto-Hedge (Main Thread Interface)
@@ -332,14 +340,20 @@ private:
     //==========================================================================
     
     // MM order state copy for self-trade check (using atomic_flag as spinlock)
-    std::atomic_flag _mm_orders_spin = ATOMIC_FLAG_INIT;
-    wtp::wt_hashmap<std::string, std::vector<ActiveOrder>> _mm_buy_orders;
-    wtp::wt_hashmap<std::string, std::vector<ActiveOrder>> _mm_sell_orders;
+    // alignas(64)+填充: 主线程写快照 / arb线程读 高频争用, 隔离缓存行防 false sharing
+    alignas(64) std::atomic_flag _mm_orders_spin = ATOMIC_FLAG_INIT;
+    char _mm_orders_spin_pad[64]{};
+    // P7: 自成交检查只需全局 最高买价/最低卖价 标量 (arb买→min_sell, arb卖→max_buy,
+    // 与按 arb_price 过滤等价: 全局 min/max 即为约束边界). updateMMOrders 预计算,
+    // executeSignal O(1) 读取, 消除原 O(n) vector 拷贝(锁内) + O(n) 线性扫描(锁内).
+    wtp::wt_hashmap<std::string, double> _mm_max_buy;   ///< code → 最高 MM 买价 (0=无)
+    wtp::wt_hashmap<std::string, double> _mm_min_sell;  ///< code → 最低 MM 卖价 (0=无)
     
     // Tick sizes for price adjustment (using atomic_flag as spinlock)
-    std::atomic_flag _tick_size_spin = ATOMIC_FLAG_INIT;
+    alignas(64) std::atomic_flag _tick_size_spin = ATOMIC_FLAG_INIT;
+    char _tick_size_spin_pad[64]{};
     wtp::wt_hashmap<std::string, double> _tick_sizes;
-    double _min_profit_threshold = 0.0;  // Minimum profit threshold in ticks
+    std::atomic<double> _min_profit_threshold{0.0};  // Minimum profit threshold in ticks (主线程写, arb线程读)
     
     // Tick counter for signal generation
     std::atomic<uint32_t> _tick_count;

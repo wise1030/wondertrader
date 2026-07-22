@@ -231,6 +231,7 @@ bool WtUftRunner::initUftStrategies()
 		stra->self()->init(cfgItem->get("params"));
 		UftStraContext* ctx = new UftStraContext(&_uft_engine, id);
 		ctx->set_strategy(stra->self());
+		ctx->setEventNotifier(&_notifier);  // R1: 注入 EventNotifier (策略层通过 ctx 获取, 转发 arb alert)
 
 		const char* traderid = cfgItem->getCString("trader");
 		TraderAdapterPtr trader = _traders.getAdapter(traderid);

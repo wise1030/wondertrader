@@ -13,6 +13,7 @@
 #pragma once
 
 #include "SpreadArbitrageTypes.h"
+#include "ISpreadStrategy.h"
 #include "SpreadCalculator.h"
 #include "../Share/RingBuffer.hpp"
 #include <memory>
@@ -91,11 +92,35 @@ struct CointegrationResult
 // Pairs Trading Strategy
 //==============================================================================
 
-class PairsTradingStrategy
+class PairsTradingStrategy : public ISpreadStrategy
 {
 public:
     PairsTradingStrategy();
     ~PairsTradingStrategy() = default;
+    
+    //==========================================================================
+    // ISpreadStrategy Interface
+    //==========================================================================
+    
+    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time) override;
+    
+    void update(const SpreadState& state, uint64_t timestamp) override
+    {
+        updatePrices(state.leg1_price, state.leg2_price, timestamp);
+    }
+    
+    void configure(const SpreadPairConfig& cfg) override
+    {
+        _config.entry_z_threshold = cfg.entry_z_threshold;
+        _config.exit_z_threshold = cfg.exit_z_threshold;
+        _config.stop_loss_z = cfg.stop_loss_z;
+        _config.max_position = cfg.max_spread_position;
+        _config.lookback_window = cfg.lookback_window;
+    }
+    
+    void reset() override;
+    
+    const char* typeName() const override { return "pairs_trading"; }
     
     //==========================================================================
     // Configuration
@@ -112,13 +137,6 @@ public:
     void updatePrices(double price1, double price2, uint64_t timestamp);
     
     //==========================================================================
-    // Signal Generation
-    //==========================================================================
-    
-    /// Generate trading signal
-    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time);
-    
-    //==========================================================================
     // Analysis
     //==========================================================================
     
@@ -131,11 +149,6 @@ public:
     /// Check if pair is valid for trading
     bool isValidPair() const { return _is_valid_pair; }
     
-    //==========================================================================
-    // State
-    //==========================================================================
-    
-    void reset();
     static constexpr const char* getName() { return "PairsTrading"; }
     
 private:

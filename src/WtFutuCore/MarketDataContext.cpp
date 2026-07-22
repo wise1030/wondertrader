@@ -233,13 +233,40 @@ void TradeFlowTracker::onTransaction(wtp::WTSTransData* data)
     bool isBuy = (trans.side == BDT_Buy);
     
     double signed_qty = isBuy ? qty : -qty;
+    bool is_large = qty > _large_trade_threshold;
+    
+    // 与 onTickInference 相同的滑窗衰减 — 旧代码直接累加从不衰减,
+    // 在整个 session 单调漂移(与 TradeFlow IC=-0.83 同根因),
+    // 且与 tick 推断通道混用同一组累积器导致口径不一致.
+    InferenceRecord rec;
+    rec.signed_flow = signed_qty;
+    rec.volume = qty;
+    rec.is_large = is_large;
+    rec.timestamp = static_cast<uint64_t>(trans.action_time);
+    _inference_window.push_back(rec);
+    
     _net_trade_flow += signed_qty;
     _total_trade_volume += qty;
-    
-    // Track large trades
-    if (qty > _large_trade_threshold)
+    if (is_large)
     {
         _large_trade_volume += qty;
+    }
+    
+    // 滑窗衰减: 移除超过时间窗口或数量窗口的旧记录
+    while (!_inference_window.empty()) {
+        const auto& front = _inference_window.front();
+        bool too_old = (rec.timestamp > front.timestamp + _window_ms);
+        bool too_many = (_inference_window.size() > _window_size);
+        if (too_old || too_many) {
+            _net_trade_flow -= front.signed_flow;
+            _total_trade_volume -= front.volume;
+            if (front.is_large) {
+                _large_trade_volume -= front.volume;
+            }
+            _inference_window.pop_front();
+        } else {
+            break;
+        }
     }
     
     // Track trade sizes with vector ring buffer

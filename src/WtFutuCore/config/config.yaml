@@ -1,0 +1,186 @@
+# ============================================================
+# WtFutuCore 主策略配置示例
+# ------------------------------------------------------------
+# 分层职责 (单一权威位置原则):
+#   本文件 (config.yaml)    = 策略身份(anchorCode/contracts) + 文件引用
+#                            + 业务级参数(quoting/portfolio/risk/closeout/performance)
+#                            [不承载任何模块开关]
+#   coordinator.yaml        = 模块开关(唯一权威) + 信号/毒性/GLFT 模块参数
+#   spread_arbitrage.yaml   = 套利子系统(pair 配置/风控/子策略参数)
+#   hotparams.yaml          = 运行时热更新参数(共享内存同步)
+# ============================================================
+
+basefiles:
+  session:   ../common/sessions.json
+  commodity: ../common/commodities.json
+  contract:  ../common/contracts.json
+  holiday:   ../common/holidays.json
+
+# ============================================================
+# 行情源 (按实际环境配置)
+# ============================================================
+parsers:
+  - active: true
+    id: parser_ctp
+    module: ParserCTP
+    # front: tcp://...
+    # user / pass / brokerid: ...
+
+# ============================================================
+# 交易通道 (按实际环境配置)
+# ============================================================
+traders:
+  - active: true
+    id: trader_ctp
+    module: TraderCTP
+    savedata: true
+    riskmon:
+      active: true
+      policy:
+        default:
+          cancel_stat_timespan: 10
+          cancel_times_boundary: 200
+          cancel_total_limits: 470
+          order_stat_timespan: 10
+          order_times_boundary: 20
+    # front / broker / appid / authcode / user / pass: ...
+
+env:
+  name: uft
+  product:
+    session: "TRADING"
+
+data:
+  store:
+    path: ./data/
+
+bspolicy: ./actpolicy.yaml
+
+# ============================================================
+# 策略定义
+# ============================================================
+strategies:
+  uft:
+    - active: true
+      id: futu_mm
+      name: FutuStraFact.FutuMM
+      trader: trader_ctp
+      params:
+
+        # ========================================================
+        # 策略身份: 锚定合约 + 合约列表
+        # ========================================================
+        anchorCode: SHFE.ag.ag2608
+
+        contracts:
+          - code: SHFE.ag.ag2608
+            maxPosition: 30
+            maxDelta: 30
+            targetPosition: 0
+          - code: SHFE.ag.ag2612
+            maxPosition: 30
+            maxDelta: 30
+            targetPosition: 0
+
+        # ========================================================
+        # 报价参数 (FutuQuoter)
+        # ========================================================
+        quoting:
+          numLevels: 1               # 报价档位数 (1-10)
+          baseSpread: 2.0            # 基础价差 (tick 数, 权威来源; 同时用于 SpreadOptimizer 定价核心 + FutuQuoter fallback)
+          baseQty: 2.0               # 基础手数
+          levelQtyMultiplier: 0.7      # 档位间数量几何衰减 (0.1-1.0, 每档 ×此值)
+          levelStep: 1.0             # 每档价格步长 (tick 数)
+          stickyThreshold: 1.0       # 粘性更新阈值 (tick)
+          improveRetreatRatio: 2.0   # 改进/退让比率
+          maxPriceDeviation: 20.0    # 最大价格偏差 (tick)
+          useBilateralQuote: false   # 是否使用双边报价接口
+          priceProtection: true      # 价格保护 (防止穿越最优价)
+          protectTicks: 1.0          # 价格保护 tick 数
+          # v3 软风控报价参数
+          qtyDecayFactor: 2.0        # 库存敏感的 qty 指数衰减因子 (util 越高 qty 越小)
+          obligationMinQty: 10.0     # 做市义务最小手数
+          obligationMaxSpreadTicks: 10
+          obligationOnlyL0: true     # 义务报价仅 L0
+          alwaysObligation: true     # 始终履行义务
+
+        # ========================================================
+        # 组合管理参数 (FutuPortfolio)
+        # ========================================================
+        portfolio:
+          maxDelta: 30               # 组合最大 Delta (软指标)
+          hedgeRatio: 1.0            # 对冲比率
+          hedgeDeltaThreshold: 0.8   # Delta 利用率触发对冲
+          hedgeCooldownMs: 5000      # 对冲冷却 (ms)
+
+        # ========================================================
+        # 风控参数 (FutuRiskMonitor)
+        # ========================================================
+        risk:
+          maxExposure: 20000000.0    # 最大敞口 (0=禁用)
+          maxDailyLoss: -200000.0    # 日最大亏损 (正负均可, 内部取 abs)
+          frequency:
+            maxOrdersPerSec: 50      # 每秒最大下单数
+            maxCancelsPerSec: 30     # 每秒最大撤单数
+            maxTradesPerSec: 20      # 每秒最大成交数
+            cooldownMs: 30000        # 风控触发后恢复冷却
+            checkIntervalMs: 5000    # 恢复检查间隔
+            recoveryThreshold: 0.8   # 恢复阈值 (利用率)
+            maxDeltaChangePerSec: 50.0
+            deltaRateWindowSec: 10
+            deltaRateCooldownMs: 5000
+            maxRecoveryCount: 3      # 每 session 最大自动恢复次数
+            pnlRecoveryRatio: 0.5
+            maxLossForRecovery: 0    # 0=不限制
+            positionBreachPauseThreshold: 1.2
+            deltaCriticalMult: 1.5   # Delta 硬限制倍数
+            deltaWarningMult: 0.8    # Delta 软警告倍数
+            # R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
+            positionWarningL1: 0.8   # util≥0.8 → WIDEN_SPREAD ×1.2 (soft check, breach 前预警)
+            positionWarningL2: 0.9   # util≥0.9 → WIDEN_SPREAD ×1.5
+
+        # ========================================================
+        # 收盘平仓参数 (CloseoutOrchestrator + CloseoutExecutor)
+        # ========================================================
+        closeout:
+          minutesBefore: 2           # 收盘前 N 分钟触发
+          flattenPosition: true      # 是否平仓
+          maxRetries: 10             # 最大重试次数
+          retryIntervalMs: 3000      # 重试间隔 (ms)
+          nightMinutesBefore: 2      # 夜盘收盘前 N 分钟
+          # CloseoutExecutor 渐进式参数
+          drainTimeoutMs: 3000       # 排空超时
+          depthRatioPassive: 0.3     # 被动档深度比例
+          depthRatioMid: 0.5         # 中间档深度比例
+          depthRatioAggressive: 0.8  # 激进档深度比例
+          sweepThresholdMs: 5000     # 扫单触发时间
+          sweepTicks: 3              # 扫单穿透 tick 数
+          useFak: true               # 使用 FAK 订单
+
+        # ========================================================
+        # 性能监控参数
+        # ========================================================
+        performance:
+          latencyThreshold: 1000000  # 延迟告警阈值 (ns)
+          enabled: false             # 是否启用性能监控
+
+        # ========================================================
+        # 下单控制
+        # ========================================================
+        orderErrorThreshold: 3        # 下单错误熔断阈值
+        maxOrders: 32                # 最大同时挂单数
+        stpMinPriceGap: 1.0          # 自成交防护最小价差
+
+        # ========================================================
+        # 模块开关 — 唯一权威位置在 coordinator.yaml
+        # ------------------------------------------------------------
+        # config.yaml 不再承载任何模块开关, 避免多源错配。
+        #   策略级开关(5个)+use_signal_aggregator+useHedging → coordinator 根级
+        #   模块级开关(toxicity/spreadOptimizer/adaptive) → coordinator.modules.<name>.enabled
+        # ========================================================
+
+        # ========================================================
+        # 外部配置文件引用
+        # ========================================================
+        coordinatorConfig: ./coordinator.yaml
+        spreadArbitrageConfig: ./spread_arbitrage.yaml

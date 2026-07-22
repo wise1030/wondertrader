@@ -69,6 +69,23 @@ void FutuRiskMonitor::recordTrade()
     _trade_times.try_push(now);
 }
 
+void FutuRiskMonitor::pruneRateWindows(uint64_t now)
+{
+    uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
+    while (auto item = _order_times.try_peek())
+    {
+        if (*item < cutoff) _order_times.try_pop(); else break;
+    }
+    while (auto item = _cancel_times.try_peek())
+    {
+        if (*item < cutoff) _cancel_times.try_pop(); else break;
+    }
+    while (auto item = _trade_times.try_peek())
+    {
+        if (*item < cutoff) _trade_times.try_pop(); else break;
+    }
+}
+
 void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::string& message)
 {
     // Log the alert
@@ -84,10 +101,16 @@ void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::st
 std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio)
 {
     std::vector<RiskViolation> violations;
+    checkRiskLimits(portfolio, violations);
+    return violations;
+}
+
+void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vector<RiskViolation>& violations)
+{
+    violations.clear();
     violations.reserve(6);  // P-5: 预分配，避免6次push_back的重分配
-    
     if (!portfolio)
-        return violations;
+        return;
     
     const PortfolioParams& params = portfolio->getParams();
     uint64_t ts = _current_time.load(std::memory_order_relaxed);
@@ -138,7 +161,8 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     // 跨品种多空不能简单对冲，毛暴露更准确反映实际风险
     //==========================================================================
     double exposure = portfolio->getTotalGrossExposure();
-    if (exposure > params.max_exposure)
+    // max_exposure > 0 防护: 配 0 表示禁用, 否则 exposure>0 恒真 → 每 tick 误报
+    if (params.max_exposure > 0 && exposure > params.max_exposure)
     {
         RiskViolation v;
         v.type = RiskLimitType::EXPOSURE;
@@ -160,7 +184,8 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     // 硬指标：Daily Loss（不可逆，需人工干预）
     //==========================================================================
     double pnl = portfolio->getTotalPnL();
-    if (pnl < -params.max_loss)
+    // max_loss > 0 防护: 配 0 表示禁用, 否则任何浮亏都触发 IRREVERSIBLE halt
+    if (params.max_loss > 0 && pnl < -params.max_loss)
     {
         RiskViolation v;
         v.type = RiskLimitType::DAILY_LOSS;
@@ -177,6 +202,8 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     
     // Check rate limits (using atomic values)
     // P2-1: 直接用 ring buffer size() 替代 atomic 双轨计数
+    // 读侧先剔除过期样本: 滑窗只在事件到达时推进会导致停止报单后误报持续
+    pruneRateWindows(ts);
     uint32_t orders = static_cast<uint32_t>(_order_times.size());
     uint32_t cancels = static_cast<uint32_t>(_cancel_times.size());
     uint32_t trades = static_cast<uint32_t>(_trade_times.size());
@@ -242,15 +269,33 @@ std::vector<RiskViolation> FutuRiskMonitor::checkRiskLimits(const FutuPortfolio*
     
     // 注意：单合约 Delta 是软指标，不产生 violation
     // Delta 超限时通过 skew 偏移和日志警告处理，不进行风控 block
-    
-    return violations;
 }
 
-bool FutuRiskMonitor::checkRateLimits() const
+bool FutuRiskMonitor::checkRateLimits()
 {
+    pruneRateWindows(_current_time.load(std::memory_order_relaxed));
     return _order_times.size() < _rate_limits.max_orders_per_sec &&
            _cancel_times.size() < _rate_limits.max_cancels_per_sec &&
            _trade_times.size() < _rate_limits.max_trades_per_sec;
+}
+
+// R2.2: 策略性软响应 — delta utilization 软警告区间 (breach 前的渐进式加宽 spread).
+//   设计哲学: WIDEN_SPREAD 是策略行为 (调整报价), 不是硬风控;
+//   在 util 0.8/0.9 时触发, 避免 breach 后才响应 (那时已需要 BLOCK/PAUSE).
+RiskAction FutuRiskMonitor::checkSoftLimits(const FutuPortfolio* portfolio) const
+{
+    if (!portfolio) return RiskAction::NONE;
+    const auto& params = portfolio->getParams();
+    if (params.portfolio_max_delta <= 0) return RiskAction::NONE;
+
+    double absDelta = std::abs(portfolio->getTotalDelta());
+    double util = absDelta / params.portfolio_max_delta;
+
+    if (util >= _rate_limits.position_warning_l2)
+        return RiskAction::WIDEN_SPREAD;  // L2: case 内设 ×2.0
+    if (util >= _rate_limits.position_warning_l1)
+        return RiskAction::WIDEN_SPREAD;  // L1: case 内设 ×1.5
+    return RiskAction::NONE;
 }
 
 RiskAction FutuRiskMonitor::determineAction(const std::vector<RiskViolation>& violations) const
@@ -335,7 +380,22 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
         outCategory = RiskCategory::REVERSIBLE;
         return RiskAction::PAUSE_QUOTING;
     }
-    
+
+    // R2.3: 在单向 BLOCK 之前, 先检查 breachCount 是否需要升级到 FLATTEN.
+    //   多类 BREACH 同时发生 (breachCount >= flatten_threshold) → 强平,
+    //   比单方向 block 更激进: 撤单 + 停 arb + anchor 强平.
+    //   (此前为死代码: 早返回拦截了升级路径, FLATTEN 永远不可达)
+    int breachCount = 0;
+    for (const auto& v : violations)
+    {
+        if (v.severity == RiskSeverity::BREACH) breachCount++;
+    }
+    if (breachCount >= _rate_limits.flatten_threshold)
+    {
+        outCategory = RiskCategory::REVERSIBLE;
+        return RiskAction::FLATTEN_POSITION;
+    }
+
     // Block specific direction
     if (long_breach)
     {
@@ -347,38 +407,15 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
         outCategory = RiskCategory::REVERSIBLE;
         return RiskAction::BLOCK_SIDE_SHORT;
     }
-    
-    // Check specific contract breach
-    if (contract_breach)
-    {
-        outCategory = RiskCategory::REVERSIBLE;
-        return RiskAction::BLOCK_CONTRACT_OPENING;
-    }
-    
-    // 4. Count remaining breaches for tiered response
-    int breachCount = 0;
-    for (const auto& v : violations)
-    {
-        if (v.severity == RiskSeverity::BREACH)
-            breachCount++;
-    }
-    
-    if (breachCount >= _rate_limits.flatten_threshold)
-    {
-        outCategory = RiskCategory::REVERSIBLE;
-        return RiskAction::FLATTEN_POSITION;
-    }
-    if (breachCount >= _rate_limits.pause_threshold)
-    {
-        outCategory = RiskCategory::REVERSIBLE;
-        return RiskAction::PAUSE_QUOTING;
-    }
+
+    // 4. Count remaining breaches for tiered response (WARNING-only 升级路径)
+    // 这一段处理 WARNING severity (BREACH 已在上面返回)
     if (breachCount >= _rate_limits.widen_threshold)
     {
         outCategory = RiskCategory::REVERSIBLE;
         return RiskAction::WIDEN_SPREAD;
     }
-    
+
     // Only warnings
     outCategory = RiskCategory::REVERSIBLE;
     return RiskAction::WARN;
@@ -391,7 +428,8 @@ void FutuRiskMonitor::haltTrading(RiskCategory category, double pnl_snapshot)
     _halt_timestamp = _current_time.load(std::memory_order_relaxed);
     _halt_pnl_snapshot = pnl_snapshot;
     _was_loss_triggered = (category == RiskCategory::IRREVERSIBLE) && (pnl_snapshot < 0);
-    _recovery_count = 0;  // Reset recovery count on new halt
+    // 不在此处重置 _recovery_count — 旧代码每次 halt 清零,
+    // 使 max_recovery_count(每 session 上限)形同虚设. 计数由 resetDaily 重置.
     
     const char* category_str = (category == RiskCategory::IRREVERSIBLE) ? "IRREVERSIBLE" : "REVERSIBLE";
     broadcastAlert("TRADING_HALTED", 
@@ -605,6 +643,9 @@ void FutuRiskMonitor::resetDaily()
     _delta_snapshot_head = 0;
     _delta_rate_breached.store(false, std::memory_order_relaxed);
     _delta_rate_breach_time = 0;
+
+    // 新 session 重置自动恢复计数(每 session 最多 max_recovery_count 次)
+    _recovery_count = 0;
     
     if (was_irreversible)
     {
@@ -730,6 +771,9 @@ double FutuRiskMonitor::getDeltaChangeRate() const
 
 bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
 {
+    // B3 fix: detection-only — does NOT directly pause/resume quoting.
+    // Coordinator::checkRisk manages TradingState transitions based on checkDeltaRate().
+    // This avoids dual recovery paths (RiskMonitor _quoting_paused vs Coordinator RISK_HALTED).
     if (_rate_limits.max_delta_change_per_sec <= 0)
         return false;
     
@@ -740,11 +784,10 @@ bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
     {
         _delta_rate_breached.store(true, std::memory_order_relaxed);
         _delta_rate_breach_time = _current_time.load(std::memory_order_relaxed);
-        pauseQuoting();
         broadcastAlert("DELTA_RATE_BREACH",
-            fmt::format("Delta change rate {:.2f}/s exceeds limit {:.2f}/s, quoting paused",
+            fmt::format("Delta change rate {:.2f}/s exceeds limit {:.2f}/s",
                 rate, _rate_limits.max_delta_change_per_sec));
-        WTSLogger::warn("[RISK] Delta rate breach: {:.2f}/s > {:.2f}/s, quoting paused",
+        WTSLogger::warn("[RISK] Delta rate breach: {:.2f}/s > {:.2f}/s",
             rate, _rate_limits.max_delta_change_per_sec);
         return true;
     }
@@ -756,11 +799,7 @@ bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
         if (!breached && (now - _delta_rate_breach_time) >= cooldownMs)
         {
             _delta_rate_breached.store(false, std::memory_order_relaxed);
-            if (_quoting_paused.load(std::memory_order_relaxed))
-            {
-                resumeQuoting();
-                WTSLogger::info("[RISK] Delta rate recovered, quoting resumed");
-            }
+            WTSLogger::info("[RISK] Delta rate recovered after cooldown");
         }
     }
     

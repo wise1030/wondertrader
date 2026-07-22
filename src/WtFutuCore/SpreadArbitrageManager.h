@@ -60,7 +60,11 @@ struct SpreadArbitrageConfig
     
     // Integration settings
     double mm_enhancement_weight;   ///< Weight of MM enhancement signals
-    
+
+    // A10: 开仓信号最低利润门槛 (ticks), 语义 = 2×(taker_spread+fee) - maker_rebate (见 ARB_SELF_CLOSE_DESIGN §4.4)
+    // 经 setMinProfitThreshold 接线到 AsyncArbitrageExecutor (价格调整成本超过此阈值则拒单)
+    double min_profit_threshold_ticks;
+
     SpreadArbitrageConfig()
         : enabled(true)
         , enhance_market_making(true)
@@ -71,6 +75,7 @@ struct SpreadArbitrageConfig
         , min_signal_confidence(0.3)
         , signal_cooldown_ms(1000)
         , mm_enhancement_weight(0.5)
+        , min_profit_threshold_ticks(1.0)
     {}
 };
 
@@ -83,10 +88,9 @@ struct StrategyInstance
     std::string pair_id;
     ArbitrageStrategy strategy_type;
     
-    std::unique_ptr<MeanReversionStrategy> mean_reversion;
-    std::unique_ptr<TrendFollowingStrategy> trend_following;
-    std::unique_ptr<PairsTradingStrategy> pairs_trading;
-    std::unique_ptr<StatisticalArbStrategy> statistical_arb;
+    /// 策略插件列表 (hybrid 模式可多个, 单策略模式取 front)
+    /// 替代原先 4 个类型成员 + else-if 链, 新增策略无需改本结构
+    std::vector<std::unique_ptr<ISpreadStrategy>> strategies;
     
     StrategyInstance() = default;
     StrategyInstance(StrategyInstance&&) = default;
@@ -105,7 +109,7 @@ using RiskAlertCallback = std::function<void(const RiskAlert&)>;
 
 /// Callback for quoting adjustments
 using QuotingAdjustCallback = std::function<void(const std::string& pair_id, 
-                                                  const QuotingAdjustment&)>;
+                                                   const QuotingAdjustment&)>;
 
 //==============================================================================
 // Spread Arbitrage Manager
@@ -191,6 +195,12 @@ public:
                         double leg1_pos, double leg2_pos,
                         double unrealized_pnl);
     
+    /// 从注入的 Portfolio(SSOT) 回填所有 pair 的腿持仓 → spread_position。
+    /// 每 tick 调用一次(processSpreadArbitrage), 使策略的退出/止损分支与
+    /// 风控仓位检查能读到真实仓位。旧代码 updatePosition 无调用者,
+    /// spread_position 恒 0, 全部退出/止损分支为死代码.
+    void refreshPositionsFromPortfolio();
+    
     /// Get current state for a pair
     SpreadState getSpreadState(const std::string& pair_id) const;
     
@@ -212,6 +222,11 @@ public:
     /// @param pair_id Spread pair id (from consumePairTag)
     /// @param filled_qty Filled quantity (absolute, single-leg fill)
     void onArbOrderFilled(const std::string& pair_id, double filled_qty);
+    
+    /// 信号在执行器侧被丢弃(未提交任何订单)时释放 in_flight。
+    /// B-3 门在信号通过时即置 in_flight; 若执行器因 confidence 过滤/调价超限/
+    /// 队列满而丢弃, 不回收则该 pair 卡死至超时(60s+), 期间完全禁发.
+    void onArbSignalDropped(const std::string& pair_id);
 
     /// Configure in-flight timeout in milliseconds. Defaults to 60000 (60 seconds).
     /// Once elapsed, in_flight_qty is forcibly reset (defense against stuck orders
@@ -279,14 +294,20 @@ private:
     MmEnhancerConfig _mm_config;
     
     // Statistical sub-strategy default parameters (from config file)
+    // A9: 作为 pair 级参数的默认值来源 (pair 级未配置时回落), 键名与 spread_arbitrage.yaml 对齐
     uint32_t _default_mr_half_life = 100;
     double   _default_mr_entry_threshold = 2.0;
     double   _default_mr_exit_threshold = 0.5;
+    double   _default_mr_stop_loss_z = 4.0;
+    double   _default_mr_add_safety_ratio = 0.75;
     uint32_t _default_pt_correlation_window = 100;
     double   _default_pt_min_correlation = 0.7;
     uint32_t _default_pt_spread_window = 50;
+    double   _default_pt_entry_threshold = 2.0;
     uint32_t _default_tf_ma_period = 20;
     double   _default_tf_breakout_threshold = 1.5;
+    double   _default_tf_stop_loss_pct = 0.02;
+    uint32_t _default_tf_max_trend_bars = 50;
     
     //==========================================================================
     // Components
@@ -308,7 +329,9 @@ private:
     //==========================================================================
     
     wtp::wt_hashmap<std::string, SpreadState> _pair_states;  ///< Spread state per pair
-    mutable std::atomic_flag _pair_states_spin = ATOMIC_FLAG_INIT;  ///< Protects _pair_states
+    // alignas(64)+填充: 主/arb 线程高频争用, 隔离缓存行防 false sharing
+    alignas(64) mutable std::atomic_flag _pair_states_spin = ATOMIC_FLAG_INIT;  ///< Protects _pair_states
+    char _pair_states_spin_pad[64]{};
      
     //==========================================================================
     // Signal State
@@ -320,7 +343,7 @@ private:
     //==========================================================================
     // Callbacks
     //==========================================================================
-    
+
     SpreadSignalCallback _signal_callback;
     RiskAlertCallback _alert_callback;
     QuotingAdjustCallback _quoting_callback;
@@ -360,7 +383,8 @@ private:
 
     /// Per-pair arb state (intent + in-flight tracking).
     wtp::wt_hashmap<std::string, PairArbState> _pair_arb_states;
-    mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
+    alignas(64) mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
+    char _pair_arb_spin_pad[64]{};
 
     /// Pairs whose in_flight timed out and need cleanup (cancel pending legs).
     /// UftFutuMmStrategy polls this via popTimedOutPairs() each tick.
@@ -370,6 +394,70 @@ private:
     /// reset. Default: 60 seconds (60000 ms). Compared against `current_time`
     /// passed to applyB3Gate. Units MUST match.
     uint64_t _in_flight_timeout_ms{60000ULL};
+
+    //==========================================================================
+    // C0: 分级平仓配置 (arb_close yaml 节点加载, 默认 enabled=false = 纯 B-3)
+    //==========================================================================
+    ArbCloseConfig _arb_close_cfg;
+
+    //==========================================================================
+    // B1: ArbIntent 实时通道 (arb 线程写, 主线程读)
+    //==========================================================================
+public:
+    struct CloseIntent {
+        std::string pair_id;
+        int      direction = 0;   ///< +1 = 平多 spread (卖leg1买leg2), -1 = 平空
+        double   qty = 0;
+        uint64_t set_time = 0;    ///< ms
+    };
+    /// 平仓信号通过 B-3 门时设置 (applyB3Gate 内, arb 线程)
+    void setActiveCloseIntent(const std::string& pair_id, int direction, double qty, uint64_t now_ms);
+    /// 成交完毕/超时/拒单/撤单时清理
+    void clearActiveCloseIntent(const std::string& pair_id);
+    /// 该合约是否有活跃平仓 intent (经 1:N 映射, any-match; 主线程读)
+    bool hasActiveCloseIntent(const std::string& leg_code) const;
+    /// 该合约的平仓方向: 0=无, +1=arb 正在买该 leg, -1=arb 正在卖该 leg (B2 协同用)
+    int  getArbCloseDirection(const std::string& leg_code) const;
+
+    //==========================================================================
+    // B5: 过冲保险丝 (事后兜底)
+    //==========================================================================
+    /// Portfolio sign-flip 检测回调 (主线程, onPositionUpdate 链上).
+    /// 撤该 pair 单由 bridge 经 popOvershootPairs 轮询执行 (与 in_flight 超时同模式).
+    void onOvershootDetected(const std::string& leg_code);
+    /// 该合约是否属于任何套利 pair 的腿
+    bool isLegInActivePair(const std::string& code) const;
+    /// pair 是否在过冲冷却期 (applyB3Gate 检查, 冷却期抑制一切信号)
+    bool isInOvershootCooldown(const std::string& pair_id) const;
+    /// 弹出待撤单的过冲 pair (bridge 每 tick 轮询)
+    bool popOvershootPairs(std::vector<std::string>& out_pairs);
+
+    //==========================================================================
+    // B6: 一合约多 pair 聚合查询 (1:N 映射)
+    //==========================================================================
+    /// 单 pair 当前 z-score (无该 pair 返回 0)
+    double getPairZscore(const std::string& pair_id) const;
+    /// 该合约所属全部 pair 的聚合 z-score (|z| 最大者, 响应最强信号)
+    double getAggregateZscore(const std::string& leg_code) const;
+
+    /// B6: leg 适配版 getQuotingAdjustment (取该 leg 首个 pair; 观测模式用)
+    QuotingAdjustment getQuotingAdjustmentForLeg(const std::string& leg_code, uint64_t now_ms);
+
+    //==========================================================================
+    // C0 配置访问
+    //==========================================================================
+    const ArbCloseConfig& getArbCloseConfig() const { return _arb_close_cfg; }
+
+private:
+    /// B1: pair_id → 活跃平仓 intent (spin lock 保护, 跨线程)
+    wtp::wt_hashmap<std::string, CloseIntent> _active_close_intents;
+    alignas(64) mutable std::atomic_flag _intent_spin = ATOMIC_FLAG_INIT;
+    char _intent_spin_pad[64]{};
+
+    /// B5: pair_id → 冷却截止时刻 (ms, epoch)
+    wtp::wt_hashmap<std::string, uint64_t> _overshoot_cooldowns;
+    /// B5: 待撤单的过冲 pair (bridge 轮询)
+    std::vector<std::string> _overshoot_pairs;
 
 public:
     /// Pop pairs whose in_flight timed out (for external cancel cleanup).

@@ -13,6 +13,7 @@
 #pragma once
 
 #include "SpreadArbitrageTypes.h"
+#include "ISpreadStrategy.h"
 #include "SpreadCalculator.h"
 #include "../Share/RingBuffer.hpp"
 #include <memory>
@@ -125,11 +126,31 @@ struct FeaturePerformance
 // Statistical Arbitrage Strategy
 //==============================================================================
 
-class StatisticalArbStrategy
+class StatisticalArbStrategy : public ISpreadStrategy
 {
 public:
     StatisticalArbStrategy();
     ~StatisticalArbStrategy() = default;
+    
+    //==========================================================================
+    // ISpreadStrategy Interface
+    //==========================================================================
+    
+    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time) override;
+    
+    void update(const SpreadState& state, uint64_t timestamp) override
+    {
+        updateState(state, timestamp);
+    }
+    
+    void configure(const SpreadPairConfig& cfg) override
+    {
+        _config.max_position = cfg.max_spread_position;
+    }
+    
+    void reset() override;
+    
+    const char* typeName() const override { return "statistical_arb"; }
     
     //==========================================================================
     // Configuration
@@ -144,13 +165,6 @@ public:
     
     /// Update with spread state
     void updateState(const SpreadState& state, uint64_t timestamp);
-    
-    //==========================================================================
-    // Signal Generation
-    //==========================================================================
-    
-    /// Generate trading signal
-    SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time);
     
     //==========================================================================
     // Feature Calculation
@@ -172,11 +186,6 @@ public:
     /// Get feature performance
     const FeaturePerformance& getFeaturePerformance() const { return _performance; }
     
-    //==========================================================================
-    // State
-    //==========================================================================
-    
-    void reset();
     static constexpr const char* getName() { return "StatisticalArb"; }
     
 private:

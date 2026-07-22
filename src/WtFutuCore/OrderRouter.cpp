@@ -198,6 +198,19 @@ OrderSubmitResult OrderRouter::submitExitShort(wtp::IUftStraCtx* ctx,
 
 void OrderRouter::cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid)
 {
+    // 标记 pending_cancel (与 cancelAllBySource/cancelByPair 一致),
+    // 使 getActiveOrders/totalActiveOrders 在 cancel-ack 窗口内不再视其为活跃.
+    for (auto& kv : _active_orders)
+    {
+        for (auto& info : kv.second)
+        {
+            if (info.localid == localid && !info.pending_cancel)
+            {
+                info.pending_cancel = true;
+                break;
+            }
+        }
+    }
     ctx->stra_cancel(localid);
 }
 
@@ -218,6 +231,59 @@ void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
             ctx->stra_cancel(info.localid);
         }
     }
+}
+
+void OrderRouter::registerPairOrder(uint32_t localid, const std::string& pair_id)
+{
+    _oid_to_pair[localid] = pair_id;
+}
+
+size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id)
+{
+    // 收集该 pair 全部活跃 localid (含历史加仓组, A7)
+    std::vector<uint32_t> ids;
+    ids.reserve(4);
+    for (const auto& kv : _oid_to_pair)
+    {
+        if (kv.second == pair_id)
+            ids.push_back(kv.first);
+    }
+    if (ids.empty()) return 0;
+
+    auto key = static_cast<int>(Source::ARBITRAGE);
+    auto orders_it = _active_orders.find(key);
+
+    size_t n = 0;
+    for (uint32_t oid : ids)
+    {
+        bool sent = false;
+        if (orders_it != _active_orders.end())
+        {
+            for (auto& info : orders_it->second)
+            {
+                if (info.localid == oid)
+                {
+                    if (!info.pending_cancel)
+                    {
+                        info.pending_cancel = true;
+                        ctx->stra_cancel(oid);
+                        ++n;
+                    }
+                    sent = true;
+                    break;
+                }
+            }
+        }
+        // 订单不在活跃表 (可能已 finalize 但 tag 未清): 防御性补撤, 幂等.
+        // 旧条件额外要求 orders_it==end (ARBITRAGE 桶不存在), 但桶在构造时预创建,
+        // 恒不成立 → 防御性补撤不可达. 改为仅判 !sent.
+        if (!sent)
+        {
+            ctx->stra_cancel(oid);
+            ++n;
+        }
+    }
+    return n;
 }
 
 bool OrderRouter::checkSelfTrade(const char* code, bool is_buy, double price) const
@@ -242,6 +308,7 @@ void OrderRouter::onOrderDone(uint32_t localid)
 
     Source src = src_it->second;
     _order_source_map.erase(src_it);
+    _oid_to_pair.erase(localid);  // A7: 同步清理 pair 映射
 
     auto key = static_cast<int>(src);
     auto orders_it = _active_orders.find(key);
@@ -260,12 +327,11 @@ void OrderRouter::onOrderDone(uint32_t localid)
     }
 }
 
-const std::vector<ActiveOrderInfo>& OrderRouter::getActiveOrders(Source src) const
+std::vector<ActiveOrderInfo> OrderRouter::getActiveOrders(Source src) const
 {
-    static const std::vector<ActiveOrderInfo> empty;
     auto key = static_cast<int>(src);
     auto it = _active_orders.find(key);
-    if (it == _active_orders.end()) return empty;
+    if (it == _active_orders.end()) return {};
     // Filter out pending_cancel orders from the returned list
     std::vector<ActiveOrderInfo> result;
     for (const auto& info : it->second)

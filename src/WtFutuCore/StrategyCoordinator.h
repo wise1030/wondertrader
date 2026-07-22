@@ -16,6 +16,7 @@
 #include "SpreadOptimizer.h"
 #include "AsyncArbitrageExecutor.h"
 #include "TradingState.h"
+#include "FutuRiskMonitor.h"
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -39,6 +40,7 @@ class PerformanceMonitor;
 class SignalAggregator;
 struct ContractState;
 class OrderRouter;
+class SpreadArbitrageManager;
 // TradingState is included via TradingState.h
 
 /// Processing context for a single tick
@@ -59,6 +61,13 @@ struct TickContext
     double tick_size;
     double upper_limit;     ///< P0-2: 涨停价
     double lower_limit;     ///< P0-2: 跌停价
+
+    // 每 tick 一次性解析的组件指针 (processTick 入口解析, 各 Stage 复用,
+    // 消除每 tick 对 unordered_map<std::string> 的重复字符串哈希查找)
+    class SignalAggregator* aggregator = nullptr;
+    class MarketDataContext* book = nullptr;
+    class FutuQuoter* quoter = nullptr;
+    class SpreadOptimizer* spread_opt = nullptr;
 
     TickContext()
         : bid_px(0), ask_px(0), mid(0), timestamp(0), time_hms(0), date(0)
@@ -178,6 +187,8 @@ public:
     void setRiskMonitor(FutuRiskMonitor* monitor) { _risk_monitor = monitor; }
     void setToxicityDetector(ToxicFlowDetector* detector) { _toxicity = detector; }
     void setArbExecutor(AsyncArbitrageExecutor* arb) { _arb_executor = arb; }
+    /// B2: 注入套利管理器 (查询平仓 intent / 聚合 z-score; 生命周期由 UftFutuMmStrategy 保证)
+    void setArbManager(SpreadArbitrageManager* mgr) { _arb_manager = mgr; }
     void setPerformanceMonitor(PerformanceMonitor* monitor) { _perf_monitor = monitor; }
     void setSelfTradeCalibrator(SelfTradeCalibrator* calibrator) { _self_trade_calibrator = calibrator; }
     void setCorrelationManager(CorrelationManager* manager) { _correlation_manager = manager; }
@@ -198,7 +209,8 @@ public:
     void setOrderBooks(std::unordered_map<std::string, std::unique_ptr<MarketDataContext>>* books) { _market_data = books; }
     void setSignalAggregators(std::unordered_map<std::string, std::unique_ptr<SignalAggregator>>* aggregators) { _signal_aggregators = aggregators; }
 
-    ProcessingResult processTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick);
+    ProcessingResult processTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick,
+                                  uint64_t now_ms = 0);
     
     bool processCloseout(wtp::IUftStraCtx* ctx, TickContext& tc);
     bool preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
@@ -229,6 +241,11 @@ public:
     void resetSession();
     void resetDaily();
     
+    /// 外部恢复路径 (UftFutuMmStrategy::on_trade / on_channel_ready) 绕过
+    /// coordinator 的 checkRisk 自动恢复, 需调用本方法同步重置协调器本地风控状态,
+    /// 否则 _risk_spread_mult 残留 → 恢复后报价宽度被永久放大 ×1.5/×2.0.
+    void onExternalResumeFromRisk() { _risk_spread_mult = 1.0; }
+    
 private:
     CoordinatorConfig _cfg;
     FutuPortfolio* _portfolio = nullptr;
@@ -239,6 +256,7 @@ private:
     SelfTradeCalibrator* _self_trade_calibrator = nullptr;
     CorrelationManager* _correlation_manager = nullptr;
     AsyncArbitrageExecutor* _arb_executor = nullptr;
+    SpreadArbitrageManager* _arb_manager = nullptr;  // B2: 平仓 intent 查询 (可空)
     OrderRouter* _order_router = nullptr;
 
     wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* _quoters = nullptr;
@@ -269,7 +287,12 @@ private:
     
     // 日志限频
     uint64_t _last_halt_log_ms = 0;        // 上次halted日志时间戳(ms)
+    std::vector<RiskViolation> _violations_buf;  // 风控违规复用缓冲(热路径零堆分配)
     uint64_t _last_pause_diag_ms = 0;     // 上次shouldPause诊断日志时间戳(ms)
+
+    // R2: 软风控倍数 (WIDEN_SPREAD 分级设置: L1→1.5, L2→2.0; processQuoting 乘入 spread_mult;
+    // canRecover 恢复时重置 1.0). 由 checkSoftLimits (soft) 或 breachCount 升级 (hard) 设置.
+    double _risk_spread_mult = 1.0;
 };
 
 } // namespace futu

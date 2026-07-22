@@ -1,0 +1,45 @@
+# ============================================================
+# 运行时热更新参数 (共享内存同步)
+# ------------------------------------------------------------
+# 修改后无需重启策略, 通过 on_params_updated() 回调实时生效。
+# 注意: 报价参数(baseSpread/baseQty/levelQtyMultiplier/levelStep/maxDelta)会
+# 穿透到 FutuQuoter 和 Coordinator; 信号权重穿透到 AdaptiveWeightFramework。
+# ============================================================
+
+# --- 报价基础参数 ---
+baseSpread: 2.0
+baseQty: 2.0
+levelQtyMultiplier: 0.7
+levelStep: 1.0
+
+# --- 组合参数 ---
+maxDelta: 30
+
+# --- Alpha 灵敏度 ---
+alphaSensitivity: 2.0
+
+# --- 信号权重 (Layer 1 基础权重, 经 regime×IC 三层调节) ---
+ofiWeight: 0.35
+tradeWeight: 0.25
+bookImbalanceWeight: 0.20
+momentumWeight: 0.15
+leadLagWeight: 0.05
+strongThreshold: 0.7
+
+# --- GLFT 价差模型参数 ---
+confidenceWeightMin: 0.3
+confidenceWeightMax: 1.0
+phi: 0.20
+deltaSkewThreshold: 0.3
+deltaSkewFactor: 1.5
+maxSpreadMult: 3.0
+minSpreadMult: 1.0
+depthSensitivity: 0.5
+toxicitySpreadFactor: 1.0
+lowConfidenceSpreadFactor: 2.0
+
+# --- 报价粘性/保护参数 ---
+stickyThreshold: 1.0
+improveRetreatRatio: 2.0
+protectTicks: 1.0
+maxPriceDeviation: 20.0

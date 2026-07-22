@@ -175,6 +175,19 @@ public:
     void cancelAllBySource(wtp::IUftStraCtx* ctx, Source src);
 
     //==========================================================================
+    // A7: Per-pair cancel (套利 pair 粒度撤单)
+    //==========================================================================
+
+    /// 注册套利单 → pair 映射 (ArbExecutionBridge 在 tagOrderPair 时同步调用).
+    /// 支持一个 pair 多组活跃订单 (MeanReversion 加仓场景).
+    void registerPairOrder(uint32_t localid, const std::string& pair_id);
+
+    /// 撤指定 pair 的全部活跃订单 (含历史加仓组).
+    /// 替代单腿失败时的 cancelAllBySource(ARBITRAGE) — 避免误撤其它 pair 的在途单.
+    /// @return 实际发出撤单请求的数量
+    size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id);
+
+    //==========================================================================
     // Active order query (per-source)
     //==========================================================================
 
@@ -187,8 +200,13 @@ public:
     uint32_t getActiveCountBySource(Source src) const
     {
         auto it = _active_orders.find(static_cast<int>(src));
-        return it == _active_orders.end() ? 0
-            : static_cast<uint32_t>(it->second.size());
+        if (it == _active_orders.end()) return 0;
+        // 排除 pending_cancel (与 totalActiveOrders/getActiveOrders 口径一致).
+        // 否则 closeout 撤单后 ack 未回时计数不归零, inflight guard 卡死.
+        uint32_t n = 0;
+        for (const auto& info : it->second)
+            if (!info.pending_cancel) ++n;
+        return n;
     }
 
     //==========================================================================
@@ -209,12 +227,19 @@ public:
     /// Called when an order is filled or cancelled — removes from active tracking
     void onOrderDone(uint32_t localid);
 
+    /// 查询订单来源 (须在 onOrderDone 移除之前调用)
+    bool isOrderFromSource(uint32_t localid, Source src) const
+    {
+        auto it = _order_source_map.find(localid);
+        return it != _order_source_map.end() && it->second == src;
+    }
+
     //==========================================================================
     // Accessors
     //==========================================================================
 
     /// Get all active orders for a given source
-    const std::vector<ActiveOrderInfo>& getActiveOrders(Source src) const;
+    std::vector<ActiveOrderInfo> getActiveOrders(Source src) const;
 
     /// Get rate counter for a source (mutable for direct manipulation)
     RateCounter& getRateCounter(Source src);
@@ -247,6 +272,9 @@ private:
 
     /// Global localid → source mapping for fast lookup on order done
     wtp::wt_hashmap<uint32_t, Source> _order_source_map;
+
+    /// A7: localid → pair_id 映射 (cancelByPair 用, onOrderDone 时清理)
+    wtp::wt_hashmap<uint32_t, std::string> _oid_to_pair;
 
     /// MM order tracker reference (for self-trade prevention)
     UnifiedOrderTracker* _mm_tracker = nullptr;

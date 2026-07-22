@@ -73,11 +73,23 @@ public:
             return;
         }
         
-        // Store price history
-        _price_history.push(mid);
+        // 增量对数收益 + 滚动和: O(1)/tick
+        // 旧代码每 tick 对全部历史(≤127)重算 std::log, 相同相邻对反复计算.
+        // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异, 数学性质:
+        //   - 可加性: log(P3/P1) = log(P3/P2) + log(P2/P1)
+        //   - 对称性: 涨跌相同幅度, 对数收益率绝对值相同
+        if (_last_mid > 0)
+        {
+            double lr = std::log(mid / _last_mid);
+            if (_log_returns.full())
+                _log_return_sum -= _log_returns.front();
+            _log_returns.push(lr);
+            _log_return_sum += lr;
+        }
+        _last_mid = mid;
         
-        // Calculate momentum if enough history
-        if (_price_history.size() >= 10)
+        size_t n = _log_returns.size();
+        if (n >= 9)  // 收益数 = 价格数-1, 等价于原 _price_history.size() >= 10
         {
             calculateMomentum();
             _result.timestamp = ts;
@@ -87,8 +99,6 @@ public:
         {
             _result.valid = false;  // 样本不足，不纳入加权计算
         }
-        
-        _last_mid = mid;
     }
     
     const SignalResult& result() const override { return _result; }
@@ -100,7 +110,8 @@ public:
     
     void reset() override
     {
-        _price_history.clear();
+        _log_returns.clear();
+        _log_return_sum = 0;
         _last_mid = 0;
         _ema_momentum = 0;
         _result = AlphaSignalResult();
@@ -124,49 +135,28 @@ private:
     bool _enabled;
     AlphaSignalResult _result;
     
-    RingBuffer<double, 128> _price_history;
+    RingBuffer<double, 128> _log_returns;   ///< 对数收益环形缓冲
+    double _log_return_sum = 0;             ///< 滚动和(满环时扣减最旧)
     double _last_mid;
     double _ema_momentum;
     
     void calculateMomentum()
     {
-        size_t n = _price_history.size();
+        size_t n = _log_returns.size();
+        if (n == 0) return;
         
-        // 改用对数收益率替代百分比变化率
-        // 百分比变化率 (P_t - P_{t-1})/P_{t-1} * 100 对高价合约信号被压制：
-        //   同样1个tick变动，价格3000的合约变化率0.033%，价格30000的合约仅0.0033%。
-        // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异，数学性质更优：
-        //   - 可加性: log(P3/P1) = log(P3/P2) + log(P2/P1)
-        //   - 对称性: 涨跌相同幅度，对数收益率绝对值相同
-        // 乘以1000作为缩放因子(对数收益率通常很小，如0.0001级别)
+        // 滚动和直接取均值, 乘以1000作为缩放因子(对数收益率通常很小, 如0.0001级别)
+        double raw_momentum = _log_return_sum / static_cast<double>(n) * 1000.0;
         
-        // Calculate log returns
-        double log_return_sum = 0;
-        size_t return_count = 0;
+        // Scale and clamp to [-1, 1]
+        double momentum = std::tanh(raw_momentum);
         
-        for (size_t i = 1; i < n; ++i)
-        {
-            if (_price_history[i - 1] > 0 && _price_history[i] > 0)
-            {
-                log_return_sum += std::log(_price_history[i] / _price_history[i - 1]);
-                return_count++;
-            }
-        }
+        _result.alpha = momentum;
         
-        if (return_count > 0)
-        {
-            double raw_momentum = log_return_sum / return_count * 1000.0;
-            
-            // Scale and clamp to [-1, 1]
-            double momentum = std::tanh(raw_momentum);
-            
-            _result.alpha = momentum;
-            
-            // Update EMA momentum
-            _ema_momentum = _cfg.ema_alpha * momentum + (1 - _cfg.ema_alpha) * _ema_momentum;
-        }
+        // Update EMA momentum
+        _ema_momentum = _cfg.ema_alpha * momentum + (1 - _cfg.ema_alpha) * _ema_momentum;
         
-        _result.confidence = (n >= 20) ? 1.0 : static_cast<double>(n) / 20.0;
+        _result.confidence = (n >= 19) ? 1.0 : static_cast<double>(n + 1) / 20.0;
     }
 };
 

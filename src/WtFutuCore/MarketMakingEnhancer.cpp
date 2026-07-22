@@ -154,15 +154,9 @@ void MarketMakingEnhancer::applyDecay(uint64_t current_time)
     _quoting_state.bid_skew *= decay_factor;
     _quoting_state.ask_skew *= decay_factor;
     
-    // Reset suppression after decay
-    if (std::abs(_quoting_state.bid_skew) < 0.05)
-    {
-        _quoting_state.suppress_bid = false;
-    }
-    if (std::abs(_quoting_state.ask_skew) < 0.05)
-    {
-        _quoting_state.suppress_ask = false;
-    }
+    // B10 fix: suppress is z-score-driven (set in calculateAdjustment), NOT skew-driven.
+    // Decaying skew must not clear suppress — z-score may still be elevated.
+    // suppress flags are recalculated each tick in calculateAdjustment().
     
     _last_decay_time = current_time;
 }

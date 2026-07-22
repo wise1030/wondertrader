@@ -18,6 +18,11 @@
 #include "SpreadArbitrageTypes.h"
 #include "SpreadOptimizer.h"
 #include "TradingState.h"
+#include "FutuRiskMonitor.h"
+#include "FutuHotParamManager.h"
+#include "CloseoutOrchestrator.h"
+#include "ArbExecutionBridge.h"
+#include "../WtUftCore/EventNotifier.h"  // R1: 告警外发通道 (策略层作为组合根)
 #include <string>
 #include <vector>
 #include <memory>
@@ -54,12 +59,26 @@ class SpreadArbitrageManager;
 class UnifiedOrderTracker;
 class CloseoutExecutor;
 
+struct RiskAlert;  // R1: handleRiskAlert 参数前向声明 (定义在 SpreadRiskManager.h)
+
 // 综合信号组件
 class TickTransactionInferer;
 class SelfTradeCalibrator;
 class SyntheticSignalFusion;
 
 // R3 v2: BilateralQuoteStats 已下放到 FutuQuoter 内部，本头文件不再前向声明
+
+/// 合约信息缓存 (移到命名空间级, 供 FutuConfigLoader 填充)
+struct ContractInfo {
+    std::string code;
+    double multiplier;
+    double tick_size;
+    double max_position;      // 单合约最大持仓（硬限制）
+    double max_delta;         // 单合约 Delta 软限制（用于单合约 skew 计算）
+    double target_position;   // 单合约目标持仓 (默认0，超过时主动平仓)
+    uint32_t close_time;      // 全天收盘时间 (HHMMSS格式，白盘收盘)
+    uint32_t night_close_time;// 夜盘收盘时间 (HHMM格式，0=无夜盘，如230=02:30, 100=01:00, 2300=23:00)
+};
 
 /// 期货做市策略配置
 /// 
@@ -86,7 +105,7 @@ struct FutuMmConfig
         uint32_t num_levels;
         double base_spread;
         double base_qty;
-        double qty_decay;
+        double level_qty_multiplier;
         double level_step;
         double sticky_threshold;
         double improve_retreat_ratio;
@@ -94,7 +113,6 @@ struct FutuMmConfig
         bool price_protection;
         double protect_ticks;
         bool use_bilateral_quote;
-        double max_obligation_spread;
         // v3 软风控参数
         double qty_decay_factor;
         double obligation_min_qty;
@@ -102,11 +120,11 @@ struct FutuMmConfig
         bool obligation_only_l0;
         bool always_obligation;
         Quoting()
-            : num_levels(1), base_spread(2.0), base_qty(5.0), qty_decay(0.7)
+            : num_levels(1), base_spread(2.0), base_qty(5.0), level_qty_multiplier(0.7)
             , level_step(1.0), sticky_threshold(1.0)
             , improve_retreat_ratio(2.0), max_price_deviation(20.0)
             , price_protection(true), protect_ticks(1.0)
-            , use_bilateral_quote(false), max_obligation_spread(10.0)
+            , use_bilateral_quote(false)
             , qty_decay_factor(2.0), obligation_min_qty(10.0)
             , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
             , always_obligation(true) {}
@@ -128,8 +146,10 @@ struct FutuMmConfig
         double position_breach_pause_threshold;
         double delta_critical_mult;
         double delta_warning_mult;
+        double position_warning_l1;   ///< R2.2: util L1 → WIDEN_SPREAD ×1.5
+        double position_warning_l2;   ///< R2.2: util L2 → WIDEN_SPREAD ×2.0
         uint32_t widen_threshold;
-        uint32_t pause_threshold;
+        // H3: pause_threshold 已删除 (死参数)
         uint32_t flatten_threshold;
         uint32_t delta_rate_window_sec;
         uint32_t delta_rate_cooldown_ms;
@@ -140,8 +160,9 @@ struct FutuMmConfig
             , max_delta_change_per_sec(3.0), max_recovery_count(3)
             , pnl_recovery_ratio(0.5), max_loss_for_recovery(0)
             , position_breach_pause_threshold(1.2), delta_critical_mult(1.5)
-            , delta_warning_mult(0.8), widen_threshold(1), pause_threshold(2)
-            , flatten_threshold(3), delta_rate_window_sec(2), delta_rate_cooldown_ms(15000) {}
+            , delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9)
+            , widen_threshold(1)
+            , flatten_threshold(2), delta_rate_window_sec(2), delta_rate_cooldown_ms(15000) {}
     } risk;
     
     struct Closeout {
@@ -188,11 +209,12 @@ struct FutuMmConfig
         bool use_performance_analyzer;
         bool use_market_making;
         bool use_spread_arbitrage;
+        bool use_async_arb_thread;   // true=启动独立arb线程(实盘), false=主线程同步执行(回测)
         Modules()
             : use_spread_optimizer(true), use_toxicity_detector(true)
             , use_adaptive_param(false), use_performance_monitor(false)
             , use_performance_analyzer(false), use_market_making(true)
-            , use_spread_arbitrage(false) {}
+            , use_spread_arbitrage(false), use_async_arb_thread(true) {}
     } modules;
     
     struct OrderControl {
@@ -249,6 +271,12 @@ public:
     /// 参数热更新回调
     virtual void on_params_updated() override;
 
+    //==========================================================================
+    // R1: 告警通道注入 (WtUftRunner 注入 EventNotifier;
+    //   RiskMonitor 直达, ArbManager 经本策略层 handleRiskAlert 转发)
+    //==========================================================================
+    void setEventNotifier(wtp::EventNotifier* notifier);
+
 private:
     //==========================================================================
     // 内部方法
@@ -256,15 +284,14 @@ private:
     
     /// 初始化业务模块
     void initBusinessModules(wtp::IUftStraCtx* ctx);
-    
-    /// 执行收盘前平仓对冲
-    void executeCloseoutHedge(IUftStraCtx* ctx);
-    
+
+    /// R1: 处理 SpreadArbitrageManager 的 RiskAlert 回调, 转发到 EventNotifier
+    void handleRiskAlert(const RiskAlert& alert);
+
     /// 检查毒性并决定是否熔断
     bool checkToxicityAndCircuitBreak(IUftStraCtx* ctx);
     
     /// 处理跨期价差套利信号
-    void processSpreadArbitrage(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick);
     
     /// 处理套利成交回报
     void onSpreadTrade(IUftStraCtx* ctx, const std::string& pair_id, 
@@ -284,7 +311,7 @@ private:
     void handleLeadLagPush(const char* stdCode, WTSTickData* tick, double mid);
     
     /// Coordinator 主处理 + closeout 执行驱动
-    void handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick);
+    void handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick, uint64_t now_ms = 0);
     
 private:
     FutuMmConfig _config;
@@ -320,16 +347,13 @@ private:
     
     /// 风险监控
     std::unique_ptr<FutuRiskMonitor> _risk_monitor;
-    
-    /// closeout 对冲单只在 FLATTENING 状态首次执行一次
-    bool _closeout_hedge_executed = false;
-    // track closeout hedge order ids so on_order can distinguish them from MM cancels
-    std::unordered_set<uint32_t> _closeout_pending_ids;
-    // defer hedge to a later tick so inflight cancel/fill回执先回流
-    bool _closeout_hedge_pending = false;
-    uint32_t _closeout_hedge_wait_ticks = 0;
-    static constexpr uint32_t CLOSEOUT_HEDGE_WAIT_TICKS = 2;
 
+    /// R1: EventNotifier 指针 (WtUftRunner 注入; RiskMonitor 直达 + ArbManager 回调转发)
+    wtp::EventNotifier* _event_notifier = nullptr;
+    
+    /// 收盘平仓编排器 (closeout 驱动职责, 架构重构 C3)
+    CloseoutOrchestrator _closeout_orch;
+    
     /// 渐进式收盘对冲执行器 (urgency-driven)
     std::unique_ptr<CloseoutExecutor> _closeout_executor;
     
@@ -366,26 +390,16 @@ private:
     /// 异步套利执行器
     std::unique_ptr<AsyncArbitrageExecutor> _async_arb;
 
-    // R3 v2: BilateralQuoteStats 已下放到 Per-Quoter 值成员，本处不再持有单实例。
+    /// 套利执行桥 (套利下单编排/残腿对冲/快照同步, 架构重构 C4)
+    ArbExecutionBridge _arb_bridge;
 
-    /// 用于防止套利引擎无限追单（追踪最近下达的套利单价格）
-    wtp::wt_hashmap<std::string, double> _arb_last_order_price;
+    std::vector<RiskViolation> _violations_buf;   // 风控违规复用缓冲(零堆分配)
     
     //==========================================================================
     // 辅助数据
     //==========================================================================
     
-    // 合约信息缓存
-    struct ContractInfo {
-        std::string code;
-        double multiplier;
-        double tick_size;
-        double max_position;      // 单合约最大持仓（硬限制）
-        double max_delta;         // 单合约 Delta 软限制（用于单合约 skew 计算）
-        double target_position;   // 单合约目标持仓 (默认0，超过时主动平仓)
-        uint32_t close_time;      // 全天收盘时间 (HHMMSS格式，白盘收盘)
-        uint32_t night_close_time;// 夜盘收盘时间 (HHMM格式，0=无夜盘，如230=02:30, 100=01:00, 2300=23:00)
-    };
+    // 合约信息缓存 (ContractInfo 已移至命名空间级)
     std::vector<ContractInfo> _contract_infos;
     
     // 当前 tick 中间价缓存
@@ -437,48 +451,9 @@ private:
     // 仅包含直接影响报价价格计算的参数
     // 仓位管理/风控/对冲等参数需重启生效
 //==========================================================================
-    // 热更新参数 (数组化)
+    // 热更新参数 (已拆分至 FutuHotParamManager, 架构重构 C2)
     //==========================================================================
-    enum HotParamIndex : uint32_t {
-        HP_BASE_SPREAD = 0,
-        HP_BASE_QTY,
-        HP_QTY_DECAY,
-        HP_LEVEL_STEP,
-        HP_MAX_DELTA,
-        HP_ALPHA_SENSITIVITY,
-        HP_OFI_WEIGHT,
-        HP_TRADE_WEIGHT,
-        HP_BOOK_IMBALANCE_WEIGHT,
-        HP_MOMENTUM_WEIGHT,
-        HP_LEAD_LAG_WEIGHT,
-        HP_STRONG_THRESHOLD,
-        HP_CONFIDENCE_WEIGHT_MIN,
-        HP_CONFIDENCE_WEIGHT_MAX,
-        HP_PHI,
-        HP_DELTA_SKEW_THRESHOLD,
-        HP_DELTA_SKEW_FACTOR,
-        HP_MAX_SPREAD_MULT,
-        HP_MIN_SPREAD_MULT,
-        HP_DEPTH_SENSITIVITY,
-        HP_TOXICITY_SPREAD_FACTOR,
-        HP_LOW_CONFIDENCE_SPREAD_FACTOR,
-        HP_STICKY_THRESHOLD,
-        HP_IMPROVE_RETREAT_RATIO,
-        HP_PROTECT_TICKS,
-        HP_MAX_PRICE_DEVIATION,
-        HP_COUNT
-    };
-    
-    struct HotParamEntry {
-        const char* name;
-        double default_val;
-        double* ptr;
-    };
-    
-    HotParamEntry _hot_params[HP_COUNT];
-    
-    bool isHotChanged(HotParamIndex idx) const { return _hot_params[idx].ptr != nullptr; }
-    double hotVal(HotParamIndex idx) const { return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val; }
+    FutuHotParamManager _hot_mgr;
 };
 
 } // namespace futu

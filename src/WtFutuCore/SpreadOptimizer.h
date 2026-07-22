@@ -72,7 +72,7 @@ struct GLFTParams
         , confidence_weight_min(0.2)
         , confidence_weight_max(1.0)
         , toxicity_spread_factor(1.0)
-        , low_confidence_spread_factor(0.8)
+        , low_confidence_spread_factor(2.0)  // M8: 统一为 2.0 (低置信度应扩大 spread; 此前构造 0.8 vs yaml 2.0 行为相反)
         , low_confidence_threshold(0.3)
         , vol_scale(5.0)
         , depth_normalization(100.0)
@@ -100,7 +100,7 @@ struct GLFTParams
         p.toxicity_spread_factor = FutuConfig::readDouble(v, "toxicitySpreadFactor", 1.0);
         p.confidence_weight_min = FutuConfig::readDouble(v, "confidenceWeightMin", 0.2);
         p.confidence_weight_max = FutuConfig::readDouble(v, "confidenceWeightMax", 1.0);
-        p.low_confidence_spread_factor = FutuConfig::readDouble(v, "lowConfidenceSpreadFactor", 0.8);
+        p.low_confidence_spread_factor = FutuConfig::readDouble(v, "lowConfidenceSpreadFactor", 2.0);  // M8: 与构造默认统一
         p.low_confidence_threshold = FutuConfig::readDouble(v, "lowConfidenceThreshold", 0.3);
         p.vol_scale = FutuConfig::readDouble(v, "volScale", 5.0);
         p.depth_normalization = FutuConfig::readDouble(v, "depthNormalization", 100.0);

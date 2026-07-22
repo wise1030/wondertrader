@@ -352,6 +352,7 @@ private:
     };
     std::deque<PendingAdverse> _pending_adverse;
     uint32_t _adverse_eval_ticks = 10;  // 成交后 10 tick 评估
+    uint32_t _adverse_timeout_ms = 30000;  // 墙钟超时: 低流动性合约久等无 tick 时强制过期
     double _total_real_adverse = 0;     // 真实 adverse (价格逆向移动)
     uint32_t _real_adverse_count = 0;   // 已评估的成交数
 };

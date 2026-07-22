@@ -93,6 +93,11 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
     // Update PnL history
     _pnl_history.push(immediate_pnl);
     
+    // 按合约累计真实成交 PnL — 此前 PositionState.realized_pnl 从未写入,
+    // 导致 getPnLAttribution 的 inventory_pnl 恒为 0. 归因公式自闭合
+    // (timing_pnl 为残差, total() 恒等 _total_pnl), 此处填充真实数据不破坏一致性.
+    _positions[trade.code].realized_pnl += immediate_pnl;
+    
     // Update drawdown
     if (_total_pnl > _peak_pnl)
         _peak_pnl = _total_pnl;
@@ -143,9 +148,18 @@ void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint
         }
     }
     
-    // 清理已评估的 pending (保留未评估的)
-    while (!_pending_adverse.empty() && _pending_adverse.front().evaluated) {
-        _pending_adverse.pop_front();
+    // 清理: 已评估 或 墙钟超时(低流动性合约久等无 tick) 的 pending 一律移除.
+    // 旧代码只 pop 连续已评估 front — 中段已评估/低流动性未评估项永久残留,
+    // _pending_adverse 无上限增长 (内存泄漏).
+    {
+        uint64_t now = timestamp;
+        auto it = std::remove_if(_pending_adverse.begin(), _pending_adverse.end(),
+            [now, this](const PendingAdverse& pa) {
+                if (pa.evaluated) return true;
+                return _adverse_timeout_ms > 0 && now > pa.trade_timestamp &&
+                       (now - pa.trade_timestamp) > _adverse_timeout_ms;
+            });
+        _pending_adverse.erase(it, _pending_adverse.end());
     }
 }
 
@@ -228,8 +242,13 @@ PerformanceMetrics PerformanceAnalyzer::getMetrics() const
         double std_dev = std::sqrt(variance);
         if (std_dev > 0)
         {
-            // Annualize assuming 250 trading days
-            metrics.sharpe_ratio = mean / std_dev * std::sqrt(250);
+            // _pnl_history 是 per-trade 收益, 非 per-day. 正确年化因子 = sqrt(每年成交笔数).
+            // 每年笔数 ≈ 250 * 平均每日笔数; 旧代码 sqrt(250) 假设每日仅 1 笔,
+            // HFT 每日数千笔 → Sharpe 被系统性低估 ~sqrt(笔数) 倍.
+            double days = (_trading_days > 0) ? static_cast<double>(_trading_days) : 1.0;
+            double trades_per_day = static_cast<double>(_total_trades) / days;
+            if (trades_per_day < 1.0) trades_per_day = 1.0;
+            metrics.sharpe_ratio = mean / std_dev * std::sqrt(250.0 * trades_per_day);
         }
     }
     
@@ -275,11 +294,10 @@ PnLAttribution PerformanceAnalyzer::getPnLAttribution() const
     // Alpha PnL: PnL from trades with strong alpha signals
     attr.alpha_pnl = _alpha_pnl;
     
-    // Inventory PnL: estimated from position changes
+    // Inventory PnL: 各合约累计真实成交 PnL (recordTrade 按合约累加)
     double inv_pnl = 0;
     for (const auto& kv : _positions)
     {
-        // Simplified: estimate inventory PnL
         inv_pnl += kv.second.realized_pnl;
     }
     attr.inventory_pnl = inv_pnl;

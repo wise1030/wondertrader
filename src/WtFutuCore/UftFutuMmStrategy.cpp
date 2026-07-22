@@ -14,6 +14,7 @@
 *   - PerformanceAnalyzer: 绩效分析
 */
 #include "UftFutuMmStrategy.h"
+#include "../WtUftCore/UftStraContext.h"  // R1: dynamic_cast 获取 EventNotifier
 #include "../Includes/IUftStraCtx.h"
 #include "../Includes/WTSVariant.hpp"
 #include "../Includes/WTSDataDef.hpp"
@@ -38,6 +39,7 @@
 #include "PerformanceMonitor.h"
 #include "SpreadArbitrageManager.h"
 #include "FutuComponentFactory.h"
+#include "FutuConfigLoader.h"
 #include "SelfTradePrevention.h"
 #include "OrderRouter.h"
 #include "StrategyCoordinator.h"
@@ -137,7 +139,7 @@ UftFutuMmStrategy::UftFutuMmStrategy(const char* id)
 // P0-2.3: PortfolioContext cache - dirty on start to force first build
 , _portfolio_ctx_dirty(true)
 // 热更新参数指针初始化
-, _hot_params{}
+, _hot_mgr()
 {
 }
 
@@ -154,236 +156,45 @@ bool UftFutuMmStrategy::init(WTSVariant* cfg)
 if (!cfg)
 return false;
 
-//------------------------------------------------------------
-// 读取合约配置
-//------------------------------------------------------------
-_config.anchor_code = cfg->getCString("anchorCode");
+// 配置解析与校验已拆分至 FutuConfigLoader (架构重构 C1)
+    return FutuConfigLoader::load(cfg, _config, _contract_infos, id());
+}
 
-//------------------------------------------------------------
-// 读取配置文件路径
-//------------------------------------------------------------
+//==========================================================================
+// R1: 告警通道注入 + 套利 alert 转发 (策略层作为组合根)
+//==========================================================================
+
+void UftFutuMmStrategy::setEventNotifier(wtp::EventNotifier* notifier)
 {
-_config.coordinator_config = readString(cfg, "coordinatorConfig", "");
-_config.spread_arbitrage_config = readString(cfg, "spreadArbitrageConfig", "");
+    _event_notifier = notifier;
+    // RiskMonitor: 直达 (既有 22 处 broadcastAlert 立即生效)
+    if (_risk_monitor)
+        _risk_monitor->setEventNotifier(notifier);
+    // ArbManager: 经回调 → 本策略 handleRiskAlert → EventNotifier
+    // (解耦: ArbManager 不直接依赖 EventNotifier, 保持模块边界清晰)
+    if (_spread_arb_manager)
+    {
+        _spread_arb_manager->setAlertCallback(
+            [this](const RiskAlert& alert) { this->handleRiskAlert(alert); });
+    }
 }
 
-// 读取合约列表
-// multiplier 和 tickSize 为可选参数，如未配置则从基础数据管理模块自动获取
-WTSVariant* cfgContracts = cfg->get("contracts");
-if (cfgContracts && cfgContracts->type() == WTSVariant::VT_Array)
+void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
 {
-for (uint32_t i = 0; i < cfgContracts->size(); i++)
-{
-WTSVariant* cfgItem = cfgContracts->get(i);
+    WTSLogger::warn("[ARB_RISK] pair={} level={} type={}: {}",
+        alert.pair_id, static_cast<int>(alert.level),
+        static_cast<int>(alert.type), alert.message);
 
-ContractInfo ci;
-ci.code = cfgItem->getCString("code");
-// multiplier 和 tickSize 可选，-1 表示未配置，后续从基础数据模块获取
-ci.multiplier = readDouble(cfgItem, "multiplier", -1.0);
-ci.tick_size = readDouble(cfgItem, "tickSize", -1.0);
-// 单合约限制，-1 表示未配置，使用全局默认值
-ci.max_position = readDouble(cfgItem, "maxPosition", -1.0);
-ci.max_delta = readDouble(cfgItem, "maxDelta", -1.0);
-// 单合约目标持仓，默认0（平衡），超过时报价倾向于减仓
-ci.target_position = readDouble(cfgItem, "targetPosition", 0.0);
-
-_contract_infos.push_back(ci);
-}
-}
-
-//------------------------------------------------------------
-// 读取 Delta 软指标参数（用于 skew 和对冲决策，不触发风控）
-//------------------------------------------------------------
-WTSVariant* cfgRisk = cfg->get("risk");
-if (cfgRisk) {
-_config.risk.max_exposure = readDouble(cfgRisk, "maxExposure", 35000000.0);
-_config.risk.max_daily_loss = readDouble(cfgRisk, "maxDailyLoss", -200000.0);
-}
-
-//------------------------------------------------------------
-// 读取报价参数（嵌套在 quoting 节点下）
-//------------------------------------------------------------
-WTSVariant* cfgQuoting = cfg->get("quoting");
-if (cfgQuoting) {
-_config.quoting.num_levels = readUInt32(cfgQuoting, "numLevels", 1);
-_config.quoting.base_spread = readDouble(cfgQuoting, "baseSpread", 2.0);
-_config.quoting.base_qty = readDouble(cfgQuoting, "baseQty", 5.0);
-_config.quoting.qty_decay = readDouble(cfgQuoting, "qtyDecay", 0.7);
-_config.quoting.level_step = readDouble(cfgQuoting, "levelStep", 1.0);
-_config.quoting.sticky_threshold = readDouble(cfgQuoting, "stickyThreshold", 1.0);
-_config.quoting.improve_retreat_ratio = readDouble(cfgQuoting, "improveRetreatRatio", 2.0);
-_config.quoting.max_price_deviation = readDouble(cfgQuoting, "maxPriceDeviation", 20.0);
-_config.quoting.use_bilateral_quote = readBool(cfgQuoting, "useBilateralQuote", false);
-_config.quoting.max_obligation_spread = readDouble(cfgQuoting, "maxObligationSpread", 10.0);
-_config.quoting.price_protection = readBool(cfgQuoting, "priceProtection", true);
-_config.quoting.protect_ticks = readDouble(cfgQuoting, "protectTicks", 1.0);
-// v3 软风控参数
-_config.quoting.qty_decay_factor = readDouble(cfgQuoting, "qtyDecayFactor", 2.0);
-_config.quoting.obligation_min_qty = readDouble(cfgQuoting, "obligationMinQty", 10.0);
-_config.quoting.obligation_max_spread_ticks = readDouble(cfgQuoting, "obligationMaxSpreadTicks", 10.0);
-_config.quoting.obligation_only_l0 = readBool(cfgQuoting, "obligationOnlyL0", true);
-_config.quoting.always_obligation = readBool(cfgQuoting, "alwaysObligation", true);
-}
-
-//------------------------------------------------------------
-// 读取组合管理参数（嵌套在 portfolio 节点下）
-//------------------------------------------------------------
-WTSVariant* cfgPortfolio = cfg->get("portfolio");
-if (cfgPortfolio) {
-_config.portfolio.max_delta = readDouble(cfgPortfolio, "maxDelta", 50.0);
-_config.portfolio.hedge_ratio = readDouble(cfgPortfolio, "hedgeRatio", 1.0);
-_config.portfolio.hedge_delta_threshold = readDouble(cfgPortfolio, "hedgeDeltaThreshold", 0.8);
-_config.portfolio.hedge_cooldown_ms = readUInt32(cfgPortfolio, "hedgeCooldownMs", 5000);
-}
-
-// 下单错误处理参数（统一处理所有下单错误）
-_config.order_control.order_error_threshold = readUInt32(cfg, "orderErrorThreshold", 10);
-_config.order_control.max_orders = readUInt32(cfg, "maxOrders", 32);
-_config.order_control.stp_min_price_gap = readDouble(cfg, "stpMinPriceGap", 1.0);
-_config.order_control.use_stp = readBool(cfg, "useStp", false);
-
-// 收盘前平仓参数（嵌套在 closeout 节点下）
-WTSVariant* cfgCloseout = cfg->get("closeout");
-if (cfgCloseout) {
-_config.closeout.minutes_before = readUInt32(cfgCloseout, "minutesBefore", 5);
-_config.closeout.flatten_position = readBool(cfgCloseout, "flattenPosition", true);
-_config.closeout.max_retries = readUInt32(cfgCloseout, "maxRetries", 3);
-_config.closeout.retry_interval_ms = readUInt32(cfgCloseout, "retryIntervalMs", 5000);
-_config.closeout.night_minutes_before = readUInt32(cfgCloseout, "nightMinutesBefore", _config.closeout.minutes_before);
-// CloseoutExecutor 参数
-_config.closeout.drain_timeout_ms = readUInt32(cfgCloseout, "drainTimeoutMs", 3000);
-_config.closeout.depth_ratio_passive = readDouble(cfgCloseout, "depthRatioPassive", 0.3);
-_config.closeout.depth_ratio_mid = readDouble(cfgCloseout, "depthRatioMid", 0.5);
-_config.closeout.depth_ratio_aggr = readDouble(cfgCloseout, "depthRatioAggressive", 0.8);
-_config.closeout.sweep_threshold_ms = readUInt32(cfgCloseout, "sweepThresholdMs", 5000);
-_config.closeout.sweep_ticks = readUInt32(cfgCloseout, "sweepTicks", 3);
-_config.closeout.use_fak = readBool(cfgCloseout, "useFak", true);
-}
-_config.closeout.close_time = 150000;  // 默认值，on_init 中会从 anchor_code 更新
-_config.closeout.night_close_time = 0;  // 默认无夜盘，on_init 中会从 anchor_code 更新
-
-//------------------------------------------------------------
-// 读取策略模式开关和性能监控开关
-// 注意：其他模块开关从 coordinator.yaml 读取，此处仅保留策略级配置
-//------------------------------------------------------------
-WTSVariant* cfgModules = cfg->get("modules");
-if (cfgModules) {
-// 策略模式开关（有效配置，不会被 coordinator 覆盖）
-_config.modules.use_market_making = readBool(cfgModules, "useMarketMaking", true);
-_config.modules.use_spread_arbitrage = readBool(cfgModules, "useSpreadArbitrage", false);
-
-// 性能监控开关（策略级配置，coordinator 不管理）
-_config.modules.use_performance_monitor = readBool(cfgModules, "usePerformanceMonitor", false);
-_config.modules.use_performance_analyzer = readBool(cfgModules, "usePerformanceAnalyzer", false);
-
-}
-
-//------------------------------------------------------------
-// 读取 FutuRiskMonitor 参数（嵌套在 risk.frequency 节点下）
-//------------------------------------------------------------
-if (cfgRisk) {
-WTSVariant* cfgFrequency = cfgRisk->get("frequency");
-if (cfgFrequency) {
-_config.risk.max_orders_per_sec = readUInt32(cfgFrequency, "maxOrdersPerSec", 50);
-_config.risk.max_cancels_per_sec = readUInt32(cfgFrequency, "maxCancelsPerSec", 30);
-_config.risk.max_trades_per_sec = readUInt32(cfgFrequency, "maxTradesPerSec", 20);
-_config.risk.cooldown_ms = readUInt32(cfgFrequency, "cooldownMs", 30000);
-_config.risk.check_interval_ms = readUInt32(cfgFrequency, "checkIntervalMs", 5000);
-_config.risk.recovery_threshold = readDouble(cfgFrequency, "recoveryThreshold", 0.8);
-_config.risk.max_delta_change_per_sec = readDouble(cfgFrequency, "maxDeltaChangePerSec", 3.0);
-_config.risk.delta_rate_window_sec = readUInt32(cfgFrequency, "deltaRateWindowSec", 2);
-_config.risk.delta_rate_cooldown_ms = readUInt32(cfgFrequency, "deltaRateCooldownMs", 15000);
-_config.risk.max_recovery_count = readUInt32(cfgFrequency, "maxRecoveryCount", 3);
-_config.risk.pnl_recovery_ratio = readDouble(cfgFrequency, "pnlRecoveryRatio", 0.5);
-_config.risk.max_loss_for_recovery = readDouble(cfgFrequency, "maxLossForRecovery", 0);
-_config.risk.position_breach_pause_threshold = readDouble(cfgFrequency, "positionBreachPauseThreshold", 1.2);
-_config.risk.delta_critical_mult = readDouble(cfgFrequency, "deltaCriticalMult", 1.5);
-_config.risk.delta_warning_mult = readDouble(cfgFrequency, "deltaWarningMult", 0.8);
-_config.risk.widen_threshold = readUInt32(cfgFrequency, "widenThreshold", 1);
-_config.risk.pause_threshold = readUInt32(cfgFrequency, "pauseThreshold", 2);
-_config.risk.flatten_threshold = readUInt32(cfgFrequency, "flattenThreshold", 3);
-}
-}
-
-//------------------------------------------------------------
-// 读取 PerformanceMonitor 参数（嵌套在 performance 节点下）
-//------------------------------------------------------------
-WTSVariant* cfgPerformance = cfg->get("performance");
-if (cfgPerformance) {
-_config.perf.monitor_latency_threshold = (uint64_t)readDouble(cfgPerformance, "latencyThreshold", 100000);
-_config.perf.enabled = readBool(cfgPerformance, "enabled", true);
-_config.perf.log_interval = readUInt32(cfgPerformance, "logInterval", 1000);
-_config.perf.warn_threshold_ns = readUInt32(cfgPerformance, "warnThresholdNs", 10000);
-_config.perf.critical_threshold_ns = readUInt32(cfgPerformance, "criticalThresholdNs", 50000);
-}
-
-//------------------------------------------------------------
-// 注意：以下模块参数已移至独立配置文件:
-//   - SpreadArbitrage -> spread_arbitrage.yaml
-//   - SelfTradePrevention -> coordinator.yaml modules
-//   - AsyncExecutor -> spread_arbitrage.yaml
-//------------------------------------------------------------
-
-//------------------------------------------------------------
-// 参数边界校验（不影响运行时延迟）
-//------------------------------------------------------------
-{
-// Delta 软指标参数校验（用于 skew 和对冲决策，不触发风控）
-if (_config.portfolio.max_delta <= 0 || _config.portfolio.max_delta > 100000000) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid maxDelta: {}, expected (0, 100000000]", id(), _config.portfolio.max_delta);
-return false;
-}
-if (_config.risk.max_exposure <= 0) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid maxExposure: {}, expected > 0", id(), _config.risk.max_exposure);
-return false;
-}
-
-// 报价参数校验
-if (_config.quoting.num_levels == 0 || _config.quoting.num_levels > 10) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid numLevels: {}, expected [1, 10]", id(), _config.quoting.num_levels);
-return false;
-}
-if (_config.quoting.base_spread <= 0 || _config.quoting.base_spread > 20) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid baseSpread: {}, expected (0, 20]", id(), _config.quoting.base_spread);
-return false;
-}
-if (_config.quoting.base_qty <= 0 || _config.quoting.base_qty > 100) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid baseQty: {}, expected (0, 100]", id(), _config.quoting.base_qty);
-return false;
-}
-if (_config.quoting.qty_decay < 0.1 || _config.quoting.qty_decay > 1.0) {
-WTSLogger::warn("UftFutuMmStrategy[{}] qtyDecay={} out of typical range [0.1, 1.0]", id(), _config.quoting.qty_decay);
-}
-
-
-if (_config.portfolio.hedge_ratio < 0 || _config.portfolio.hedge_ratio > 1.0) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid hedgeRatio: {}, expected [0, 1]", id(), _config.portfolio.hedge_ratio);
-return false;
-}
-
-// P1优化: Sticky 和价格验证参数校验
-if (_config.quoting.sticky_threshold <= 0 || _config.quoting.sticky_threshold > 10.0) {
-WTSLogger::warn("UftFutuMmStrategy[{}] stickyThreshold={} out of typical range (0, 10]", id(), _config.quoting.sticky_threshold);
-}
-if (_config.quoting.max_price_deviation < 0 || _config.quoting.max_price_deviation > 100.0) {
-WTSLogger::warn("UftFutuMmStrategy[{}] maxPriceDeviation={} out of typical range [0, 100]", id(), _config.quoting.max_price_deviation);
-}
-
-// 注意：Alpha 参数校验已移至 coordinator.yaml 加载时
-// 注意：SpreadArbitrage 参数校验已移至 spread_arbitrage.yaml 加载时
-
-// 流控参数校验
-if (_config.risk.max_orders_per_sec == 0 || _config.risk.max_orders_per_sec > 500) {
-WTSLogger::error("UftFutuMmStrategy[{}] invalid maxOrdersPerSec: {}, expected [1, 500]", id(), _config.risk.max_orders_per_sec);
-return false;
-}
-
-WTSLogger::info("UftFutuMmStrategy[{}] parameter validation passed", id());
-}
-
-// 注意：业务模块初始化移到 on_init 中，以便从基础数据管理模块获取合约参数
-
-return true;
+    // 转发到 EventNotifier (运维侧订阅 nanomsg topic="ARB_RISK")
+    if (_event_notifier)
+    {
+        std::string msg = fmt::format(
+            "[L{}] pair={} type={} val={:.2f}/thr={:.2f}: {}",
+            static_cast<int>(alert.level), alert.pair_id,
+            static_cast<int>(alert.type), alert.value, alert.threshold,
+            alert.message);
+        _event_notifier->notify("ARB_RISK", msg.c_str());
+    }
 }
 
 //==========================================================================
@@ -426,7 +237,32 @@ _config.modules.use_toxicity_detector = coord_cfg.use_toxicity_detector;
 _config.modules.use_spread_optimizer = coord_cfg.use_spread_optimizer;
 _config.modules.use_adaptive_param = coord_cfg.use_adaptive_params;
 
-// 注意：use_market_making, use_spread_arbitrage, use_performance_monitor, use_performance_analyzer    // 从 config.yaml 读取，保留原值
+//==========================================================================
+// 模块开关统一解析 (单一权威来源):
+//   coordinator.yaml 根级是以下 7 个开关的唯一位置, 不再 fallback 到
+//   modules 节点或 config.yaml — 避免多源错配.
+//     useMarketMaking / useSpreadArbitrage / useAsyncArbThread
+//     usePerformanceMonitor / usePerformanceAnalyzer
+//     use_signal_aggregator / useHedging
+//   3 个模块级开关(toxicityDetector/spreadOptimizer/adaptiveParam) 只读
+//   modules.<name>.enabled, 由 StrategyCoordinator::loadConfigFromVariant 解析.
+//   下方 coordBool 找不到键时使用编译期默认(见 Modules 构造函数).
+//==========================================================================
+{
+wtp::WTSVariant* raw = coord_cfg._raw_variant;
+auto coordBool = [&](const char* key, bool compile_time_default) -> bool {
+    if (raw) {
+        wtp::WTSVariant* node = raw->get(key);
+        if (node) return node->asBoolean();
+    }
+    return compile_time_default;
+};
+_config.modules.use_market_making        = coordBool("useMarketMaking",         true);
+_config.modules.use_spread_arbitrage     = coordBool("useSpreadArbitrage",      false);
+_config.modules.use_async_arb_thread     = coordBool("useAsyncArbThread",       true);
+_config.modules.use_performance_monitor  = coordBool("usePerformanceMonitor",   false);
+_config.modules.use_performance_analyzer = coordBool("usePerformanceAnalyzer",  false);
+}
 
 WTSLogger::info("Strategy mode: MM={}, Arb={}", 
 _config.modules.use_market_making ? "ON" : "OFF",
@@ -443,7 +279,9 @@ portfolio_params.hedge_ratio = _config.portfolio.hedge_ratio;
 portfolio_params.hedge_delta_threshold = _config.portfolio.hedge_delta_threshold;
 portfolio_params.hedge_cooldown_ms = _config.portfolio.hedge_cooldown_ms;
 portfolio_params.max_exposure = _config.risk.max_exposure;
-portfolio_params.max_loss = -_config.risk.max_daily_loss;
+// max_loss 语义为正容忍度 (RiskMonitor: pnl < -max_loss 触发)。
+// 配置历史上正负约定混用(默认 -200000, README 示例 50000), 统一取绝对值防御.
+portfolio_params.max_loss = std::abs(_config.risk.max_daily_loss);
 _portfolio->setParams(portfolio_params);
 _portfolio->setAnchorContract(_config.anchor_code);
 
@@ -502,7 +340,7 @@ qcfg.num_levels = _config.quoting.num_levels;
 qcfg.base_spread = _config.quoting.base_spread;
 qcfg.level_step = _config.quoting.level_step;
 qcfg.base_qty = _config.quoting.base_qty;
-qcfg.qty_decay = _config.quoting.qty_decay;
+qcfg.level_qty_multiplier = _config.quoting.level_qty_multiplier;
 qcfg.tick_size = ci.tick_size;
 qcfg.sticky_threshold = _config.quoting.sticky_threshold;
 qcfg.improve_retreat_ratio = _config.quoting.improve_retreat_ratio;
@@ -515,7 +353,6 @@ qcfg.protect_ticks = _config.quoting.protect_ticks;
 // 双边报价参数
 qcfg.use_bilateral_quote = _config.quoting.use_bilateral_quote;
 qcfg.min_valid_qty = _config.quoting.base_qty;  // 有效挂单最小数量 = 基础挂单量
-qcfg.max_obligation_spread = _config.quoting.max_obligation_spread;
 
 // v3 软风控参数透传
 qcfg.qty_decay_factor = _config.quoting.qty_decay_factor;
@@ -592,7 +429,7 @@ quoter->setOrderTracker(_order_tracker.get());
 }
 
 // R3 v2: BilateralQuoteStats 已下放到 Per-Quoter 值成员
-//   - 每个 quoter 持值成员，setConfig(min_valid_qty/max_obligation_spread) 来自 quoter 自身 cfg
+//   - 每个 quoter 持值成员，setConfig(min_valid_qty/obligation_max_spread_ticks) 来自 quoter 自身 cfg
 //   - sessInfo 从 _session_cache 取（on_init 中已用三段式查询并缓存）
 //   - 不再重复调 stra_get_comminfo（两段式 code 查不到品种信息）
 uint32_t stats_ok = 0;
@@ -694,10 +531,11 @@ rate_limits.delta_rate_window_sec = _config.risk.delta_rate_window_sec;
 rate_limits.delta_rate_cooldown_ms = _config.risk.delta_rate_cooldown_ms;
 rate_limits.position_breach_pause_threshold = _config.risk.position_breach_pause_threshold;
 rate_limits.delta_critical_mult = _config.risk.delta_critical_mult;
-rate_limits.delta_warning_mult = _config.risk.delta_warning_mult;
-rate_limits.widen_threshold = _config.risk.widen_threshold;
-rate_limits.pause_threshold = _config.risk.pause_threshold;
-rate_limits.flatten_threshold = _config.risk.flatten_threshold;
+    rate_limits.delta_warning_mult = _config.risk.delta_warning_mult;
+    rate_limits.position_warning_l1 = _config.risk.position_warning_l1;
+    rate_limits.position_warning_l2 = _config.risk.position_warning_l2;
+    rate_limits.widen_threshold = _config.risk.widen_threshold;
+    rate_limits.flatten_threshold = _config.risk.flatten_threshold;
 _risk_monitor->setRateLimits(rate_limits);
 
 // 设置恢复配置
@@ -726,6 +564,22 @@ _config.risk.max_delta_change_per_sec);
 // Register with coordinator
 if (_coordinator) {
 _coordinator->setRiskMonitor(_risk_monitor.get());
+}
+
+// CloseoutOrchestrator 依赖注入 (架构重构 C3) — 所有依赖模块至此均已创建
+{
+    CloseoutOrchestrator::Deps orch_deps;
+    orch_deps.executor = _closeout_executor.get();
+    orch_deps.risk_monitor = _risk_monitor.get();
+    orch_deps.portfolio = _portfolio.get();
+    orch_deps.trading_state = &_trading_state;
+    orch_deps.order_router = _order_router.get();
+    orch_deps.quoters = &_quoters;
+    orch_deps.anchor_code = &_config.anchor_code;
+    orch_deps.close_time = _config.closeout.close_time;
+    orch_deps.flatten_position = _config.closeout.flatten_position;
+    orch_deps.strategy_id = id();
+    _closeout_orch.setDeps(orch_deps);
 }
 
 //------------------------------------------------------------
@@ -849,6 +703,8 @@ WTSLogger::info("PerformanceAnalyzer: disabled");
 if (_config.modules.use_performance_monitor)
 {
 _performance_monitor = FutuComponentFactory::createPerformanceMonitor(coord_cfg);
+// 接线到 Coordinator — 旧代码漏接, 协调器内 recordTickToQuote 因空指针永不执行
+_coordinator->setPerformanceMonitor(_performance_monitor.get());
 WTSLogger::info("PerformanceMonitor: latencyThreshold={}ns", _config.perf.monitor_latency_threshold);
 }
 else
@@ -901,6 +757,18 @@ if (_config.modules.use_spread_arbitrage)
 {
 _stp = FutuComponentFactory::createSelfTradePrevention(coord_cfg, _order_tracker.get());
 
+// H7: 统一 min_price_gap — config.yaml 的 stpMinPriceGap 是权威来源
+// (coordinator.yaml 的 minPriceGap 被 override, 避免双路径不一致)
+{
+    auto stp_cfg = _stp->getConfig();
+    if (std::abs(stp_cfg.min_price_gap - _config.order_control.stp_min_price_gap) > 1e-9) {
+        WTSLogger::warn("STP min_price_gap synced to config.yaml stpMinPriceGap={:.1f} (coordinator.yaml minPriceGap overridden)",
+            _config.order_control.stp_min_price_gap);
+    }
+    stp_cfg.min_price_gap = _config.order_control.stp_min_price_gap;
+    _stp->setConfig(stp_cfg);
+}
+
 WTSLogger::info("SelfTradePrevention: enabled, strategy=CANCEL_MM, using UnifiedOrderTracker");
 }
 
@@ -912,8 +780,15 @@ if (_config.modules.use_spread_arbitrage)
 _async_arb = FutuComponentFactory::createAsyncArbitrageExecutor(coord_cfg);
 _async_arb->setArbitrageManager(_spread_arb_manager.get());
 _async_arb->setSelfTradePrevention(_stp.get());
+// A10: 接线利润门槛 (此前 setMinProfitThreshold 无调用者, 价格调整成本检查恒放行)
+_async_arb->setMinProfitThreshold(_spread_arb_manager->getConfig().min_profit_threshold_ticks);
 if (_coordinator) {
 _coordinator->setArbExecutor(_async_arb.get());
+_coordinator->setArbManager(_spread_arb_manager.get());  // B2: 平仓 intent 查询通道
+}
+// B5: 过冲保险丝 — Portfolio sign-flip → arb_manager->onOvershootDetected
+if (_portfolio) {
+_portfolio->setArbManager(_spread_arb_manager.get());
 }
 
 // 设置每个合约的 tick size（用于套利订单价格调整）
@@ -926,6 +801,22 @@ _async_arb->updateTickSize(ci.code, ci.tick_size);
 }
 
 WTSLogger::info("AsyncArbitrageExecutor: enabled, signalInterval=5000us, ticksPerSignal=5");
+
+// ArbExecutionBridge 依赖注入 (架构重构 C4)
+{
+    ArbExecutionBridge::Deps bridge_deps;
+    bridge_deps.async_arb = _async_arb.get();
+    bridge_deps.arb_manager = _spread_arb_manager.get();
+    bridge_deps.order_router = _order_router.get();
+    bridge_deps.order_tracker = _order_tracker.get();
+    bridge_deps.stp = _stp.get();
+    bridge_deps.portfolio = _portfolio.get();
+    bridge_deps.risk_monitor = _risk_monitor.get();
+    bridge_deps.contract_infos = &_contract_infos;
+    bridge_deps.use_spread_arbitrage = _config.modules.use_spread_arbitrage;
+    bridge_deps.strategy_id = id();
+    _arb_bridge.setDeps(bridge_deps);
+}
 }
 else
 {
@@ -934,7 +825,13 @@ WTSLogger::info("AsyncArbitrageExecutor: disabled");
 
 // 共享TradingState（必须在arb if/else块之外，否则Arb=OFF时指针为nullptr导致segfault）
 if (_coordinator) {
-_coordinator->setTradingState(&_trading_state);
+    _coordinator->setTradingState(&_trading_state);
+}
+
+// R1: 如果 WtUftRunner 在 init 之前已注入 _event_notifier,
+// 此时所有下游(_risk_monitor / _spread_arb_manager)均已创建, 完成注入
+if (_event_notifier) {
+    setEventNotifier(_event_notifier);
 }
 
 //------------------------------------------------------------
@@ -955,6 +852,14 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 {
 // 保存ctx指针
 _main_ctx = ctx;
+
+// R1: 从 ctx 获取 EventNotifier (WtUftRunner 创建 UftStraContext 时已注入 &_notifier)
+auto* uft_ctx = dynamic_cast<UftStraContext*>(ctx);
+if (uft_ctx && uft_ctx->getEventNotifier())
+{
+    setEventNotifier(uft_ctx->getEventNotifier());
+    WTSLogger::info("UftFutuMmStrategy[{}] EventNotifier injected via ctx", id());
+}
 
 // 默认收盘时间
 _config.closeout.close_time = 150000;
@@ -1105,45 +1010,8 @@ auto it = _signal_aggregators.begin();
 if (it->second) sig_defaults = it->second->getConfig();
 }
 
-// 报价基础参数
-HotParamEntry hot_defaults[] = {
-{"base_spread",                _config.quoting.base_spread,           nullptr},
-{"base_qty",                   _config.quoting.base_qty,              nullptr},
-{"qty_decay",                  _config.quoting.qty_decay,             nullptr},
-{"level_step",                 _config.quoting.level_step,            nullptr},
-{"max_delta",                  _config.portfolio.max_delta,             nullptr},
-{"alpha_sensitivity",          coord_mp.alpha_sensitivity,    nullptr},
-{"ofi_weight",                 sig_defaults.ofi_weight,       nullptr},
-{"trade_weight",               sig_defaults.trade_weight,     nullptr},
-{"book_imbalance_weight",      sig_defaults.book_imbalance_weight, nullptr},
-{"momentum_weight",            sig_defaults.momentum_weight,  nullptr},
-{"lead_lag_weight",            sig_defaults.lead_lag_weight,  nullptr},
-{"strong_threshold",           sig_defaults.strong_threshold,  nullptr},
-{"confidence_weight_min",      glft_defaults.confidence_weight_min, nullptr},
-{"confidence_weight_max",      glft_defaults.confidence_weight_max, nullptr},
-{"phi",                        glft_defaults.phi,             nullptr},
-{"delta_skew_threshold",       glft_defaults.delta_skew_threshold, nullptr},
-{"delta_skew_factor",          glft_defaults.delta_skew_factor, nullptr},
-{"max_spread_mult",            glft_defaults.max_spread_mult, nullptr},
-{"min_spread_mult",            glft_defaults.min_spread_mult, nullptr},
-{"depth_sensitivity",          glft_defaults.depth_sensitivity, nullptr},
-{"toxicity_spread_factor",     glft_defaults.toxicity_spread_factor, nullptr},
-{"low_confidence_spread_factor", glft_defaults.low_confidence_spread_factor, nullptr},
-{"sticky_threshold",           _config.quoting.sticky_threshold,    nullptr},
-{"improve_retreat_ratio",      _config.quoting.improve_retreat_ratio, nullptr},
-{"protect_ticks",              _config.quoting.protect_ticks,       nullptr},
-{"max_price_deviation",        _config.quoting.max_price_deviation, nullptr},
-};
-static_assert(sizeof(hot_defaults) / sizeof(hot_defaults[0]) == HP_COUNT, "hot_defaults size mismatch");
-
-for (uint32_t i = 0; i < HP_COUNT; i++) {
-_hot_params[i].name = hot_defaults[i].name;
-_hot_params[i].default_val = hot_defaults[i].default_val;
-_hot_params[i].ptr = ctx->sync_param(hot_defaults[i].name, hot_defaults[i].default_val);
-}
-
-// 注册参数监控（启用热更新检测）
-ctx->commit_param_watcher();
+// 热参数注册已拆分至 FutuHotParamManager (架构重构 C2)
+_hot_mgr.registerParams(ctx, _config, glft_defaults, sig_defaults, coord_mp.alpha_sensitivity);
 
 WTSLogger::info("UftFutuMmStrategy[{}] hot-update params registered (defaults from coordinator.yaml)", id());
 
@@ -1179,6 +1047,9 @@ void UftFutuMmStrategy::on_session_begin(IUftStraCtx* ctx, uint32_t uTDate)
 {
 // 重置日内状态
 _risk_monitor->resetDaily();
+// 重置组合日内 PnL — 旧代码 realized_pnl 跨日累计, 导致"日亏损"风控
+// 用昨日亏损误判今日 IRREVERSIBLE halt.
+_portfolio->resetDailyPnl();
 // force=true —— 新交易日强制清 closeout state,
 // 否则上一日卡 FLATTENING 时 resetCloseout 会被状态机拒绝,导致 state 永久死锁
 _risk_monitor->resetCloseout(true);  // 重置收盘前平仓状态(强制)
@@ -1191,31 +1062,30 @@ _order_error_count = 0;
 _quoting_paused_since = 0;
 
 // reset closeout hedge guard so new day can fire hedge if needed
-_closeout_hedge_executed = false;
-// clear stale hedge ids from previous session
-_closeout_pending_ids.clear();
-_closeout_hedge_pending = false;
-_closeout_hedge_wait_ticks = 0;
-
-// Reset CloseoutExecutor for new session
-if (_closeout_executor)
-    _closeout_executor->reset();
+// (closeout 守卫/执行器复位已收编到 CloseoutOrchestrator, 架构重构 C3)
+// (套利桥状态复位已收编到 ArbExecutionBridge, 架构重构 C4)
+_arb_bridge.resetSession();
+_closeout_orch.resetSession();
 
 // 重置本地状态
 _blocked_contracts.clear();
 
 // 启动异步套利执行器
-// 回测环境: 不启动 arb 线程, 改用 pushTick 同步执行 (避免 data race)
-// 实盘环境: 启动 arb 线程异步处理
+// useAsyncArbThread=true(实盘默认): 启动独立 arb 线程, pushTick 走 SPSC 队列 (~50ns)
+// useAsyncArbThread=false(回测): 不启动线程, pushTick 主线程同步执行
+// 跨线程安全已修复: computeDerivedSpread 改读 _pair_states(spin保护),
+// canOpenPosition/getQuotingAdjustment 加锁, _min_profit_threshold 原子化.
 if (_async_arb)
 {
-    // 回测检测: WtBtRunner 的回测没有真实的多线程并发需求
-    // 通过检查是否在回测环境来决定是否启动线程
-    // 简化: 检查 ctx 是否为 UFT 回测上下文 (通过 undone 查询是否可用)
-    // 更简单: 始终不 start, 让 pushTick 走同步路径
-    // 实盘部署时再取消注释
-    //_async_arb->start();
-    WTSLogger::info("AsyncArbitrageExecutor: sync mode (arb thread not started for safety)");
+    if (_config.modules.use_async_arb_thread)
+    {
+        _async_arb->start();
+        WTSLogger::info("AsyncArbitrageExecutor: async mode (arb thread started)");
+    }
+    else
+    {
+        WTSLogger::info("AsyncArbitrageExecutor: sync mode (arb thread disabled by config)");
+    }
 }
 
 // 清空自成交防护模块
@@ -1296,27 +1166,8 @@ _stp->clear();
     WTSLogger::info("UftFutuMmStrategy[{}] session end: {}, Delta: {}", 
         id(), uTDate, _portfolio->getTotalDelta());
 
-    // session_end closeout 状态强制收尾
-    // 根因:closeout FLATTENING → COMPLETED 仅在 on_order 回调 + getTotalDelta()<0.01
-    // 这一条路径上转移。若 hedge 单未全成、或成交后 Delta 因取整/口径残留(如 1 手)
-    // 不到阈值,state 卡 FLATTENING。session 结束是硬边界:此后不可能再有 tick/order
-    // 推动状态,必须当场强制收尾,避免下一日 resetCloseout 被状态机拒绝(canTransitionTo
-    // 仅允许 COMPLETED→IDLE)导致 state 永久死锁。
-    auto cs_at_end = _risk_monitor->getCloseoutSub();
-    if (cs_at_end != CloseoutSub::IDLE && cs_at_end != CloseoutSub::COMPLETED)
-    {
-        WTSLogger::warn("UftFutuMmStrategy[{}] session end with non-terminal closeout state={}, force-finalizing",
-            id(), static_cast<int>(cs_at_end));
-        uint64_t now_ms = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-        // 走 markCloseoutFailed:FLATTENING/RETRYING 都允许转 FAILED;TRIGGERED 不允许,
-        // 但 TRIGGERED 在 session_end 出现属异常,仍走 force reset 兜底
-        _risk_monitor->markCloseoutFailed(now_ms);
-        // 同步清守卫(防止 stale ids 跨 session 污染 on_order 路径)
-        _closeout_pending_ids.clear();
-        _closeout_hedge_pending = false;
-        _closeout_hedge_wait_ticks = 0;
-        _closeout_hedge_executed = false;
-    }
+    // session_end closeout 状态强制收尾 (已拆分至 CloseoutOrchestrator, 架构重构 C3)
+    _closeout_orch.finalizeAtSessionEnd(TimeUtils::getLocalTimeNow());
 }
 
 //============================================================
@@ -1427,7 +1278,7 @@ void UftFutuMmStrategy::handleLeadLagPush(const char* stdCode, WTSTickData* tick
     }
 }
 
-void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
+void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick, uint64_t now_ms)
 {
     if (!_coordinator || _price_stale)
     {
@@ -1441,7 +1292,7 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
         return;
     }
 
-    auto result = _coordinator->processTick(ctx, stdCode, tick);
+    auto result = _coordinator->processTick(ctx, stdCode, tick, now_ms);
 
     // 记录报价到绩效分析器
     if (result.quote_placed && _perf_analyzer)
@@ -1459,88 +1310,8 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
         _toxicity_detector->runFusionCycle();
     }
 
-    // === Closeout hedge trigger ===
-    if (result.closeout_executed && _config.closeout.flatten_position
-        && _risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
-    {
-        _trading_state.enterCloseout();
-        for (auto& [code, quoter] : _quoters) {
-            if (quoter) quoter->cancelAll(ctx);
-        }
-        _closeout_hedge_pending = true;
-        _closeout_hedge_wait_ticks = 0;
-        _closeout_hedge_executed = true;
-        WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: halted + cancelAll, hedge deferred {} ticks",
-                        id(), CLOSEOUT_HEDGE_WAIT_TICKS);
-    }
-
-    // Deferred CloseoutExecutor start
-    if (_closeout_hedge_pending)
-    {
-        _closeout_hedge_wait_ticks++;
-        if (_closeout_hedge_wait_ticks >= CLOSEOUT_HEDGE_WAIT_TICKS)
-        {
-            WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: starting CloseoutExecutor after {} ticks",
-                            id(), _closeout_hedge_wait_ticks);
-            executeCloseoutHedge(ctx);
-            _closeout_hedge_pending = false;
-            _closeout_hedge_wait_ticks = 0;
-        }
-    }
-
-    // Run CloseoutExecutor every tick if active
-    if (_closeout_executor && _closeout_executor->isActive())
-    {
-        const ContractState* anchorState = _portfolio->getContract(_config.anchor_code);
-        MarketSnapshot snap;
-        snap.bid1       = anchorState ? anchorState->bid1 : 0;
-        snap.ask1       = anchorState ? anchorState->ask1 : 0;
-        snap.bid1_qty   = tick->bidqty(0);
-        snap.ask1_qty   = tick->askqty(0);
-        snap.price_tick = anchorState ? anchorState->tick_size : 0;
-        snap.upper_limit = tick->upperlimit();   // P2-2
-        snap.lower_limit = tick->lowerlimit();   // P2-2
-        {
-            uint32_t at = tick->actiontime();
-            uint32_t hh = at / 10000000;
-            uint32_t mm = (at / 100000) % 100;
-            uint32_t ss = (at / 1000) % 100;
-            uint32_t mmm = at % 1000;
-            snap.timestamp_ms = static_cast<uint64_t>(hh) * 3600000ULL
-                              + static_cast<uint64_t>(mm) * 60000ULL
-                              + static_cast<uint64_t>(ss) * 1000ULL
-                              + mmm;
-        }
-        _closeout_executor->run(ctx, snap);
-
-        if (_closeout_executor->isCompleted())
-        {
-            if (_risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
-            {
-                uint64_t now = ctx->stra_get_date() * 1000000ULL
-                             + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-                _risk_monitor->markCloseoutCompleted(now);
-            }
-        }
-        else if (_closeout_executor->isFailed())
-        {
-            uint64_t now = ctx->stra_get_date() * 1000000ULL
-                         + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-            _risk_monitor->markCloseoutFailed(now);
-        }
-    }
-
-    // Reset hedge flags on terminal/transient closeout states
-    auto cs = _risk_monitor->getCloseoutSub();
-    if (cs == CloseoutSub::IDLE || cs == CloseoutSub::FAILED
-        || cs == CloseoutSub::RETRYING)
-    {
-        _closeout_hedge_executed = false;
-        _closeout_hedge_pending = false;
-        _closeout_hedge_wait_ticks = 0;
-        if (_closeout_executor && !_closeout_executor->isCompleted())
-            _closeout_executor->reset();
-    }
+    // === Closeout 驱动 (已拆分至 CloseoutOrchestrator, 架构重构 C3) ===
+    _closeout_orch.onTick(ctx, tick, result.closeout_executed);
 }
 
 //============================================================
@@ -1555,9 +1326,10 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     // 1. 报价暂停恢复 (ERROR → NORMAL with exponential backoff)
     handleQuotingAutoResume();
 
-    // 2. 风控时间戳
+    // 2. 风控时间戳 (每 tick 墙钟只读一次, 复用于 coordinator processTick)
+    uint64_t now_ms = TimeUtils::getLocalTimeNow();
     if (_risk_monitor)
-        _risk_monitor->setCurrentTime(TimeUtils::getLocalTimeNow());
+        _risk_monitor->setCurrentTime(now_ms);
 
     // 3. 行情数据更新 (markToMarket + correlation + hedge_ratio)
     double mid = (tick->bidprice(0) + tick->askprice(0)) / 2.0;
@@ -1571,104 +1343,17 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     handleLeadLagPush(stdCode, tick, mid);
 
     // 5. Coordinator 主处理 + closeout 驱动 (含 coordinator null fail-safe)
-    handleCoordinatorTick(ctx, stdCode, tick);
+    handleCoordinatorTick(ctx, stdCode, tick, now_ms);
 
-    // 6. 跨期价差套利 (与做市业务平级，独立处理)
+    // 6. 跨期价差套利 (与做市业务平级，独立处理 — 已拆分至 ArbExecutionBridge, C4)
     if (_spread_arb_manager && _config.modules.use_spread_arbitrage)
     {
-        processSpreadArbitrage(ctx, stdCode, tick);
+        _arb_bridge.onTick(ctx, stdCode, tick);
     }
 
     _tick_count++;
 }
 
-void UftFutuMmStrategy::executeCloseoutHedge(IUftStraCtx* ctx)
-{
-//============================================================
-// CloseoutExecutor 启动入口
-// 实际执行逻辑在 CloseoutExecutor::run() 中，由 on_tick 每 tick 调用。
-// 本函数只负责一次性的 start()：计算 close_time_ms，启动执行器。
-//
-// 收盘前对冲所有敞口：
-//   1. 检查是否已 flat → 直接 COMPLETED
-//   2. 获取锚定合约 + 对冲比率
-//   3. 计算 close_time_ms（ms-from-midnight）
-//   4. 启动 CloseoutExecutor
-//============================================================
-
-if (!_closeout_executor)
-{
-    WTSLogger::error("UftFutuMmStrategy[{}] CloseoutExecutor is null!", id());
-    return;
-}
-
-// 已经在运行（retry 重入场景），不重复 start
-if (!_closeout_executor->isIdle())
-return;
-
-// P1-2: closeout 决策前从策略引擎同步持仓
-for (const auto& c : _portfolio->getAllContracts())
-{
-    double actual = ctx->stra_get_local_position(c.code.c_str());
-    if (std::abs(c.position - actual) > 0.01)
-    {
-        WTSLogger::info("UftFutuMmStrategy[{}] Portfolio sync before closeout: {} {:.0f}->{:.0f}",
-                        id(), c.code, c.position, actual);
-        _portfolio->onPositionUpdate(c.code.c_str(), actual);
-    }
-}
-
-double totalDelta = _portfolio->getNetDelta();
-
-if (std::abs(totalDelta) < 0.01)
-{
-    WTSLogger::info("UftFutuMmStrategy[{}] Closeout: No position to hedge (Delta=0)", id());
-    if (_risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
-    {
-        uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-        _risk_monitor->markCloseoutCompleted(now);
-    }
-    return;
-}
-
-// 获取锚定合约信息
-const ContractState* anchorState = _portfolio->getContract(_config.anchor_code);
-if (!anchorState)
-{
-    WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: anchor contract {} not found",
-                     id(), _config.anchor_code);
-    return;
-}
-
-double hedgeRatio = anchorState->hedge_ratio;
-if (hedgeRatio <= 0)
-{
-    WTSLogger::error("UftFutuMmStrategy[{}] Closeout failed: invalid hedgeRatio={}",
-                     id(), hedgeRatio);
-    return;
-}
-
-// 计算 close_time_ms (ms-from-midnight from HHMMSS config)
-uint32_t close_hhmmss = _config.closeout.close_time;  // e.g. 150000
-uint32_t hh = close_hhmmss / 10000;
-uint32_t mm = (close_hhmmss / 100) % 100;
-uint32_t ss = close_hhmmss % 100;
-uint64_t close_time_ms = static_cast<uint64_t>(hh) * 3600000ULL
-                       + static_cast<uint64_t>(mm) * 60000ULL
-                       + static_cast<uint64_t>(ss) * 1000ULL;
-
-// 启动 CloseoutExecutor
-WTSLogger::warn("UftFutuMmStrategy[{}] CLOSEOUT: starting CloseoutExecutor "
-                "(code={}, delta={:.2f}, hedge_ratio={:.2f}, close_ms={})",
-                id(), _config.anchor_code, totalDelta, hedgeRatio, close_time_ms);
-
-_closeout_executor->start(ctx, _config.anchor_code.c_str(),
-                           close_time_ms, hedgeRatio);
-
-// 标记 FLATTENING (executor 已启动，等待渐进成交)
-uint64_t now = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-_risk_monitor->markCloseoutDraining(now);
-}
 
 void UftFutuMmStrategy::on_order_queue(IUftStraCtx* ctx, const char* stdCode, WTSOrdQueData* newOrdQue)
 {
@@ -1745,30 +1430,43 @@ double local_net = ctx->stra_get_local_position(stdCode);
     double old_avg_cost = cs ? cs->avg_cost : 0;
     double mult = cs ? cs->multiplier : 1;
 
-    // 1. 计算已实现盈亏(平仓部分)
+    // 1. 计算已实现盈亏(平仓部分) + 2. 计算新 avg_cost
+    // 分四种情形: 同向减仓 / 同向加仓(加权均价) / 方向翻转(全平旧仓+新仓成本=成交价) / 全部平仓
+    // 旧代码对"翻转且|new|<|old|"(如多5→空3)按减仓处理: closed_qty=2(实为5),
+    // 3 手 realized 永久丢失, 且新均价残留多头成本.
     double realized = 0;
-    if (cs && std::abs(old_pos) > 0.01 && std::abs(new_pos) < std::abs(old_pos)) {
-        // 持仓减少 = 有平仓
-        double closed_qty = std::abs(old_pos) - std::abs(new_pos);
-        if (old_pos > 0) {
-            realized = (price - old_avg_cost) * closed_qty * mult;  // 多头平仓
-        } else {
-            realized = (old_avg_cost - price) * closed_qty * mult;  // 空头平仓
+    double new_avg_cost = old_avg_cost;
+    if (cs && std::abs(old_pos) > 0.01)
+    {
+        bool same_dir = (old_pos > 0 && new_pos > 0) || (old_pos < 0 && new_pos < 0);
+        if (same_dir && std::abs(new_pos) > std::abs(old_pos))
+        {
+            // 同向加仓: 加权平均
+            double added_qty = std::abs(new_pos) - std::abs(old_pos);
+            new_avg_cost = (old_avg_cost * std::abs(old_pos) + price * added_qty) / std::abs(new_pos);
+        }
+        else
+        {
+            // 同向减仓 / 全部平仓(new_pos==0) / 方向翻转: 旧仓全部或部分按均价结算
+            double closed_qty = same_dir ? (std::abs(old_pos) - std::abs(new_pos))
+                                         : std::abs(old_pos);
+            if (closed_qty > 0.01)
+            {
+                realized = (old_pos > 0)
+                    ? (price - old_avg_cost) * closed_qty * mult   // 多头平仓
+                    : (old_avg_cost - price) * closed_qty * mult;  // 空头平仓
+            }
+            if (!same_dir && std::abs(new_pos) > 0.01)
+            {
+                // 方向翻转: 新仓成本 = 翻转成交价
+                new_avg_cost = price;
+            }
         }
     }
-
-    // 2. 计算新 avg_cost(开仓部分)
-    double new_avg_cost = old_avg_cost;
-    if (cs && std::abs(new_pos) > std::abs(old_pos)) {
-        // 持仓增加 = 有开仓
-        double added_qty = std::abs(new_pos) - std::abs(old_pos);
-        if ((old_pos >= 0 && new_pos > 0) || (old_pos <= 0 && new_pos < 0)) {
-            // 同方向加仓: 加权平均
-            new_avg_cost = (old_avg_cost * std::abs(old_pos) + price * added_qty) / std::abs(new_pos);
-        } else {
-            // 方向翻转
-            new_avg_cost = price;
-        }
+    else if (cs && std::abs(new_pos) > 0.01)
+    {
+        // 从零开仓
+        new_avg_cost = price;
     }
 
     // 3. 更新 Portfolio
@@ -1781,17 +1479,8 @@ double local_net = ctx->stra_get_local_position(stdCode);
     }
 }
 
-// Scheme B-3: if this fill is from an arb order, decrement its in_flight tracking.
-// consumePairTag returns true and writes pair_id when localid is an arb-tagged order.
-// We decrement by `vol` (single-leg fill); both legs decrement separately as each fills.
-if (_async_arb && _spread_arb_manager)
-{
-    std::string arb_pair_id;
-    if (_async_arb->consumePairTag(localid, arb_pair_id))
-    {
-        _spread_arb_manager->onArbOrderFilled(arb_pair_id, vol);
-    }
-}
+// 套利单成交处理 (in_flight 递减 + 残腿对冲, 已拆分至 ArbExecutionBridge, C4)
+_arb_bridge.onTradeFill(ctx, localid, stdCode, isLong, vol, price);
 
 // 更新 Quoter 订单状态
 // R3 v2: onTrade 补时间参数(UFT: stra_get_time=HHMM, stra_get_secs=SSmmm)
@@ -1814,9 +1503,11 @@ if (_config.modules.use_spread_optimizer)
 // NO-OP
 }
 
-// 从共享订单跟踪器中移除（成交后不再需要跟踪）
-if (_order_tracker)
-_order_tracker->untrackOrder(localid);    
+// 从共享订单跟踪器中移除 — 仅完全成交时才 untrack。
+// 旧代码无条件 untrack: 部分成交后残留活单从真相源消失,
+// 导致自成交检查绕过/在途量低估/sticky 失效.
+if (_order_tracker && _order_tracker->recordOrderFill(localid, vol))
+_order_tracker->untrackOrder(localid);
 // 记录到绩效分析器
 if (_perf_analyzer)
 {
@@ -1854,7 +1545,10 @@ _perf_analyzer->updatePosition(stdCode, _portfolio->getPosition(stdCode), 0);
 // 记录到自身成交校准器 (统一管理成交记录，供毒性检测使用)
 if (_self_trade_calibrator)
 {
-uint64_t timestamp = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
+// 统一 epoch ms — 旧代码用 date*1e6+time*100+secs 压缩时间(~2e13),
+// 而 onTick/getFillRetreat/decayCalibration 均传 epoch ms(~1.75e12),
+// uint64 下溢导致 FillRetreat/prune/decay 全部失效.
+uint64_t timestamp = static_cast<uint64_t>(TimeUtils::getLocalTimeNow());
 double mid_at_fill = price;
 double spread_at_fill = 0.2;  // default spread
 auto mid_it = _last_mid.find(stdCode);
@@ -1922,7 +1616,8 @@ _toxicity_detector->onSelfTradeCalibration(calibration);
 // ============================================================
 if (_trading_state.qphase == QuotingPhase::RISK_HALTED && _risk_monitor)
 {
-auto violations = _risk_monitor->checkRiskLimits(_portfolio.get());
+_risk_monitor->checkRiskLimits(_portfolio.get(), _violations_buf);
+auto& violations = _violations_buf;
 bool hasHardBreach = false;
 for (const auto& v : violations)
 {
@@ -1962,6 +1657,9 @@ _blocked_contracts.clear();
 _risk_monitor->resumeQuoting();
 _risk_monitor->unblockLong();
 _risk_monitor->unblockShort();
+// A1: 同步重置协调器软风控倍数 — 本路径绕过 coordinator 的 checkRisk 自动恢复,
+// 否则 _risk_spread_mult 残留, 恢复后报价宽度被永久放大.
+if (_coordinator) _coordinator->onExternalResumeFromRisk();
 WTSLogger::info("UftFutuMmStrategy[{}] Trading resumed after trade (risk check passed)", id());
 }
 else
@@ -1983,18 +1681,15 @@ if (_risk_monitor && isCanceled)
 _risk_monitor->recordCancel();
 
 // 计算当前时间戳:
-//   - now_ms (毫秒级 epoch-like) 给 RiskMonitor 用(closeout 超时判定)
+//   - now_ms (epoch 毫秒) 给 RiskMonitor 用(closeout 超时/重试判定)
 //   - uTime_HHMM / sec_in_min 给 BilateralStats 用
-// UFT 上下文: stra_get_time() 返回 HHMM, stra_get_secs() 返回 SSmmm
-uint32_t date = ctx->stra_get_date();
+// 统一使用 TimeUtils::getLocalTimeNow() (epoch ms), 与 RiskMonitor 的
+// checkCloseoutRetry / _current_time 保持同一时间基准。
+// 旧实现 date*86400000 把 YYYYMMDD 当天数, 产生 ~1.75e15 的垃圾时间戳.
 uint32_t time_hhmm = ctx->stra_get_time();
 uint32_t ssmmm = ctx->stra_get_secs();
-uint32_t h = time_hhmm / 100;
-uint32_t m = time_hhmm % 100;
 uint32_t s = ssmmm / 1000;
-uint32_t ms = ssmmm % 1000;
-uint64_t now_ms = (static_cast<uint64_t>(h) * 3600 + m * 60 + s) * 1000 + ms;
-now_ms += static_cast<uint64_t>(date) * 86400000ULL;
+uint64_t now_ms = TimeUtils::getLocalTimeNow();
 
 // 更新 Quoter 订单状态(内部会从 UnifiedOrderTracker 移除)
 // 同时触发双边报价统计更新
@@ -2014,6 +1709,10 @@ break;
 if ((isCanceled || leftQty == 0) && _stp)
 _stp->untrackOrder(localid);
 
+// closeout 订单跟踪 (已拆分至 CloseoutOrchestrator, 架构重构 C3)
+// 注意: 必须在 onOrderDone 抹除来源记录之前调用 (内部用 OrderRouter 来源标记识别)
+_closeout_orch.onOrderEvent(ctx, localid, stdCode, isCanceled, leftQty, now_ms);
+
 // 通知 OrderRouter 订单完成（撤销或完全成交）
 if ((isCanceled || leftQty == 0) && _order_router)
 _order_router->onOrderDone(localid);
@@ -2022,34 +1721,19 @@ _order_router->onOrderDone(localid);
 // (full fill or cancel). Defensive: removes stale entries even if
 // onArbOrderFilled (in_flight tracking) already saw the fills.
 if ((isCanceled || leftQty == 0) && _async_arb)
-_async_arb->onOrderFinalized(localid);
-
-// Check closeout order status in on_order callback
-// When in FLATTENING state, check if all closeout orders are done
-// only handle orders we know are closeout hedges (tracked in _closeout_pending_ids)
-bool is_closeout_order = (_closeout_pending_ids.find(localid) != _closeout_pending_ids.end());
-if (_risk_monitor && _risk_monitor->isCloseoutFlattening() && is_closeout_order)
 {
-    if (isCanceled)
+// A4: 套利腿撤单 → 通知 bridge (撤对侧 + 残腿标记 + 释放 in_flight).
+// 必须在 onOrderFinalized 清 tag 之前查询 pair_id.
+// consumePairTag 语义为"查询不抹除"(支持 partial fill), 此处调用安全.
+if (isCanceled)
+{
+    std::string pair_id;
+    if (_async_arb->consumePairTag(localid, pair_id))
     {
-        // Closeout order was rejected/canceled — mark FAILED to trigger retry
-        WTSLogger::warn("[CLOSEOUT] Order canceled/rejected during flattening: code={} localid={}, marking FAILED for retry",
-            stdCode, localid);
-        _closeout_pending_ids.erase(localid);
-        _risk_monitor->markCloseoutFailed(now_ms);
+        _arb_bridge.onLegCancelled(ctx, pair_id);
     }
-    else if (leftQty == 0)
-    {
-        // Order fully filled — check if position is now flat
-        _closeout_pending_ids.erase(localid);
-        double totalDelta = _portfolio->getTotalDelta();
-        if (std::abs(totalDelta) < 0.01)
-        {
-            WTSLogger::info("[CLOSEOUT] All positions flattened, marking COMPLETED");
-            _risk_monitor->markCloseoutCompleted(now_ms);
-        }
-        // else: still have positions, wait for more fills or next tick
-    }
+}
+_async_arb->onOrderFinalized(localid);
 }
 }
 
@@ -2090,6 +1774,12 @@ void UftFutuMmStrategy::on_channel_ready(IUftStraCtx* ctx)
 {
 _channel_ready = true;
 _price_stale = true;  // P1-4: 标记价格过期，直到收到首个 tick
+
+// 通道恢复, 重启套利 (与 on_channel_lost 的 setEnabled(false) 对称).
+if (_async_arb)
+{
+    _async_arb->setEnabled(true);
+}
 
 //============================================================
 // 同步持仓和未成交订单
@@ -2156,7 +1846,8 @@ if (!has_valid_price)
 WTSLogger::info("UftFutuMmStrategy[{}] No price yet, resuming quoting (risk will activate on first tick)", id());
 }
 
-auto violations = _risk_monitor->checkRiskLimits(_portfolio.get());
+_risk_monitor->checkRiskLimits(_portfolio.get(), _violations_buf);
+auto& violations = _violations_buf;
 if (violations.empty())
 {
 // Use resumeFromRisk() instead of direct assignments
@@ -2168,6 +1859,8 @@ _risk_monitor->resumeTrading();
 _risk_monitor->resumeQuoting();
 _risk_monitor->unblockLong();
 _risk_monitor->unblockShort();
+// A1: 同步重置协调器软风控倍数 (同 on_trade 恢复路径).
+if (_coordinator) _coordinator->onExternalResumeFromRisk();
 WTSLogger::info("UftFutuMmStrategy[{}] Trading resumed after channel ready (risk normalized)", id());
 }
 else
@@ -2185,7 +1878,7 @@ has_position_breach = true;
 const ContractState* breached = _portfolio->getPositionBreachedContract();
 if (breached)
 {
-int32_t reduction = _portfolio->getPositionReductionToLimit(*breached);
+        double reduction = _portfolio->getPositionReductionToLimit(*breached);
 if (reduction != 0)
 {
 // 获取当前价格
@@ -2297,6 +1990,12 @@ void UftFutuMmStrategy::on_channel_lost(IUftStraCtx* ctx)
         _risk_monitor->haltTrading(RiskCategory::REVERSIBLE, _portfolio ? _portfolio->getTotalPnL() : 0);
     }
 
+    // 3.5 停止套利 — 通道断开时 arb 线程继续生成信号只会塞满 _order_queue 后无声丢弃.
+    if (_async_arb)
+    {
+        _async_arb->setEnabled(false);
+    }
+
     // 4. 快照当前持仓（通道恢复后用于校验）
     if (_portfolio)
     {
@@ -2314,243 +2013,6 @@ void UftFutuMmStrategy::on_channel_lost(IUftStraCtx* ctx)
 // 跨期价差套利执行逻辑 - 异步版本
 //==========================================================================
 
-void UftFutuMmStrategy::processSpreadArbitrage(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
-{
-if (!_async_arb || !_config.modules.use_spread_arbitrage)
-return;
-
-// ============================================================
-// 主线程：快速推送 tick 数据到异步队列（~50ns，非阻塞）
-// ============================================================
-// BISECT: 恢复 pushTick (内部已注释 processTick/processSignals)
-_async_arb->pushTick(stdCode, tick->price(), 1.0, tick->actiontime());
-
-// ============================================================
-// 主线程：更新 MM 订单状态到异步执行器（用于自成交检测）
-// ============================================================
-if (_stp)
-{
-_async_arb->updateMMOrders(stdCode, 
-_stp->getMMBuyOrders(stdCode), 
-_stp->getMMSellOrders(stdCode));
-}
-
-// ============================================================
-// 主线程：处理异步执行器返回的订单请求（执行订单）
-// ============================================================
-_async_arb->processPendingOrders([this, ctx](const ArbOrderRequest& order) {
-
-// ==========================================================
-// 【核心风控与防死循环】 检查是否有挂单，并防止同价位无限撤单替换
-// ==========================================================
-double undone = ctx->stra_get_undone(order.code.c_str());
-if (undone > 0)
-{
-auto it = _arb_last_order_price.find(order.code);
-if (it != _arb_last_order_price.end())
-{
-// 如果挂单仍在，且新信号要求的价格和目前挂单价完全一致，
-// 则直接丢弃新信号，避免触发 WT 底层的【自动撤销并重下相同单】机制，
-// 从而保护订单在交易所撮合队列中的排队优先级。
-if (std::abs(it->second - order.price) < 1e-6)
-{
-WTSLogger::debug("AsyncArb skipped: {} already has {} pending at identical price {}",
-order.code, undone, order.price);
-return;
-}
-}
-}
-
-_arb_last_order_price[order.code] = order.price;
-
-// 执行订单（通过 OrderRouter）
-if (!_order_router)
-{
-WTSLogger::error("AsyncArb callback invoked with _order_router==nullptr; "
-                 "OrderRouter must be initialized before arb is enabled. Dropping order.");
-return;
-}
-
-OrderSubmitResult router_result;
-if (order.is_buy)
-{
-router_result = _order_router->submitBuy(ctx, order.code.c_str(), order.price, order.qty, Source::ARBITRAGE);
-if (!router_result.localids.empty())
-WTSLogger::info("AsyncArb BUY {} {}@{} via OrderRouter", order.code, order.qty, order.price);
-}
-else
-{
-router_result = _order_router->submitSell(ctx, order.code.c_str(), order.price, order.qty, Source::ARBITRAGE);
-if (!router_result.localids.empty())
-WTSLogger::info("AsyncArb SELL {} {}@{} via OrderRouter", order.code, order.qty, order.price);
-}
-
-// Scheme B-3: tag each returned localid with the pair_id so on_trade can
-// route fills to SpreadArbMgr::onArbOrderFilled (in-flight tracking).
-// Tag here ONLY when submit succeeded (localids non-empty); rate_limited /
-// self_trade_blocked paths produce empty localids and are skipped naturally.
-if (!router_result.localids.empty() && !order.pair_id.empty())
-{
-    for (uint32_t lid : router_result.localids)
-    {
-        _async_arb->tagOrderPair(lid, order.pair_id);
-    }
-}
-
-if (router_result.rate_limited)
-{
-WTSLogger::warn("AsyncArb order rate limited: {} {}", order.code, order.is_buy ? "BUY" : "SELL");
-
-// P1-2: 套利单腿提交失败(流控/STP 阻断),撤同 pair_id 已提交的单
-// 防止裸腿风险(leg1 已提交但 leg2 失败)
-if (!order.pair_id.empty()) {
-    WTSLogger::warn("AsyncArb leg FAILED for pair={}, canceling opposite leg", order.pair_id);
-    // OrderRouter 按 Source::ARBITRAGE 撤所有活跃套利单
-    _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
-}
-return;
-}
-if (router_result.self_trade_blocked)
-{
-WTSLogger::warn("AsyncArb order self-trade blocked: {} {}", order.code, order.is_buy ? "BUY" : "SELL");
-
-// P1-2: STP 阻断 = 单腿失败,撤同 pair_id 已提交的单
-if (!order.pair_id.empty()) {
-    WTSLogger::warn("AsyncArb leg STP-BLOCKED for pair={}, canceling opposite leg", order.pair_id);
-    _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
-}
-return;
-}
-
-// 记录到风险监控
-if (_risk_monitor)
-{
-_risk_monitor->recordOrder();
-}
-});
-
-// ============================================================
-// 主线程：处理orphan leg自动对冲
-// ============================================================
-_async_arb->processOrphanLegs([this, ctx](const std::string& code,
-                                            bool is_buy,
-                                            double price,
-                                            double qty,
-                                            bool urgent) {
-    // 从Portfolio获取对手价（对冲方向用对手价确保成交）
-    double hedge_price = price;  // fallback
-    if (_portfolio)
-    {
-        const ContractState* cs = _portfolio->getContract(code);
-        if (cs)
-        {
-            // 对冲方向: is_buy → 用ask1买入, !is_buy → 用bid1卖出
-            if (is_buy && cs->ask1 > 0)
-                hedge_price = cs->ask1;
-            else if (!is_buy && cs->bid1 > 0)
-                hedge_price = cs->bid1;
-        }
-    }
-
-    // urgent时加1个tick确保成交（模拟市价）
-    if (urgent)
-    {
-        // 从contract_infos查找tick_size
-        double tick = 0;
-        for (const auto& ci : _contract_infos)
-        {
-            if (ci.code == code) { tick = ci.tick_size; break; }
-        }
-        if (tick > 0)
-        {
-            hedge_price = is_buy ? hedge_price + tick : hedge_price - tick;
-        }
-    }
-
-    // 价格保护: hedge_price必须>0
-    if (hedge_price <= 0)
-    {
-        WTSLogger::error("OrphanLeg hedge ABORTED: {} price=0, no market data yet", code);
-        return;
-    }
-
-    // 通过OrderRouter下单（Source::HEDGING）
-    if (_order_router)
-    {
-        OrderSubmitResult result;
-        if (is_buy)
-        {
-            result = _order_router->submitBuy(ctx, code.c_str(), hedge_price,
-                                               qty, Source::HEDGING);
-        }
-        else
-        {
-            result = _order_router->submitSell(ctx, code.c_str(), hedge_price,
-                                                qty, Source::HEDGING);
-        }
-
-        if (!result.localids.empty())
-        {
-            WTSLogger::info("OrphanLeg HEDGE {} {} {}@{} via OrderRouter{}",
-                is_buy ? "BUY" : "SELL", code, qty, hedge_price,
-                urgent ? " [URGENT]" : "");
-        }
-        if (result.rate_limited)
-        {
-            WTSLogger::warn("OrphanLeg hedge rate limited: {}", code);
-        }
-        if (result.self_trade_blocked)
-        {
-            WTSLogger::warn("OrphanLeg hedge self-trade blocked: {}", code);
-        }
-    }
-    else
-    {
-        // Fallback: 直接调ctx API
-        if (is_buy)
-        {
-            ctx->stra_enter_long(code.c_str(), hedge_price, qty);
-        }
-        else
-        {
-            ctx->stra_enter_short(code.c_str(), hedge_price, qty);
-        }
-        WTSLogger::info("OrphanLeg HEDGE {} {} {}@{} via ctx{}",
-            is_buy ? "BUY" : "SELL", code, qty, hedge_price,
-            urgent ? " [URGENT]" : "");
-    }
-
-    // 记录到风险监控
-    if (_risk_monitor)
-    {
-        _risk_monitor->recordOrder();
-    }
-},
-// 传入当前组合delta_ratio，用于动态调整对冲超时
-[this]() -> double {
-    if (!_portfolio) return 0.0;
-    return _portfolio->getPortfolioDeltaUtilization();  // abs(net_delta)/max_delta
-}());
-
-// ============================================================
-// in_flight timeout 清理: 撤掉超时 pair 的未成交套利挂单
-// 防止: leg1 成交 + leg2 挂单超时 → in_flight 清零 → 新信号发出
-//       但 leg2 仍在场上 → 可能重复建仓
-// ============================================================
-if (_spread_arb_manager && _order_router)
-{
-    std::vector<std::string> timed_out;
-    if (_spread_arb_manager->popTimedOutPairs(timed_out))
-    {
-        for (const auto& pair_id : timed_out)
-        {
-            WTSLogger::warn("Arb in_flight timeout cleanup: pair={}, canceling pending arb orders",
-                pair_id);
-            _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
-        }
-    }
-}
-}
 
 void UftFutuMmStrategy::onSpreadTrade(IUftStraCtx* ctx, const std::string& pair_id,
 const std::string& code, bool is_buy, 
@@ -2672,7 +2134,9 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
         {
             WTSLogger::warn("Arb order REJECTED: localid={}, pair={}, canceling all arb orders",
                 localid, pair_id);
-            _order_router->cancelAllBySource(_main_ctx, Source::ARBITRAGE);
+            _order_router->cancelByPair(_main_ctx, pair_id);  // A7: 原 cancelAllBySource 误撤其它 pair
+            // A2: 补残腿防护标记 — broker 拒单场景此前仅撤单, 对侧在途成交无 hedge 回补
+            _arb_bridge.markLegRejected(pair_id, 0);
         }
     }
 
@@ -2711,82 +2175,15 @@ void UftFutuMmStrategy::on_params_updated()
 {
     WTSLogger::info("UftFutuMmStrategy[{}] === PARAMS HOT UPDATE ===", id());
     
-    //============================================================
-    // 从共享内存读取更新后的参数值，同步到各模块
-    //============================================================
-    
-    // 报价参数 → SpreadOptimizer
-    for (auto& [code, optimizer] : _spread_optimizers)
-    {
-        if (!optimizer) continue;
-        GLFTParams p = optimizer->getParams();  // Copy current params
-        p.base_spread           = hotVal(HP_BASE_SPREAD);
-        p.confidence_weight_min = hotVal(HP_CONFIDENCE_WEIGHT_MIN);
-        p.confidence_weight_max = hotVal(HP_CONFIDENCE_WEIGHT_MAX);
-        p.phi                   = hotVal(HP_PHI);
-        p.delta_skew_threshold  = hotVal(HP_DELTA_SKEW_THRESHOLD);
-        p.delta_skew_factor     = hotVal(HP_DELTA_SKEW_FACTOR);
-        p.max_spread_mult       = hotVal(HP_MAX_SPREAD_MULT);
-        p.min_spread_mult       = hotVal(HP_MIN_SPREAD_MULT);
-        p.depth_sensitivity     = hotVal(HP_DEPTH_SENSITIVITY);
-        p.toxicity_spread_factor = hotVal(HP_TOXICITY_SPREAD_FACTOR);
-        p.low_confidence_spread_factor = hotVal(HP_LOW_CONFIDENCE_SPREAD_FACTOR);
-        optimizer->updateParams(p);  // Thread-safe update (replaces const_cast)
-    }
-    
-    // 报价数量参数 → FutuQuoter
-    _config.quoting.base_spread = hotVal(HP_BASE_SPREAD);
-    _config.quoting.base_qty    = hotVal(HP_BASE_QTY);
-    _config.quoting.qty_decay   = hotVal(HP_QTY_DECAY);
-    _config.quoting.level_step  = hotVal(HP_LEVEL_STEP);
-    
-    // Alpha权重 → SignalAggregator
-    SignalAggregatorConfig sig_weights;
-    sig_weights.ofi_weight              = hotVal(HP_OFI_WEIGHT);
-    sig_weights.trade_weight            = hotVal(HP_TRADE_WEIGHT);
-    sig_weights.book_imbalance_weight   = hotVal(HP_BOOK_IMBALANCE_WEIGHT);
-    sig_weights.momentum_weight         = hotVal(HP_MOMENTUM_WEIGHT);
-    sig_weights.lead_lag_weight         = hotVal(HP_LEAD_LAG_WEIGHT);
-    sig_weights.strong_threshold        = hotVal(HP_STRONG_THRESHOLD);
-    
-    for (auto& [code, aggregator] : _signal_aggregators)
-    {
-        if (aggregator) aggregator->updateWeights(sig_weights);
-    }
-    
-    // Alpha灵敏度 → Coordinator
-    if (_coordinator)
-    {
-        _coordinator->setAlphaSensitivity(hotVal(HP_ALPHA_SENSITIVITY));
-    }
-    
-    // Delta软指标 → Portfolio
-    // 使用setParams替代const_cast，保持接口一致性
-    if (_portfolio)
-    {
-        PortfolioParams pp = _portfolio->getParams();  // 拷贝
-        pp.portfolio_max_delta = hotVal(HP_MAX_DELTA);
-        _portfolio->setParams(pp);  // 通过非const方法写回
-    }
-    
-    // 报价粘性/保护参数 → FutuQuoter
-    double new_sticky_threshold = hotVal(HP_STICKY_THRESHOLD);
-    double new_improve_retreat_ratio = hotVal(HP_IMPROVE_RETREAT_RATIO);
-    double new_protect_ticks = hotVal(HP_PROTECT_TICKS);
-    double new_max_price_deviation = hotVal(HP_MAX_PRICE_DEVIATION);
-    
-    _config.quoting.sticky_threshold = new_sticky_threshold;
-    _config.quoting.improve_retreat_ratio = new_improve_retreat_ratio;
-    _config.quoting.protect_ticks = new_protect_ticks;
-    _config.quoting.max_price_deviation = new_max_price_deviation;
-    
-    for (auto& [code, quoter] : _quoters)
-    {
-        if (!quoter) continue;
-        quoter->updateStickyParams(new_sticky_threshold, new_improve_retreat_ratio);
-        quoter->updateProtectionParams(true, new_protect_ticks, _config.quoting.max_obligation_spread);
-        quoter->updateMaxPriceDeviation(new_max_price_deviation);
-    }
+    // 热参数应用已拆分至 FutuHotParamManager (架构重构 C2)
+    FutuHotParamManager::Targets t;
+    t.config = &_config;
+    t.quoters = &_quoters;
+    t.spread_opts = &_spread_optimizers;
+    t.aggregators = &_signal_aggregators;
+    t.coordinator = _coordinator.get();
+    t.portfolio = _portfolio.get();
+    _hot_mgr.applyAll(t, id());
     
     WTSLogger::info("UftFutuMmStrategy[{}] === HOT UPDATE COMPLETE ===", id());
 }

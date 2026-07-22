@@ -5,6 +5,7 @@
 #include "SpreadRiskManager.h"
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 namespace futu {
 
@@ -91,10 +92,12 @@ SpreadRiskMetrics SpreadRiskManager::calculatePairRisk(const std::string& pair_i
     
     const auto& state = it->second;
     
-    // Calculate exposures
+    // Calculate exposures (signed: long > 0, short < 0)
     risk.leg1_exposure = state.leg1_position * state.leg1_price;
     risk.leg2_exposure = state.leg2_position * state.leg2_price;
-    risk.net_exposure = risk.leg1_exposure - state.beta * risk.leg2_exposure;
+    // 净方向敞口 = 符号叠加 (空头 leg2_exposure 为负, 自然对冲多头).
+    // 全对冲价差 (多1000/空1000) 净敞口≈0; 旧公式 leg1 - beta*leg2 得 2000, 虚高2倍.
+    risk.net_exposure = risk.leg1_exposure + state.beta * risk.leg2_exposure;
     
     // Calculate VaR (simplified - assumes normal distribution)
     if (state.spread_std > 0 && state.hasPosition())
@@ -269,8 +272,12 @@ bool SpreadRiskManager::checkConvergenceFailure(const std::string& pair_id) cons
         return false;
     
     // Check if divergence is too high for too long
+    // 旧代码 positionDuration(0): uint64 下溢导致 long_duration 恒真
     bool high_divergence = std::abs(state.zscore) > _config.max_divergence_zscore;
-    bool long_duration = state.positionDuration(0) > _config.max_divergence_time * 1000;
+    uint64_t now_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch()).count());
+    bool long_duration = state.positionDuration(now_us) > _config.max_divergence_time;
     
     return high_divergence && long_duration;
 }

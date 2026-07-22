@@ -5,6 +5,7 @@
 
 #include "UnifiedOrderTracker.h"
 #include "../WTSTools/WTSLogger.h"
+#include "../Share/TimeUtils.hpp"
 #include <algorithm>
 #include <limits>
 
@@ -32,6 +33,8 @@ uint32_t UnifiedOrderTracker::trackOrderInternal(
     order.code[MAX_CODE_LEN - 1] = '\0';
     order.price = price;
     order.qty = qty;
+    order.filled_qty = 0;
+    order.original_qty = qty;   // 原始下单量, 供 recordOrderFill 判定完全成交 (不被 updateOrderQty 改写)
     order.place_mid = placeMid;
     order.place_time = placeTime;
     order.last_check = placeTime;
@@ -63,6 +66,7 @@ uint32_t UnifiedOrderTracker::trackOrderInternal(
     }
     
     _order_count++;
+    _generation++;
     _stats.orders_placed++;
     
     return index;
@@ -90,9 +94,11 @@ void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
         _stats.orders_canceled++;
         _stats.recordCancel(order.cancel_reason);
         
-        _cancel_timestamps.push_back(currentTime > 0 ? currentTime : 
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
+        // 统一使用 epoch ms (TimeUtils), 与 shouldCancelDueToRate 的调用方时间基准一致.
+        // 旧代码用 steady_clock(开机起算), 与 epoch ms 相差数十年 → 撤单率统计恒≈0,
+        // max_cancel_rate 限制形同虚设.
+        _cancel_timestamps.push_back(currentTime > 0 ? currentTime :
+            static_cast<uint64_t>(TimeUtils::getLocalTimeNow()));
     }
     else
     {
@@ -134,7 +140,23 @@ void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
             {
                 auto& ids = it2->second;
                 ids.erase(std::remove(ids.begin(), ids.end(), orderId), ids.end());
-                if (ids.empty()) _mm_buy_by_code.erase(it2);
+                if (ids.empty())
+                {
+                    _mm_buy_by_code.erase(it2);
+                    // 清除幽灵最优价 — 旧代码 erase 后又用 operator[] 重插空 vector,
+                    // 导致下面的重算分支不可达, 陈旧 best price 永久残留.
+                    _best_buy_price.erase(code);
+                }
+                else
+                {
+                    double best = 0;
+                    for (uint32_t id : ids)
+                    {
+                        const UnifiedOrderInfo* o = getOrderByOrderId(id);
+                        if (o && o->isActive() && o->price > best) best = o->price;
+                    }
+                    _best_buy_price[code] = best;
+                }
             }
         }
         else
@@ -144,30 +166,22 @@ void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
             {
                 auto& ids = it2->second;
                 ids.erase(std::remove(ids.begin(), ids.end(), orderId), ids.end());
-                if (ids.empty()) _mm_sell_by_code.erase(it2);
+                if (ids.empty())
+                {
+                    _mm_sell_by_code.erase(it2);
+                    _best_sell_price.erase(code);
+                }
+                else
+                {
+                    double best = std::numeric_limits<double>::max();
+                    for (uint32_t id : ids)
+                    {
+                        const UnifiedOrderInfo* o = getOrderByOrderId(id);
+                        if (o && o->isActive() && o->price < best) best = o->price;
+                    }
+                    _best_sell_price[code] = (best == std::numeric_limits<double>::max()) ? 0 : best;
+                }
             }
-        }
-        
-        // Recalculate best prices
-        if (isBid && !_mm_buy_by_code[code].empty())
-        {
-            double best = 0;
-            for (uint32_t id : _mm_buy_by_code[code])
-            {
-                const UnifiedOrderInfo* o = getOrderByOrderId(id);
-                if (o && o->isActive() && o->price > best) best = o->price;
-            }
-            _best_buy_price[code] = best;
-        }
-        else if (!isBid && !_mm_sell_by_code[code].empty())
-        {
-            double best = std::numeric_limits<double>::max();
-            for (uint32_t id : _mm_sell_by_code[code])
-            {
-                const UnifiedOrderInfo* o = getOrderByOrderId(id);
-                if (o && o->isActive() && o->price < best) best = o->price;
-            }
-            _best_sell_price[code] = (best == std::numeric_limits<double>::max()) ? 0 : best;
         }
     }
     
@@ -176,6 +190,7 @@ void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
     _free_slots.push_back(index);
     _order_index.erase(it);
     _order_count--;
+    _generation++;
 }
 
 //==============================================================================
@@ -323,15 +338,39 @@ double UnifiedOrderTracker::getPendingSellQty(const std::string& code) const
 // Auto-Cancel Check
 //==============================================================================
 
-std::vector<CancelAction> UnifiedOrderTracker::checkAutoCancel(
+const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
     const std::string& code, uint64_t currentTime, double currentMid, double tickSize,
     bool stateChanged, bool inventoryLimitHit, double current_risk_delta)
 {
-    std::vector<CancelAction> actions;
+    // 复用成员缓冲 (主线程单线程调用), 消除每 tick 3 次 vector 堆分配
+    _actions_buf.clear();
+    
+    // 清扫卡死的 pending_cancel 单 — 撤单 ack 丢失/通道断连时单永远卡在 PENDING_CANCEL,
+    // 占用 max_orders 配额且干扰自成交/在途统计. 超时强制 untrack (ack 若随后到达,
+    // onOrderDone 找不到记录, 无副作用).
+    if (_cfg.pending_cancel_timeout_ms > 0)
+    {
+        _stale_buf.clear();
+        for (size_t i = 0; i < _orders.size(); ++i)
+        {
+            UnifiedOrderInfo& order = _orders[i];
+            if (!order.isActive() || !order.isPendingCancel()) continue;
+            if (order.cancel_time == 0)
+                order.cancel_time = currentTime;  // 首次观察到, 记录时刻
+            else if (currentTime - order.cancel_time >= _cfg.pending_cancel_timeout_ms)
+                _stale_buf.push_back(order.order_id);
+        }
+        for (uint32_t oid : _stale_buf)
+        {
+            WTSLogger::warn("UnifiedOrderTracker: cancel ack timeout ({}ms), force untrack order {}",
+                _cfg.pending_cancel_timeout_ms, oid);
+            untrackOrder(oid, currentTime);
+        }
+    }
     
     // Create snapshot of active order indices
-    std::vector<size_t> active_indices;
-    active_indices.reserve(_orders.size());
+    _active_indices_buf.clear();
+    _active_indices_buf.reserve(_orders.size());
     
     for (size_t i = 0; i < _orders.size(); ++i)
     {
@@ -339,12 +378,12 @@ std::vector<CancelAction> UnifiedOrderTracker::checkAutoCancel(
         if (order.isActive() && !order.isPendingCancel())
         {
             if (code.empty() || std::string(order.code) == code)
-                active_indices.push_back(i);
+                _active_indices_buf.push_back(i);
         }
     }
     
     // Process each order
-    for (size_t idx : active_indices)
+    for (size_t idx : _active_indices_buf)
     {
         UnifiedOrderInfo& order = _orders[idx];
         
@@ -374,7 +413,7 @@ std::vector<CancelAction> UnifiedOrderTracker::checkAutoCancel(
                 if (!withinCooldown) {
                     order.last_inv_cancel_check = currentTime;
                     action.reason = CancelReason::INVENTORY_LIMIT;
-                    actions.push_back(action);
+                    _actions_buf.push_back(action);
                     order.setPendingCancel(CancelReason::INVENTORY_LIMIT);
                     continue;
                 }
@@ -405,14 +444,14 @@ std::vector<CancelAction> UnifiedOrderTracker::checkAutoCancel(
             }
             
             action.reason = CancelReason::STALE;
-            actions.push_back(action);
+            _actions_buf.push_back(action);
             order.setPendingCancel(CancelReason::STALE);
             continue;
         }
     }
     
-    _total_cancels += static_cast<uint32_t>(actions.size());
-    return actions;
+    _total_cancels += static_cast<uint32_t>(_actions_buf.size());
+    return _actions_buf;
 }
 
 //==============================================================================
@@ -437,11 +476,14 @@ SelfTradeCheckResult UnifiedOrderTracker::checkSelfTrade(
     const auto& mmOrders = is_buy ? _mm_sell_by_code : _mm_buy_by_code;
     auto it = mmOrders.find(code);
     if (it == mmOrders.end() || it->second.empty()) return result;
-    
+
     for (uint32_t orderId : it->second)
     {
         const UnifiedOrderInfo* order = getOrderByOrderId(orderId);
-        if (!order || !order->isActive()) continue;
+        // 排除 PENDING_CANCEL: 做市报价刷新先撤旧单(markPendingCancel)再下新单,
+        // cancel-ack 窗口内旧单仍 isActive 但即将离场, 不应参与自成交判定,
+        // 否则高频刷新时 ARB 信号被旧报价误拒 (与 getPendingBuyQty 过滤口径一致).
+        if (!order || !order->isActive() || order->isPendingCancel()) continue;
         
         bool conflict = false;
         if (is_market_order)
@@ -491,7 +533,8 @@ std::vector<uint32_t> UnifiedOrderTracker::getConflictingMMOrders(
     for (uint32_t orderId : it->second)
     {
         const UnifiedOrderInfo* order = getOrderByOrderId(orderId);
-        if (!order || !order->isActive()) continue;
+        // 排除 PENDING_CANCEL: 已在撤单途中, 无需再判冲突/再撤
+        if (!order || !order->isActive() || order->isPendingCancel()) continue;
         
         bool conflict = false;
         if (arb_is_buy)

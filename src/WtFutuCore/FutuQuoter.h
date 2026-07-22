@@ -59,7 +59,7 @@ struct QuoterConfig
     double      base_spread;    ///< Base spread in ticks (per side, from mid)
     double      level_step;     ///< Additional tick step between levels
     double      base_qty;       ///< Base quantity per level
-    double      qty_decay;      ///< Quantity multiplier for outer levels (e.g. 0.5 = halve each level)
+    double      level_qty_multiplier;  ///< M2: 档位间数量几何衰减系数 (e.g. 0.7 = 每档 ×0.7; 此前叫 qty_decay 易与 qty_decay_factor 混淆)
     double      tick_size;      ///< Minimum price increment
     
     // Sticky 策略参数
@@ -78,22 +78,19 @@ struct QuoterConfig
     bool        use_bilateral_quote;  ///< 是否使用双边报价接口 stra_quote() (default: false)
     double      min_valid_qty;        ///< 有效挂单最小数量，用于统计 (default: 1.0)
     
-    // 做市义务配置
-    double      max_obligation_spread; ///< 做市义务最大报价宽度（ticks），用于单边受限时和双边报价统计 (default: 100.0)
-    
     // v3 软风控参数（use_bilateral_quote=false 路径专用，bilateral 路径不受影响）
     double      qty_decay_factor;          ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_util)
     double      obligation_min_qty;        ///< 软 obligation 报价最小手数 (default: 10)
-    double      obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10)
+    double      obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10) — 同时用于报价生成和双边统计判断 (统一, 挂在哪=统计到哪)
     bool        obligation_only_l0;        ///< 软 obligation 是否仅 L0 (default: true)
     bool        always_obligation;         ///< 是否始终履行做市义务(双边报单) (default: true)
     
     QuoterConfig()
         : num_levels(1), base_spread(2.0), level_step(1.0)
-        , base_qty(5.0), qty_decay(0.7), tick_size(1.0)
+        , base_qty(5.0), level_qty_multiplier(0.7), tick_size(1.0)
         , sticky_threshold(1.0), improve_retreat_ratio(2.0), max_price_deviation(20.0)
         , price_protection(true), protect_ticks(1.0)
-        , use_bilateral_quote(false), min_valid_qty(1.0), max_obligation_spread(10.0)
+        , use_bilateral_quote(false), min_valid_qty(1.0)
         , qty_decay_factor(2.0), obligation_min_qty(10.0)
         , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
         , always_obligation(true) {}
@@ -115,20 +112,26 @@ public:
 
     /// Get configuration
     const QuoterConfig& config() const { return _cfg; }
-    void updateQuotingParams(double base_spread, double base_qty, double qty_decay, double level_step) {
+    void updateQuotingParams(double base_spread, double base_qty, double level_qty_multiplier, double level_step) {
         _cfg.base_spread = base_spread;
         _cfg.base_qty = base_qty;
-        _cfg.qty_decay = qty_decay;
+        _cfg.level_qty_multiplier = level_qty_multiplier;
         _cfg.level_step = level_step;
+        // 重算预计算数量表 — init() 中 _level_qtys 由 base_qty*level_qty_multiplier^i 预计算,
+        // 旧代码只改 _cfg 不刷表, 热更新对实际下单量无效.
+        for (uint32_t i = 0; i < _level_qtys.size(); i++)
+        {
+            double qty = _cfg.base_qty * std::pow(_cfg.level_qty_multiplier, i);
+            _level_qtys[i] = std::max(1.0, std::round(qty));
+        }
     }
     void updateStickyParams(double sticky_threshold, double improve_retreat_ratio) {
         _cfg.sticky_threshold = sticky_threshold;
         _cfg.improve_retreat_ratio = improve_retreat_ratio;
     }
-    void updateProtectionParams(bool price_protection, double protect_ticks, double max_obligation_spread) {
+    void updateProtectionParams(bool price_protection, double protect_ticks) {
         _cfg.price_protection = price_protection;
         _cfg.protect_ticks = protect_ticks;
-        _cfg.max_obligation_spread = max_obligation_spread;
     }
     void updateMaxPriceDeviation(double max_price_deviation) {
         _cfg.max_price_deviation = max_price_deviation;
@@ -218,7 +221,7 @@ public:
     {
         BilateralStatsConfig bcfg;
         bcfg.min_valid_qty = _cfg.min_valid_qty;
-        bcfg.max_obligation_spread = _cfg.max_obligation_spread;
+        bcfg.bilateral_stats_max_spread_ticks = _cfg.obligation_max_spread_ticks;  // 统一: 统计阈值 = 报价宽度
         _bilateral_stats.setConfig(bcfg);
         return _bilateral_stats.setSessionInfo(sessInfo, _cfg.code.c_str());
     }
@@ -269,7 +272,7 @@ private:
     {
         if (level < _level_qtys.size())
             return _level_qtys[level];
-        double qty = _cfg.base_qty * pow(_cfg.qty_decay, level);
+        double qty = _cfg.base_qty * pow(_cfg.level_qty_multiplier, level);
         return std::max(1.0, std::round(qty));
     }
 

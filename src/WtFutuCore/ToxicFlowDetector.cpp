@@ -237,6 +237,10 @@ void ToxicFlowDetector::runFusionCycle()
 {
     if (!_fusion_enabled) return;
     
+    // 无任何输入源(feedTickInference/feedBookSignal/addSelfTradeCalibration 均未被调用)时
+    // fuse() 输出 direction=0 — 直接回灌会用空 alpha 覆盖 Predictive 的有效通道, 必须跳过.
+    if (!_signal_fusion.hasAnySource()) return;
+    
     // Fuse all available signals into synthetic transaction data
     SyntheticTransactionData synth = _signal_fusion.fuse();
     

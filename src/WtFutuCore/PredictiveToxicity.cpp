@@ -146,17 +146,11 @@ void PredictiveToxicity::updateCache() const
     
     // Warmup gate
     // 冷启动 _buckets 累积不足时 VPIN 噪声极大(单 bucket 就能算出非零值),
-    // 导致 is_toxic 抖动锁死策略。要求至少 min_warmup_buckets 个完整桶后才输出毒性。
-    // 期间 vpin=0, is_toxic=false, alpha 通道仍生效(走 _has_alpha_data 分支)。
-    if (_buckets.size() < _cfg.min_warmup_buckets) {
-        _cached_result.vpin = 0.0;
-        _cached_result.is_toxic = false;
-        _cache_dirty = false;
-        return;
-    }
-    
-    // VPIN
-    _cached_result.vpin = _vpin;
+    // 导致 is_toxic 抖动锁死策略。要求至少 min_warmup_buckets 个完整桶后才启用 VPIN。
+    // 期间 vpin=0, 但 alpha 通道(OFI/Trade/extreme)仍然生效 — 旧代码在此提前 return,
+    // 与下方注释矛盾, 预热期形成保护真空.
+    const bool vpin_ready = (_buckets.size() >= _cfg.min_warmup_buckets);
+    _cached_result.vpin = vpin_ready ? _vpin : 0.0;
     
     if (_has_alpha_data)
     {
@@ -182,16 +176,13 @@ void PredictiveToxicity::updateCache() const
     // Combined score: weighted combination of VPIN and alpha (not max)
     _cached_result.combined_score = 0.5 * _cached_result.vpin + 0.5 * _cached_result.alpha_toxicity;
     
-    // Apply extreme signal boost
-    if (_cached_result.extreme_signal > 0)
-    {
-        _cached_result.combined_score = std::max(_cached_result.combined_score, _cached_result.extreme_signal * 0.8);
-    }
+    // 注意: extreme_signal 不在此叠加 — 由 ToxicFlowDetector 门面在 realized 加权后
+    // 统一叠加, 避免双重放大(本类内部叠加一次 + 门面再叠加一次).
     
     // Is toxic?
     _cached_result.is_toxic = 
         _cached_result.combined_score > _cfg.alpha_threshold ||
-        _cached_result.vpin > _cfg.vpin_threshold;
+        (vpin_ready && _cached_result.vpin > _cfg.vpin_threshold);
     
     // Toxic side
     if (_cached_result.is_toxic && _has_alpha_data)

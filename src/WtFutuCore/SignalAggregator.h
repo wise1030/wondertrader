@@ -6,6 +6,7 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <unordered_map>
 #include "FutuConfig.h"
@@ -120,6 +121,12 @@ public:
         _cfg.momentum_weight = cfg.momentum_weight;
         _cfg.lead_lag_weight = cfg.lead_lag_weight;
         _cfg.strong_threshold = cfg.strong_threshold;
+        // 穿透到权重框架的 Layer1 base 权重 — 否则热更新对实际 alpha 计算无效
+        if (_weight_framework) {
+            _weight_framework->updateBaseWeights(
+                cfg.ofi_weight, cfg.trade_weight, cfg.book_imbalance_weight,
+                cfg.momentum_weight, cfg.lead_lag_weight);
+        }
     }
     
     const SignalAggregatorConfig& getConfig() const { return _cfg; }
@@ -208,6 +215,15 @@ public:
         _tick_count = 0;
         _ctx.reset();
         for (auto& pair : _sources) pair.second->reset();
+        _prev_alpha = 0.0;
+        _tick_counter = 0;
+        _mid_history_for_ic.clear();
+        _mid_ma_short.clear();
+        _mid_ma_long.clear();
+        _ma_short_sum = 0.0;
+        _ma_long_sum = 0.0;
+        _dynamic_weights.clear();
+        _scale_trackers_initialized = false;
     }
 
 private:
@@ -216,8 +232,9 @@ private:
     
     void initializeSignalSources() {
         _sources.clear();
+        _signal_slots.clear();
         
-        // Volatility signal source (always enabled)
+        // Volatility signal source (always enabled, 辅助信号不参与加权)
         if (_cfg.use_volatility) {
             auto vol = std::make_unique<RealizedVolSignalSource>();
             vol->setWindowSize(_cfg.volatility_window);
@@ -229,7 +246,15 @@ private:
         if (_cfg.use_ofi) {
             OFISignalSource::Config ofi_cfg;
             ofi_cfg.window = _cfg.ofi_window;
-            _sources[SignalType::OFI] = std::make_unique<OFISignalSource>(ofi_cfg);
+            auto src = std::make_unique<OFISignalSource>(ofi_cfg);
+            registerSlot(SignalType::OFI, WeightedSignalType::OFI, src.get(),
+                         &SignalAggregatorConfig::ofi_weight, true,
+             [](const SignalContext& ctx, const ISignalSource*, bool& ok) {
+                ok = ctx.ofi.valid;
+                return ok ? ctx.ofi.ofi : 0.0;
+             },
+             [](SignalContext& ctx, double v) { ctx.alpha.ofi_component = v; });
+            _sources[SignalType::OFI] = std::move(src);
         }
         
         // Trade flow signal source
@@ -237,14 +262,30 @@ private:
             TradeFlowSignalSource::Config flow_cfg;
             flow_cfg.window = _cfg.trade_flow_window;
             flow_cfg.large_trade_threshold = _cfg.large_trade_threshold;
-            _sources[SignalType::TRADE_FLOW] = std::make_unique<TradeFlowSignalSource>(flow_cfg);
+            auto src = std::make_unique<TradeFlowSignalSource>(flow_cfg);
+            registerSlot(SignalType::TRADE_FLOW, WeightedSignalType::TRADE_FLOW, src.get(),
+                         &SignalAggregatorConfig::trade_weight, true,
+             [](const SignalContext& ctx, const ISignalSource*, bool& ok) {
+                ok = ctx.trade_flow.valid;
+                return ok ? ctx.trade_flow.net_flow_normalized : 0.0;
+             },
+             [](SignalContext& ctx, double v) { ctx.alpha.trade_component = v; });
+            _sources[SignalType::TRADE_FLOW] = std::move(src);
         }
         
         // Book imbalance signal source
         if (_cfg.use_book_imbalance) {
             BookImbalanceSignalSource::Config imb_cfg;
             imb_cfg.dominant_threshold = _cfg.book_imbalance_threshold;
-            _sources[SignalType::BOOK_IMBALANCE] = std::make_unique<BookImbalanceSignalSource>(imb_cfg);
+            auto src = std::make_unique<BookImbalanceSignalSource>(imb_cfg);
+            registerSlot(SignalType::BOOK_IMBALANCE, WeightedSignalType::BOOK_IMBALANCE, src.get(),
+                         &SignalAggregatorConfig::book_imbalance_weight, true,
+             [](const SignalContext& ctx, const ISignalSource*, bool& ok) {
+                ok = ctx.book_imbalance.valid;
+                return ok ? ctx.book_imbalance.simple_imbalance : 0.0;
+             },
+             [](SignalContext& ctx, double v) { ctx.alpha.book_imbalance_component = v; });
+            _sources[SignalType::BOOK_IMBALANCE] = std::move(src);
         }
         
         // Momentum signal source
@@ -252,15 +293,52 @@ private:
             MomentumSignalSource::Config mom_cfg;
             mom_cfg.window = _cfg.momentum_window;
             mom_cfg.ema_alpha = _cfg.momentum_ema_alpha;
-            _sources[SignalType::MOMENTUM] = std::make_unique<MomentumSignalSource>(mom_cfg);
+            auto src = std::make_unique<MomentumSignalSource>(mom_cfg);
+            registerSlot(SignalType::MOMENTUM, WeightedSignalType::MOMENTUM, src.get(),
+                         &SignalAggregatorConfig::momentum_weight, true,
+             [](const SignalContext&, const ISignalSource* s, bool& ok) {
+                ok = s->result().valid;
+                return ok ? s->getAlphaValue() : 0.0;
+             },
+             [](SignalContext& ctx, double v) { ctx.alpha.momentum_component = v; });
+            _sources[SignalType::MOMENTUM] = std::move(src);
         }
         
         if (_cfg.use_lead_lag) {
             LeadLagSignalSource::Config ll_cfg;
             ll_cfg.window = _cfg.lead_lag_window;
             ll_cfg.lag_ms = _cfg.lead_lag_lag_ms;
-            _sources[SignalType::LEAD_LAG] = std::make_unique<LeadLagSignalSource>(ll_cfg);
+            auto src = std::make_unique<LeadLagSignalSource>(ll_cfg);
+            // LL 不做幅度归一化 — LL 信号特性与其他信号不同:
+            // 大部分 tick 是重复值(anchor tick 频率低), p95 归一化会爆炸.
+            // LL 的 IC 虽然最高(0.09)但绝对值仍小, 放大幅度=放大噪声.
+            registerSlot(SignalType::LEAD_LAG, WeightedSignalType::LEAD_LAG, src.get(),
+                         &SignalAggregatorConfig::lead_lag_weight, false,
+             [](const SignalContext&, const ISignalSource* s, bool& ok) {
+                ok = s->result().valid;
+                return ok ? s->getAlphaValue() : 0.0;
+             },
+             [](SignalContext& ctx, double v) { ctx.alpha.lead_lag_component = v; });
+            _sources[SignalType::LEAD_LAG] = std::move(src);
         }
+    }
+    
+    /// 注册一个加权信号槽位 — 新增信号源只需在 initializeSignalSources 中
+    /// 加一段注册, computeAlpha/IC 记录/归一化/权重全部自动生效
+    void registerSlot(SignalType type, WeightedSignalType wtype, ISignalSource* source,
+                      double SignalAggregatorConfig::*weight_member, bool normalize,
+                      std::function<double(const SignalContext&, const ISignalSource*, bool&)> extract,
+                      std::function<void(SignalContext&, double)> set_component)
+    {
+        SignalSlot slot;
+        slot.type = type;
+        slot.wtype = wtype;
+        slot.source = source;
+        slot.weight_member = weight_member;
+        slot.normalize = normalize;
+        slot.extract = std::move(extract);
+        slot.set_component = std::move(set_component);
+        _signal_slots.push_back(std::move(slot));
     }
     
     void computeMarketState() {
@@ -326,43 +404,35 @@ private:
         // Adaptive Weight Framework (三层权重)
         // 在固定权重逻辑前计算动态权重, 替代后续的 _cfg.xxx_weight
         //==================================================================
-        // 提取各信号当前值
-        double ofi_val = _ctx.ofi.valid ? _ctx.ofi.ofi : 0.0;
-        double trade_val = _ctx.trade_flow.valid ? _ctx.trade_flow.net_flow_normalized : 0.0;
-        double book_val = _ctx.book_imbalance.valid ? _ctx.book_imbalance.simple_imbalance : 0.0;
-        double mom_val = 0.0;
-        if (_cfg.use_momentum) {
-            auto mom_it = _sources.find(SignalType::MOMENTUM);
-            if (mom_it != _sources.end() && mom_it->second) {
-                const auto& result = mom_it->second->result();
-                if (result.valid) mom_val = mom_it->second->getAlphaValue();
-            }
-        }
-        double ll_val = 0.0;
-        if (_cfg.use_lead_lag) {
-            auto ll_it = _sources.find(SignalType::LEAD_LAG);
-            if (ll_it != _sources.end() && ll_it->second) {
-                const auto& result = ll_it->second->result();
-                if (result.valid) { ll_val = ll_it->second->getAlphaValue(); }
-                _ctx.alpha.lead_lag_component = result.valid ? ll_val : 0.0;
-            }
+        // 提取各信号当前值 (槽位驱动, 替代 5 段硬编码提取)
+        double slot_vals[5] = {0.0, 0.0, 0.0, 0.0, 0.0};  // 按 WeightedSignalType 索引
+        bool slot_ok[5] = {false, false, false, false, false};
+        for (auto& slot : _signal_slots) {
+            bool ok = false;
+            double v = slot.extract(_ctx, slot.source, ok);
+            size_t idx = static_cast<size_t>(slot.wtype);
+            slot_vals[idx] = v;
+            slot_ok[idx] = ok;
         }
         
         // 记录信号值用于 IC 跟踪
         _tick_counter++;
         if (_weight_framework) {
-            _weight_framework->recordSignal(WeightedSignalType::OFI, ofi_val);
-            _weight_framework->recordSignal(WeightedSignalType::TRADE_FLOW, trade_val);
-            _weight_framework->recordSignal(WeightedSignalType::BOOK_IMBALANCE, book_val);
-            _weight_framework->recordSignal(WeightedSignalType::MOMENTUM, mom_val);
-            _weight_framework->recordSignal(WeightedSignalType::LEAD_LAG, ll_val);
+            for (auto& slot : _signal_slots) {
+                _weight_framework->recordSignal(slot.wtype, slot_vals[static_cast<size_t>(slot.wtype)]);
+            }
             
             // 记录 horizon-tick 前的信号对应的未来回报
-            if (_tick_counter > _weight_framework->getConfig().ic_horizon) {
-                double future_return = _ctx.mid_price - _prev_mid_for_ic;
+            // 口径: future_return = mid[t] - mid[t-horizon]
+            // 旧代码用 1-tick 收益(mid[t]-mid[t-1])冒充 horizon 收益, IC 度量失真.
+            const uint32_t ic_horizon = _weight_framework->getConfig().ic_horizon;
+            _mid_history_for_ic.push_back(_ctx.mid_price);
+            if (_mid_history_for_ic.size() > static_cast<size_t>(ic_horizon) + 1)
+                _mid_history_for_ic.pop_front();
+            if (_tick_counter > ic_horizon && _mid_history_for_ic.size() > ic_horizon) {
+                double future_return = _ctx.mid_price - _mid_history_for_ic.front();
                 _weight_framework->recordReturn(future_return);
             }
-            _prev_mid_for_ic = _ctx.mid_price;
             
             // 定期更新 IC
             if (_tick_counter % _weight_framework->getConfig().ic_update_interval == 0) {
@@ -370,86 +440,43 @@ private:
             }
             
             // 计算动态权重
-            double signal_array[5] = {ofi_val, trade_val, book_val, mom_val, ll_val};
+            double signal_array[5] = {slot_vals[0], slot_vals[1], slot_vals[2], slot_vals[3], slot_vals[4]};
             // EC 跨期品种 → LeadLag regime factor 升权
             bool is_cross_term = (_sources.find(SignalType::LEAD_LAG) != _sources.end());
+            // Regime trend 检测: 维护短/长窗口 mid 滚动均值 (O(1))
+            // 旧代码 short_ma==long_ma=mid → ratio=0 → trend 恒 RANGING,
+            // 动量权重被 mom_ranging_factor(0.5) 永久减半.
+            _mid_ma_short.push_back(_ctx.mid_price);
+            _ma_short_sum += _ctx.mid_price;
+            if (_mid_ma_short.size() > MA_SHORT_WINDOW) { _ma_short_sum -= _mid_ma_short.front(); _mid_ma_short.pop_front(); }
+            _mid_ma_long.push_back(_ctx.mid_price);
+            _ma_long_sum += _ctx.mid_price;
+            if (_mid_ma_long.size() > MA_LONG_WINDOW) { _ma_long_sum -= _mid_ma_long.front(); _mid_ma_long.pop_front(); }
+            double short_ma = _ma_short_sum / _mid_ma_short.size();
+            double long_ma  = _ma_long_sum / _mid_ma_long.size();
             auto regime = MarketRegime::detect(
                 _ctx.volatility.vol_percentile,
-                _ctx.mid_price, _ctx.mid_price,  // MA 简化为当前价(暂不维护 MA 历史)
+                short_ma, long_ma,
                 (_ctx.bid_depth + _ctx.ask_depth) / 2.0
             );
             _dynamic_weights = _weight_framework->computeWeights(regime, signal_array, is_cross_term);
         }
         
-        // OFI component
-        if (_cfg.use_ofi && _ctx.ofi.valid) {
-            double ofi_norm = normalizeSignal(WeightedSignalType::OFI, _ctx.ofi.ofi);
-            _ctx.alpha.ofi_component = ofi_norm;
-            double w = getDynamicWeight(WeightedSignalType::OFI, _cfg.ofi_weight);
-            alpha_sum += w * ofi_norm;
+        //==================================================================
+        // 加权求和 (槽位驱动, 替代 5 段硬编码分量)
+        // 每个槽位: 提取 → 幅度归一化(LL 除外) → 动态权重 → 累加
+        //==================================================================
+        for (auto& slot : _signal_slots) {
+            size_t idx = static_cast<size_t>(slot.wtype);
+            if (!slot_ok[idx]) continue;
+            double raw = slot_vals[idx];
+            double norm = slot.normalize ? normalizeSignal(slot.wtype, raw) : raw;
+            slot.set_component(_ctx, norm);
+            double w = getDynamicWeight(slot.wtype, _cfg.*(slot.weight_member));
+            alpha_sum += w * norm;
             weight_sum += w;
-            _valid_signals.push_back(ofi_norm);
+            _valid_signals.push_back(norm);
             _valid_weights.push_back(w);
-        }
-        
-        // Trade flow component
-        if (_cfg.use_trade_flow && _ctx.trade_flow.valid) {
-            double trade_norm = normalizeSignal(WeightedSignalType::TRADE_FLOW, _ctx.trade_flow.net_flow_normalized);
-            _ctx.alpha.trade_component = trade_norm;
-            double w = getDynamicWeight(WeightedSignalType::TRADE_FLOW, _cfg.trade_weight);
-            alpha_sum += w * trade_norm;
-            weight_sum += w;
-            _valid_signals.push_back(trade_norm);
-            _valid_weights.push_back(w);
-        }
-        
-        // Book imbalance component
-        if (_cfg.use_book_imbalance && _ctx.book_imbalance.valid) {
-            double book_norm = normalizeSignal(WeightedSignalType::BOOK_IMBALANCE, _ctx.book_imbalance.simple_imbalance);
-            _ctx.alpha.book_imbalance_component = book_norm;
-            double w = getDynamicWeight(WeightedSignalType::BOOK_IMBALANCE, _cfg.book_imbalance_weight);
-            alpha_sum += w * book_norm;
-            weight_sum += w;
-            _valid_signals.push_back(book_norm);
-            _valid_weights.push_back(w);
-        }
-        
-        // Momentum component (if enabled)
-        if (_cfg.use_momentum) {
-            auto mom_it = _sources.find(SignalType::MOMENTUM);
-            if (mom_it != _sources.end() && mom_it->second) {
-                const auto& result = mom_it->second->result();
-                if (result.valid) {
-                    double mom_raw = mom_it->second->getAlphaValue();
-                    double mom_norm = normalizeSignal(WeightedSignalType::MOMENTUM, mom_raw);
-                    _ctx.alpha.momentum_component = mom_norm;
-                    double w = getDynamicWeight(WeightedSignalType::MOMENTUM, _cfg.momentum_weight);
-                    alpha_sum += w * mom_norm;
-                    weight_sum += w;
-                    _valid_signals.push_back(mom_norm);
-                    _valid_weights.push_back(w);
-                }
-            }
-        }
-        
-        if (_cfg.use_lead_lag) {
-            auto ll_it = _sources.find(SignalType::LEAD_LAG);
-            if (ll_it != _sources.end() && ll_it->second) {
-                const auto& result = ll_it->second->result();
-                if (result.valid) {
-                    double ll_raw = ll_it->second->getAlphaValue();
-                    // LL 不做幅度归一化 — LL 信号特性与其他信号不同:
-                    // 大部分 tick 是重复值(anchor tick 频率低), p95 归一化会爆炸.
-                    // LL 的 IC 虽然最高(0.09)但绝对值仍小, 放大幅度=放大噪声.
-                    // 用原始 tanh 值参与合成, 由权重框架通过 IC 升权.
-                    _ctx.alpha.lead_lag_component = ll_raw;
-                    double w = getDynamicWeight(WeightedSignalType::LEAD_LAG, _cfg.lead_lag_weight);
-                    alpha_sum += w * ll_raw;
-                    weight_sum += w;
-                    _valid_signals.push_back(ll_raw);
-                    _valid_weights.push_back(w);
-                }
-            }
         }
         
 // Fallback Mechanism: If no primary signals are valid, try falling back to just book imbalance
@@ -538,6 +565,21 @@ private:
     std::unordered_map<SignalType, std::unique_ptr<ISignalSource>> _sources;
     VolatilitySignalSource* _vol_source = nullptr;
     
+    //==========================================================================
+    // 加权信号槽位 (表驱动, 替代 computeAlpha 中的 5 段硬编码分量)
+    // 顺序固定: OFI / TradeFlow / BookImbalance / Momentum / LeadLag
+    //==========================================================================
+    struct SignalSlot {
+        SignalType type;
+        WeightedSignalType wtype;
+        ISignalSource* source;                                 // 缓存指针, 消除每 tick map find
+        double SignalAggregatorConfig::*weight_member;         // 静态回退权重(指向 _cfg 成员)
+        bool normalize;                                        // 是否做 p95 幅度归一化
+        std::function<double(const SignalContext&, const ISignalSource*, bool&)> extract;
+        std::function<void(SignalContext&, double)> set_component;
+    };
+    std::vector<SignalSlot> _signal_slots;
+    
     // Pre-allocated vectors for zero-allocation hotpath
     std::vector<double> _valid_signals;
     std::vector<double> _valid_weights;
@@ -551,7 +593,15 @@ private:
     std::unique_ptr<AdaptiveWeightFramework> _weight_framework;
     std::unordered_map<WeightedSignalType, double> _dynamic_weights;
     uint64_t _tick_counter = 0;
-    double _prev_mid_for_ic = 0.0;
+    // IC horizon 回报: mid[t-horizon] 历史 (长度 horizon+1)
+    std::deque<double> _mid_history_for_ic;
+    // Regime trend 检测: 短/长窗口 mid 均值 (O(1) 滚动和)
+    std::deque<double> _mid_ma_short;
+    std::deque<double> _mid_ma_long;
+    double _ma_short_sum = 0.0;
+    double _ma_long_sum = 0.0;
+    static constexpr size_t MA_SHORT_WINDOW = 20;
+    static constexpr size_t MA_LONG_WINDOW = 60;
     
     // Signal amplitude normalization (rolling p95 scale)
     // 确保 Mom/LL 等小幅信号不被 OFI/Trade 饱和信号淹没

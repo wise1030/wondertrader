@@ -32,7 +32,7 @@ void FutuQuoter::init(const QuoterConfig& cfg)
         _ask_levels[i].is_bid = false;
         _ask_levels[i].level_index = static_cast<uint8_t>(i);
         
-        double qty = cfg.base_qty * std::pow(cfg.qty_decay, i);
+        double qty = cfg.base_qty * std::pow(cfg.level_qty_multiplier, i);
         _level_qtys[i] = std::max(1.0, std::round(qty));
     }
 }
@@ -50,6 +50,11 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
     QuoteResult qr{};
     qr.is_obligation_bid = false;
     qr.is_obligation_ask = false;
+
+    // 注意: spread_mult 与 _cfg.base_spread 不在此使用 — spread 由上游
+    // (StrategyCoordinator → SpreadOptimizer::computeOptimalQuote) 计入 l0_bid/l0_ask 价格,
+    // Quoter 只负责按 level_step 逐档外扩。在此再次应用 spread 会导致双重计宽。
+    (void)spread_mult;
 
     double level_offset = level * _cfg.level_step * _cfg.tick_size;
     qr.bidPrice = floor((l0_bid_price - level_offset) / _cfg.tick_size) * _cfg.tick_size;
@@ -170,19 +175,30 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
     auto [bidId, askId] = _ctx->stra_quote(_cfg.code.c_str(), qr.bidPrice, qr.bidQty,
                                             qr.askPrice, qr.askQty,
                                             (_allow_bid && _allow_ask) ? "MM_BILATERAL" : "MM_OBLIGATION");
-    if (bidId != 0 && askId != 0)
+    // 单侧成功也要登记跟踪 — 否则成功侧订单成为孤儿单(在场但无人管理/撤单)
+    uint32_t placed = 0;
+    if (bidId != 0)
     {
         bid_level.order_ids = {bidId}; bid_level.price = qr.bidPrice; bid_level.qty = qr.bidQty;
-        ask_level.order_ids = {askId}; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
         _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
-        _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
-        if (_tracker && now > 0) {
+        if (_tracker && now > 0)
             _tracker->trackMMOrder(bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
-            _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
-        }
-        return 2;
+        ++placed;
     }
-    return 0;
+    if (askId != 0)
+    {
+        ask_level.order_ids = {askId}; ask_level.price = qr.askPrice; ask_level.qty = qr.askQty;
+        _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
+        if (_tracker && now > 0)
+            _tracker->trackMMOrder(askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+        ++placed;
+    }
+    if (placed == 1)
+    {
+        WTSLogger::warn("FutuQuoter[{}]: stra_quote partial failure (bidId={}, askId={}), tracking orphan side",
+            _cfg.code, bidId, askId);
+    }
+    return placed;
 }
 
 uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now)
@@ -485,7 +501,8 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty,
 void FutuQuoter::onTrade(uint32_t localid, double vol, double price,
                          uint32_t uTime_HHMM, uint32_t sec_in_min)
 {
-    if (_tracker) _tracker->recordFilled();
+    // 注意: 不在这里调 _tracker->recordFilled() — orders_filled 由
+    // untrackOrder(完全成交路径)统一计数, 避免每笔成交 +2 的双重计数.
 
     // R3 v2: 成交导致挂单 qty 减少，可能跌出 min_valid_qty 累计深度阈值
     // 必须重新评估 valid 状态（onOrder 路径不一定能覆盖所有部分成交场景）

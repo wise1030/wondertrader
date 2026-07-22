@@ -13,6 +13,7 @@
 
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <cstdint>
 
 namespace futu {
@@ -45,6 +46,16 @@ enum class ArbitrageStrategy : uint8_t
     MARKET_MAKING,       ///< Strategy E: Market making enhancement
     HYBRID               ///< Strategy F: Hybrid approach
 };
+
+/// 枚举 → 注册表名称映射 (与 yaml primaryStrategy 字符串一致)
+inline const std::string& strategyTypeName(ArbitrageStrategy t)
+{
+    static const std::string names[] = {
+        "mean_reversion", "trend_following", "pairs_trading",
+        "statistical_arb", "market_making", "mean_reversion"  // HYBRID fallback
+    };
+    return names[static_cast<uint8_t>(t) < 6 ? static_cast<uint8_t>(t) : 0];
+}
 
 //==============================================================================
 // Signal Type Enumeration
@@ -216,10 +227,11 @@ struct SpreadState
     /// Check if has open position
     inline bool hasPosition() const { return std::abs(spread_position) > 0.001; }
     
-    /// Get position duration in seconds
-    inline uint64_t positionDuration(uint64_t now) const
+    /// Get position duration in seconds (now_us 与 position_open_time 同为 µs epoch)
+    inline uint64_t positionDuration(uint64_t now_us) const
     {
-        return hasPosition() ? (now - position_open_time) / 1000 : 0;
+        if (!hasPosition() || now_us <= position_open_time) return 0;
+        return (now_us - position_open_time) / 1000000ULL;  // µs → s
     }
 };
 
@@ -422,11 +434,101 @@ struct PairArbState
     /// Last derived spread position observed (for monitoring/debug)
     double    last_derived_position;
 
+    /// B4: 平仓专用 in_flight (STOP_LOSS/TIMEOUT 主动平仓的在飞量).
+    /// 与 open in_flight 分离: onArbOrderFilled 优先扣减本字段;
+    /// 超时窗口更短 (close_in_flight_timeout_ms, 止损场景要求快速反馈).
+    double    close_in_flight_qty;
+    uint64_t  close_in_flight_set_time;
+
     PairArbState()
         : intent(ArbIntent::NONE), intent_set_tick(0)
         , in_flight_qty(0), in_flight_direction(0), in_flight_set_time(0)
         , last_derived_position(0)
+        , close_in_flight_qty(0), close_in_flight_set_time(0)
     {}
+};
+
+//==============================================================================
+// C0: Arb Close Config (分级平仓配置, ARB_SELF_CLOSE_DESIGN v2.1 §C0)
+//
+// 设计哲学:
+//   CLOSE_LONG/SHORT 永不解禁 (B-3 特性: MM maker 消耗, 赚 spread + 免 fee)
+//   STOP_LOSS  最高优先级解禁 (FAK + 对手价, 止损成本 << 继续亏损)
+//   TIMEOUT    次优先级解禁 (GFD 挂 mid, 超时升级对手价)
+//==============================================================================
+
+inline bool is_close_signal(SpreadSignalType t)
+{
+    return t == SpreadSignalType::CLOSE_LONG_SPREAD ||
+           t == SpreadSignalType::CLOSE_SHORT_SPREAD ||
+           t == SpreadSignalType::STOP_LOSS ||
+           t == SpreadSignalType::TIMEOUT_EXIT ||
+           t == SpreadSignalType::REBALANCE;
+}
+
+struct ArbCloseConfig
+{
+    bool enabled = false;               ///< 总开关 (false = 纯 B-3, 默认)
+
+    struct AllowSignals {
+        bool close_long = false;        ///< v2.0: 永不解禁 (B-3 特性保留)
+        bool close_short = false;
+        bool timeout_exit = false;      ///< C2 解禁, maker 单
+        bool stop_loss = false;         ///< C1 解禁, taker 单 (最高优先级)
+    } allow_signals;
+
+    /// 分级执行策略
+    struct ExecutionPolicy {
+        int      order_flag = 0;        ///< 0=GFD 1=FAK 2=FOK
+        double   price_offset_ticks = 0;///< 相对对手价/mid 偏移
+        uint64_t timeout_ms = 30000;    ///< 未成交升级窗口
+        bool     upgrade_to_taker = false; ///< 超时是否升级对手价
+    };
+    ExecutionPolicy stop_loss_policy;   ///< FAK 对手价, 1s
+    ExecutionPolicy timeout_policy;     ///< GFD mid, 30s 升级
+
+    double   max_close_size_pct = 0.5;        ///< 单次平仓量上限 (vs spread_position)
+    uint64_t close_in_flight_timeout_ms = 5000; ///< 平仓 in_flight 超时 (B4)
+    bool     oversold_protection = true;      ///< 过冲保险丝 (B5 事后)
+    uint64_t overshoot_cooldown_ms = 3600000; ///< 触发保险丝后 pair 冷却
+    bool     intent_broadcast = true;         ///< 与 Coordinator 协同 (B1+B2)
+
+    /// per-strategy 覆盖 (v2.1 §十四建议2; 默认空 = 全局配置生效)
+    struct StrategyOverride {
+        bool close_long = false;
+        bool close_short = false;
+        std::string execution = "timeout_policy";
+    };
+    std::unordered_map<std::string, StrategyOverride> strategy_overrides;
+
+    ArbCloseConfig()
+    {
+        stop_loss_policy.order_flag = 1;        // FAK
+        stop_loss_policy.timeout_ms = 1000;
+        stop_loss_policy.upgrade_to_taker = false;
+        timeout_policy.order_flag = 0;          // GFD
+        timeout_policy.timeout_ms = 30000;
+        timeout_policy.upgrade_to_taker = true;
+    }
+
+    bool is_allowed(SpreadSignalType t) const
+    {
+        if (!enabled) return false;
+        switch (t)
+        {
+        case SpreadSignalType::CLOSE_LONG_SPREAD:  return allow_signals.close_long;
+        case SpreadSignalType::CLOSE_SHORT_SPREAD: return allow_signals.close_short;
+        case SpreadSignalType::TIMEOUT_EXIT:       return allow_signals.timeout_exit;
+        case SpreadSignalType::STOP_LOSS:          return allow_signals.stop_loss;
+        default: return false;  // REBALANCE 等保持抑制
+        }
+    }
+
+    /// 查询信号应使用的执行策略 (STOP_LOSS → stop_loss_policy, 其余 → timeout_policy)
+    const ExecutionPolicy& policy_for(SpreadSignalType t) const
+    {
+        return (t == SpreadSignalType::STOP_LOSS) ? stop_loss_policy : timeout_policy;
+    }
 };
 
 } // namespace futu

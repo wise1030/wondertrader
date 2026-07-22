@@ -49,7 +49,7 @@ struct ToxicityParams
         , book_weight(0.3)
         , self_trade_weight(0.4)
         , extreme_signal_weight(0.8)
-        , vpin_threshold(0.7)
+        , vpin_threshold(0.10)  // H2: 统一与 fromVariant 默认一致 (此前构造 0.7 vs fromVariant 0.10, 差 7 倍)
         , vpin_window(50)
         , vpin_bucket_size(1000)
         , vpin_min_warmup_buckets(5) {}

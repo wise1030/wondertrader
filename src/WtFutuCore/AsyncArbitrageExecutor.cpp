@@ -141,12 +141,23 @@ size_t AsyncArbitrageExecutor::processPendingOrders(OrderCallback callback)
 }
 
 void AsyncArbitrageExecutor::updateMMOrders(const std::string& code,
-                                             const std::vector<ActiveOrder>& buy_orders,
-                                             const std::vector<ActiveOrder>& sell_orders)
+                                              const std::vector<ActiveOrder>& buy_orders,
+                                              const std::vector<ActiveOrder>& sell_orders)
 {
+    // P7: 预计算全局 最高买价/最低卖价 标量, 不再存储整个 vector.
+    // 空 vector → 擦除条目, 避免残留陈旧 min/max.
+    double max_buy = 0;
+    for (const auto& o : buy_orders)
+        if (o.price > max_buy) max_buy = o.price;
+    double min_sell = std::numeric_limits<double>::max();
+    for (const auto& o : sell_orders)
+        if (o.price > 0 && o.price < min_sell) min_sell = o.price;
+    
     SpinLockGuard lock(_mm_orders_spin);
-    _mm_buy_orders[code] = buy_orders;
-    _mm_sell_orders[code] = sell_orders;
+    if (max_buy > 0) _mm_max_buy[code] = max_buy;
+    else _mm_max_buy.erase(code);
+    if (min_sell < std::numeric_limits<double>::max()) _mm_min_sell[code] = min_sell;
+    else _mm_min_sell.erase(code);
 }
 
 void AsyncArbitrageExecutor::updateTickSize(const std::string& code, double tickSize)
@@ -222,6 +233,13 @@ void AsyncArbitrageExecutor::arbThreadFunc()
         _tick_available.store(false, std::memory_order_release);
         
         // ================================================================
+        // 异常兜底: 任何处理异常都不能让 arb 线程退出 (主线程仍 pushTick,
+        // 线程一死队列塞满后无声丢信号). 异常时禁用套利 + 告警, 保线程存活
+        // 以便 _stop_requested 干净关闭.
+        // ================================================================
+        try
+        {
+        // ================================================================
         // 处理所有待处理的 tick 数据
         // ================================================================
         size_t ticks_processed = _tick_queue->popAll([this](const ArbTickData& tick) {
@@ -259,6 +277,17 @@ void AsyncArbitrageExecutor::arbThreadFunc()
             processSignals(current_time);
             last_process_time = current_time;
         }
+        }
+        catch (const std::exception& e)
+        {
+            WTSLogger::error("AsyncArb thread exception: {} — disabling arbitrage", e.what());
+            _config.enabled.store(false, std::memory_order_release);
+        }
+        catch (...)
+        {
+            WTSLogger::error("AsyncArb thread unknown exception — disabling arbitrage");
+            _config.enabled.store(false, std::memory_order_release);
+        }
     }
     
     WTSLogger::info("AsyncArbitrageExecutor thread exiting");
@@ -284,10 +313,18 @@ void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
     for (const auto& signal : signals)
     {
         // Only process high-confidence signals
-        if (signal.confidence > 0.5)
+        // 注意: OPEN 类信号在 B-3 门已置 in_flight; 被 confidence 过滤丢弃时必须释放,
+        // 否则 pair 卡死至 60s 超时. MR 阈值入场时 confidence 恰为 0.5, 用 >= 保留最弱有效信号.
+        if (signal.confidence >= 0.5)
         {
             executeSignal(signal);
             _signals_generated.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            // B7 fix: 无论 OPEN 还是 CLOSE, 低 confidence 丢弃时都必须释放 in_flight,
+            // 否则 STOP_LOSS/TIMEOUT 等 CLOSE 信号 confidence<0.5 时会卡 5s 超时.
+            _arb_manager->onArbSignalDropped(signal.pair_id);
         }
     }
 }
@@ -295,8 +332,33 @@ void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
 void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
 {
     // Determine buy/sell direction
-    bool leg1_is_buy = (signal.type == SpreadSignalType::OPEN_LONG_SPREAD || 
-                        signal.type == SpreadSignalType::CLOSE_SHORT_SPREAD);
+    bool leg1_is_buy;
+    if (signal.type == SpreadSignalType::OPEN_LONG_SPREAD ||
+        signal.type == SpreadSignalType::CLOSE_SHORT_SPREAD)
+    {
+        leg1_is_buy = true;
+    }
+    else if (signal.type == SpreadSignalType::OPEN_SHORT_SPREAD ||
+             signal.type == SpreadSignalType::CLOSE_LONG_SPREAD)
+    {
+        leg1_is_buy = false;
+    }
+    else
+    {
+        // STOP_LOSS / TIMEOUT_EXIT: 方向由当前价差持仓符号决定 —
+        // 旧代码硬编码按"平多价差"(卖leg1买leg2)处理, 对空头价差止损=加仓.
+        // 多头价差平仓 = 卖 leg1; 空头价差平仓 = 买 leg1.
+        auto st = _arb_manager->getSpreadState(signal.pair_id);
+        // A5: 零持仓时无法确定平仓方向, 降级 NONE 防止误开仓 (止损单错向=新开仓)
+        if (st.spread_position == 0.0)
+        {
+            WTSLogger::warn("Arb[{}]: close/stop signal with zero spread_position, degraded to NONE",
+                signal.pair_id);
+            _arb_manager->onArbSignalDropped(signal.pair_id);
+            return;
+        }
+        leg1_is_buy = (st.spread_position < 0);
+    }
     bool leg2_is_buy = !leg1_is_buy;
     
     double leg1_price = signal.leg1_price;
@@ -320,82 +382,62 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     double orig_leg2_price = leg2_price;
     bool price_adjusted = false;
     
-    // Self-trade check (using local copy of MM orders)
+    // Self-trade check (P7: O(1) 预计算标量 — 全局 min_sell/max_buy 即约束边界,
+    // 与原"扫全部订单取最严格价"等价, 消除锁内 O(n) 线性扫描).
     {
         SpinLockGuard lock(_mm_orders_spin);
         
         // Check leg1
-        auto buy_it = _mm_buy_orders.find(signal.leg1_code);
-        auto sell_it = _mm_sell_orders.find(signal.leg1_code);
-        
-        if (leg1_is_buy && sell_it != _mm_sell_orders.end())
+        if (leg1_is_buy)
         {
-            // Buying, check if we have sell orders at or below our buy price
-            for (const auto& order : sell_it->second)
+            auto it = _mm_min_sell.find(signal.leg1_code);
+            if (it != _mm_min_sell.end() && it->second > 0 && it->second <= leg1_price)
             {
-                if (order.price <= leg1_price)
-                {
-                    // Potential self-trade, adjust price by 1 tick
-                    leg1_price = order.price - leg1_tick_size;
-                    price_adjusted = true;
-                    WTSLogger::warn("Self-trade risk on {} BUY, adjusted price from {} to {}",
-                        signal.leg1_code, orig_leg1_price, leg1_price);
-                    break;
-                }
+                leg1_price = it->second - leg1_tick_size;
+                price_adjusted = true;
+                WTSLogger::warn("Self-trade risk on {} BUY, adjusted price from {} to {}",
+                    signal.leg1_code, orig_leg1_price, leg1_price);
             }
         }
-        else if (!leg1_is_buy && buy_it != _mm_buy_orders.end())
+        else
         {
-            // Selling, check if we have buy orders at or above our sell price
-            for (const auto& order : buy_it->second)
+            auto it = _mm_max_buy.find(signal.leg1_code);
+            if (it != _mm_max_buy.end() && it->second > 0 && it->second >= leg1_price)
             {
-                if (order.price >= leg1_price)
-                {
-                    leg1_price = order.price + leg1_tick_size;
-                    price_adjusted = true;
-                    WTSLogger::warn("Self-trade risk on {} SELL, adjusted price from {} to {}",
-                        signal.leg1_code, orig_leg1_price, leg1_price);
-                    break;
-                }
+                leg1_price = it->second + leg1_tick_size;
+                price_adjusted = true;
+                WTSLogger::warn("Self-trade risk on {} SELL, adjusted price from {} to {}",
+                    signal.leg1_code, orig_leg1_price, leg1_price);
             }
         }
         
         // Check leg2 (same logic)
-        buy_it = _mm_buy_orders.find(signal.leg2_code);
-        sell_it = _mm_sell_orders.find(signal.leg2_code);
-        
-        if (leg2_is_buy && sell_it != _mm_sell_orders.end())
+        if (leg2_is_buy)
         {
-            for (const auto& order : sell_it->second)
+            auto it = _mm_min_sell.find(signal.leg2_code);
+            if (it != _mm_min_sell.end() && it->second > 0 && it->second <= leg2_price)
             {
-                if (order.price <= leg2_price)
-                {
-                    leg2_price = order.price - leg2_tick_size;
-                    price_adjusted = true;
-                    WTSLogger::warn("Self-trade risk on {} BUY, adjusted price from {} to {}",
-                        signal.leg2_code, orig_leg2_price, leg2_price);
-                    break;
-                }
+                leg2_price = it->second - leg2_tick_size;
+                price_adjusted = true;
+                WTSLogger::warn("Self-trade risk on {} BUY, adjusted price from {} to {}",
+                    signal.leg2_code, orig_leg2_price, leg2_price);
             }
         }
-        else if (!leg2_is_buy && buy_it != _mm_buy_orders.end())
+        else
         {
-            for (const auto& order : buy_it->second)
+            auto it = _mm_max_buy.find(signal.leg2_code);
+            if (it != _mm_max_buy.end() && it->second > 0 && it->second >= leg2_price)
             {
-                if (order.price >= leg2_price)
-                {
-                    leg2_price = order.price + leg2_tick_size;
-                    price_adjusted = true;
-                    WTSLogger::warn("Self-trade risk on {} SELL, adjusted price from {} to {}",
-                        signal.leg2_code, orig_leg2_price, leg2_price);
-                    break;
-                }
+                leg2_price = it->second + leg2_tick_size;
+                price_adjusted = true;
+                WTSLogger::warn("Self-trade risk on {} SELL, adjusted price from {} to {}",
+                    signal.leg2_code, orig_leg2_price, leg2_price);
             }
         }
     }
     
     // If price was adjusted, recalculate profit and check threshold
-    if (price_adjusted && _min_profit_threshold > 0)
+    if (price_adjusted && _min_profit_threshold.load(std::memory_order_relaxed) > 0)
     {
         // Calculate spread impact from price adjustment
         // For LONG_SPREAD: buy leg1, sell leg2
@@ -424,10 +466,11 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         double spread_impact_ticks = spread_impact / avg_tick_size;
         
         // If spread impact exceeds minimum profit threshold, reject signal
-        if (-spread_impact_ticks > _min_profit_threshold)
+        if (-spread_impact_ticks > _min_profit_threshold.load(std::memory_order_relaxed))
         {
             WTSLogger::warn("Arb signal REJECTED: price adjustment would cost {:.2f} ticks > threshold {:.2f}",
-                -spread_impact_ticks, _min_profit_threshold);
+                -spread_impact_ticks, _min_profit_threshold.load(std::memory_order_relaxed));
+            _arb_manager->onArbSignalDropped(signal.pair_id);  // 释放 B-3 in_flight
             return;
         }
         
@@ -436,7 +479,15 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     
     // Create order requests
     uint32_t req_id = _next_request_id.fetch_add(2, std::memory_order_relaxed);
-    
+
+    // C0: 平仓单执行策略 (STOP_LOSS → FAK 对手价; TIMEOUT → GFD mid)
+    bool is_close = is_close_signal(signal.type);
+    int order_flag = 0;
+    if (is_close && _arb_manager)
+    {
+        order_flag = _arb_manager->getArbCloseConfig().policy_for(signal.type).order_flag;
+    }
+
     // Leg 1 order
     ArbOrderRequest order1;
     order1.pair_id = signal.pair_id;
@@ -446,7 +497,9 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     order1.qty = leg1_qty;
     order1.timestamp = signal.timestamp;
     order1.request_id = req_id;
-    
+    order1.order_flag = order_flag;
+    order1.is_close = is_close;
+
     // Leg 2 order
     ArbOrderRequest order2;
     order2.pair_id = signal.pair_id;
@@ -456,6 +509,8 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     order2.qty = leg2_qty;
     order2.timestamp = signal.timestamp;
     order2.request_id = req_id + 1;  // 同一对两腿使用连续ID
+    order2.order_flag = order_flag;
+    order2.is_close = is_close;
     
     // 原子提交：先检查队列是否有足够空间放两腿
     const size_t needed_slots = 2;
@@ -466,6 +521,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         WTSLogger::warn("AsyncArb signal DROPPED: order queue full "
                          "(need={}, avail={}), pair={}",
             needed_slots, available, signal.pair_id);
+        _arb_manager->onArbSignalDropped(signal.pair_id);  // 释放 B-3 in_flight
         return;  // 两腿都不提交，避免单腿风险
     }
     
@@ -475,6 +531,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     {
         WTSLogger::error("AsyncArb: leg1 push failed after pre-check! pair={}",
             signal.pair_id);
+        _arb_manager->onArbSignalDropped(signal.pair_id);  // 释放 B-3 in_flight
         return;  // 第一腿失败，不提交第二腿
     }
     
@@ -491,11 +548,20 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         // 记录单腿敞口，供processPendingOrders检测并自动对冲
         // Arb线程push到_from_arb队列(SPSC安全)，主线程pop
         // 传入delta_ratio=0(arb线程无法获取portfolio delta，主线程回调时补充)
-        _orphan_legs_from_arb.tryPush({signal.pair_id, req_id, signal.leg1_code,
+        if (!_orphan_legs_from_arb.tryPush({signal.pair_id, req_id, signal.leg1_code,
             signal.leg2_code, leg1_is_buy, leg1_qty, leg1_price,
-            std::chrono::steady_clock::now(), 0.0});
-        WTSLogger::warn("AsyncArb: orphan leg recorded for auto-hedge, "
-                         "pair={}, leg1={}", signal.pair_id, signal.leg1_code);
+            std::chrono::steady_clock::now(), 0.0}))
+        {
+            WTSLogger::error("AsyncArb CRITICAL: orphan queue FULL (64), "
+                             "leg1 exposed! pair={}, leg1={}",
+                             signal.pair_id, signal.leg1_code);
+            _arb_manager->onArbSignalDropped(signal.pair_id);
+        }
+        else
+        {
+            WTSLogger::warn("AsyncArb: orphan leg recorded for auto-hedge, "
+                            "pair={}, leg1={}", signal.pair_id, signal.leg1_code);
+        }
     }
     
     WTSLogger::info("AsyncArb signal: pair={}, leg1={} {}@{} ({}), leg2={} {}@{} ({})",

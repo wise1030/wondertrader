@@ -36,12 +36,16 @@ struct SpreadCalculatorConfig
     uint32_t min_samples;           ///< Minimum samples for valid stats
     double ema_alpha;               ///< EMA smoothing factor
     bool use_robust_stats;          ///< Use robust statistics (median-based)
+    double beta_min;                ///< smoothed_beta 截断下限 (默认 0.7, 跨品种 pair 可调宽)
+    double beta_max;                ///< smoothed_beta 截断上限 (默认 1.5)
     
     SpreadCalculatorConfig()
         : window_size(200)
         , min_samples(30)
         , ema_alpha(0.1)
         , use_robust_stats(false)
+        , beta_min(0.7)
+        , beta_max(1.5)
     {}
 };
 
@@ -151,6 +155,7 @@ private:
     
     void updateStatistics();
     void updateCorrelation();
+    void computeCorrelationAndBeta();  ///< 单次扫描 log-return, 同算 correlation+beta+alpha
     double calculateRobustStd(const RingBuffer<double, 256>& data) const;
     
     //==========================================================================
@@ -200,13 +205,17 @@ private:
     mutable double _alpha;  // mutable for modification in const calculateBeta()
     double _half_life;
     
+    // log-return 复用缓冲 (computeCorrelationAndBeta 单次扫描填充,
+    // correlation+beta 共享, 消除重复 std::log; 每 10 tick 一次, 非热路径)
+    std::vector<double> _ret1_buf;
+    std::vector<double> _ret2_buf;
+    
     //==========================================================================
-    // Welford Online Algorithm State (for O(1) mean/variance updates)
+    // EWMA Decay Statistics (replaces Welford cumulative — adapts to regime shifts)
     //==========================================================================
     
-    double _welford_m;     ///< Running mean
-    double _welford_s;     ///< Running sum of squared deviations
-    uint32_t _welford_n;   ///< Sample count for Welford algorithm
+    double _ewma_var;      ///< EWMA variance (exponentially weighted)
+    uint32_t _welford_n;   ///< Sample count (retained for periodicity/min_samples checks)
     
     //==========================================================================
     // State
@@ -267,7 +276,7 @@ public:
     bool isSpreadContract(const std::string& code) const;
     
     /// Get all pairs containing a contract
-    std::vector<std::string> getPairsForContract(const std::string& code) const;
+    const std::vector<std::string>& getPairsForContract(const std::string& code) const;
     
     //==========================================================================
     // Management

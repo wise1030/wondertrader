@@ -8,17 +8,6 @@
 
 namespace futu {
 
-static uint64_t timestampToMs(uint64_t ts)
-{
-    uint32_t date = static_cast<uint32_t>(ts / 1000000ULL);
-    uint32_t time_secs = static_cast<uint32_t>((ts / 100ULL) % 10000);
-    uint32_t ms_part = static_cast<uint32_t>(ts % 100);
-    uint32_t h = time_secs / 10000;
-    uint32_t m = (time_secs / 100) % 100;
-    uint32_t s = time_secs % 100;
-    return (static_cast<uint64_t>(date) * 86400ULL + h * 3600 + m * 60 + s) * 1000ULL + ms_part;
-}
-
 //------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
@@ -444,10 +433,10 @@ FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_
     
     const auto& state = it->second;
     double retreat_price_offset = _config.retreat_ticks * _config.tick_size;
-    uint64_t now_ms = timestampToMs(current_time);
+    uint64_t now_ms = current_time;  // 已是 epoch ms (统一于 recordFill 入口)
     
     if (state.last_buy_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
-        uint64_t fill_ms = timestampToMs(state.last_buy_fill_time);
+        uint64_t fill_ms = state.last_buy_fill_time;
         uint64_t elapsed_ms = now_ms - fill_ms;
         if (elapsed_ms < _config.retreat_cooldown_ms) {
             retreat.bid_retreat_price = state.last_buy_fill_price - retreat_price_offset;
@@ -456,7 +445,7 @@ FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_
     }
     
     if (state.last_sell_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
-        uint64_t fill_ms = timestampToMs(state.last_sell_fill_time);
+        uint64_t fill_ms = state.last_sell_fill_time;
         uint64_t elapsed_ms = now_ms - fill_ms;
         if (elapsed_ms < _config.retreat_cooldown_ms) {
             retreat.ask_retreat_price = state.last_sell_fill_price + retreat_price_offset;

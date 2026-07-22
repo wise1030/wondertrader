@@ -6,6 +6,7 @@
  * Performance optimized: O(1) contract lookup via hash map
  */
 #include "FutuPortfolio.h"
+#include "SpreadArbitrageManager.h"  // B5: onOvershootDetected / hasActiveCloseIntent
 #include "../Includes/WTSDataDef.hpp"
 #include "../WTSTools/WTSLogger.h"
 #include <cmath>
@@ -99,6 +100,11 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
     {
         cs->unrealized_pnl = (lastPrice - cs->avg_cost) * cs->position * cs->multiplier;
     }
+    else if (cs->position == 0)
+    {
+        // 平仓后清零浮盈, 避免残留浮盈与 realized_pnl 双重计数
+        cs->unrealized_pnl = 0;
+    }
     
     // Update daily_pnl whenever markToMarket is called
     updateDailyPnL(code);
@@ -128,6 +134,22 @@ void FutuPortfolio::updateDailyPnL(const std::string& code)
     cs->daily_pnl = cs->unrealized_pnl + cs->realized_pnl;
 }
 
+void FutuPortfolio::resetDailyPnl()
+{
+    for (auto& cs : _contracts)
+    {
+        cs.realized_pnl = 0;
+        cs.unrealized_pnl = 0;
+        cs.daily_pnl = 0;
+        // 隔夜持仓重置成本基准为 0 — 触发 StrategyCoordinator 首 tick 的
+        // pre_close 分支 (position!=0 && avg_cost==0) 以昨收重设 avg_cost.
+        // 否则 markToMarket 用昨日 avg_cost 重算浮盈, 把昨日盈亏混入今日 daily_pnl,
+        // 违背"日内 PnL 不跨日累计"的风控语义 (max_loss 误触).
+        if (cs.position != 0)
+            cs.avg_cost = 0;
+    }
+}
+
 void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
 {
     // O(1) lookup
@@ -137,17 +159,33 @@ void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
     // 记录前一个position用于成交效果日志
     cs->prev_position = cs->position;
     cs->position = newPos;
+
+    checkOvershootSignFlip(stdCode, cs->prev_position, newPos);  // B5
 }
 
 void FutuPortfolio::updatePosition(const std::string& code, double position, double avgCost)
 {
     ContractState* cs = getContract(code);
     if (!cs) return;
-    
+
+    double prev = cs->position;  // B5: 捕获前值 (本函数不维护 prev_position 字段)
     cs->position = position;
     if (avgCost > 0)
         cs->avg_cost = avgCost;
-    
+
+    checkOvershootSignFlip(code.c_str(), prev, position);  // B5
+}
+
+void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double now)
+{
+    if (!_arb_manager) return;
+    if (prev == 0.0 || prev * now >= 0.0) return;  // 未翻转 (含从零建仓/回到零)
+    if (_arb_manager->hasActiveCloseIntent(code))
+    {
+        WTSLogger::error("Portfolio[{}] OVERSHOOT sign-flip: {:.1f} -> {:.1f} during arb close",
+            code, prev, now);
+        _arb_manager->onOvershootDetected(code);
+    }
 }
 
 //==========================================================================

@@ -23,6 +23,12 @@ void CorrelationManager::addRelation(const std::string& code1, const std::string
         SpreadCalculatorConfig cfg;
         cfg.window_size = _config.window_size > 0 ? _config.window_size : 100;
         cfg.min_samples = 10;
+        // 跨品种 pair 的 beta 截断带围绕 expectedBeta 设置 (默认带宽 ±3x),
+        // 避免真实 beta (如 0.3/0.05) 被默认下限 0.7 错误截断.
+        if (expectedBeta > 0) {
+            cfg.beta_min = expectedBeta * 0.3;
+            cfg.beta_max = expectedBeta * 3.0;
+        }
         calc->setConfig(cfg);
         calc->setSpreadType(SpreadType::SIMPLE_DIFF);
         _calculators[key] = calc;

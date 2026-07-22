@@ -223,7 +223,9 @@ void StatisticalArbStrategy::updateAdaptiveWeights()
 void StatisticalArbStrategy::recordOutcome(double pnl, const StatisticalFeatures& features)
 {
     // Update performance tracking for adaptive weights
-    double scaled_pnl = pnl / (_config.base_qty + 1);
+    // B13 fix: tanh normalize pnl to [-1,1] — prevents learning rate × 10000 from
+    // instantly saturating weights to max, making adaptive learning ineffective.
+    double scaled_pnl = std::tanh(pnl / (_config.base_qty * 10.0 + 1.0));
     
     _performance.zscore_return = 0.9 * _performance.zscore_return + 
                                   0.1 * scaled_pnl * features.zscore;

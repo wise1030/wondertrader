@@ -47,9 +47,8 @@ SpreadCalculator::SpreadCalculator()
     , _half_life(0)
     , _last_update(0)
     , _initialized(false)
-    , _welford_m(0)      // Welford mean
-    , _welford_s(0)      // Welford sum of squared deviations
-    , _welford_n(0)      // Welford count
+    , _ewma_var(0)
+    , _welford_n(0)
 {
 }
 
@@ -135,36 +134,40 @@ double SpreadCalculator::calculateSpread(double price1, double price2) const
 
 void SpreadCalculator::updateStatistics()
 {
-    // Welford's online algorithm for O(1) mean/variance updates
-    // This is critical for low-latency HFT systems
+    // EWMA decay statistics — replaces cumulative Welford.
+    // Adapts to regime shifts: alpha controls half-life (~138 ticks at alpha=0.005).
+    // For stationary spreads (same-variant arb), converges similarly to Welford.
+    // For non-stationary spreads (cross-variant), tracks local statistics better.
 
-    // Guard: once _welford_m becomes nan (from a nan spread), it stays nan
-    // forever and poisons all downstream signals. Detect and log.
     if (std::isnan(_current_spread))
     {
-        // Skip nan sample to protect accumulator
         return;
     }
 
     _welford_n++;
-    double delta = _current_spread - _welford_m;
-    _welford_m += delta / _welford_n;
-    double delta2 = _current_spread - _welford_m;
-    _welford_s += delta * delta2;
     
-    // Update mean and std using Welford results
-    _spread_mean = _welford_m;
+    constexpr double alpha = 0.005;  // EWMA decay factor (half-life ~138 ticks)
     
-    if (_welford_n > 1)
+    if (!_initialized)
     {
-        _spread_std = std::sqrt(_welford_s / (_welford_n - 1));
+        _spread_mean = _current_spread;
+        _ewma_var = 0;
+        _ema_spread = _current_spread;
+        _initialized = true;
     }
     else
     {
-        _spread_std = 0;
+        double prev_mean = _spread_mean;
+        _spread_mean = alpha * _current_spread + (1.0 - alpha) * prev_mean;
+        double diff = _current_spread - _spread_mean;
+        _ewma_var = alpha * diff * diff + (1.0 - alpha) * _ewma_var;
+        
+        _ema_spread = _config.ema_alpha * _current_spread + 
+                       (1.0 - _config.ema_alpha) * _ema_spread;
     }
     
-    // Calculate Z-Score
+    _spread_std = std::sqrt(_ewma_var);
+    
     if (_spread_std > 1e-10)
     {
         _zscore = (_current_spread - _spread_mean) / _spread_std;
@@ -174,38 +177,17 @@ void SpreadCalculator::updateStatistics()
         _zscore = 0;
     }
     
-    // Update EMA
-    if (!_initialized)
-    {
-        _ema_spread = _current_spread;
-        _initialized = true;
-    }
-    else
-    {
-        _ema_spread = _config.ema_alpha * _current_spread + 
-                       (1 - _config.ema_alpha) * _ema_spread;
-    }
-    
-    // Update correlation and beta periodically (still needs full scan, but less frequent)
+    // Update correlation and beta periodically (单次扫描 log-return 同算两者, 消除重复 std::log)
     if (_welford_n % 10 == 0 && _welford_n >= _config.min_samples)
     {
-        _correlation = calculateCorrelation();
-        _beta = calculateBeta();
+        computeCorrelationAndBeta();
         
-        // EMA smoothing for beta (hedge ratio)
-        // 减少价格跳跃和短期波动对 beta 的影响
-        // smoothed_beta = α × new_beta + (1-α) × prev_smoothed_beta
         _smoothed_beta = _config.ema_alpha * _beta + (1 - _config.ema_alpha) * _smoothed_beta;
         
-        // Beta 边界约束
-        // 防止极端值导致 delta 计算异常
-        // 收紧范围从 [0.5, 2.0] 到 [0.7, 1.5]
-        // 同品种跨期beta应该≈1.0，[0.5, 2.0]太宽导致delta被低估
-        // 跨品种可以由CorrelationManager的addRelation传入更宽的范围
-        constexpr double BETA_MIN = 0.7;
-        constexpr double BETA_MAX = 1.5;
-        if (_smoothed_beta < BETA_MIN) _smoothed_beta = BETA_MIN;
-        if (_smoothed_beta > BETA_MAX) _smoothed_beta = BETA_MAX;
+        // beta 截断范围可配 (默认 0.7/1.5 适合同品种跨期; 跨品种 pair 真实 beta 可能
+        // 远低于 0.7, 由 CorrelationManager 按 expectedBeta 设带宽, 避免错误截断).
+        if (_smoothed_beta < _config.beta_min) _smoothed_beta = _config.beta_min;
+        if (_smoothed_beta > _config.beta_max) _smoothed_beta = _config.beta_max;
     }
     
     // Estimate half-life periodically
@@ -340,6 +322,81 @@ double SpreadCalculator::calculateBeta() const
     return beta;
 }
 
+void SpreadCalculator::computeCorrelationAndBeta()
+{
+    // 单次扫描计算 log-return 到复用缓冲, correlation+beta 共享,
+    // 消除原 calculateCorrelation(2 pass) + calculateBeta(1 pass) 共 6 次/元素 的重复 std::log.
+    // 数学公式与原两方法完全一致 (valid 过滤/skip 逻辑相同).
+    size_t n = std::min(_leg1_history.size(), _leg2_history.size());
+    if (n < _config.min_samples + 1)  // 需要 n+1 个价格计算 n 个 return
+    {
+        _correlation = 0;
+        _beta = 1.0;
+        return;
+    }
+    
+    _ret1_buf.clear();
+    _ret2_buf.clear();
+    _ret1_buf.reserve(n - 1);
+    _ret2_buf.reserve(n - 1);
+    for (size_t i = 1; i < n; ++i)
+    {
+        double prev1 = _leg1_history[i - 1];
+        double prev2 = _leg2_history[i - 1];
+        double curr1 = _leg1_history[i];
+        double curr2 = _leg2_history[i];
+        if (prev1 <= 0 || prev2 <= 0 || curr1 <= 0 || curr2 <= 0)
+            continue;
+        _ret1_buf.push_back(std::log(curr1 / prev1));  // leg1 return
+        _ret2_buf.push_back(std::log(curr2 / prev2));  // leg2 return
+    }
+    
+    size_t valid_count = _ret1_buf.size();
+    if (valid_count < _config.min_samples)
+    {
+        _correlation = 0;
+        _beta = 1.0;
+        return;
+    }
+    
+    // Correlation (mean of returns) + Beta 累加项, 单次循环完成
+    double mean1 = 0, mean2 = 0;
+    for (size_t i = 0; i < valid_count; ++i) { mean1 += _ret1_buf[i]; mean2 += _ret2_buf[i]; }
+    mean1 /= valid_count;
+    mean2 /= valid_count;
+    
+    double cov = 0, var1 = 0, var2 = 0;
+    double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
+    for (size_t i = 0; i < valid_count; ++i)
+    {
+        double r1 = _ret1_buf[i];   // leg1 return
+        double r2 = _ret2_buf[i];   // leg2 return
+        double d1 = r1 - mean1;
+        double d2 = r2 - mean2;
+        cov  += d1 * d2;
+        var1 += d1 * d1;
+        var2 += d2 * d2;
+        // Beta: x=leg2 return, y=leg1 return (与原 calculateBeta 相同)
+        sum_x  += r2;
+        sum_y  += r1;
+        sum_xy += r2 * r1;
+        sum_xx += r2 * r2;
+    }
+    
+    _correlation = (var1 < 1e-10 || var2 < 1e-10) ? 0.0 : cov / std::sqrt(var1 * var2);
+    
+    double denom = valid_count * sum_xx - sum_x * sum_x;
+    if (std::abs(denom) < 1e-10)
+    {
+        _beta = 1.0;  // 与原 calculateBeta 一致: 此时不改 _alpha
+    }
+    else
+    {
+        _beta = (valid_count * sum_xy - sum_x * sum_y) / denom;
+        _alpha = (sum_y - _beta * sum_x) / valid_count;
+    }
+}
+
 double SpreadCalculator::estimateHalfLife() const
 {
     // Estimate half-life using Ornstein-Uhlenbeck process
@@ -428,9 +485,8 @@ void SpreadCalculator::reset()
     _half_life = 0;
     _initialized = false;
     
-    // Reset Welford state
-    _welford_m = 0;
-    _welford_s = 0;
+    // Reset EWMA state
+    _ewma_var = 0;
     _welford_n = 0;
 }
 
@@ -547,11 +603,13 @@ bool SpreadCalculatorManager::isSpreadContract(const std::string& code) const
     return _contract_to_pairs.find(code) != _contract_to_pairs.end();
 }
 
-std::vector<std::string> SpreadCalculatorManager::getPairsForContract(const std::string& code) const
+const std::vector<std::string>& SpreadCalculatorManager::getPairsForContract(const std::string& code) const
 {
+    // 返回 const 引用避免每 tick 按值拷贝 vector<string> (pair 注册后 map 只读, 引用安全).
+    static const std::vector<std::string> empty;
     auto it = _contract_to_pairs.find(code);
     if (it == _contract_to_pairs.end())
-        return {};
+        return empty;
     return it->second;
 }
 

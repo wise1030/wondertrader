@@ -196,7 +196,6 @@ class RollingScaleTracker {
     double _cached_scale = 1.0;
     double _min_scale;
     double _percentile;  // e.g. 0.95 for p95
-    bool _cache_dirty = true;
 
 public:
     explicit RollingScaleTracker(uint32_t window = 500, uint32_t update_interval = 20,
@@ -209,7 +208,6 @@ public:
         if (_abs_history.size() > _window) {
             _abs_history.pop_front();
         }
-        _cache_dirty = true;
         _tick_count++;
     }
 
@@ -217,20 +215,21 @@ public:
     double getScale() {
         if (_abs_history.size() < 20) return 1.0;  // warmup: no scaling
 
-        if (!_cache_dirty && (_tick_count % _update_interval != 0)) {
+        // 按 update_interval 节流: 旧代码 _cache_dirty 每次 record 都置 true,
+        // 导致下面的跳过条件永不成立 — 每 tick 都对 500 元素做拷贝+全排序.
+        if (_tick_count % _update_interval != 0) {
             return _cached_scale;
         }
 
         // Compute percentile of absolute values
+        // nth_element 为 O(n), 替代 std::sort 的 O(n log n) — 分位数只需定位单个元素
         _sorted_cache.assign(_abs_history.begin(), _abs_history.end());
-        std::sort(_sorted_cache.begin(), _sorted_cache.end());
-
         size_t idx = static_cast<size_t>(_percentile * _sorted_cache.size());
         if (idx >= _sorted_cache.size()) idx = _sorted_cache.size() - 1;
+        std::nth_element(_sorted_cache.begin(), _sorted_cache.begin() + idx, _sorted_cache.end());
 
         double scale = _sorted_cache[idx];
         _cached_scale = std::max(scale, _min_scale);
-        _cache_dirty = false;
         return _cached_scale;
     }
 
@@ -245,7 +244,6 @@ public:
         _sorted_cache.clear();
         _cached_scale = 1.0;
         _tick_count = 0;
-        _cache_dirty = true;
     }
 };
 
@@ -381,9 +379,10 @@ public:
 
             // Layer 3: Online confidence adjustment
             double ir = _ic_trackers[type].current_ir;
-            // IR → confidence factor: IR>1 → 2.0, IR=0 → 1.0, IR<-1 → 0.3
-            // tanh mapping with floor
-            double ic_factor = 0.3 + 1.7 * (0.5 + 0.5 * std::tanh(ir * 2.0));
+            // IR → confidence factor: IR=0 → 1.0(中性, 不升不降), IR>1 → ~2.0, IR<-1 → floor 0.3
+            // 旧公式 0.3+1.7*(0.5+0.5*tanh(ir*2)): IR=0 → 1.15 (无数据新信号免费升权 15%)
+            double ic_factor = 1.0 + std::tanh(ir * 2.0);
+            ic_factor = std::max(0.3, std::min(2.0, ic_factor));
 
             // Consistency boost: if this signal agrees with majority, boost
             double signal_sign = (entries[i].signal_val > 0) ? 1.0 : -1.0;
@@ -395,8 +394,8 @@ public:
             // Combine layers
             double w = w_base * regime_factor * ic_factor * consistency_boost;
 
-            // Apply floor and cap
-            w = std::max(_cfg.weight_floor, std::min(_cfg.weight_cap, w));
+            // Apply floor only (cap is applied AFTER normalization to prevent breach)
+            w = std::max(_cfg.weight_floor, w);
 
             weights[type] = w;
             raw_sum += w;
@@ -407,6 +406,13 @@ public:
             for (auto& [type, w] : weights) {
                 w /= raw_sum;
             }
+        }
+
+        // Apply cap AFTER normalization — 在归一化前施加 cap 无效:
+        // [0.50, 0.05×4] 归一化后首权重 = 0.50/0.70 = 0.714 > cap.
+        // 归一化后施加 cap 可能使 sum < 1.0, 但 alpha 用 Σ(w·s)/Σw 比值计算, 不受影响.
+        for (auto& [type, w] : weights) {
+            w = std::min(_cfg.weight_cap, w);
         }
 
         return weights;
@@ -424,6 +430,17 @@ public:
     }
 
     const Config& getConfig() const { return _cfg; }
+    
+    /// 热更新 Layer1 基础权重 — SignalAggregator::updateWeights 调用,
+    /// 旧代码只改 SignalAggregatorConfig, 框架内 base 权重不同步 → 热更新无效.
+    void updateBaseWeights(double ofi, double trade, double book, double mom, double ll) {
+        _cfg.base_ofi = ofi;
+        _cfg.base_trade = trade;
+        _cfg.base_book = book;
+        _cfg.base_mom = mom;
+        _cfg.base_ll = ll;
+    }
+    
     void reset() {
         for (auto& [type, tracker] : _ic_trackers) {
             tracker = RollingIC(_cfg.ic_window, _cfg.ic_horizon);
