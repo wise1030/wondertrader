@@ -71,6 +71,7 @@ strategies:
         # 策略身份: 锚定合约 + 合约列表
         # ========================================================
         anchorCode: SHFE.ag.ag2608
+        isBacktest: false             # 回测模式 (on_trade 只撤不挂, 避免 _orders 迭代器失效; 生产=false)
 
         contracts:
           - code: SHFE.ag.ag2608
@@ -95,8 +96,10 @@ strategies:
           improveRetreatRatio: 2.0   # 改进/退让比率
           maxPriceDeviation: 20.0    # 最大价格偏差 (tick)
           useBilateralQuote: false   # 是否使用双边报价接口
-          priceProtection: true      # 价格保护 (防止穿越最优价)
-          protectTicks: 1.0          # 价格保护 tick 数
+          priceProtection: true      # 价格保护开关 (false=完全不钳制, 按 l0 报价)
+          protectTicks: 1.0          # 允许比盘口好的最大 tick 数 (防穿+排队保护)
+                                     # 宽盘口合约(远月/低流动, 盘口>10t)应调至 >= obligationMaxSpreadTicks,
+                                     # 否则报价被钳在盘口边缘, 双边价差超义务带宽 (ec2609 实测覆盖率 8%)
           # v3 软风控报价参数
           qtyDecayFactor: 2.0        # 库存敏感的 qty 指数衰减因子 (util 越高 qty 越小)
           obligationMinQty: 10.0     # 做市义务最小手数
@@ -109,9 +112,7 @@ strategies:
         # ========================================================
         portfolio:
           maxDelta: 30               # 组合最大 Delta (软指标)
-          hedgeRatio: 1.0            # 对冲比率
-          hedgeDeltaThreshold: 0.8   # Delta 利用率触发对冲
-          hedgeCooldownMs: 5000      # 对冲冷却 (ms)
+          hedgeRatio: 1.0            # 对冲比率 (CloseoutExecutor 用)
 
         # ========================================================
         # 风控参数 (FutuRiskMonitor)
@@ -138,6 +139,8 @@ strategies:
             # R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
             positionWarningL1: 0.8   # util≥0.8 → WIDEN_SPREAD ×1.2 (soft check, breach 前预警)
             positionWarningL2: 0.9   # util≥0.9 → WIDEN_SPREAD ×1.5
+            # v7.1: 日界自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产必须 false)
+            autoClearIrreversibleOnReset: false
 
         # ========================================================
         # 收盘平仓参数 (CloseoutOrchestrator + CloseoutExecutor)
@@ -161,8 +164,11 @@ strategies:
         # 性能监控参数
         # ========================================================
         performance:
-          latencyThreshold: 1000000  # 延迟告警阈值 (ns)
+          latencyThreshold: 100000   # 延迟告警阈值 (ns)
           enabled: false             # 是否启用性能监控
+          logInterval: 1000          # 日志间隔 (tick)
+          warnThresholdNs: 10000     # 延迟告警阈值 (ns)
+          criticalThresholdNs: 50000 # 延迟严重告警阈值 (ns)
 
         # ========================================================
         # 下单控制
@@ -170,6 +176,7 @@ strategies:
         orderErrorThreshold: 3        # 下单错误熔断阈值
         maxOrders: 32                # 最大同时挂单数
         stpMinPriceGap: 1.0          # 自成交防护最小价差
+        useStp: false                # 自成交防护开关 (独立于套利; useSpreadArbitrage=true 时强制 true)
 
         # ========================================================
         # 模块开关 — 唯一权威位置在 coordinator.yaml

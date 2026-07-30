@@ -92,13 +92,12 @@ struct FutuMmConfig
     std::string anchor_code;
     std::string coordinator_config;
     std::string spread_arbitrage_config;
+    bool is_backtest = false;
     
     struct Portfolio {
         double max_delta;
         double hedge_ratio;
-        double hedge_delta_threshold;  ///< 对冲触发Delta利用率阈值 (0.0-1.0)
-        uint32_t hedge_cooldown_ms;    ///< 对冲冷却时间(ms)
-        Portfolio() : max_delta(50.0), hedge_ratio(1.0), hedge_delta_threshold(0.8), hedge_cooldown_ms(5000) {}
+        Portfolio() : max_delta(50.0), hedge_ratio(1.0) {}
     } portfolio;
     
     struct Quoting {
@@ -153,6 +152,7 @@ struct FutuMmConfig
         uint32_t flatten_threshold;
         uint32_t delta_rate_window_sec;
         uint32_t delta_rate_cooldown_ms;
+        bool auto_clear_irreversible_on_reset;  ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
         Risk()
             : max_exposure(35000000.0), max_daily_loss(-200000.0)
             , max_orders_per_sec(50), max_cancels_per_sec(30), max_trades_per_sec(20)
@@ -162,7 +162,8 @@ struct FutuMmConfig
             , position_breach_pause_threshold(1.2), delta_critical_mult(1.5)
             , delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9)
             , widen_threshold(1)
-            , flatten_threshold(2), delta_rate_window_sec(2), delta_rate_cooldown_ms(15000) {}
+            , flatten_threshold(2), delta_rate_window_sec(2), delta_rate_cooldown_ms(15000)
+            , auto_clear_irreversible_on_reset(false) {}
     } risk;
     
     struct Closeout {
@@ -444,6 +445,8 @@ private:
     
     // 参数调优计数器
     uint32_t _tick_count;        // Tick计数器
+    uint64_t _exchange_time_ms = 0;     // v7.1: 最近 tick 的 replay 时间 (actiondate/actiontime 推出, 跨日单调; 节流统一时间基准)
+    bool _is_backtest = false;           // 回测标志: on_trade 中只撤不挂(避免 _orders 迭代器失效)
     uint32_t _param_update_interval; // 参数更新间隔(ticks)
     
     //==========================================================================

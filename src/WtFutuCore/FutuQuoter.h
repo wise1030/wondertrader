@@ -177,9 +177,18 @@ public:
     void onOrder(uint32_t localid, bool isCanceled, double leftQty,
                  uint32_t uTime_HHMM = 0, uint32_t sec_in_min = 0);
 
-    /// Handle fill — clear the filled level's order ID, trigger stats update
-    /// （成交导致挂单 qty 减少，可能跌出 min_valid_qty 累计深度阈值，必须更新统计）
-    /// @param uTime_HHMM    当前时间 HHMM 格式（用于 BilateralStats 时间累计；0 = 不更新统计）
+    /// v7.1: 报单引擎确认 (on_entrust 回调) — 双边统计的挂单确认入口。
+    /// 设计: 报单统计以引擎回调为准 (建模网络延迟), 不以发出报单时刻为准。
+    /// 回测 mocker 用 postTask 异步触发 on_entrust (回调时 ID 已注册);
+    /// 实盘 on_entrust 在柜台确认后异步返回。两者语义一致。
+    /// @param uTime_HHMM    回调时刻 HHMM (stra_get_time, 回测=replay 实盘=交易所时间)
+    /// @param sec_in_min    分钟内秒数 [0, 59]
+    void onEntrustAck(uint32_t localid, uint32_t uTime_HHMM, uint32_t sec_in_min);
+
+    /// Handle fill — 注: v7.1 起统计更新由 onOrder 独立完成
+    /// (mocker/实盘中每笔 on_trade 必伴随 on_order(leftQty) 回调,
+    ///  onTrade 的统计更新冗余, 已移除避免双计)
+    /// @param uTime_HHMM    当前时间 HHMM 格式（0 = 不更新统计）
     /// @param sec_in_min    分钟内秒数 [0, 59]
     void onTrade(uint32_t localid, double vol, double price,
                  uint32_t uTime_HHMM = 0, uint32_t sec_in_min = 0);

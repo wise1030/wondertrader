@@ -227,6 +227,10 @@ public:
     /// Called when an order is filled or cancelled — removes from active tracking
     void onOrderDone(uint32_t localid);
 
+    /// v7.1: 注入 replay 时钟 (限速滑窗/活动时间戳统一时间基准;
+    /// 回测墙钟限速随机器速度漂移 → 订单序列不可复现). 0=回退墙钟.
+    void setNowMs(uint64_t ms) { _now_ms = ms; }
+
     /// 查询订单来源 (须在 onOrderDone 移除之前调用)
     bool isOrderFromSource(uint32_t localid, Source src) const
     {
@@ -278,6 +282,9 @@ private:
 
     /// MM order tracker reference (for self-trade prevention)
     UnifiedOrderTracker* _mm_tracker = nullptr;
+
+    /// v7.1: replay 时钟 (策略每 tick 注入; 0=回退墙钟)
+    uint64_t _now_ms = 0;
 };
 
 } // namespace futu

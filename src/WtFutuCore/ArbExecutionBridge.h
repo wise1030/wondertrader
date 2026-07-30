@@ -88,6 +88,9 @@ private:
     std::unordered_map<std::string, CloseHedgeState> _arb_hedge_on_fill;
     // MM 订单快照世代号 (增量同步到 arb 执行器)
     uint64_t _last_mm_generation = 0;
+
+    // v7.1: replay 时钟 (onTick 注入; 超时/时间戳统一时间基准, 0=回退墙钟)
+    uint64_t _now_ms = 0;
 };
 
 } // namespace futu

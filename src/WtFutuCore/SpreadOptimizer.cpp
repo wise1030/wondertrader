@@ -4,7 +4,19 @@
 #include <algorithm>
 #include <cmath>
 
-namespace futu {
+namespace futu
+{
+
+// perf#9: 常用幂次特化, 避免 libm pow (~40ns/次). power 来自配置,
+// 默认 1.5; == 比较安全 (配置加载的字面量精确表示).
+static inline double fastPow(double x, double power)
+{
+    if (power == 1.5) return x * std::sqrt(x);
+    if (power == 2.0) return x * x;
+    if (power == 1.0) return x;
+    if (power == 0.5) return std::sqrt(x);
+    return std::pow(x, power);
+}
 
 SpreadOptimizer::SpreadOptimizer(const std::string& code)
     : _code(code)
@@ -112,10 +124,20 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     //    - 单合约 delta skew: 防止单合约头寸过度累积
     //    - 组合 delta skew: 防止组合整体头寸过度累积
     //==========================================================================
+    double half_spread = result.base_spread / 2.0;
+
+    // v7.1 连续控制: pos_util ≥ 1.0 时授权减仓侧穿越 mid
+    bool cross_authorized = pCtx && pCtx->contract_pos_util_valid
+                            && std::abs(pCtx->contract_pos_util) >= 1.0;
+
     double contractMaxDelta = pCtx ? pCtx->contract_max_delta : 0;
     double totalDelta = pCtx ? pCtx->total_delta : 0;
-    
-    double contract_skew = computeContractDeltaSkew(contractDelta, contractMaxDelta);
+
+    // v7.1: 优先用统一仓位口径 (pos+同向pending)/maxPos 的归一化 skew;
+    //       未注入时回退 legacy delta 口径 (行为兼容)
+    double contract_skew = (pCtx && pCtx->contract_pos_util_valid)
+        ? computeContractPosSkew(pCtx->contract_pos_util, half_spread, _params.skew_cross_max_ticks)
+        : computeContractDeltaSkew(contractDelta, contractMaxDelta);
     double portfolio_skew = computePortfolioDeltaSkew(totalDelta);
     
     // v3 双维 skew：从"取较大者"改为加权求和（权重在 GLFTParams）
@@ -133,16 +155,14 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     
     //==========================================================================
     // 5. 综合偏移计算
-    //    skew 最终截断上限为 half_spread
-    //    这样高持仓时 skew 可以偏移到 half_spread，使一侧报价贴到 fair_value
+    //    skew 截断上限为 half_spread; v7.1: util≥1.0 时扩展到
+    //    half_spread + skew_cross_max_ticks, 授权减仓侧穿越 mid 主动减仓
     //==========================================================================
     double total_skew = delta_skew;
-    
-    double half_spread = result.base_spread / 2.0;
-    // 修正1: tanh→clamp (线性截断)
-    // tanh截断太弱: |tanh(x)|<1, 满仓时ask=+0.238永远贴不到mid
-    // clamp让skew_raw=-1.0时total_skew=-1.0, ask精确贴mid
-    total_skew = std::max(-half_spread, std::min(half_spread, total_skew));
+
+    double clamp_limit = cross_authorized
+        ? half_spread + _params.skew_cross_max_ticks : half_spread;
+    total_skew = std::max(-clamp_limit, std::min(clamp_limit, total_skew));
     result.inventory_skew = total_skew;
     
     //==========================================================================
@@ -154,12 +174,11 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     // 两者协同才能在毒性环境下快速出清库存。
     double skew_price = total_skew * _params.tick_size * spread_mult;
     
-    // 第二次截断上限改为 half_spread_price * spread_mult
-    // 原代码截断到half_spread_price，当spread_mult>1时skew_price必然被截断，
-    // 导致spread_mult放大skew的设计意图被抵消（skew被截断回half_spread_price）。
-    // 修复后截断上限=half_spread_price*spread_mult，与skew_price的最大值一致：
-    //   total_skew最大=half_spread, skew_price最大=half_spread*tick_size*spread_mult=half_spread_price*spread_mult
-    double skew_limit = half_spread_price * spread_mult;
+    // 第二次截断上限 = (half_spread_price + 穿越授权扩展) * spread_mult
+    // 截断上限与 total_skew 的最大值一致 (含 v7.1 穿越权限扩展),
+    // 否则 spread_mult>1 时 skew 被截回, 放大设计意图被抵消
+    double skew_limit = (half_spread_price +
+        (cross_authorized ? _params.skew_cross_max_ticks * _params.tick_size : 0.0)) * spread_mult;
     if (std::abs(skew_price) > skew_limit) {
         skew_price = (skew_price > 0 ? 1.0 : -1.0) * skew_limit;
     }
@@ -238,7 +257,28 @@ double SpreadOptimizer::computeContractDeltaSkew(double contractDelta, double co
     double direction = (utilization > 0) ? -1.0 : 1.0;
     // 修正2: 乘以inventory_skew_scale增强中持仓skew力度
     // scale=2.0时util=0.6→skew=-0.930(接近-half_base=-1.0), ask从+0.566降至+0.070
-    return direction * std::pow(std::abs(utilization), _params.delta_skew_power) * _params.inventory_skew_scale;
+    return direction * fastPow(std::abs(utilization), _params.delta_skew_power) * _params.inventory_skew_scale;
+}
+
+double SpreadOptimizer::computeContractPosSkew(double signed_pos_util, double half_spread_ticks, double cross_max_ticks) const
+{
+    if (half_spread_ticks <= 0) return 0.0;
+
+    double util = std::abs(signed_pos_util);
+    if (util <= 1e-9) return 0.0;
+
+    double direction = (signed_pos_util > 0) ? -1.0 : 1.0;
+    // v7.1 归一化库存 skew: skew_norm = util^power × gain
+    //   norm=1.0 → 减仓侧贴 mid; gain=1.0, power=1.5 时:
+    //   util=0.5→0.35×half, util=0.8→0.72×half, util=1.0→贴mid
+    double norm = fastPow(util, _params.delta_skew_power) * _params.inventory_skew_gain;
+    // 穿越权限: util≥1.0 时允许 norm>1.0 (减仓侧穿越 mid 主动减仓),
+    //   上限 = 1 + cross_max/half; util<1.0 时 cap=1.0 保证义务合规
+    double cap = 1.0;
+    if (util >= 1.0 && cross_max_ticks > 0)
+        cap = 1.0 + cross_max_ticks / half_spread_ticks;
+    norm = std::min(norm, cap);
+    return direction * norm * half_spread_ticks;
 }
 
 double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta) const
@@ -250,7 +290,7 @@ double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta) const
     
     double excess = util - _params.delta_skew_threshold;
     double direction = (totalDelta > 0) ? -1.0 : 1.0;
-    return direction * _params.delta_skew_factor * std::pow(excess, _params.delta_skew_power);
+    return direction * _params.delta_skew_factor * fastPow(excess, _params.delta_skew_power);
 }
 
 } // namespace futu

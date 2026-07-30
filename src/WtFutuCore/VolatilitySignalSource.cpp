@@ -63,36 +63,21 @@ void RealizedVolSignalSource::updateVolatility()
     // Bessel's correction
     variance *= n / (n - 1.0);
     _result.realized_vol = std::sqrt(std::max(0.0, variance));
-    
-    // For now, composite vol = realized vol.
-    // Future: blend with micro-structure signals (imbalance flux, etc.)
     _result.composite_vol = _result.realized_vol;
     
-    // Update percentile and tier
-    _result.vol_percentile = getVolPercentile();
-    _result.vol_tier = determineTier(_result.vol_percentile);
-}
-
-double RealizedVolSignalSource::getVolPercentile() const
-{
+    // Direct tier classification from vol thresholds (no percentile binning).
+    // Only 2 boundaries matter: ELEVATED (widen) and EXTREME (pause).
     double vol = _result.realized_vol;
-    // 使用可配置的百分位分箱阈值替代硬编码
-    // 原代码硬编码阈值对不同品种不适用(如原油vs豆粕波动率差异大)。
-    // 现从_percentile_bins读取，可通过setPercentileBins()或配置文件调整。
-    if (vol < _percentile_bins.vol_p10) return 10.0;
-    if (vol < _percentile_bins.vol_p25) return 25.0;
-    if (vol < _percentile_bins.vol_p50) return 50.0;
-    if (vol < _percentile_bins.vol_p70) return 70.0;
-    if (vol < _percentile_bins.vol_p85) return 85.0;
-    return 95.0;
-}
-
-VolTier RealizedVolSignalSource::determineTier(double percentile)
-{
-    if (percentile < 20.0) return VolTier::LOW;
-    if (percentile < 60.0) return VolTier::NORMAL;
-    if (percentile < 85.0) return VolTier::ELEVATED;
-    return VolTier::EXTREME;
+    if (vol >= _vol_extreme)
+        _result.vol_tier = VolTier::EXTREME;
+    else if (vol >= _vol_elevated)
+        _result.vol_tier = VolTier::ELEVATED;
+    else
+        _result.vol_tier = VolTier::NORMAL;
+    
+    // Linear percentile mapping for SpreadOptimizer (sigma_sq) and ICWeightTracker (regime).
+    // Maps [0, vol_extreme] -> [0, 85], caps at 100.
+    _result.vol_percentile = std::min(100.0, vol / _vol_extreme * 85.0);
 }
 
 void RealizedVolSignalSource::reset()
@@ -103,24 +88,6 @@ void RealizedVolSignalSource::reset()
     _last_mid = 0;
     _result = VolatilitySignalResult();
     _result.type = SignalType::VOLATILITY;
-}
-
-//------------------------------------------------------------------------------
-
-// PercentileBins::fromVariant — 从配置文件读取百分位阈值
-// Note: defined outside the struct with full qualified name
-auto
-RealizedVolSignalSource::PercentileBins::fromVariant(wtp::WTSVariant* v)
-    -> PercentileBins
-{
-    PercentileBins bins;
-    if (!v) return bins;
-    bins.vol_p10 = FutuConfig::readDouble(v, "volP10", 0.0003);
-    bins.vol_p25 = FutuConfig::readDouble(v, "volP25", 0.0005);
-    bins.vol_p50 = FutuConfig::readDouble(v, "volP50", 0.001);
-    bins.vol_p70 = FutuConfig::readDouble(v, "volP70", 0.002);
-    bins.vol_p85 = FutuConfig::readDouble(v, "volP85", 0.003);
-    return bins;
 }
 
 } // namespace futu

@@ -2,44 +2,46 @@
 # 运行时热更新参数 (共享内存同步)
 # ------------------------------------------------------------
 # 修改后无需重启策略, 通过 on_params_updated() 回调实时生效。
-# 注意: 报价参数(baseSpread/baseQty/levelQtyMultiplier/levelStep/maxDelta)会
+# 键名必须用 snake_case (与 FutuHotParamManager::registerParams 中
+# sync_param 注册名完全一致), 否则共享内存写入不生效。
+# 注意: 报价参数(base_spread/base_qty/level_qty_multiplier/level_step/max_delta)会
 # 穿透到 FutuQuoter 和 Coordinator; 信号权重穿透到 AdaptiveWeightFramework。
 # ============================================================
 
 # --- 报价基础参数 ---
-baseSpread: 2.0
-baseQty: 2.0
-levelQtyMultiplier: 0.7
-levelStep: 1.0
+base_spread: 2.0
+base_qty: 2.0
+level_qty_multiplier: 0.7
+level_step: 1.0
 
 # --- 组合参数 ---
-maxDelta: 30
+max_delta: 30
 
 # --- Alpha 灵敏度 ---
-alphaSensitivity: 2.0
+alpha_sensitivity: 2.0
 
 # --- 信号权重 (Layer 1 基础权重, 经 regime×IC 三层调节) ---
-ofiWeight: 0.35
-tradeWeight: 0.25
-bookImbalanceWeight: 0.20
-momentumWeight: 0.15
-leadLagWeight: 0.05
-strongThreshold: 0.7
+ofi_weight: 0.35
+trade_weight: 0.25
+book_imbalance_weight: 0.20
+momentum_weight: 0.15
+lead_lag_weight: 0.05
+strong_threshold: 0.7
 
 # --- GLFT 价差模型参数 ---
-confidenceWeightMin: 0.3
-confidenceWeightMax: 1.0
+confidence_weight_min: 0.3
+confidence_weight_max: 1.0
 phi: 0.20
-deltaSkewThreshold: 0.3
-deltaSkewFactor: 1.5
-maxSpreadMult: 3.0
-minSpreadMult: 1.0
-depthSensitivity: 0.5
-toxicitySpreadFactor: 1.0
-lowConfidenceSpreadFactor: 2.0
+delta_skew_threshold: 0.3
+delta_skew_factor: 1.5
+max_spread_mult: 3.0
+min_spread_mult: 1.0
+depth_sensitivity: 0.5
+toxicity_spread_factor: 1.0
+low_confidence_spread_factor: 2.0
 
 # --- 报价粘性/保护参数 ---
-stickyThreshold: 1.0
-improveRetreatRatio: 2.0
-protectTicks: 1.0
-maxPriceDeviation: 20.0
+sticky_threshold: 1.0
+improve_retreat_ratio: 2.0
+protect_ticks: 1.0
+max_price_deviation: 20.0

@@ -110,6 +110,16 @@ bool CloseoutExecutor::handleDraining(wtp::IUftStraCtx* ctx,
     if (_tracker)
     {
         drain_ok = (_tracker->getOrderCount() == 0);
+        // B14 fix: DRAIN 补查 OrderRouter 在途单 — UnifiedOrderTracker 只 track
+        // MM 单, arb/hedge/closeout 经 OrderRouter 不在其内. closeout 触发时
+        // cancelAllBySource 的撤单在途成交会改变实际持仓, 不等其落地会导致
+        // ASSESS 基于滞后持仓计算 _remaining.
+        if (drain_ok && _router)
+        {
+            drain_ok = (_router->getActiveCountBySource(Source::ARBITRAGE) == 0 &&
+                        _router->getActiveCountBySource(Source::HEDGING) == 0 &&
+                        _router->getActiveCountBySource(Source::CLOSEOUT) == 0);
+        }
     }
     else
     {
@@ -485,6 +495,8 @@ void CloseoutExecutor::submitHedgeOrder(wtp::IUftStraCtx* ctx,
     {
         // BUY to close short → stra_buy (net position API)
         auto res = _router->submitBuy(ctx, _code, price, qty, src, flag);
+        if (res.rejected)
+            WTSLogger::warn("CloseoutExecutor: BUY {} rejected - invalid price={}", _code, price);
         if (res.rate_limited)
             WTSLogger::warn("CloseoutExecutor: BUY rate limited");
         else if (res.self_trade_blocked)
@@ -494,6 +506,8 @@ void CloseoutExecutor::submitHedgeOrder(wtp::IUftStraCtx* ctx,
     {
         // SELL to close long → stra_sell (net position API)
         auto res = _router->submitSell(ctx, _code, price, qty, src, flag);
+        if (res.rejected)
+            WTSLogger::warn("CloseoutExecutor: SELL {} rejected - invalid price={}", _code, price);
         if (res.rate_limited)
             WTSLogger::warn("CloseoutExecutor: SELL rate limited");
         else if (res.self_trade_blocked)

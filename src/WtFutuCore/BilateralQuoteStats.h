@@ -155,6 +155,12 @@ public:
         _bilateral_switch_count = 0;
         _total_spread_ticks = 0;
         _spread_sample_count = 0;
+        // v7.1: 诊断计数器同步重置, 避免跨日累积导致日志失真
+        _inv_both_empty = 0;
+        _inv_no_bid = 0;
+        _inv_no_ask = 0;
+        _inv_crossed = 0;
+        _inv_spread_wide = 0;
         // session_total_secs 在 setSessionInfo 时已算好,不重置
     }
 
@@ -187,6 +193,30 @@ public:
         return true;
     }
 
+    /// v7.1 诊断: 非双边原因计数 (formatString 输出, 定位覆盖率失真根因)
+    void countInvalidReason(const ValidQuoteSnapshot& snapshot)
+    {
+        if (!snapshot.has_valid_bid && !snapshot.has_valid_ask) ++_inv_both_empty;
+        else if (!snapshot.has_valid_bid) ++_inv_no_bid;
+        else if (!snapshot.has_valid_ask) ++_inv_no_ask;
+        else
+        {
+            double spread = snapshot.getSpreadTicks();
+            if (spread <= 0) ++_inv_crossed;
+            else if (spread > _cfg.bilateral_stats_max_spread_ticks)
+            {
+                ++_inv_spread_wide;
+                // 限频诊断: 每 5000 次 wide 输出一次实际快照价格
+                if (_inv_spread_wide % 5000 == 1)
+                {
+                    WTSLogger::debug("[BILATERAL_STATS] wide#{} wb={:.2f} wa={:.2f} spread={:.2f}t (max={:.1f}t tick={:.3f})",
+                        _inv_spread_wide, snapshot.weighted_bid_price, snapshot.weighted_ask_price,
+                        spread, _cfg.bilateral_stats_max_spread_ticks, snapshot.tick_size);
+                }
+            }
+        }
+    }
+
     /// 更新统计状态（每次 onOrder/onTrade 调用，O(1)）
     /// @param snapshot 累计加权快照
     /// @param uTime_HHMM 当前时间 HHMM
@@ -199,6 +229,8 @@ public:
         if (now_units == INVALID_UNITS) return;  // 非交易时段，丢弃
 
         bool new_bilateral = checkBilateral(snapshot);
+        if (!new_bilateral)
+            countInvalidReason(snapshot);
 
         // 状态切换处理：bilateral 进/出
         if (new_bilateral && !_is_bilateral)
@@ -262,15 +294,21 @@ public:
     std::string formatString() const
     {
         auto r = getResult();
-        char buf[256];
+        char buf[512];
         snprintf(buf, sizeof(buf),
-            "bilateral=%llus session=%llus ratio=%.2f%% avg_spread=%.2fticks switches=%u samples=%llu",
+            "bilateral=%llus session=%llus ratio=%.2f%% avg_spread=%.2fticks switches=%u samples=%llu | "
+            "inv[both=%llu bid=%llu ask=%llu cross=%llu wide=%llu]",
             (unsigned long long)r.total_bilateral_time_sec,
             (unsigned long long)r.total_session_time_sec,
             r.bilateral_ratio * 100.0,
             r.avg_spread_ticks,
             r.bilateral_switch_count,
-            (unsigned long long)r.bilateral_sample_count);
+            (unsigned long long)r.bilateral_sample_count,
+            (unsigned long long)_inv_both_empty,
+            (unsigned long long)_inv_no_bid,
+            (unsigned long long)_inv_no_ask,
+            (unsigned long long)_inv_crossed,
+            (unsigned long long)_inv_spread_wide);
         return std::string(buf);
     }
 
@@ -303,6 +341,13 @@ private:
     // Spread 样本
     double   _total_spread_ticks;
     uint64_t _spread_sample_count;
+
+    // v7.1 诊断: 非双边原因计数
+    uint64_t _inv_both_empty = 0;
+    uint64_t _inv_no_bid = 0;
+    uint64_t _inv_no_ask = 0;
+    uint64_t _inv_crossed = 0;
+    uint64_t _inv_spread_wide = 0;
 };
 
 } // namespace futu

@@ -49,7 +49,7 @@ OrderSubmitResult OrderRouter::submitBuy(wtp::IUftStraCtx* ctx,
     }
 
     // 1. Rate limit check
-    uint64_t now_ms = TimeUtils::getLocalTimeNow();
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     if (!checkRateLimit(src, now_ms))
     {
         result.rate_limited = true;
@@ -96,7 +96,7 @@ OrderSubmitResult OrderRouter::submitSell(wtp::IUftStraCtx* ctx,
         return result;
     }
 
-    uint64_t now_ms = TimeUtils::getLocalTimeNow();
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     if (!checkRateLimit(src, now_ms))
     {
         result.rate_limited = true;
@@ -134,7 +134,7 @@ OrderSubmitResult OrderRouter::submitExitLong(wtp::IUftStraCtx* ctx,
 {
     OrderSubmitResult result;
 
-    uint64_t now_ms = TimeUtils::getLocalTimeNow();
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     if (!checkRateLimit(src, now_ms))
     {
         result.rate_limited = true;
@@ -170,7 +170,7 @@ OrderSubmitResult OrderRouter::submitExitShort(wtp::IUftStraCtx* ctx,
 {
     OrderSubmitResult result;
 
-    uint64_t now_ms = TimeUtils::getLocalTimeNow();
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     if (!checkRateLimit(src, now_ms))
     {
         result.rate_limited = true;

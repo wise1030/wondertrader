@@ -126,6 +126,10 @@ public:
     //==========================================================================
     
     void setConfig(const SpreadArbitrageConfig& config) { _config = config; }
+
+    /// v7.1: 注入 replay 时钟 (overshoot 冷却等跨线程时间判定统一基准;
+    /// 回测墙钟冷却随机器速度漂移 → 不可复现). atomic 因 arb 线程读.
+    void setNowMs(uint64_t ms) { _now_ms.store(ms, std::memory_order_relaxed); }
     const SpreadArbitrageConfig& getConfig() const { return _config; }
     
     /// Load configuration from YAML file
@@ -386,6 +390,14 @@ private:
     alignas(64) mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
     char _pair_arb_spin_pad[64]{};
 
+    /// perf#1: lock-free z-score 缓存 — arb 线程在 _pair_states_spin 内写入,
+    /// 主线程 getPairZscore/getAggregateZscore 免锁读取, 消除每 tick
+    /// K 次 spinlock 竞争 (arb onTick 持锁 ~1µs 穿越 pair 循环+虚调用).
+    /// unique_ptr 包装: atomic 不可移动, addSpreadPair 运行时增 pair 时
+    /// vector 扩容保持指针稳定. 注册后 _pair_zscore_idx 只读, 并发读安全.
+    std::vector<std::unique_ptr<std::atomic<double>>> _pair_zscore_cache;
+    wtp::wt_hashmap<std::string, size_t> _pair_zscore_idx;
+
     /// Pairs whose in_flight timed out and need cleanup (cancel pending legs).
     /// UftFutuMmStrategy polls this via popTimedOutPairs() each tick.
     std::vector<std::string> _timed_out_pairs;
@@ -456,6 +468,9 @@ private:
 
     /// B5: pair_id → 冷却截止时刻 (ms, epoch)
     wtp::wt_hashmap<std::string, uint64_t> _overshoot_cooldowns;
+
+    /// v7.1: replay 时钟 (策略每 tick 注入; 0=回退墙钟; 跨线程 atomic)
+    std::atomic<uint64_t> _now_ms{0};
     /// B5: 待撤单的过冲 pair (bridge 轮询)
     std::vector<std::string> _overshoot_pairs;
 

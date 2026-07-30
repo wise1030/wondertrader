@@ -66,16 +66,25 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
 
     if (is_obligation_mode)
     {
-        // 义务模式: 不衰减 qty，价格偏移到义务区间
+        // 义务带宽 (统计口径=报价口径: 挂在带宽内才算义务报价)
+        double ask_cap   = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+        double bid_floor = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+        // v7.1 T4: 减仓侧 clamp 不覆写 — skew 攻击性价格(贴mid/穿mid, ≤cap)被保留,
+        //          义务带宽只作上限; 旧覆写把 ask 钉死在 mid+10ticks(被动),
+        //          最需要减仓时减仓侧反而最不积极
         if (force_ask_obligation && apply_obligation) {
-            qr.askPrice = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+            qr.askPrice = std::min(qr.askPrice, ask_cap);
             qr.askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
             qr.is_obligation_ask = true;
+            // 加仓侧(bid): 带宽下限, 既满足双边义务又最被动
+            if (qr.bidQty > 0) qr.bidPrice = std::max(qr.bidPrice, bid_floor);
         }
         if (force_bid_obligation && apply_obligation) {
-            qr.bidPrice = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+            qr.bidPrice = std::max(qr.bidPrice, bid_floor);
             qr.bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
             qr.is_obligation_bid = true;
+            // 加仓侧(ask): 带宽上限
+            if (qr.askQty > 0) qr.askPrice = std::min(qr.askPrice, ask_cap);
         }
         // 义务模式: allow 不阻断，至少保持 baseQty
         qr.bidQty = std::max(qr.bidQty, 1.0);
@@ -117,6 +126,12 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
     }
 
     // 价格保护 (不对义务报价应用)
+    // protectTicks 语义: 允许比盘口好的最大 tick 数 (防穿 + 排队保护)。
+    //   窄盘口(1-2t): 常规防穿, 不改变报价行为。
+    //   宽盘口(远月/低流动性, 11-34t): protectTicks 过小会把报价钳在盘口边缘,
+    //   双边价差超出 obligationMaxSpreadTicks → 做市义务违约 (ec2609 实测 8%)。
+    //   此类合约应将 protectTicks 调至 ≥ obligationMaxSpreadTicks,
+    //   或 priceProtection: false 完全关闭钳制。
     if (_cfg.price_protection)
     {
         if (qr.bidQty > 0 && !qr.is_obligation_bid && best_bid > 0)
@@ -126,8 +141,33 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
     }
 
     // 价格边界验证 (涨跌停)
-    if (qr.bidQty > 0 && !validatePrice(qr.bidPrice, mid, upper_limit, lower_limit)) qr.bidQty = 0;
-    if (qr.askQty > 0 && !validatePrice(qr.askPrice, mid, upper_limit, lower_limit)) qr.askQty = 0;
+    // B4 fix: 义务单越限 clamp 到涨跌停内而非置零 — 保住做市义务存在性
+    // (越限价提交交易所必拒, clamp 后合规且义务不失); NaN/Inf/负价仍置零
+    // (计算错误硬防御); deviation 检查对义务单豁免 (已被 obligation_max_spread 约束).
+    if (qr.bidQty > 0) {
+        if (qr.is_obligation_bid) {
+            if (std::isnan(qr.bidPrice) || std::isinf(qr.bidPrice) || qr.bidPrice <= 0)
+                qr.bidQty = 0;
+            else {
+                if (upper_limit > 0 && qr.bidPrice > upper_limit) qr.bidPrice = upper_limit;
+                if (lower_limit > 0 && qr.bidPrice < lower_limit) qr.bidPrice = lower_limit;
+            }
+        } else if (!validatePrice(qr.bidPrice, mid, upper_limit, lower_limit)) {
+            qr.bidQty = 0;
+        }
+    }
+    if (qr.askQty > 0) {
+        if (qr.is_obligation_ask) {
+            if (std::isnan(qr.askPrice) || std::isinf(qr.askPrice) || qr.askPrice <= 0)
+                qr.askQty = 0;
+            else {
+                if (upper_limit > 0 && qr.askPrice > upper_limit) qr.askPrice = upper_limit;
+                if (lower_limit > 0 && qr.askPrice < lower_limit) qr.askPrice = lower_limit;
+            }
+        } else if (!validatePrice(qr.askPrice, mid, upper_limit, lower_limit)) {
+            qr.askQty = 0;
+        }
+    }
 
     return qr;
 }
@@ -498,19 +538,27 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty,
     }
 }
 
-void FutuQuoter::onTrade(uint32_t localid, double vol, double price,
-                         uint32_t uTime_HHMM, uint32_t sec_in_min)
+void FutuQuoter::onEntrustAck(uint32_t localid, uint32_t uTime_HHMM, uint32_t sec_in_min)
 {
-    // 注意: 不在这里调 _tracker->recordFilled() — orders_filled 由
-    // untrackOrder(完全成交路径)统一计数, 避免每笔成交 +2 的双重计数.
-
-    // R3 v2: 成交导致挂单 qty 减少，可能跌出 min_valid_qty 累计深度阈值
-    // 必须重新评估 valid 状态（onOrder 路径不一定能覆盖所有部分成交场景）
+    // 引擎确认报单 — 订单状态已在 handle*Quote 注册, 此处只驱动统计.
+    // 语义: 报单"在场时间"从引擎确认时刻起算, 不含发出→确认的网络延迟.
+    (void)localid;
     if (uTime_HHMM > 0 && _bilateral_stats.hasSessionInfo())
     {
         auto snapshot = getValidQuoteSnapshot();
         _bilateral_stats.update(snapshot, uTime_HHMM, sec_in_min);
     }
+}
+
+void FutuQuoter::onTrade(uint32_t localid, double vol, double price,
+                         uint32_t uTime_HHMM, uint32_t sec_in_min)
+{
+    // 注意: 不在这里调 _tracker->recordFilled() — orders_filled 由
+    // untrackOrder(完全成交路径)统一计数, 避免每笔成交 +2 的双重计数.
+    // v7.1: 统计更新已移除 — 每笔 on_trade 必伴随 on_order(leftQty) 回调
+    //       (mocker UftMocker.cpp:985-988 / 实盘柜台回报同序), onOrder 独立
+    //       完成统计, 此处重复更新属于双计.
+    (void)localid; (void)vol; (void)price; (void)uTime_HHMM; (void)sec_in_min;
 }
 
 double FutuQuoter::totalBidQty() const

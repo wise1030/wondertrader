@@ -159,26 +159,69 @@ processTick()
 
 ## 风控体系 (FutuRiskMonitor)
 
-### 7级风险响应 (R2 重构: soft check + hard 升级)
+### v7.1 连续控制重设计 (2026-07-23)
 
-风控分两层:**策略性软响应**(breach 前预警,调整报价参数)和**硬风控**(breach 后阻断,可能强平/停机)。
+**核心原则**: 仓位风险由**无状态连续控制**处理, 报价永在线(做市义务); 离散硬动作只保留给
+真正的极端情况(日亏损/组合敞口)。仓位 breach **不再触发** BLOCK_SIDE/PAUSE_QUOTING/RISK_HALTED。
+
+**统一利用率口径**: `util = (|pos| + 同向pending) / maxPos` — skew/qty衰减/义务/taker 共用
 
 | 层 | 触发条件 | 动作 | 类型 |
 |----|---------|------|------|
-| NORMAL | util < 0.8 | 正常报价 | — |
-| **WIDEN_SPREAD L1** | util ≥ 0.8 | `spread_mult = 1.2` | 策略(soft check) |
-| **WIDEN_SPREAD L2** | util ≥ 0.9 | `spread_mult = 1.5` | 策略(soft check) |
-| BLOCK_SIDE_* | 单方向 util ≥ 1.0 | 禁买/禁卖 + `RISK_HALTED` | 硬风控 |
-| PAUSE_QUOTING | 双方向 breach 或 util ≥ 1.2 | 撤单 + 停 arb + `pauseQuoting()` | 硬风控 |
-| FLATTEN_POSITION | breachCount ≥ 2 | 撤单 + 停 arb + anchor 强平 | 硬风控升级 |
+| NORMAL | util < 0.8 | 正常报价 (skew + qty衰减连续调节) | 连续 |
+| **WIDEN_SPREAD** | 组合delta util ≥ 0.8/0.9 | `spread_mult = 1.2/1.5` (每tick无状态重算) | 策略(soft) |
+| **skew 穿越授权** | util ≥ 1.0 | 减仓侧允许穿越 mid 最多 `skewCrossMaxTicks`(3), 主动减仓 | 连续 |
+| **obligation reduce** | util ≥ 1.0 | 加仓侧=带宽极限价+min qty; 减仓侧=skew攻击性(clamp不覆写) | 连续 |
+| **TAKER_REDUCE** | util ≥ 1.3 | FAK对手价平到 0.8×maxPos, 每合约30s限频 | 离散(主动吃单) |
+| FLATTEN_POSITION | 非仓位类 breachCount ≥ 2 | 撤单 + 停 arb + anchor 强平 | 硬风控 |
 | HALT_TRADING | DAILY_LOSS CRITICAL 或任意 CRITICAL | IRREVERSIBLE 强平 + 全停 | 终极 |
 
 **设计要点**:
-- WIDEN_SPREAD 是**策略行为**(调整报价 spread,不阻断交易),由 `checkSoftLimits()` 在 hard check 之前执行,不产生硬 violation
-- 做市有**最低报价数量要求**,故无 `REDUCE_SIZE`(已删除);统一用 WIDEN_SPREAD 分级倍数降低成交速率
-- FLATTEN_POSITION 在多类 BREACH 同时发生时触发(`breachCount >= flatten_threshold`),比单向 BLOCK 更激进
-  - **V6 修复 (B1)**: `flatten_threshold` 默认 3->2（checkRiskLimits 单次最多产生 EXPOSURE+POSITION_NET=2 个 BREACH，阈值 3 永不可达）
-  - **V6 修复 (B3)**: delta-rate 停机改为检测与状态管理分离（RiskMonitor 仅检测，Coordinator 统一管理 TradingState + 恢复路径）
+- **无状态 = 无死锁**: 仓位调节是 util 的纯函数, 仓位降了 skew 自动缓和, 无需恢复状态机
+  (旧设计: PAUSE→撤单→无成交→仓位永不降→永不恢复, 覆盖率1-9% 的结构性根因)
+- **T4 clamp 修复**: obligation 减仓侧 `askPrice=min(skew价, 带宽上限)`, 保留 skew 攻击性;
+  旧覆写把减仓侧钉死在 mid+10ticks(被动), 最需要减仓时最不积极
+- **穿越权限**: GLFT skew 旧 clamp(±half_spread) 使减仓能力在 util=1.0 封顶;
+  v7.1 扩展到 half_spread+3ticks, 配合归一化 skew (`util^1.5×gain`, 1.0=贴mid)
+- BLOCK_SIDE 保留给 DELTA/EXPOSURE 组合级 breach (罕见); POSITION_NET 仅 alert 上报
+- 配置: coordinator.yaml `takerReduceThreshold/TargetUtil/CooldownMs`,
+  spreadOptimizer `inventorySkewGain/skewCrossMaxTicks`
+
+### v7.1 配套修复 (2026-07-24, 回测验证通过)
+
+| 修复 | 位置 | 说明 |
+|---|---|---|
+| **分向成本簿记账** | FutuPortfolio::onTradeFill + ContractState long/short_qty/avg | offset 标志驱动, 替代净额推断。旧净额均价在 MM+arb 共享净头寸时被 arb 腿污染 → daily_pnl 假阳性日亏(引擎真账+34k vs 内部账-3.7M) → IRREVERSIBLE halt 误杀。markToMarket/setReferencePrice/resetDailyPnl 同步分向化 |
+| **closeout 窗口禁 arb** | UftFutuMmStrategy::on_tick step 6 | `phase != CLOSEOUT` 才喂 arb tick。旧逻辑 14:45 平仓后 arb 继续开新价差仓到 15:00, 重建 ~50 手 delta 过夜 |
+| **成交后立即重挂** | StrategyCoordinator::requoteAfterFill | 单边成交侵蚀深度 < min_valid_qty → 立即撤剩余单按最近 tick 参数重挂, 恢复双边义务; 200ms 限频. 配置 `requoteAfterFillMinIntervalMs` |
+| **日界自动清除 IRREVERSIBLE** | FutuRiskMonitor::resetDaily | `autoClearIrreversibleOnReset`(默认 false, 回测开), 模拟隔夜人工复核 |
+
+**5日 EC 回测验证 (6/08-6/12)**:
+- 仓位死锁消除: util 达 1.06 (proj 53/50) 仅触发 obligation reduce, 报价不停; TAKER_REDUCE 未触发(仓位被连续控制压在 1.3 以内)
+- 日亏假阳性消除: 全 5 天无 LOSS_CRITICAL 误报, 5 次 QUOTING_PAUSED 均为 closeout 正常流程
+- 引擎资金曲线: +444,940 (修复前同窗口 +34k 且 Day2-5 被误 halt)
+- requoteAfterFill 触发 279 次
+
+### v7.1 第二轮修复 (2026-07-24, 覆盖率根因治理)
+
+覆盖率仍低(<1%) → 二轮深挖定位三个根因, 均在 WtFutuCore 内修复:
+
+| 修复 | 位置 | 说明 |
+|---|---|---|
+| **双边统计以引擎确认为准** | FutuQuoter::onEntrustAck/onOrder; 删 refreshQuotes末/placement时/onTrade 的统计 | 报单"在场时间"从引擎确认(on_entrust)起算, 不含发出→确认的网络延迟 (建模延迟)。mocker 新单只有 on_entrust 异步(postTask), on_order 仅在成交/撤单/每tick匹配心跳触发; 每笔 on_trade 必伴随 on_order(leftQty) → onTrade 统计冗余已删 |
+| **价格保护可配置化** | config `protectTicks`/`priceProtection` | protectTicks 语义=允许比盘口好的最大 tick 数("最大可以穿多少")。远月宽盘口(11-34t)合约须 ≥ obligationMaxSpreadTicks, 否则报价被钳在盘口边缘→双边价差超带宽(ec2609 实测 8%)。priceProtection:false 完全关闭 |
+| **session 休息段暂停** | StrategyCoordinator::processSectionBreak + on_tick step6 门控 | 每节收盘前 N 分钟(`sectionBreakMinutesBefore`,默认1)撤全部报价+arb在途单+停报价/套利, 下一节首tick自动恢复。每日最后一节跳过(归 closeout)。注意 stra_get_time 返回 HHMM(4位) |
+| **节流统一 replay 时钟** | 全策略决策路径(coordinator/risk/router/orchestrator/bridge/manager) | 回测中墙钟节流随机器速度漂移→订单序列不可复现。统一改 tick actiondate/actiontime 推出的 replay ms, 墙钟仅用于纯日志限频 |
+| **诊断计数器** | BilateralQuoteStats 非双边原因分类 | formatString 输出 inv[both/bid/ask/cross/wide] 计数, 定位覆盖率失真根因 |
+
+**5日 EC 回测验证 (6/08-6/12, protectTicks=10)**:
+- ec2607/08 双边覆盖率: **75-84%** (vs 修复前 <1%)
+- ec2609 双边覆盖率: **8% → 51-56%** (远月盘口宽, protectTicks=10 允许深入盘口)
+- SECTION_BREAK 触发 20 次 (2 break/天 × 5天 × 2 合约档), 正常
+- 仓位连续控制工作: util 1.06 → obligation reduce, 报价不停
+- **Day3 真实日亏 halt** (-953k): 50手 maxDelta × 50乘数 = 2500元/点, 200k 日亏限 ≈ 80点反向; EC 日内常波动 80+点 → **日亏限对 50手 EC 结构性偏紧**, 属业务风控参数决策(非 bug)
+
+**已知外部限制**: 回测仍有轻微不可复现 (WtBtCore/HftMocker.cpp `splitVolume()` 用 srand(time) 随机拆分成交 → 同配置两次运行成交序列有噪声), 评估策略表现需多次运行取均值。详见 `AGENTS.md`。
 
 ### 告警外发通道 (R1 接线)
 
@@ -208,9 +251,10 @@ notifier:
 ```
 
 ### 自动恢复机制
-- **可逆风险** (Delta偏离、频率超限、单方向 breach): 冷却后自动恢复
+- **仓位 breach** (v7.1): 无状态连续控制, 无需恢复 — 仓位回落 skew/qty 自动缓和
+- **可逆风险** (Delta偏离、EXPOSURE breach、频率超限): 冷却后自动恢复
 - **不可逆风险** (日亏损超限): 需人工干预(`clearIrreversible`)
-- **BLOCK_SIDE 恢复**(R2.7): BLOCK_SIDE_LONG/SHORT 设 `qphase=RISK_HALTED`,走统一恢复路径(`canRecover` + `resumeFromRisk` + `unblockLong/Short`)
+- **BLOCK_SIDE 恢复**(R2.7, 仅 DELTA/EXPOSURE 触发): BLOCK_SIDE_LONG/SHORT 设 `qphase=RISK_HALTED`,走统一恢复路径(`canRecover` + `resumeFromRisk` + `unblockLong/Short`)
 
 ### 收盘平仓状态机
 ```

@@ -289,7 +289,11 @@ bool SpreadArbitrageManager::addSpreadPair(const SpreadPairConfig& pair_config)
     _pair_states[pair_config.pair_id].pair_id = pair_config.pair_id;
     _pair_states[pair_config.pair_id].leg1_code = pair_config.leg1_code;
     _pair_states[pair_config.pair_id].leg2_code = pair_config.leg2_code;
-    
+
+    // perf#1: 注册 lock-free z-score 缓存槽位
+    _pair_zscore_idx[pair_config.pair_id] = _pair_zscore_cache.size();
+    _pair_zscore_cache.push_back(std::make_unique<std::atomic<double>>(0.0));
+
     return true;
 }
 
@@ -368,6 +372,12 @@ void SpreadArbitrageManager::onTick(const std::string& code, double price,
         stored_state.spread_mean = state.spread_mean;
         stored_state.spread_std = state.spread_std;
         stored_state.zscore = state.zscore;
+        // perf#1: 同步发布 lock-free 缓存, 主线程读 z-score 不再抢 _pair_states_spin
+        {
+            auto zit = _pair_zscore_idx.find(pair_id);
+            if (zit != _pair_zscore_idx.end())
+                _pair_zscore_cache[zit->second]->store(state.zscore, std::memory_order_relaxed);
+        }
         stored_state.correlation = state.correlation;
         stored_state.beta = state.beta;
         stored_state.half_life = state.half_life;
@@ -426,6 +436,9 @@ std::vector<SpreadSignal> SpreadArbitrageManager::generateSignals(uint64_t curre
         double unrealized = _portfolio_ptr->getSnapshotUnrealizedPnL();
         double total = _portfolio_ptr->getSnapshotTotalPnL();
         double realized = total - unrealized;
+        // updatePortfolioPnL 写 _current_drawdown 等, 主线程 updateAlerts 读这些字段,
+        // 必须持 _pair_states_spin 与写端(updatePairState)对齐, 避免 data race.
+        SpinLockGuard lock(_pair_states_spin);
         _risk_manager->updatePortfolioPnL(unrealized, realized);
     }
     
@@ -1158,6 +1171,9 @@ void SpreadArbitrageManager::dispatchSignal(const SpreadSignal& signal)
 
 void SpreadArbitrageManager::checkRiskAlerts()
 {
+    // _active_alerts 由 updatePairState(主线程, 持 _pair_states_spin) -> updateAlerts 写入,
+    // 此处在 arb 线程读取, 必须持同一锁, 否则 vector copy ctor 与 clear/push_back 并发 -> SIGSEGV.
+    SpinLockGuard lock(_pair_states_spin);
     auto alerts = _risk_manager->generateAlerts();
     for (const auto& alert : alerts)
     {
@@ -1269,6 +1285,17 @@ void SpreadArbitrageManager::reset()
         _overshoot_pairs.clear();
         _intent_spin.clear(std::memory_order_release);
     }
+
+    // B7 fix: 同步清理 B-3 在途状态, 否则 stale in_flight_qty>0.5
+    // 阻断所有新信号直到 60s 超时 (每 session 边界后 arb 冻结)
+    {
+        SpinLockGuard lock(_pair_arb_spin);
+        _pair_arb_states.clear();
+    }
+
+    // perf#1: z-score 缓存同步清零, 防跨 session 残留旧值
+    for (auto& slot : _pair_zscore_cache)
+        slot->store(0.0, std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -1339,7 +1366,7 @@ void SpreadArbitrageManager::onOvershootDetected(const std::string& leg_code)
     if (!_calculator_manager) return;
 
     const auto& pairs = _calculator_manager->getPairsForContract(leg_code);
-    uint64_t now_ms = TimeUtils::getLocalTimeNow();
+    uint64_t now_ms = _now_ms.load(std::memory_order_relaxed); if (now_ms == 0) now_ms = TimeUtils::getLocalTimeNow();
 
     for (const auto& pid : pairs)
     {
@@ -1398,7 +1425,7 @@ bool SpreadArbitrageManager::isInOvershootCooldown(const std::string& pair_id) c
     while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
     auto it = _overshoot_cooldowns.find(pair_id);
     bool in_cd = (it != _overshoot_cooldowns.end()) &&
-                 (TimeUtils::getLocalTimeNow() < it->second);
+                 ((_now_ms.load(std::memory_order_relaxed) > 0 ? _now_ms.load(std::memory_order_relaxed) : TimeUtils::getLocalTimeNow()) < it->second);
     _intent_spin.clear(std::memory_order_release);
     return in_cd;
 }
@@ -1423,9 +1450,13 @@ bool SpreadArbitrageManager::popOvershootPairs(std::vector<std::string>& out_pai
 
 double SpreadArbitrageManager::getPairZscore(const std::string& pair_id) const
 {
-    SpinLockGuard lock(_pair_states_spin);
-    auto it = _pair_states.find(pair_id);
-    return (it != _pair_states.end()) ? it->second.zscore : 0.0;
+    // perf#1: lock-free 读 atomic 缓存, 消除主线程每 tick K 次 spinlock 竞争.
+    // 注册后 _pair_zscore_idx 只读 (addSpreadPair 仅 init/config 期调用),
+    // ankerl map 无写并发时读安全.
+    auto it = _pair_zscore_idx.find(pair_id);
+    return (it != _pair_zscore_idx.end())
+        ? _pair_zscore_cache[it->second]->load(std::memory_order_relaxed)
+        : 0.0;
 }
 
 double SpreadArbitrageManager::getAggregateZscore(const std::string& leg_code) const

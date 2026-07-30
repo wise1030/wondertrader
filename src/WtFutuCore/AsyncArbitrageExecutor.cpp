@@ -202,6 +202,7 @@ void AsyncArbitrageExecutor::arbThreadFunc()
     
     uint64_t last_process_time = 0;
     uint32_t tick_counter = 0;
+    uint32_t consecutive_errors = 0;  // C6 fix: 连续异常计数, ≤3 重试, >3 才禁用
     const uint32_t signal_interval_us = _config.signal_interval_us;
     const uint32_t ticks_per_signal = _config.ticks_per_signal;
     const uint32_t max_wait_us = _config.max_wait_us;
@@ -277,16 +278,36 @@ void AsyncArbitrageExecutor::arbThreadFunc()
             processSignals(current_time);
             last_process_time = current_time;
         }
+        consecutive_errors = 0;  // C6 fix: 本轮处理成功, 清零重试计数
         }
         catch (const std::exception& e)
         {
-            WTSLogger::error("AsyncArb thread exception: {} — disabling arbitrage", e.what());
-            _config.enabled.store(false, std::memory_order_release);
+            // C6 fix: 瞬态异常(单笔坏 tick 等)不再永久杀死套利 — 连续 >3 次才禁用
+            ++consecutive_errors;
+            if (consecutive_errors <= 3)
+            {
+                WTSLogger::error("AsyncArb thread exception ({}/3): {} — retrying",
+                    consecutive_errors, e.what());
+            }
+            else
+            {
+                WTSLogger::error("AsyncArb thread exception persistent ({} consecutive): {} — disabling arbitrage",
+                    consecutive_errors, e.what());
+                _config.enabled.store(false, std::memory_order_release);
+            }
         }
         catch (...)
         {
-            WTSLogger::error("AsyncArb thread unknown exception — disabling arbitrage");
-            _config.enabled.store(false, std::memory_order_release);
+            ++consecutive_errors;
+            if (consecutive_errors <= 3)
+            {
+                WTSLogger::error("AsyncArb thread unknown exception ({}/3) — retrying", consecutive_errors);
+            }
+            else
+            {
+                WTSLogger::error("AsyncArb thread unknown exception persistent — disabling arbitrage");
+                _config.enabled.store(false, std::memory_order_release);
+            }
         }
     }
     

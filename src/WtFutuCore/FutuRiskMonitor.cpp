@@ -339,18 +339,13 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
     // - negative position/short delta -> too much short -> block short (no more selling)
     bool long_breach = false;
     bool short_breach = false;
-    bool contract_breach = false;
     
     for (const auto& v : violations)
     {
         if (v.severity < RiskSeverity::BREACH)
             continue;
-            
-        if (v.type == RiskLimitType::POSITION_LONG)
-            long_breach = true;
-        else if (v.type == RiskLimitType::POSITION_SHORT)
-            short_breach = true;
-        else if (v.type == RiskLimitType::DELTA || v.type == RiskLimitType::EXPOSURE)
+
+        if (v.type == RiskLimitType::DELTA || v.type == RiskLimitType::EXPOSURE)
         {
             // Positive delta/exposure breach means too much long
             // Negative delta breach means too much short
@@ -361,16 +356,11 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
         }
         else if (v.type == RiskLimitType::POSITION_NET)
         {
-            if (v.utilization >= _rate_limits.position_breach_pause_threshold)
-            {
-                outCategory = RiskCategory::REVERSIBLE;
-                return RiskAction::PAUSE_QUOTING;
-            }
-            if (v.current_value > 0)
-                long_breach = true;
-            else
-                short_breach = true;
-            contract_breach = true;
+            // v7.1 连续控制重设计: 单合约仓位 breach 不再触发 BLOCK_SIDE/PAUSE 硬动作。
+            // 仓位由连续控制层处理 (skew穿越权限 + obligation减仓 + taker紧急减仓),
+            // 报价永在线(做市义务), 无状态=无恢复=无死锁。
+            // alert 已在 checkRiskLimits 中上报 (POSITION_BREACH)。
+            continue;
         }
     }
     
@@ -388,7 +378,9 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
     int breachCount = 0;
     for (const auto& v : violations)
     {
-        if (v.severity == RiskSeverity::BREACH) breachCount++;
+        // POSITION_NET 不计入: 仓位 breach 由连续控制处理, 不参与 FLATTEN 升级
+        if (v.severity == RiskSeverity::BREACH && v.type != RiskLimitType::POSITION_NET)
+            breachCount++;
     }
     if (breachCount >= _rate_limits.flatten_threshold)
     {
@@ -528,9 +520,18 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
             return false;
     }
     
-    // Check if any contract limit is breached
-    if (portfolio->isAnyContractLimitBreached())
-        return false;
+    // Check if any contract position is still above pause threshold.
+    // Recovery requires pos < max_position * pause_threshold (e.g. 1.2*50=60),
+    // NOT pos <= max_position (50). The stricter requirement creates a dead-lock:
+    // PAUSE blocks quoting -> no fills -> pos can't decrease -> never recovers.
+    // With the relaxed threshold, MM resumes at 60 but checkPreTradePosition's
+    // v3 soft limit (obligation mode at util>=1.0) drives natural reduction.
+    for (const auto& c : portfolio->getAllContracts())
+    {
+        if (c.max_position > 0 &&
+            std::abs(c.position) > c.max_position * _rate_limits.position_breach_pause_threshold)
+            return false;
+    }
     
     // Enhanced: Check PnL recovery if halt was triggered by loss
     if (_was_loss_triggered)
@@ -621,8 +622,20 @@ void FutuRiskMonitor::resetDaily()
     // Preserve IRREVERSIBLE halt category across daily reset.
     // IRREVERSIBLE risks (e.g. daily loss) must not auto-recover on new day.
     // Only clearIrreversible() (called with human confirmation) can reset it.
+    // v7.1: auto_clear_irreversible_on_reset=true 时日界自动清除
+    //       (回测场景, 模拟隔夜人工复核; 生产保持 false)
     RiskCategory saved_halt_category = _halt_category;
     bool was_irreversible = (saved_halt_category == RiskCategory::IRREVERSIBLE);
+    if (was_irreversible && _recovery_config.auto_clear_irreversible_on_reset)
+    {
+        WTSLogger::warn("[RISK] resetDaily: auto-clearing IRREVERSIBLE halt at day boundary "
+                        "(autoClearIrreversibleOnReset=true, simulated overnight manual review)");
+        was_irreversible = false;
+        _halt_category = RiskCategory::REVERSIBLE;
+        _was_loss_triggered = false;
+        _halt_pnl_snapshot = 0;
+        broadcastAlert("IRREVERSIBLE_CLEARED", "IRREVERSIBLE halt auto-cleared at day boundary (config-gated)");
+    }
     
     _trading_halted.store(was_irreversible, std::memory_order_relaxed);  // Stay halted if IRREVERSIBLE
     _long_blocked.store(false, std::memory_order_relaxed);

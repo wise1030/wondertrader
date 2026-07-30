@@ -191,13 +191,19 @@ if (adaptive) {
 // SignalAggregator: 已迁移到 SignalAggregatorConfig::fromVariant
 }
 
-// Hedging parameters (对冲控制)
-_cfg.use_hedging = readBool(cfg, "useHedging", _cfg.use_hedging);
-_cfg.hedge_delta_threshold = readDouble(cfg, "hedgeDeltaThreshold", _cfg.hedge_delta_threshold);
-_cfg.hedge_cooldown_ms = readUInt32(cfg, "hedgeCooldownMs", _cfg.hedge_cooldown_ms);
+// v7.1 taker 紧急减仓参数
+_cfg.taker_reduce_threshold = readDouble(cfg, "takerReduceThreshold", _cfg.taker_reduce_threshold);
+_cfg.taker_reduce_target_util = readDouble(cfg, "takerReduceTargetUtil", _cfg.taker_reduce_target_util);
+_cfg.taker_reduce_cooldown_ms = readUInt32(cfg, "takerReduceCooldownMs", _cfg.taker_reduce_cooldown_ms);
 
-WTSLogger::info("StrategyCoordinator: loaded config from variant (toxicity={}, perf={}, hedging={})",
-_cfg.use_toxicity_detector, _cfg.perf_enabled, _cfg.use_hedging);
+// v7.1 成交后立即重挂参数
+_cfg.requote_after_fill_min_interval_ms = readUInt32(cfg, "requoteAfterFillMinIntervalMs", _cfg.requote_after_fill_min_interval_ms);
+
+// v7.1 session 休息段参数
+_cfg.section_break_minutes_before = readUInt32(cfg, "sectionBreakMinutesBefore", _cfg.section_break_minutes_before);
+
+WTSLogger::info("StrategyCoordinator: loaded config from variant (toxicity={}, perf={})",
+_cfg.use_toxicity_detector, _cfg.perf_enabled);
 }
 
 void StrategyCoordinator::initialize()
@@ -229,6 +235,12 @@ tc.timestamp = (now_ms > 0) ? now_ms : TimeUtils::getLocalTimeNow();
 // Stage 0: Closeout state machine (always needed)
 if (processCloseout(ctx, tc)) {
 result.closeout_executed = true;
+result.processed = true;
+return result;
+}
+
+// Stage 0.5: v7.1 session 休息段 (每节收盘前 N 分钟暂停; 最后一节归 closeout)
+if (processSectionBreak(ctx, tc)) {
 result.processed = true;
 return result;
 }
@@ -266,10 +278,10 @@ updateSignals(ctx, tc, tick);
 
 // Stage 4: Check risk
 if (!checkRisk(ctx, tc)) {
-    // PAUSE_QUOTING 时仍执行 hedge — 减仓才能恢复正常
+    // PAUSE_QUOTING 时仍执行 taker 减仓 - 减仓才能恢复正常
     // HALT_TRADING 时跳过(已有 FORCE FLAT 在 checkRisk 内执行)
     if (_risk_monitor && !_risk_monitor->isTradingHalted()) {
-        checkAndHedge(ctx);
+        checkTakerReduce(ctx);
     }
     result.processed = true;
     return result;
@@ -277,6 +289,9 @@ if (!checkRisk(ctx, tc)) {
 
 // Stage 5: Process auto-cancel (先撤旧单,再报新单)
 result.order_canceled = processAutoCancel(ctx, tc);
+
+// Stage 5.5: v7.1 taker 紧急减仓 (穿仓主动吃单; 报价不停, 与之并行)
+checkTakerReduce(ctx);
 
 // Stage 6: Process quoting (MM core)
 result.quote_placed = processQuoting(ctx, tc, tick);
@@ -286,8 +301,6 @@ result.quote_placed = processQuoting(ctx, tc, tick);
 // Note: Arbitrage processing is handled by UftFutuMmStrategy::processSpreadArbitrage
 // when use_spread_arbitrage is enabled
 
-// Stage 7: Check and hedge (always needed for risk management)
-result.hedge_triggered = checkAndHedge(ctx);
 
 // Stage 7.5: Position reduction removed — skew+clamp handles inventory reduction via quote offset
 // (attemptPositionReduction used 3-tick cross-spread which was too costly; 
@@ -317,6 +330,95 @@ _last_perf_ms = tc.timestamp;
 }
 
 return result;
+}
+
+//==========================================================================
+// Stage 0.5: Session Section Break (v7.1)
+//   每节收盘前 N 分钟: 撤全部报价 + arb 在途单, 暂停报价/套利;
+//   下一节首 tick 自动恢复。每日最后一节跳过 (closeout 状态机处理)。
+//   例 EC(FD0900): 10:15/11:30 休息段, 15:00 归 closeout。
+//==========================================================================
+
+bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, const TickContext& tc)
+{
+if (_cfg.section_break_minutes_before == 0)
+return false;
+
+wtp::WTSSessionInfo* sess = nullptr;
+auto sit = _session_info.find(tc.code);
+if (sit != _session_info.end()) sess = sit->second;
+if (!sess) return false;
+
+const auto& sections = sess->getTradingSections();
+if (sections.size() < 2)
+return false;   // 单节品种无中间休息段 (最后一节归 closeout)
+
+// 当前分钟 (stra_get_time 返回 HHMM(4位), 兼容 HHMMSS)
+uint32_t cur_hhmm = (tc.time_hms >= 10000) ? tc.time_hms / 100 : tc.time_hms;
+uint32_t cur_min = (cur_hhmm / 100) * 60 + (cur_hhmm % 100);
+
+bool in_break = false;
+// 最后一节跳过 (closeout 处理), 只检查前 N-1 节的收尾窗口
+for (size_t i = 0; i + 1 < sections.size(); i++)
+{
+uint32_t end_hhmm = sections[i].second;
+uint32_t end_min = (end_hhmm / 100) * 60 + (end_hhmm % 100);
+if (end_min >= _cfg.section_break_minutes_before &&
+    cur_min >= end_min - _cfg.section_break_minutes_before &&
+    cur_min < end_min)
+{
+in_break = true;
+break;
+}
+}
+
+if (in_break)
+{
+if (!_section_break_active)
+{
+_section_break_active = true;
+WTSLogger::info("[SECTION_BREAK] {} entering break window at {} ({}min before section end), cancel all + pause quoting/arb",
+tc.code, cur_hhmm, _cfg.section_break_minutes_before);
+// 撤全部做市报价
+if (_quoters) {
+for (auto& [code, quoter] : *_quoters) {
+if (quoter) quoter->cancelAll(ctx);
+}
+}
+// 撤 arb/hedge 在途单 + 停 arb 信号执行
+if (_order_router) {
+_order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
+_order_router->cancelAllBySource(ctx, Source::HEDGING);
+}
+if (_arb_executor) {
+AsyncArbConfig arbCfg = _arb_executor->getConfig();
+arbCfg.enabled.store(false);
+_arb_executor->setConfig(arbCfg);
+}
+}
+return true;    // 休息段内: 跳过 MM pipeline (报价/对冲/taker)
+}
+
+// 休息段结束 → 恢复
+if (_section_break_active)
+{
+_section_break_active = false;
+bool arb_resumed = false;
+if (_arb_executor) {
+// B2 fix: RISK_HALTED 时不复活 arb - 由 checkRisk 恢复路径
+// (resumeFromRisk + enabled=true) 在风险正常化后统一复活,
+// 避免 break 期间触发的风控 halt 被此处绕过
+if (!isTradingHalted()) {
+AsyncArbConfig arbCfg = _arb_executor->getConfig();
+arbCfg.enabled.store(true);
+_arb_executor->setConfig(arbCfg);
+arb_resumed = true;
+}
+}
+WTSLogger::info("[SECTION_BREAK] {} break window ended at {}, resuming quoting{}",
+tc.code, cur_hhmm, arb_resumed ? "/arb" : " (arb deferred: risk halted)");
+}
+return false;
 }
 
 //==========================================================================
@@ -543,7 +645,7 @@ return tc.is_trading_session;
 //==========================================================================
 
 void StrategyCoordinator::updateMarketData(
-wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick)
+wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick)
 {
 // Update portfolio (position and prices)
 if (_portfolio)
@@ -555,6 +657,10 @@ _global_portfolio_ctx.total_delta = _portfolio->getTotalDelta();
 _global_portfolio_ctx.total_exposure = _portfolio->getTotalExposure();
 _global_portfolio_ctx.related.clear();
 _portfolio_ctx_dirty = false;
+
+// perf#4: 单 tick 内复用 (processTick 期间持仓不变), 后续 Stage 免重复 O(n) 扫描
+tc.total_delta = _global_portfolio_ctx.total_delta;
+tc.total_exposure = _global_portfolio_ctx.total_exposure;
 
 // A2 fix: publish atomic PnL snapshot for arb thread (lock-free on x86-64)
 _portfolio->publishPnLSnapshot();
@@ -739,17 +845,19 @@ if (_trading_state) {
 // R2.4: 策略性软响应 (delta util 0.8/0.9 → WIDEN_SPREAD, 不产生硬 violation).
 //   在 hard check 之前执行; soft action 不阻断 hard check (两者可叠加).
 //   设计: WIDEN_SPREAD 是策略行为 (调整报价), 不是硬风控 (BLOCK/PAUSE/HALT).
+//   v7.1 无状态化: 每 tick 由当前 util 重算, util 回落即回 1.0,
+//   消除旧 std::max 闩锁 (util 回落后 spread 仍被永久放大直到完整恢复).
 if (!_trading_state || _trading_state->qphase != QuotingPhase::RISK_HALTED)
 {
-    RiskAction soft = _risk_monitor->checkSoftLimits(_portfolio);
-    if (soft == RiskAction::WIDEN_SPREAD)
+    double cur_util = _portfolio ? _portfolio->getPortfolioDeltaUtilization() : 0;
+    double l1 = _risk_monitor->getRateLimits().position_warning_l1;
+    double l2 = _risk_monitor->getRateLimits().position_warning_l2;
+    double target = (cur_util >= l2) ? 1.5 : (cur_util >= l1) ? 1.2 : 1.0;
+    if (target != _risk_spread_mult)
     {
-        double cur_util = _portfolio ? _portfolio->getPortfolioDeltaUtilization() : 0;
-        double l2 = _risk_monitor->getRateLimits().position_warning_l2;
-        double target = (cur_util >= l2) ? 1.5 : 1.2;  // R2.5: L2→×1.5, L1→×1.2 (做市最低报价要求, 温和加宽)
-        _risk_spread_mult = std::max(_risk_spread_mult, target);
-        WTSLogger::debug("[RISK] soft WIDEN_SPREAD: spread_mult={:.1f} (util={:.2f}, L{})",
-            _risk_spread_mult, cur_util, cur_util >= l2 ? 2 : 1);
+        WTSLogger::debug("[RISK] soft WIDEN_SPREAD stateless: spread_mult {:.1f}->{:.1f} (util={:.2f})",
+            _risk_spread_mult, target, cur_util);
+        _risk_spread_mult = target;
     }
 }
 
@@ -785,7 +893,7 @@ if (_order_router) {
 
 // IRREVERSIBLE → 强平(对手价FAK)
 if (category == RiskCategory::IRREVERSIBLE && _portfolio && _order_router) {
-    double delta = _portfolio->getTotalDelta();
+    double delta = tc.total_delta;  // perf#4: Stage 2 缓存值 (本 tick 持仓未变)
     if (std::abs(delta) > 0.01) {
         const std::string& anchor = _portfolio->getAnchorContract();
         const ContractState* cs = _portfolio->getContract(anchor);
@@ -891,7 +999,7 @@ if (_arb_executor) {
 }
 // anchor 强平 (对手价 FAK, 与 HALT_TRADING 的 IRREVERSIBLE 段同逻辑)
 if (_portfolio && _order_router) {
-    double delta = _portfolio->getTotalDelta();
+    double delta = tc.total_delta;  // perf#4: Stage 2 缓存值 (本 tick 持仓未变)
     if (std::abs(delta) > 0.01) {
         const std::string& anchor = _portfolio->getAnchorContract();
         const ContractState* cs = _portfolio->getContract(anchor);
@@ -1018,6 +1126,29 @@ p_ctx.contract_max_delta = cs->contract_max_delta;
 }
 
 //==========================================================================
+// 2.5 v3/v7.1 软风控前置: 统一仓位利用率口径
+//   (pos+同向pending)/maxPos — skew 归一化注入 + quoter qty衰减/义务 共用
+//==========================================================================
+double _v3_long_util = 0.0;
+double _v3_short_util = 0.0;
+bool   _v3_force_ask_obligation = false;
+bool   _v3_force_bid_obligation = false;
+if (_risk_monitor) {
+auto pre_trade = _risk_monitor->checkPreTradePosition(
+tc.code, _portfolio, _order_tracker);
+_v3_long_util = pre_trade.long_utilization;
+_v3_short_util = pre_trade.short_utilization;
+_v3_force_ask_obligation = pre_trade.force_ask_obligation;
+_v3_force_bid_obligation = pre_trade.force_bid_obligation;
+// v7.1: 带符号仓位利用率注入 skew (正=多 负=空, 取较大侧)
+if (cs && cs->max_position > 0) {
+p_ctx.contract_pos_util = (_v3_long_util >= _v3_short_util)
+? _v3_long_util : -_v3_short_util;
+p_ctx.contract_pos_util_valid = true;
+}
+}
+
+//==========================================================================
 // 3. 使用 SpreadOptimizer 计算动态 Skew 和价差倍数
 //==========================================================================
 double skew = 0.0;
@@ -1090,22 +1221,8 @@ if (std::abs(agg_z) > 0.1)
     }
 }
 }
-// v3 软风控字段：从 RiskMonitor.checkPreTradePosition 透传到 FutuQuoter.refreshQuotes
-double _v3_long_util = 0.0;
-double _v3_short_util = 0.0;
-bool   _v3_force_ask_obligation = false;
-bool   _v3_force_bid_obligation = false;
-if (_risk_monitor) {
-auto pre_trade = _risk_monitor->checkPreTradePosition(
-tc.code, _portfolio, _order_tracker);
-if (!pre_trade.allow_bid) allow_bid = false;
-if (!pre_trade.allow_ask) allow_ask = false;
-// v3 软风控字段透传到 quoter（util + obligation 标志）
-_v3_long_util = pre_trade.long_utilization;
-_v3_short_util = pre_trade.short_utilization;
-_v3_force_ask_obligation = pre_trade.force_ask_obligation;
-_v3_force_bid_obligation = pre_trade.force_bid_obligation;
-} 
+// v3 软风控字段已前移至 Stage 2.5 (skew 注入需要); v3 checkPreTradePosition
+// 恒返回 allow_bid/ask=true, 不再阻断
 if (_cfg.use_toxicity_detector && _toxicity) {
 ToxicityMetrics tox = _toxicity->analyze();
 
@@ -1204,6 +1321,19 @@ l0_ask = std::ceil(retreat.ask_retreat_price / tc.tick_size) * tc.tick_size;
 //==========================================================================
 // 4. 执行报价发布
 //==========================================================================
+// v7.1: 缓存最终报价参数, 供 requoteAfterFill 成交后立即重挂使用
+{
+CachedQuote& cq = _last_quote_params[tc.code];
+cq.mid = tc.mid; cq.l0_bid = l0_bid; cq.l0_ask = l0_ask; cq.spread_mult = spread_mult;
+cq.allow_bid = allow_bid; cq.allow_ask = allow_ask;
+cq.long_util = _v3_long_util; cq.short_util = _v3_short_util;
+cq.force_ask_obligation = _v3_force_ask_obligation; cq.force_bid_obligation = _v3_force_bid_obligation;
+cq.upper_limit = tick->upperlimit(); cq.lower_limit = tick->lowerlimit();
+cq.best_bid = tick->bidprice(0); cq.best_ask = tick->askprice(0);
+cq.timestamp = tc.timestamp;
+cq.valid = true;
+}
+
 tc.quoter->refreshQuotes(ctx, tc.mid, l0_bid, l0_ask, spread_mult,
 allow_bid, allow_ask, tc.timestamp,
 tick->upperlimit(), tick->lowerlimit(), tick->bidprice(0), tick->askprice(0),
@@ -1224,7 +1354,7 @@ double tick_size = tc.tick_size > 0 ? tc.tick_size : 1.0;
 
 // Check auto-cancel on the tracker directly
 bool inventory_hit = _portfolio ? _portfolio->isAnyLimitBreached() : false;
-double current_risk_delta = _portfolio ? _portfolio->getTotalDelta() : 0.0;
+double current_risk_delta = tc.total_delta;  // perf#4: Stage 2 缓存值 (本 tick 持仓未变)
 
 const auto& actions = _order_tracker->checkAutoCancel(tc.code, tc.timestamp, tc.mid, tick_size, false, inventory_hit, current_risk_delta);
 
@@ -1239,209 +1369,135 @@ return false;
 }
 
 //==========================================================================
-// Stage 7: Check and Hedge
+// Stage 4.5: v7.1 Taker 紧急减仓
+//   合约 util ≥ taker_reduce_threshold (默认1.3) 时, FAK 对手价主动平掉
+//   (|pos| - target×maxPos) 超出部分。应对"大量成交突然穿仓"场景:
+//   被动减仓(skew穿越)回归太慢时主动吃单, 报价永不停(做市义务不受影响)。
 //==========================================================================
 
-bool StrategyCoordinator::checkAndHedge(wtp::IUftStraCtx* ctx)
+bool StrategyCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx)
 {
-if (!_portfolio || !_cfg.use_hedging)
+if (!ctx || !_portfolio || !_order_router)
+return false;
+if (_cfg.taker_reduce_threshold <= 0.0)
 return false;
 
-// P1-2: 决策前从策略引擎同步持仓，确保 delta 基于最新策略持仓而非滞后快照
-// 注意: 同步的是 stra_get_local_position (策略持仓)，不是账户持仓
-if (ctx && _portfolio)
+// v7.1: 限频计时统一用 replay 时钟 (回测可复现); 未注入时回退墙钟
+uint64_t now_ms = _last_exchange_time_ms > 0 ? _last_exchange_time_ms : TimeUtils::getLocalTimeNow();
+bool triggered = false;
+
+for (const auto& c : _portfolio->getAllContracts())
 {
-    for (const auto& c : _portfolio->getAllContracts())
-    {
-        double actual = ctx->stra_get_local_position(c.code.c_str());
-        if (std::abs(c.position - actual) > 0.01)
-        {
-            WTSLogger::debug("Portfolio sync before hedge: {} {:.0f}->{:.0f}", c.code, c.position, actual);
-            _portfolio->onPositionUpdate(c.code.c_str(), actual);
-        }
-    }
+if (c.max_position <= 0 || std::abs(c.position) < 1.0)
+continue;
+
+double util = std::abs(c.position) / c.max_position;
+if (util < _cfg.taker_reduce_threshold)
+continue;
+
+// 每合约限频
+auto it = _last_taker_reduce.find(c.code);
+if (it != _last_taker_reduce.end() &&
+    now_ms - it->second < _cfg.taker_reduce_cooldown_ms)
+{
+continue;
 }
 
-if (!_portfolio->needsHedging())
-return false;
+// 平掉超出 target×maxPos 的部分 (FAK 对手价, 不追价)
+double target = c.max_position * _cfg.taker_reduce_target_util;
+double qty = std::floor(std::abs(c.position) - target);
+if (qty < 1.0)
+continue;
 
-// ===== 对冲防震荡机制 =====
-uint64_t now_ms = TimeUtils::getLocalTimeNow();
-double currentDelta = _portfolio->getTotalDelta();
-double max_delta = _portfolio->getParams().portfolio_max_delta;
+bool is_long = c.position > 0;
+double price = is_long ? c.bid1 : c.ask1;   // 对手价
+if (price <= 0)
+continue;
 
-// 0. 紧急突破：delta > 2*max_delta 时绕过反向保护，但仍受 cooldown 约束
-//    在 match_this_tick 回测撮合模式下，如果 emergency 绕过 cooldown，
-//    hedge 单秒成交 → 同 tick Delta 变化 → 再次触发 emergency → 无限循环。
-//    实盘 FAK 不秒成交，但 cooldown 对实盘也有益（等待成交回流再决策）。
-bool is_emergency = max_delta > 0 && std::abs(currentDelta) > max_delta * 2.0;
+WTSLogger::warn("[TAKER_REDUCE] {} util={:.2f} >= {:.2f}: {} {:.0f}@{} (pos={:.0f}/{:.0f} -> target={:.0f})",
+c.code, util, _cfg.taker_reduce_threshold,
+is_long ? "EXIT_LONG" : "EXIT_SHORT", qty, price,
+c.position, c.max_position, target);
 
-// 冷却期检查：所有 hedge（含 emergency）都受 cooldown 约束
-if (_last_hedge_time > 0 && (now_ms - _last_hedge_time) < _cfg.hedge_cooldown_ms)
+OrderSubmitResult rr = is_long
+? _order_router->submitExitLong(ctx, c.code.c_str(), price, qty, true, Source::CLOSEOUT, 1)
+: _order_router->submitExitShort(ctx, c.code.c_str(), price, qty, true, Source::CLOSEOUT, 1);
+
+if (rr.rate_limited)
 {
-    if (!is_emergency)
-    {
-        return false;
-    }
-    // emergency 也受 cooldown：只记录不执行
-    // 防止 match_this_tick 模式下 hedge 秒成交 → 连续 emergency hedge 循环
-    WTSLogger::debug("Emergency hedge blocked by cooldown: delta={:.1f}, "
-        "remaining {}ms", currentDelta,
-        _cfg.hedge_cooldown_ms - (now_ms - _last_hedge_time));
-    return false;
+WTSLogger::warn("[TAKER_REDUCE] {} rate limited, will retry next cooldown", c.code);
+continue;
+}
+if (rr.self_trade_blocked)
+{
+WTSLogger::warn("[TAKER_REDUCE] {} self-trade blocked (MM quotes on the way), will retry", c.code);
+continue;
 }
 
-if (!is_emergency)
+if (!rr.localids.empty())
 {
-    // 1. 反向对冲保护：如果上次对冲方向与当前需要方向相反，需要delta翻转幅度超过1.2倍触发阈值
-    //    防止：delta=80→SELL对冲→delta=-80→立即BUY对冲→无限循环
-    if (_last_hedge_direction != 0)
-    {
-        bool need_buy = currentDelta < 0;   // delta<0需要BUY对冲
-        bool need_sell = currentDelta > 0;  // delta>0需要SELL对冲
-        bool is_reverse = (_last_hedge_direction > 0 && need_sell) || 
-                          (_last_hedge_direction < 0 && need_buy);
-        
-        if (is_reverse)
-        {
-            double reverse_max = _cfg.modules.portfolio_max_delta;
-            if (reverse_max <= 0) reverse_max = _cfg.hedge_delta_threshold;
-            double reverse_threshold = reverse_max * 1.2;
-            if (std::abs(currentDelta) < reverse_threshold)
-            {
-                WTSLogger::debug("Hedge anti-oscillation: reverse hedge blocked, "
-                    "current_delta={:.1f}, reverse_threshold={:.1f}, last_hedge_dir={}",
-                    currentDelta, reverse_threshold, _last_hedge_direction);
-                return false;
-            }
-            WTSLogger::info("Hedge reverse allowed: delta={:.1f} exceeds reverse_threshold={:.1f}",
-                currentDelta, reverse_threshold);
-        }
-    }
-}
-else
-{
-    WTSLogger::warn("EMERGENCY HEDGE: delta={:.1f} > 2*max_delta={:.1f}",
-        currentDelta, max_delta * 2.0);
-}
-
-HedgeAction action = _portfolio->computeHedge();
-if (action.qty == 0)
-return false;
-
-// 3. 对冲数量限制：每次对冲不超过delta的50%，避免完全翻转
-//    如果computeHedge返回的数量会导致delta翻转，截断到delta的50%
-{
-    double max_hedge_qty = std::abs(currentDelta) * 0.5;
-    if (std::abs(action.qty) > max_hedge_qty && max_hedge_qty >= 1.0)
-    {
-        WTSLogger::info("Hedge qty capped: {:.0f} -> {:.0f} (anti-overshoot, delta={:.1f})",
-            std::abs(action.qty), max_hedge_qty, currentDelta);
-        action.qty = (action.qty > 0 ? 1 : -1) * std::round(max_hedge_qty);
-    }
-}
-
-bool is_buy = action.qty > 0;
-double qty = std::abs(action.qty);
-
-if (action.is_urgent)
-{
-WTSLogger::warn("URGENT HEDGE: {} {}@{} (delta={})", 
-is_buy ? "BUY" : "SELL", qty, action.code,
-_portfolio->getTotalDelta());
-}
-
-// 使用对手价确保快速成交
-double price = 0;
-ContractState* cs = _portfolio->getContract(action.code);
-if (cs)
-{
-price = is_buy ? cs->ask1 : cs->bid1;
-}
-
-// 通过 OrderRouter 下单（限速+防自成交+审计）
-// 使用 stra_buy/sell 净仓模式，由框架底层按 actpolicy 自动拆分开平方向
-if (_order_router)
-{
-OrderSubmitResult router_result;
-if (is_buy)
-{
-router_result = _order_router->submitBuy(ctx, action.code.c_str(), price, qty, Source::HEDGING);
-}
-else
-{
-router_result = _order_router->submitSell(ctx, action.code.c_str(), price, qty, Source::HEDGING);
-}
-
-if (router_result.rate_limited)
-{
-WTSLogger::warn("Hedge order rate limited: {} (delta={})", 
-action.code, _portfolio->getTotalDelta());
-return false;
-}
-if (router_result.self_trade_blocked)
-{
-WTSLogger::warn("Hedge order self-trade blocked: {} (delta={})", 
-action.code, _portfolio->getTotalDelta());
-return false;
-}
-
-if (!router_result.localids.empty())
-{
-WTSLogger::info("Hedge order placed via OrderRouter: {} {} {}@{} (localid={})", 
-action.code, is_buy ? "BUY" : "SELL", qty, price, router_result.localids.front());
-
+_last_taker_reduce[c.code] = now_ms;
 if (_risk_monitor)
-{
 _risk_monitor->recordOrder();
-}
-
-// 记录对冲状态（防震荡）
-_last_hedge_time = TimeUtils::getLocalTimeNow();
-_last_hedge_direction = is_buy ? 1 : -1;
-_last_hedge_delta = currentDelta;
-
-return true;
-}
-
-WTSLogger::error("Hedge order FAILED via OrderRouter: {} (delta={})", 
-action.code, _portfolio->getTotalDelta());
-return false;
-}
-
-// Fallback: 直接调 ctx API（OrderRouter 未设置时）
-// 使用 stra_buy/sell 净仓模式，由框架底层按 actpolicy 自动拆分开平方向
-wtp::OrderIDs localids;
-if (is_buy)
-{
-localids = ctx->stra_buy(action.code.c_str(), price, qty, 0);
+triggered = true;
 }
 else
 {
-localids = ctx->stra_sell(action.code.c_str(), price, qty, 0);
+WTSLogger::error("[TAKER_REDUCE] {} order FAILED", c.code);
+}
 }
 
-if (!localids.empty())
+return triggered;
+}
+
+//==========================================================================
+// v7.1: 成交后立即重挂 (做市义务恢复)
+//   单边成交把该侧挂单深度侵蚀到 min_valid_qty 以下 → 双边义务不满足 →
+//   立即撤剩余单 + 按最近 tick 参数重新挂单, 不再等下一个 tick。
+//   obligation 路径 (always_obligation&&L0) 本身即"先撤残留再双边下单",
+//   天然满足"撤剩余单重新挂单"语义。
+//==========================================================================
+
+bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms)
 {
-WTSLogger::info("Hedge order placed (direct): {} {} {}@{} (localid={})", 
-action.code, is_buy ? "BUY" : "SELL", qty, price, localids.front());
-
-if (_risk_monitor)
-{
-_risk_monitor->recordOrder();
-}
-
-// 记录对冲状态（防震荡）
-_last_hedge_time = TimeUtils::getLocalTimeNow();
-_last_hedge_direction = is_buy ? 1 : -1;
-_last_hedge_delta = currentDelta;
-
-return true;
-}
-
-WTSLogger::error("Hedge order FAILED (direct): {} (delta={})", 
-action.code, _portfolio->getTotalDelta());
+if (!ctx || !_quoters)
 return false;
+if (_cfg.requote_after_fill_min_interval_ms == 0)
+return false;
+// 报价状态门: RISK_HALTED/MARKET/TOXICITY 等期间不补挂 (与 processQuoting 同门)
+if (!_trading_state || !_trading_state->canQuote())
+return false;
+
+auto it = _quoters->find(code);
+if (it == _quoters->end() || !it->second)
+return false;
+FutuQuoter* quoter = it->second.get();
+
+// 义务检查: 双边深度是否仍满足 min_valid_qty; 满足则无需动作
+ValidQuoteSnapshot snap = quoter->getValidQuoteSnapshot();
+if (snap.has_valid_bid && snap.has_valid_ask)
+return false;
+
+auto qit = _last_quote_params.find(code);
+if (qit == _last_quote_params.end() || !qit->second.valid)
+return false;
+const CachedQuote& q = qit->second;
+
+// 限频防 churn (密集成交时合并重挂)
+uint64_t& last = _last_requote_ms[code];
+if (last > 0 && now_ms > last && now_ms - last < _cfg.requote_after_fill_min_interval_ms)
+return false;
+last = now_ms;
+
+WTSLogger::debug("[REQUOTE] {} fill eroded obligation depth (bid_valid={} ask_valid={}), re-quoting immediately",
+code, snap.has_valid_bid, snap.has_valid_ask);
+
+quoter->refreshQuotes(ctx, q.mid, q.l0_bid, q.l0_ask, q.spread_mult,
+q.allow_bid, q.allow_ask, q.timestamp,
+q.upper_limit, q.lower_limit, q.best_bid, q.best_ask,
+q.long_util, q.short_util,
+q.force_ask_obligation, q.force_bid_obligation);
+return true;
 }
 
 //==========================================================================

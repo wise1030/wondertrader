@@ -18,6 +18,17 @@ namespace futu {
 
 void CloseoutOrchestrator::onTick(wtp::IUftStraCtx* ctx, wtp::WTSTickData* tick, bool closeout_triggered)
 {
+    // v7.1: replay 时钟注入 (mark* 与 RiskMonitor._current_time 同为 replay 基准)
+    {
+        uint32_t ad = tick->actiondate();
+        uint32_t at = tick->actiontime();
+        _now_ms = static_cast<uint64_t>(ad) * 86400000ULL
+                + static_cast<uint64_t>(at / 10000000) * 3600000ULL
+                + static_cast<uint64_t>((at / 100000) % 100) * 60000ULL
+                + static_cast<uint64_t>((at / 1000) % 100) * 1000ULL
+                + (at % 1000);
+    }
+
     // === Closeout hedge trigger ===
     if (closeout_triggered && _deps.flatten_position
         && _deps.risk_monitor->isCloseoutFlattening() && !_closeout_hedge_executed)
@@ -78,12 +89,12 @@ void CloseoutOrchestrator::onTick(wtp::IUftStraCtx* ctx, wtp::WTSTickData* tick,
         {
             if (_deps.risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
             {
-                _deps.risk_monitor->markCloseoutCompleted(TimeUtils::getLocalTimeNow());
+                _deps.risk_monitor->markCloseoutCompleted(_now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow());
             }
         }
         else if (_deps.executor->isFailed())
         {
-            _deps.risk_monitor->markCloseoutFailed(TimeUtils::getLocalTimeNow());
+            _deps.risk_monitor->markCloseoutFailed(_now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow());
         }
     }
 
@@ -137,7 +148,7 @@ if (std::abs(totalDelta) < 0.01)
     WTSLogger::info("UftFutuMmStrategy[{}] Closeout: No position to hedge (Delta=0)", _deps.strategy_id);
     if (_deps.risk_monitor->getCloseoutSub() != CloseoutSub::COMPLETED)
     {
-        _deps.risk_monitor->markCloseoutCompleted(TimeUtils::getLocalTimeNow());
+        _deps.risk_monitor->markCloseoutCompleted(_now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow());
     }
     return;
 }
@@ -178,7 +189,7 @@ _deps.executor->start(ctx, _deps.anchor_code->c_str(),
 
 // 标记 FLATTENING (executor 已启动，等待渐进成交)
 // 时间戳统一 epoch ms (搬移时修复: 旧代码在此用了压缩时间戳)
-_deps.risk_monitor->markCloseoutDraining(TimeUtils::getLocalTimeNow());
+_deps.risk_monitor->markCloseoutDraining(_now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow());
 }
 
 void CloseoutOrchestrator::onOrderEvent(wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode,

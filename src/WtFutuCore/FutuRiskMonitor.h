@@ -37,8 +37,9 @@ class UnifiedOrderTracker;  // Forward declaration
 /// Risk limit types
 enum class RiskLimitType
 {
-    POSITION_LONG,      ///< Maximum long position
-    POSITION_SHORT,     ///< Maximum short position
+    // B5: POSITION_LONG/SHORT 已删除 — v7.1 连续控制接管仓位风险
+    // (skew/qty-decay/obligation/taker), BLOCK_SIDE 硬动作实际等价全停,
+    // 方向性违规类型从未被产生, 属 v7.1 前残留死代码
     POSITION_NET,       ///< Maximum net position
     DELTA,              ///< Maximum portfolio delta
     EXPOSURE,           ///< Maximum total exposure
@@ -167,6 +168,7 @@ struct RecoveryConfig
     uint32_t max_recovery_count;    ///< Maximum number of auto-recoveries per session
     double   pnl_recovery_ratio;    ///< Required PnL recovery ratio (e.g., 0.5 = 50% of loss recovered)
     double   max_loss_for_recovery; ///< Max absolute loss at halt to allow auto-recovery (0=disabled)
+    bool     auto_clear_irreversible_on_reset; ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
     
     RecoveryConfig()
         : cooldown_ms(30000)
@@ -175,6 +177,7 @@ struct RecoveryConfig
         , max_recovery_count(3)
         , pnl_recovery_ratio(0.5)
         , max_loss_for_recovery(0)
+        , auto_clear_irreversible_on_reset(false)
     {}
     
     static RecoveryConfig fromVariant(wtp::WTSVariant* v) {
@@ -185,6 +188,7 @@ struct RecoveryConfig
         c.max_recovery_count = FutuConfig::readUInt32(v, "maxRecoveryCount", 3);
         c.pnl_recovery_ratio = FutuConfig::readDouble(v, "pnlRecoveryRatio", 0.5);
         c.max_loss_for_recovery = FutuConfig::readDouble(v, "maxLossForRecovery", 0);
+        c.auto_clear_irreversible_on_reset = FutuConfig::readBool(v, "autoClearIrreversibleOnReset", false);
         return c;
     }
 };

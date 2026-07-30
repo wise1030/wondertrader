@@ -21,6 +21,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg, FutuMmConfig& _config,
     // 读取合约配置
     //------------------------------------------------------------
     _config.anchor_code = cfg->getCString("anchorCode");
+    _config.is_backtest = readBool(cfg, "isBacktest", false);
 
 //------------------------------------------------------------
 // 读取配置文件路径
@@ -92,10 +93,8 @@ _config.quoting.always_obligation = readBool(cfgQuoting, "alwaysObligation", tru
 //------------------------------------------------------------
 WTSVariant* cfgPortfolio = cfg->get("portfolio");
 if (cfgPortfolio) {
-_config.portfolio.max_delta = readDouble(cfgPortfolio, "maxDelta", 50.0);
-_config.portfolio.hedge_ratio = readDouble(cfgPortfolio, "hedgeRatio", 1.0);
-_config.portfolio.hedge_delta_threshold = readDouble(cfgPortfolio, "hedgeDeltaThreshold", 0.8);
-_config.portfolio.hedge_cooldown_ms = readUInt32(cfgPortfolio, "hedgeCooldownMs", 5000);
+    _config.portfolio.max_delta = readDouble(cfgPortfolio, "maxDelta", 50.0);
+    _config.portfolio.hedge_ratio = readDouble(cfgPortfolio, "hedgeRatio", 1.0);
 }
 
 // 下单错误处理参数（统一处理所有下单错误）
@@ -159,6 +158,7 @@ _config.risk.position_warning_l1 = readDouble(cfgFrequency, "positionWarningL1",
 _config.risk.position_warning_l2 = readDouble(cfgFrequency, "positionWarningL2", 0.9);
 _config.risk.widen_threshold = readUInt32(cfgFrequency, "widenThreshold", 1);
 _config.risk.flatten_threshold = readUInt32(cfgFrequency, "flattenThreshold", 2);
+_config.risk.auto_clear_irreversible_on_reset = readBool(cfgFrequency, "autoClearIrreversibleOnReset", false);
 }
 }
 

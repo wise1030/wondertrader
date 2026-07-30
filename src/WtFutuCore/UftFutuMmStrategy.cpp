@@ -276,8 +276,6 @@ _portfolio = std::make_unique<FutuPortfolio>();
 PortfolioParams portfolio_params;
 portfolio_params.portfolio_max_delta = _config.portfolio.max_delta;
 portfolio_params.hedge_ratio = _config.portfolio.hedge_ratio;
-portfolio_params.hedge_delta_threshold = _config.portfolio.hedge_delta_threshold;
-portfolio_params.hedge_cooldown_ms = _config.portfolio.hedge_cooldown_ms;
 portfolio_params.max_exposure = _config.risk.max_exposure;
 // max_loss 语义为正容忍度 (RiskMonitor: pnl < -max_loss 触发)。
 // 配置历史上正负约定混用(默认 -200000, README 示例 50000), 统一取绝对值防御.
@@ -285,9 +283,8 @@ portfolio_params.max_loss = std::abs(_config.risk.max_daily_loss);
 _portfolio->setParams(portfolio_params);
 _portfolio->setAnchorContract(_config.anchor_code);
 
-WTSLogger::info("FutuPortfolio: maxDelta={} (soft), hedgeRatio={}, hedgeThreshold={}, hedgeCooldown={}ms, maxExposure={}, maxLoss={}",
+WTSLogger::info("FutuPortfolio: maxDelta={} (soft), hedgeRatio={}, maxExposure={}, maxLoss={}",
 portfolio_params.portfolio_max_delta, portfolio_params.hedge_ratio,
-portfolio_params.hedge_delta_threshold, portfolio_params.hedge_cooldown_ms,
 portfolio_params.max_exposure, portfolio_params.max_loss);
 
 // 添加合约到 Portfolio（包含单合约限制）
@@ -546,6 +543,7 @@ recovery_cfg.recovery_threshold = _config.risk.recovery_threshold;
 recovery_cfg.max_recovery_count = _config.risk.max_recovery_count;
 recovery_cfg.pnl_recovery_ratio = _config.risk.pnl_recovery_ratio;
 recovery_cfg.max_loss_for_recovery = _config.risk.max_loss_for_recovery;
+recovery_cfg.auto_clear_irreversible_on_reset = _config.risk.auto_clear_irreversible_on_reset;
 _risk_monitor->setRecoveryConfig(recovery_cfg);
 
 CloseoutConfig closeout_cfg;
@@ -603,6 +601,12 @@ wtp::WTSVariant* modules_v = root ? root->get("modules") : nullptr;
 if (modules_v) {
 wtp::WTSVariant* sig_v = modules_v->get("signalAggregator");
 if (sig_v) sig_cfg = SignalAggregatorConfig::fromVariant(sig_v);
+}
+
+// model.type 校验失败 -> 跳过 SignalAggregator 初始化
+if (!sig_cfg.valid) {
+WTSLogger::error("SignalAggregator: config invalid (unsupported model type), skipping initialization");
+return;
 }
 
 for (const auto& ci : _contract_infos)
@@ -852,6 +856,8 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 {
 // 保存ctx指针
 _main_ctx = ctx;
+_is_backtest = _config.is_backtest;
+WTSLogger::info("UftFutuMmStrategy[{}] mode: {} (isBacktest={})", id(), _is_backtest ? "BACKTEST" : "LIVE", _is_backtest);
 
 // R1: 从 ctx 获取 EventNotifier (WtUftRunner 创建 UftStraContext 时已注入 &_notifier)
 auto* uft_ctx = dynamic_cast<UftStraContext*>(ctx);
@@ -968,7 +974,6 @@ FutuConfigValidator::checkRange("delta_skew_threshold", glft.delta_skew_threshol
 
 // Portfolio 参数校验
 FutuConfigValidator::checkPositive("portfolio_max_delta", _portfolio->getParams().portfolio_max_delta, vr);
-FutuConfigValidator::checkRange("hedge_delta_threshold", _portfolio->getParams().hedge_delta_threshold, 0.1, 1.0, vr);
 
 // 输出结果
 for (const auto& err : vr.errors) {
@@ -1167,7 +1172,7 @@ _stp->clear();
         id(), uTDate, _portfolio->getTotalDelta());
 
     // session_end closeout 状态强制收尾 (已拆分至 CloseoutOrchestrator, 架构重构 C3)
-    _closeout_orch.finalizeAtSessionEnd(TimeUtils::getLocalTimeNow());
+    _closeout_orch.finalizeAtSessionEnd(_exchange_time_ms > 0 ? _exchange_time_ms : TimeUtils::getLocalTimeNow());
 }
 
 //============================================================
@@ -1179,7 +1184,7 @@ void UftFutuMmStrategy::handleQuotingAutoResume()
     if (_trading_state.qphase != QuotingPhase::ERROR || _quoting_paused_since == 0)
         return;
 
-    uint64_t paused_ms = TimeUtils::getLocalTimeNow() - _quoting_paused_since;
+    uint64_t paused_ms = (_exchange_time_ms > 0 ? _exchange_time_ms : TimeUtils::getLocalTimeNow()) - _quoting_paused_since;
     uint64_t wait_threshold = 10000;  // 初始等待 10 秒
     if (_order_error_count > 0)
     {
@@ -1326,8 +1331,26 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     // 1. 报价暂停恢复 (ERROR → NORMAL with exponential backoff)
     handleQuotingAutoResume();
 
-    // 2. 风控时间戳 (每 tick 墙钟只读一次, 复用于 coordinator processTick)
-    uint64_t now_ms = TimeUtils::getLocalTimeNow();
+    // 2. v7.1 主时钟: 全策略决策逻辑统一用 replay 时间 (tick actiondate/actiontime)。
+    //   回测中墙钟节流(delta-rate滑窗/毒性cooloff/限速/恢复冷却)随机器速度漂移,
+    //   导致订单序列不可复现 (同配置两次运行 PnL 差数倍)。
+    //   实盘时 replay 时间=交易所时间, 语义一致。
+    {
+        uint32_t ad = tick->actiondate();
+        uint32_t at = tick->actiontime();
+        _exchange_time_ms = static_cast<uint64_t>(ad) * 86400000ULL
+                   + static_cast<uint64_t>(at / 10000000) * 3600000ULL
+                   + static_cast<uint64_t>((at / 100000) % 100) * 60000ULL
+                   + static_cast<uint64_t>((at / 1000) % 100) * 1000ULL
+                   + (at % 1000);
+        if (_coordinator)
+            _coordinator->setExchangeTime(_exchange_time_ms);
+        if (_order_router)
+            _order_router->setNowMs(_exchange_time_ms);
+        if (_spread_arb_manager)
+            _spread_arb_manager->setNowMs(_exchange_time_ms);
+    }
+    uint64_t now_ms = _exchange_time_ms;
     if (_risk_monitor)
         _risk_monitor->setCurrentTime(now_ms);
 
@@ -1346,7 +1369,14 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     handleCoordinatorTick(ctx, stdCode, tick, now_ms);
 
     // 6. 跨期价差套利 (与做市业务平级，独立处理 — 已拆分至 ArbExecutionBridge, C4)
-    if (_spread_arb_manager && _config.modules.use_spread_arbitrage)
+    // v7.1: CLOSEOUT 阶段不喂 arb tick — 收盘平仓窗口内开新价差仓会让
+    //       closeout 前功尽弃 (回测实证: 14:45 平仓后 arb 重建 ~50 手 delta 过夜,
+    //       次日跳空触发日亏 IRREVERSIBLE halt)。夜盘 closeout 由
+    //       exitToQuoting 恢复 phase 后自动恢复喂入。
+    // v7.1: session 休息段同样不喂 arb (与报价暂停一致).
+    if (_spread_arb_manager && _config.modules.use_spread_arbitrage
+        && _trading_state.phase != MmPhase::CLOSEOUT
+        && !(_coordinator && _coordinator->isSectionBreakActive()))
     {
         _arb_bridge.onTick(ctx, stdCode, tick);
     }
@@ -1422,60 +1452,21 @@ _risk_monitor->recordTrade();
 // stra_get_local_position 返回的是本策略的净头寸
 double local_net = ctx->stra_get_local_position(stdCode);
 
-// P0-1: 完整的持仓+PnL 更新(替换原来的简单 onPositionUpdate)
+// P0-1/v7.1: 分向成本簿记账 (offset 标志驱动, 替代净额推断)
+// 旧净额推断在 MM+arb 共享同合约净头寸时必然失真:
+//   arb 腿的开平被误判为 MM 加减仓, avg_cost 被污染 → daily_pnl 假阳性日亏
+//   (回测实证: 引擎真账 +34k, 内部账 -3.7M → 日亏 IRREVERSIBLE halt 误杀)
 {
-    double old_pos = _portfolio->getPosition(stdCode);
-    double new_pos = local_net;
-    const ContractState* cs = _portfolio->getContract(stdCode);
-    double old_avg_cost = cs ? cs->avg_cost : 0;
-    double mult = cs ? cs->multiplier : 1;
+    _portfolio->onTradeFill(stdCode, isLong, static_cast<int>(offset), vol, price);
+    _portfolio_ctx_dirty = true;
 
-    // 1. 计算已实现盈亏(平仓部分) + 2. 计算新 avg_cost
-    // 分四种情形: 同向减仓 / 同向加仓(加权均价) / 方向翻转(全平旧仓+新仓成本=成交价) / 全部平仓
-    // 旧代码对"翻转且|new|<|old|"(如多5→空3)按减仓处理: closed_qty=2(实为5),
-    // 3 手 realized 永久丢失, 且新均价残留多头成本.
-    double realized = 0;
-    double new_avg_cost = old_avg_cost;
-    if (cs && std::abs(old_pos) > 0.01)
+    // 净持仓以引擎真值校验 (防漏单/异常路径漂移)
+    const ContractState* cs_chk = _portfolio->getContract(stdCode);
+    if (cs_chk && std::abs(cs_chk->position - local_net) > 0.01)
     {
-        bool same_dir = (old_pos > 0 && new_pos > 0) || (old_pos < 0 && new_pos < 0);
-        if (same_dir && std::abs(new_pos) > std::abs(old_pos))
-        {
-            // 同向加仓: 加权平均
-            double added_qty = std::abs(new_pos) - std::abs(old_pos);
-            new_avg_cost = (old_avg_cost * std::abs(old_pos) + price * added_qty) / std::abs(new_pos);
-        }
-        else
-        {
-            // 同向减仓 / 全部平仓(new_pos==0) / 方向翻转: 旧仓全部或部分按均价结算
-            double closed_qty = same_dir ? (std::abs(old_pos) - std::abs(new_pos))
-                                         : std::abs(old_pos);
-            if (closed_qty > 0.01)
-            {
-                realized = (old_pos > 0)
-                    ? (price - old_avg_cost) * closed_qty * mult   // 多头平仓
-                    : (old_avg_cost - price) * closed_qty * mult;  // 空头平仓
-            }
-            if (!same_dir && std::abs(new_pos) > 0.01)
-            {
-                // 方向翻转: 新仓成本 = 翻转成交价
-                new_avg_cost = price;
-            }
-        }
-    }
-    else if (cs && std::abs(new_pos) > 0.01)
-    {
-        // 从零开仓
-        new_avg_cost = price;
-    }
-
-    // 3. 更新 Portfolio
-    if (std::abs(old_pos - new_pos) > 0.01) {
-        _portfolio->updatePosition(stdCode, new_pos, new_avg_cost);
-        _portfolio_ctx_dirty = true;
-    }
-    if (std::abs(realized) > 0.001) {
-        _portfolio->addRealizedPnl(stdCode, realized);
+        WTSLogger::warn("UftFutuMmStrategy[{}] position book divergence: {} book={:.0f} engine={:.0f}, resyncing",
+            id(), stdCode, cs_chk->position, local_net);
+        _portfolio->resyncPosition(stdCode, local_net);
     }
 }
 
@@ -1494,6 +1485,23 @@ _arb_bridge.onTradeFill(ctx, localid, stdCode, isLong, vol, price);
             quoter->onTrade(localid, vol, price, uTime_HHMM, sec_in_min);
             break;
         }
+    }
+}
+
+// v7.1: 单边成交侵蚀挂单深度 → 不满足双边做市义务时, 立即恢复
+// 回测: 只撤 MM 单(stra_cancel postTask 安全), 重挂由 processQuoting 同 tick 完成
+// 生产: 同步 requoteAfterFill (stra_buy/sell 发往交易所, 无 _orders 迭代问题)
+if (_coordinator)
+{
+    if (_is_backtest)
+    {
+        auto qit = _quoters.find(stdCode);
+        if (qit != _quoters.end())
+            qit->second->cancelAll(ctx);
+    }
+    else
+    {
+        _coordinator->requoteAfterFill(ctx, stdCode, _exchange_time_ms);
     }
 }
 
@@ -1689,7 +1697,8 @@ _risk_monitor->recordCancel();
 uint32_t time_hhmm = ctx->stra_get_time();
 uint32_t ssmmm = ctx->stra_get_secs();
 uint32_t s = ssmmm / 1000;
-uint64_t now_ms = TimeUtils::getLocalTimeNow();
+// v7.1: 用 replay 时钟 (与 RiskMonitor._current_time 同基准; 回测可复现)
+uint64_t now_ms = _exchange_time_ms > 0 ? _exchange_time_ms : TimeUtils::getLocalTimeNow();
 
 // 更新 Quoter 订单状态(内部会从 UnifiedOrderTracker 移除)
 // 同时触发双边报价统计更新
@@ -1976,7 +1985,7 @@ void UftFutuMmStrategy::on_channel_lost(IUftStraCtx* ctx)
     // 1. 立即暂停所有交易和报价
     // P1-1: enter RISK_HALTED on channel lost
     _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
-    _quoting_paused_since = TimeUtils::getLocalTimeNow();
+    _quoting_paused_since = _exchange_time_ms > 0 ? _exchange_time_ms : TimeUtils::getLocalTimeNow();
 
     // 2. 撤销所有做市挂单（通道断开时无法保证订单状态）
     for (auto& [code, quoter] : _quoters)
@@ -2109,6 +2118,22 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     if (bSuccess)
     {
         _order_error_count = 0;
+        // v7.1: 报单引擎确认 → 双边统计挂单确认入口
+        // (在场时间从引擎确认时刻起算, 不含发出→确认的网络延迟;
+        //  回测 mocker postTask 异步触发, 回调时 quoter 已注册 ID)
+        if (_main_ctx)
+        {
+            uint32_t uTime = _main_ctx->stra_get_time();
+            uint32_t secs  = _main_ctx->stra_get_secs() / 1000;
+            for (auto& [code, quoter] : _quoters)
+            {
+                if (quoter->isMyOrder(localid))
+                {
+                    quoter->onEntrustAck(localid, uTime, secs);
+                    break;
+                }
+            }
+        }
         // P1-6/U1: 用 tryResumeFrom 替代 setQuotingPhase(NORMAL),
         // 仅当 qphase 真的是 ERROR 时才翻 NORMAL (避免在其它态下乱翻)
         if (_trading_state.tryResumeFrom(QuotingPhase::ERROR))
@@ -2125,6 +2150,23 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
 
     WTSLogger::error("UftFutuMmStrategy[{}] Order FAILED (count={}/{}): localid={}, error={}",
         id(), _order_error_count, _config.order_control.order_error_threshold, localid, errMsg);
+
+    // v7.1 生产适配: 拒单的 localid 已被 handle*Quote 注册进 quoter level, 但订单
+    // 从未上交易所。若不清理, getValidQuoteSnapshot 仍把死单当有效深度 → 统计虚高
+    // (sticky/pause 期间死单滞留)。复用 onOrder(canceled) 路径移除死单 + 更新统计。
+    if (_main_ctx)
+    {
+        uint32_t uTime = _main_ctx->stra_get_time();
+        uint32_t secs  = _main_ctx->stra_get_secs() / 1000;
+        for (auto& [code, quoter] : _quoters)
+        {
+            if (quoter->isMyOrder(localid))
+            {
+                quoter->onOrder(localid, true, 0, uTime, secs);
+                break;
+            }
+        }
+    }
 
     // 套利单被拒: 撤同 pair 另一腿,防止裸腿
     if (_async_arb && _order_router)
@@ -2144,7 +2186,7 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     {
         _trading_state.setQuotingPhase(QuotingPhase::ERROR);
         // 硬触发分支补设 paused_since, 让 handleQuotingAutoResume 正常工作.
-        _quoting_paused_since = TimeUtils::getLocalTimeNow();
+        _quoting_paused_since = _exchange_time_ms > 0 ? _exchange_time_ms : TimeUtils::getLocalTimeNow();
 
         WTSLogger::error("UftFutuMmStrategy[{}] Trading HALTED due to consecutive order errors (count={}/threshold={})",
             id(), _order_error_count, _config.order_control.order_error_threshold);
@@ -2161,7 +2203,7 @@ void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
     {
         // 软触发不 cancelAll, 维持原语义 (临时小问题, 挂单留着等下笔成功)
         _trading_state.setQuotingPhase(QuotingPhase::ERROR);
-        _quoting_paused_since = TimeUtils::getLocalTimeNow();
+        _quoting_paused_since = _exchange_time_ms > 0 ? _exchange_time_ms : TimeUtils::getLocalTimeNow();
         WTSLogger::warn("UftFutuMmStrategy[{}] Quoting temporarily paused due to order error ({}/{})",
             id(), _order_error_count, _config.order_control.order_error_threshold);
     }

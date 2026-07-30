@@ -20,6 +20,17 @@ namespace futu {
 
 void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick)
 {
+// v7.1: replay 时钟注入 (stale 对冲清理/时间戳统一基准, 回测可复现)
+{
+    uint32_t ad = tick->actiondate();
+    uint32_t at = tick->actiontime();
+    _now_ms = static_cast<uint64_t>(ad) * 86400000ULL
+            + static_cast<uint64_t>(at / 10000000) * 3600000ULL
+            + static_cast<uint64_t>((at / 100000) % 100) * 60000ULL
+            + static_cast<uint64_t>((at / 1000) % 100) * 1000ULL
+            + (at % 1000);
+}
+
 if (!_deps.async_arb || !_deps.use_spread_arbitrage)
 return;
 
@@ -40,15 +51,17 @@ if (_deps.arb_manager)
 _deps.arb_manager->refreshPositionsFromPortfolio();
 
 // B5 fix: cleanup stale hedge entries (opposite leg partially filled then cancelled)
-// 纯超时条件: 任何条目超过 30s 即视为死亡 (hedge-on-fill 窗口为毫秒~秒级).
-// 不能用 hedged_qty < original_qty: original_qty=0 的条目 (onLegCancelled 无量标记)
-// 在 onTradeFill 中 erase 要求 original_qty>0 永不满足, 会永久泄漏并导致
-// 该 pair 后续所有成交被错误反向对冲.
+// 超时条件兜底: original_qty>0 的条目 30s 过期, original_qty==0 的条目 2s 过期
+// (撤单无量标记, 对齐"毫秒~秒级"窗口语义). 不能用 hedged_qty < original_qty:
+// original_qty=0 的条目 erase 要求 original_qty>0 永不满足, 会永久泄漏.
+// B1 根治: 新信号订单提交时 (processPendingOrders) 主动清除 original_qty==0 条目,
+// 消除 2s 窗口内新信号成交被错误对冲的风险.
 {
-uint64_t now_ms = TimeUtils::getLocalTimeNow();
+uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
 for (auto it = _arb_hedge_on_fill.begin(); it != _arb_hedge_on_fill.end(); ) {
+    const uint64_t timeout_ms = (it->second.original_qty > 0) ? 30000 : 2000;
     if (it->second.created_time_ms > 0 &&
-        now_ms - it->second.created_time_ms > 30000)
+        now_ms - it->second.created_time_ms > timeout_ms)
     {
         WTSLogger::warn("ArbBridge: stale hedge entry expired, pair={}, "
                         "hedged={}/{}", it->first, it->second.hedged_qty, it->second.original_qty);
@@ -96,6 +109,10 @@ if (std::abs(it->second - order.price) < 1e-6)
 {
 WTSLogger::debug("AsyncArb skipped: {} already has {} pending at identical price {}",
 order.code, undone, order.price);
+// B13 fix: drop 时同步释放 B-3 in_flight 闸门,
+// 否则该 pair 冻结至 60s 超时 (1:N 聚合下多 pair 共享 leg 同价时触发)
+if (_deps.arb_manager)
+_deps.arb_manager->onArbSignalDropped(order.pair_id);
 return;
 }
 }
@@ -151,13 +168,17 @@ OrderSubmitResult router_result;
 if (order.is_buy)
 {
 router_result = _deps.order_router->submitBuy(ctx, order.code.c_str(), exe_price, exe_qty, Source::ARBITRAGE, order.order_flag);
-if (!router_result.localids.empty())
+if (router_result.rejected)
+WTSLogger::warn("AsyncArb BUY {} rejected - invalid price={}", order.code, exe_price);
+else if (!router_result.localids.empty())
 WTSLogger::info("AsyncArb BUY {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
 }
 else
 {
 router_result = _deps.order_router->submitSell(ctx, order.code.c_str(), exe_price, exe_qty, Source::ARBITRAGE, order.order_flag);
-if (!router_result.localids.empty())
+if (router_result.rejected)
+WTSLogger::warn("AsyncArb SELL {} rejected - invalid price={}", order.code, exe_price);
+else if (!router_result.localids.empty())
 WTSLogger::info("AsyncArb SELL {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
 }
 
@@ -165,8 +186,21 @@ WTSLogger::info("AsyncArb SELL {} {}@{} via OrderRouter", order.code, exe_qty, e
 // route fills to SpreadArbMgr::onArbOrderFilled (in-flight tracking).
 if (!router_result.localids.empty() && !order.pair_id.empty())
 {
-    for (uint32_t lid : router_result.localids)
+// B1 根治: 新信号订单提交成功 = 旧孤儿腿 hedge-on-fill 条目 (original_qty==0)
+// 已过期. 不清除则 2s 窗口内新 leg1 成交会被 onTradeFill 错误对冲 (旧条目
+// 按全 vol 对冲, 无视这是新信号的开仓而非旧孤儿腿的残余成交).
+// 开仓/平仓均需清除: 平仓信号的新成交也不应触发旧孤儿腿对冲.
+{
+    auto hit = _arb_hedge_on_fill.find(order.pair_id);
+    if (hit != _arb_hedge_on_fill.end() && hit->second.original_qty <= 0)
     {
+        WTSLogger::debug("ArbBridge: clearing stale original_qty==0 hedge entry for pair={} "
+                         "(new signal submitted, hedged={})", order.pair_id, hit->second.hedged_qty);
+        _arb_hedge_on_fill.erase(hit);
+    }
+}
+for (uint32_t lid : router_result.localids)
+{
         _deps.async_arb->tagOrderPair(lid, order.pair_id);
         _deps.order_router->registerPairOrder(lid, order.pair_id);  // A7: cancelByPair 映射
         // A8: 录入 UnifiedOrderTracker (此前 trackArbOrder 全项目无调用者,
@@ -175,7 +209,7 @@ if (!router_result.localids.empty() && !order.pair_id.empty())
         if (_deps.order_tracker)
         {
             _deps.order_tracker->trackArbOrder(lid, order.code, exe_price, exe_qty,
-                exe_price /*placeMid 近似*/, TimeUtils::getLocalTimeNow(), order.is_buy);
+                exe_price /*placeMid 近似*/, _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow(), order.is_buy);
         }
     }
 }
@@ -279,6 +313,10 @@ _deps.async_arb->processOrphanLegs([this, ctx](const std::string& code,
                 is_buy ? "BUY" : "SELL", code, qty, hedge_price,
                 urgent ? " [URGENT]" : "");
         }
+        if (result.rejected)
+        {
+            WTSLogger::warn("OrphanLeg hedge rejected - invalid price: {}", code);
+        }
         if (result.rate_limited)
         {
             WTSLogger::warn("OrphanLeg hedge rate limited: {}", code);
@@ -374,10 +412,15 @@ if (_deps.async_arb->consumePairTag(localid, arb_pair_id))
             double hedge_price = isLong
                 ? (cs && cs->bid1 > 0 ? cs->bid1 : price)
                 : (cs && cs->ask1 > 0 ? cs->ask1 : price);
-            if (isLong)
-                _deps.order_router->submitSell(ctx, stdCode, hedge_price, hedge_qty, Source::CLOSEOUT, 1);
-            else
-                _deps.order_router->submitBuy(ctx, stdCode, hedge_price, hedge_qty, Source::CLOSEOUT, 1);
+            if (isLong) {
+                auto rr = _deps.order_router->submitSell(ctx, stdCode, hedge_price, hedge_qty, Source::CLOSEOUT, 1);
+                if (rr.rejected)
+                    WTSLogger::warn("ORPHAN LEG HEDGE SELL {} rejected - invalid price={}", stdCode, hedge_price);
+            } else {
+                auto rr = _deps.order_router->submitBuy(ctx, stdCode, hedge_price, hedge_qty, Source::CLOSEOUT, 1);
+                if (rr.rejected)
+                    WTSLogger::warn("ORPHAN LEG HEDGE BUY {} rejected - invalid price={}", stdCode, hedge_price);
+            }
             hedge_it->second.hedged_qty += hedge_qty;
             WTSLogger::warn("UftFutuMmStrategy[{}] ORPHAN LEG HEDGE: pair={} {} {} x {} @ {} (cumulative {}/{})",
                 _deps.strategy_id, arb_pair_id, isLong ? "SELL" : "BUY", stdCode, hedge_qty, hedge_price,
@@ -399,7 +442,7 @@ void ArbExecutionBridge::markLegRejected(const std::string& pair_id, double orde
     if (st.original_qty <= 0 || order_qty > st.original_qty)
         st.original_qty = order_qty;
     if (st.created_time_ms == 0)
-        st.created_time_ms = TimeUtils::getLocalTimeNow();
+        st.created_time_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
 }
 
 void ArbExecutionBridge::onLegCancelled(wtp::IUftStraCtx* ctx, const std::string& pair_id)

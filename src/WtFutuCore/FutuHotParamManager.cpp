@@ -127,7 +127,7 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
         pp.portfolio_max_delta = hotVal(HP_MAX_DELTA);
         t.portfolio->setParams(pp);  // 通过非const方法写回
     }
-    // 同步到 Coordinator (checkAndHedge 防震荡阈值)
+    // 同步到 Coordinator (软风控 WIDEN_SPREAD 的 portfolio delta util 基准)
     if (t.coordinator)
     {
         t.coordinator->setPortfolioMaxDelta(hotVal(HP_MAX_DELTA));

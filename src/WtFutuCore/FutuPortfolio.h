@@ -34,10 +34,8 @@ class SpreadArbitrageManager;  // B5: 过冲保险丝回调目标 (前向声明)
 /// Portfolio/inventory parameters
 struct PortfolioParams
 {
-    double      hedge_ratio;        ///< Fraction of delta to hedge (0.0-1.0)
+    double      hedge_ratio;        ///< Fraction of delta to hedge (0.0-1.0, used by CloseoutExecutor)
     double      portfolio_max_delta;  ///< 组合级 Delta 软限制，用于 skew 调制（非硬限制）
-    double      hedge_delta_threshold; ///< 对冲触发Delta利用率阈值 (0.0-1.0, 默认0.8=80%时触发)
-    uint32_t    hedge_cooldown_ms;   ///< 对冲冷却时间(ms)
     
     //==========================================================================
     // 风控硬限制（由 FutuRiskMonitor 读取，不属于组合管理范畴）
@@ -48,8 +46,6 @@ struct PortfolioParams
     PortfolioParams()
         : hedge_ratio(1.0)
         , portfolio_max_delta(50.0)
-        , hedge_delta_threshold(0.8)
-        , hedge_cooldown_ms(5000)
         , max_exposure(35000000.0)
         , max_loss(200000.0)
     {}
@@ -58,40 +54,55 @@ struct PortfolioParams
 /// Per-contract state (unified from InventoryState + ContractState)
 struct ContractState
 {
-    std::string code;           ///< Standard code (e.g. "CFFEX.IF.2503")
-    double      multiplier;     ///< Contract multiplier
-    double      tick_size;      ///< Minimum tick size
-    double      hedge_ratio;    ///< Hedge ratio relative to anchor contract
-    bool        hedge_ratio_initialized;  ///< 冷启动初始化标志：false=仍是默认 1.0，需要 on_tick 用纯货值比注入；true=已用货值比或 EMA β 初始化过
-    
-    // Position state
+    // perf#11: 热字段前置 — getTotalDelta/getTotalExposure 扫描只读
+    // position/hedge_ratio/multiplier/last_price, 集中首 32 字节 (半 cache line),
+    // 避免 code string (32B) 占首行导致每合约扫描拉 3 cache line
     double      position;       ///< Net position (+ long, - short)
+    double      hedge_ratio;    ///< Hedge ratio relative to anchor contract
+    double      multiplier;     ///< Contract multiplier
+    double      last_price;     ///< Latest mid/last price
+
+    std::string code;           ///< Standard code (e.g. "CFFEX.IF.2503")
+    double      tick_size;      ///< Minimum tick size
+    bool        hedge_ratio_initialized;  ///< 冷启动初始化标志：false=仍是默认 1.0，需要 on_tick 用纯货值比注入；true=已用货值比或 EMA β 初始化过
+
+    // Position state
     double      prev_position;  ///< Previous position for trade effect logging
-    double      avg_cost;       ///< Average cost
+    double      avg_cost;       ///< Average cost (主导侧均价, 兼容字段)
     double      unrealized_pnl; ///< Unrealized P&L
     double      realized_pnl;   ///< Realized P&L (accumulated from closed positions)
+
+    // v7.1 分向成本簿 (offset 标志驱动记账)
+    // 净额均价推断在 MM+arb 共享同合约净头寸时必然失真 (arb 腿的开平
+    // 被误判为 MM 的加减仓, avg_cost 被污染 → daily_pnl 假阳性日亏)。
+    // 分向簿与交易所/回测引擎口径一致: position = long_qty - short_qty
+    double      long_qty;       ///< 多向持有量
+    double      long_avg;       ///< 多向加权成本
+    double      short_qty;      ///< 空向持有量
+    double      short_avg;      ///< 空向加权成本
     
-    // Market data
-    double      last_price;     ///< Latest mid/last price
+    // Market data (last_price 已前置, perf#11)
     double      bid1;           ///< Best bid
     double      ask1;           ///< Best ask
-    
+
     // Other
     double      daily_pnl;      ///< Daily P&L
     bool        is_active;      ///< Whether actively quoting
     uint64_t    last_update;    ///< Last update timestamp
-    
+
     // Per-contract limits (硬限制)
     double      max_position;   ///< Max position for this contract (0 = no limit)
     double      target_position;///< Target position for this contract (default 0 = balanced)
-    
+
     // Per-contract soft indicators (软指标)
     double      contract_max_delta;  ///< 单合约 delta 软限制，用于单合约 skew 计算 (0 = no limit)
-    
+
     ContractState()
-        : multiplier(1), tick_size(1), hedge_ratio(1.0), hedge_ratio_initialized(false)
-        , position(0), prev_position(0), avg_cost(0), unrealized_pnl(0), realized_pnl(0)
-        , last_price(0), bid1(0), ask1(0)
+        : position(0), hedge_ratio(1.0), multiplier(1), last_price(0)
+        , code(), tick_size(1), hedge_ratio_initialized(false)
+        , prev_position(0), avg_cost(0), unrealized_pnl(0), realized_pnl(0)
+        , long_qty(0), long_avg(0), short_qty(0), short_avg(0)
+        , bid1(0), ask1(0)
         , daily_pnl(0), is_active(true), last_update(0)
         , max_position(0), target_position(0), contract_max_delta(0)
     {}
@@ -176,16 +187,6 @@ struct ContractState
 };
 
 /// Hedge action recommendation
-struct HedgeAction
-{
-    std::string code;           ///< Contract to trade
-    double      qty;            ///< Quantity (+ buy, - sell)
-    double      price;          ///< Suggested price (0 = market)
-    bool        is_urgent;      ///< Urgency flag
-    
-    HedgeAction() : qty(0), price(0), is_urgent(false) {}
-};
-
 /// Unified Portfolio Manager
 class FutuPortfolio
 {
@@ -262,6 +263,14 @@ public:
     
     /// Update position with average cost
     void updatePosition(const std::string& code, double position, double avgCost = 0);
+
+    /// v7.1: offset 标志驱动的分向成本簿记账 (替代净额推断)
+    /// @param is_long_side 交易的方向属性: true=多头侧(OPEN买/CLOSE卖), false=空头侧
+    /// @param offset 0=OPEN, 1=CLOSE, 2=CLOSETODAY (TraderAdapter WOT 枚举值)
+    void onTradeFill(const std::string& code, bool is_long_side, int offset, double vol, double price);
+
+    /// v7.1: 引擎净持仓真值再同步 (防漏单漂移); 保留主导侧成本, 缺失侧清零
+    void resyncPosition(const std::string& code, double engine_net);
 
     //==========================================================================
     // B5: 过冲保险丝 (ARB_SELF_CLOSE_DESIGN v2.1)
@@ -518,12 +527,6 @@ public:
     //==========================================================================
     // Hedging
     //==========================================================================
-    
-    /// Check if hedging is needed
-    bool needsHedging() const;
-    
-    /// Compute hedge action
-    HedgeAction computeHedge(double target_delta = 0) const;
     
     //==========================================================================
     // PnL Snapshot for cross-thread access (arb thread)

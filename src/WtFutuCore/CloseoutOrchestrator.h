@@ -81,6 +81,7 @@ private:
     bool _closeout_hedge_pending = false;    ///< 是否正在等待延迟启动
     uint32_t _closeout_hedge_wait_ticks = 0; ///< 已等待 tick 数
     std::unordered_set<uint32_t> _closeout_pending_ids;  ///< closeout 对冲单 ID (兜底, 主识别走 OrderRouter)
+    uint64_t _now_ms = 0;  ///< v7.1: replay 时钟 (onTick 注入; mark* 与 RiskMonitor._current_time 同基准, 0=回退墙钟)
 };
 
 } // namespace futu

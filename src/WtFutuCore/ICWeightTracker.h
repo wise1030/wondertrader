@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <unordered_map>
 #include "../WTSTools/WTSLogger.h"
@@ -333,8 +334,9 @@ public:
     /// \param regime Current market regime
     /// \param signal_values Current signal values [OFI, Trade, Book, Mom, LL]
     /// \param is_cross_term Whether this is a cross-term contract (affects LeadLag)
-    /// \return Normalized weights [OFI, Trade, Book, Mom, LL] summing to 1.0
-    std::unordered_map<WeightedSignalType, double> computeWeights(
+    /// \return Normalized weights indexed by WeightedSignalType, summing to 1.0
+    ///         (array 替代 unordered_map: 消除每 tick 5 节点堆分配, perf#2/#6)
+    std::array<double, static_cast<size_t>(WeightedSignalType::COUNT)> computeWeights(
         const MarketRegime& regime,
         const double signal_values[5],
         bool is_cross_term
@@ -367,7 +369,7 @@ public:
         double consistency = (total_w > 0) ? std::abs(weighted_direction / total_w) : 0.5;
 
         // Compute final weight for each signal
-        std::unordered_map<WeightedSignalType, double> weights;
+        std::array<double, static_cast<size_t>(WeightedSignalType::COUNT)> weights{};
         double raw_sum = 0;
 
         for (int i = 0; i < 5; i++) {
@@ -397,13 +399,13 @@ public:
             // Apply floor only (cap is applied AFTER normalization to prevent breach)
             w = std::max(_cfg.weight_floor, w);
 
-            weights[type] = w;
+            weights[static_cast<size_t>(type)] = w;
             raw_sum += w;
         }
 
         // Normalize to sum=1
         if (raw_sum > 0) {
-            for (auto& [type, w] : weights) {
+            for (auto& w : weights) {
                 w /= raw_sum;
             }
         }
@@ -411,7 +413,7 @@ public:
         // Apply cap AFTER normalization — 在归一化前施加 cap 无效:
         // [0.50, 0.05×4] 归一化后首权重 = 0.50/0.70 = 0.714 > cap.
         // 归一化后施加 cap 可能使 sum < 1.0, 但 alpha 用 Σ(w·s)/Σw 比值计算, 不受影响.
-        for (auto& [type, w] : weights) {
+        for (auto& w : weights) {
             w = std::min(_cfg.weight_cap, w);
         }
 

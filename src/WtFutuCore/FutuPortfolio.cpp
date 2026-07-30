@@ -96,7 +96,17 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
     if (!cs) return;
     
     cs->last_price = lastPrice;
-    if (cs->position != 0 && cs->avg_cost > 0)
+    // v7.1: 分向簿有效时按方向分别计算浮盈 (与引擎口径一致,
+    //       不受 MM+arb 交织对净额均价的污染影响)
+    if (cs->long_qty > 0.01 || cs->short_qty > 0.01)
+    {
+        cs->unrealized_pnl =
+            (cs->long_qty > 0.01 && cs->long_avg > 0
+                ? (lastPrice - cs->long_avg) * cs->long_qty * cs->multiplier : 0)
+          + (cs->short_qty > 0.01 && cs->short_avg > 0
+                ? (cs->short_avg - lastPrice) * cs->short_qty * cs->multiplier : 0);
+    }
+    else if (cs->position != 0 && cs->avg_cost > 0)
     {
         cs->unrealized_pnl = (lastPrice - cs->avg_cost) * cs->position * cs->multiplier;
     }
@@ -123,6 +133,9 @@ void FutuPortfolio::setReferencePrice(const std::string& code, double refPrice)
     ContractState* cs = getContract(code);
     if (!cs || refPrice <= 0) return;
     cs->avg_cost = refPrice;
+    // v7.1: 分向簿同步锚定 (隔夜持仓日初成本基准 = 昨收)
+    if (cs->long_qty > 0.01) cs->long_avg = refPrice;
+    if (cs->short_qty > 0.01) cs->short_avg = refPrice;
 }
 
 void FutuPortfolio::updateDailyPnL(const std::string& code)
@@ -146,7 +159,11 @@ void FutuPortfolio::resetDailyPnl()
         // 否则 markToMarket 用昨日 avg_cost 重算浮盈, 把昨日盈亏混入今日 daily_pnl,
         // 违背"日内 PnL 不跨日累计"的风控语义 (max_loss 误触).
         if (cs.position != 0)
+        {
             cs.avg_cost = 0;
+            cs.long_avg = 0;    // v7.1: 分向簿同步重置, setReferencePrice 重锚
+            cs.short_avg = 0;
+        }
     }
 }
 
@@ -176,6 +193,83 @@ void FutuPortfolio::updatePosition(const std::string& code, double position, dou
     checkOvershootSignFlip(code.c_str(), prev, position);  // B5
 }
 
+void FutuPortfolio::onTradeFill(const std::string& code, bool is_long_side, int offset, double vol, double price)
+{
+    ContractState* cs = getContract(code);
+    if (!cs || vol <= 0) return;
+
+    cs->prev_position = cs->position;
+
+    double& side_qty = is_long_side ? cs->long_qty : cs->short_qty;
+    double& side_avg = is_long_side ? cs->long_avg : cs->short_avg;
+
+    if (offset == 0) // OPEN: 加仓, 加权均价
+    {
+        side_avg = (side_qty > 0.01) ? (side_avg * side_qty + price * vol) / (side_qty + vol)
+                                     : price;
+        side_qty += vol;
+    }
+    else // CLOSE(1)/CLOSETODAY(2): 对持有均价实现盈亏
+    {
+        double close_qty = std::min(vol, side_qty);
+        if (side_avg > 0 && close_qty > 0.01)
+        {
+            double realized = is_long_side ? (price - side_avg) * close_qty * cs->multiplier
+                                           : (side_avg - price) * close_qty * cs->multiplier;
+            cs->realized_pnl += realized;
+        }
+        side_qty -= close_qty;
+        if (side_qty < 0.01) { side_qty = 0; side_avg = 0; }
+
+        // 平仓量超出持有量的部分 = 净仓模式下的反向开仓
+        double excess = vol - close_qty;
+        if (excess > 0.01)
+        {
+            double& opp_qty = is_long_side ? cs->short_qty : cs->long_qty;
+            double& opp_avg = is_long_side ? cs->short_avg : cs->long_avg;
+            opp_avg = (opp_qty > 0.01) ? (opp_avg * opp_qty + price * excess) / (opp_qty + excess)
+                                       : price;
+            opp_qty += excess;
+        }
+    }
+
+    // 兼容字段: 净持仓 + 主导侧均价 (markToMarket 已改分向, 仅供遗留消费者)
+    cs->position = cs->long_qty - cs->short_qty;
+    cs->avg_cost = (cs->long_qty >= cs->short_qty) ? cs->long_avg : cs->short_avg;
+
+    checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position);  // B5
+    updateDailyPnL(code);
+}
+
+void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
+{
+    ContractState* cs = getContract(code);
+    if (!cs) return;
+
+    cs->prev_position = cs->position;
+    if (engine_net > 0.01)
+    {
+        cs->long_qty = engine_net; cs->short_qty = 0; cs->short_avg = 0;
+        if (cs->long_avg <= 0) cs->long_avg = cs->last_price;
+        cs->avg_cost = cs->long_avg;
+    }
+    else if (engine_net < -0.01)
+    {
+        cs->short_qty = -engine_net; cs->long_qty = 0; cs->long_avg = 0;
+        if (cs->short_avg <= 0) cs->short_avg = cs->last_price;
+        cs->avg_cost = cs->short_avg;
+    }
+    else
+    {
+        cs->long_qty = cs->short_qty = 0;
+        cs->long_avg = cs->short_avg = 0;
+        cs->avg_cost = 0;
+    }
+    cs->position = engine_net;
+    checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position);  // B5
+    updateDailyPnL(code);
+}
+
 void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double now)
 {
     if (!_arb_manager) return;
@@ -189,74 +283,7 @@ void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double
 }
 
 //==========================================================================
-// Hedging
-//==========================================================================
-
-bool FutuPortfolio::needsHedging() const
-{
-    // 使用 hedge_delta_threshold * portfolio_max_delta 作为对冲触发阈值
-    // hedge_delta_threshold 是利用率比例 (默认0.8)，即达到80% max_delta时触发对冲
-    double trigger_delta = _params.portfolio_max_delta * _params.hedge_delta_threshold;
-    return _params.portfolio_max_delta > 0 && trigger_delta > 0 && std::abs(getTotalDelta()) > trigger_delta;
-}
-
-HedgeAction FutuPortfolio::computeHedge(double target_delta) const
-{
-    HedgeAction action;
-    action.code = _anchor_code;
-    action.qty = 0;
-    action.price = 0;
-    action.is_urgent = false;
-    
-    if (_anchor_code.empty())
-        return action;
-
-    // O(1) lookup
-    const ContractState* anchor = getContract(_anchor_code);
-    if (!anchor || anchor->multiplier == 0 || anchor->hedge_ratio == 0)
-        return action;
-
-    double currentDelta = getTotalDelta();
-    
-    // Calculate hedge quantity to reduce delta toward target
-    double deltaToHedge = (currentDelta - target_delta) * _params.hedge_ratio;
-
-    // Convert delta to contracts
-    double hedgeQty = -deltaToHedge / anchor->hedge_ratio;
-
-    // Round to nearest integer
-    action.qty = std::round(hedgeQty);
-
-    // P1-3: anchor 持仓上限 guard — 防止 hedge 导致 anchor 反向超限
-    if (anchor->max_position > 0)
-    {
-        double projected = anchor->position + action.qty;
-        double max_pos = anchor->max_position;
-        if (projected > max_pos)
-        {
-            action.qty = max_pos - anchor->position;
-            action.is_urgent = true;
-            WTSLogger::warn("computeHedge: clamped to anchor max_position (pos={:.0f}, raw_qty={:.0f}, clamped_qty={:.0f})",
-                anchor->position, std::round(hedgeQty), action.qty);
-        }
-        else if (projected < -max_pos)
-        {
-            action.qty = -max_pos - anchor->position;
-            action.is_urgent = true;
-            WTSLogger::warn("computeHedge: clamped to anchor -max_position (pos={:.0f}, raw_qty={:.0f}, clamped_qty={:.0f})",
-                anchor->position, std::round(hedgeQty), action.qty);
-        }
-    }
-
-    // Mark as urgent if significantly over portfolio_max_delta (软指标)
-    action.is_urgent = action.is_urgent || (_params.portfolio_max_delta > 0 && std::abs(currentDelta) > _params.portfolio_max_delta * 1.5);
-    
-    return action;
-}
-
-//==========================================================================
 // Position Reduction
-//==========================================================================
 
 std::vector<const ContractState*> FutuPortfolio::getContractsNeedingReduction(double threshold) const
 {

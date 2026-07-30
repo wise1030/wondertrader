@@ -69,6 +69,12 @@ struct TickContext
     class FutuQuoter* quoter = nullptr;
     class SpreadOptimizer* spread_opt = nullptr;
 
+    // perf#4: portfolio 级聚合值缓存 (updateMarketData 写入, 后续 Stage 复用,
+    // 消除 checkRisk/processAutoCancel 中重复的 O(n) getTotalDelta/getTotalExposure
+    // 全合约扫描. processTick 内持仓不变 — 仅 on_trade 回调改持仓, 故单 tick 内有效)
+    double total_delta = 0.0;
+    double total_exposure = 0.0;
+
     TickContext()
         : bid_px(0), ask_px(0), mid(0), timestamp(0), time_hms(0), date(0)
         , is_trading_session(false), market_state_paused(false)
@@ -82,7 +88,6 @@ struct ProcessingResult
     bool processed;
     bool quote_placed;
     bool order_canceled;
-    bool hedge_triggered;
     bool reduce_triggered;      // (deprecated: position reduction now via skew)
     bool params_updated;
     bool closeout_executed;
@@ -91,7 +96,7 @@ struct ProcessingResult
 
     ProcessingResult()
         : processed(false), quote_placed(false), order_canceled(false)
-        , hedge_triggered(false), reduce_triggered(false), params_updated(false)
+        , reduce_triggered(false), params_updated(false)
         , closeout_executed(false), market_state_cancelled(false)
         , processing_time_ns(0) {}
 };
@@ -147,9 +152,17 @@ struct CoordinatorConfig
     // perf fields: propagated from config.yaml via FutuMmConfig, not read by StrategyCoordinator itself
     uint64_t perf_monitor_latency_threshold;
     
-    bool use_hedging = true;
-    double hedge_delta_threshold = 0.8;
-    uint32_t hedge_cooldown_ms = 5000;
+    // v7.1 taker 紧急减仓 (主动吃单; 应对大量成交突然穿仓)
+    double   taker_reduce_threshold = 1.3;     ///< 合约 util ≥ 此值触发 taker 减仓 (0=禁用)
+    double   taker_reduce_target_util = 0.8;   ///< 减仓目标: 平到 target × maxPos
+    uint32_t taker_reduce_cooldown_ms = 30000; ///< 每合约 taker 减仓限频
+
+    // v7.1 成交后立即重挂 (做市义务: 单边成交侵蚀深度 → 撤剩余单重新挂单)
+    uint32_t requote_after_fill_min_interval_ms = 200; ///< 每合约成交重挂最小间隔(ms, 0=禁用)
+
+    // v7.1 session 休息段暂停 (每节收盘前 N 分钟撤单+暂停报价/套利;
+    // 每日最后一节由 closeout 处理, 不在此列). 0=禁用
+    uint32_t section_break_minutes_before = 1;
     
     ModuleParams modules;
     wtp::WTSVariant* _raw_variant = nullptr;
@@ -177,6 +190,11 @@ public:
     const CoordinatorConfig& getConfig() const { return _cfg; }
     void setAlphaSensitivity(double val) { _cfg.modules.alpha_sensitivity = val; }
     void setPortfolioMaxDelta(double val) { _cfg.modules.portfolio_max_delta = val; }
+
+    /// v7.1: 注入 replay 时间 (tick actiondate/actiontime 推出, 跨日单调).
+    /// 回测中墙钟节流随机器速度漂移 → 订单序列不可复现;
+    /// hedge/taker/requote 等节流统一改用 replay 时钟 (0=未注入, 回退墙钟).
+    void setExchangeTime(uint64_t ms) { _last_exchange_time_ms = ms; }
     
     bool loadConfig(const std::string& config_file);
     void loadConfigFromVariant(wtp::WTSVariant* cfg);
@@ -213,13 +231,26 @@ public:
                                   uint64_t now_ms = 0);
     
     bool processCloseout(wtp::IUftStraCtx* ctx, TickContext& tc);
+    /// v7.1: session 休息段检查 — 每节收盘前 section_break_minutes_before 分钟
+    /// 进入休息段: 撤全部报价+arb在途单, 停报价/套利; 下一节开始自动恢复。
+    /// 每日最后一节跳过 (由 closeout 状态机处理).
+    bool processSectionBreak(wtp::IUftStraCtx* ctx, const TickContext& tc);
+    /// 当前是否处于 session 休息段 (供策略层门控 arb tick 喂入)
+    bool isSectionBreakActive() const { return _section_break_active; }
     bool preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
-    void updateMarketData(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
+    void updateMarketData(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateSignals(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
     bool checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc);
     bool processQuoting(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
     bool processAutoCancel(wtp::IUftStraCtx* ctx, const TickContext& tc);
-    bool checkAndHedge(wtp::IUftStraCtx* ctx);
+    /// v7.1: taker 紧急减仓 — 合约 util ≥ taker_reduce_threshold 时 FAK 对手价
+    /// 平掉 (|pos| - target×maxPos) 超出部分, 每合约 cooldown 限频.
+    /// 应对"大量成交突然穿仓"场景: 被动减仓太慢时主动吃单, 报价永不停.
+    bool checkTakerReduce(wtp::IUftStraCtx* ctx);
+    /// v7.1: 成交后立即重挂 — 单边成交把挂单深度侵蚀到 min_valid_qty 以下时,
+    /// 用最近一个 tick 的报价参数立即撤剩余单+重新挂单, 恢复双边做市义务,
+    /// 不再等下一个 tick。requote_after_fill_min_interval_ms 限频防 churn。
+    bool requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms);
     // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_scale)
     void updateAdaptiveParams(wtp::IUftStraCtx* ctx, const TickContext& tc);
     
@@ -278,10 +309,6 @@ private:
     std::unordered_map<std::string, wtp::WTSSessionInfo*> _session_info;
     wtp::wt_hashmap<std::string, double> _last_mid;
     
-    // 对冲防震荡状态
-    uint64_t _last_hedge_time = 0;        // 上次对冲时间戳(ms)
-    int _last_hedge_direction = 0;         // 上次对冲方向: +1=BUY, -1=SELL, 0=none
-    double _last_hedge_delta = 0.0;        // 上次对冲前的delta值
     
     // 减仓防重复触发 — removed (attemptPositionReduction deleted)
     
@@ -291,8 +318,31 @@ private:
     uint64_t _last_pause_diag_ms = 0;     // 上次shouldPause诊断日志时间戳(ms)
 
     // R2: 软风控倍数 (WIDEN_SPREAD 分级设置: L1→1.5, L2→2.0; processQuoting 乘入 spread_mult;
-    // canRecover 恢复时重置 1.0). 由 checkSoftLimits (soft) 或 breachCount 升级 (hard) 设置.
+    // v7.1 无状态化: 每 tick 由当前 portfolio delta util 重算, util<L1 即回 1.0)
     double _risk_spread_mult = 1.0;
+
+    // v7.1: taker 减仓限频状态 (每合约上次触发时间戳 ms)
+    std::unordered_map<std::string, uint64_t> _last_taker_reduce;
+
+    // v7.1: 成交重挂 — 最近一个 tick 的最终报价参数缓存 (processQuoting 末尾写入)
+    struct CachedQuote
+    {
+        double mid = 0, l0_bid = 0, l0_ask = 0, spread_mult = 1.0;
+        bool allow_bid = true, allow_ask = true;
+        double long_util = 0, short_util = 0;
+        bool force_ask_obligation = false, force_bid_obligation = false;
+        double upper_limit = 0, lower_limit = 0, best_bid = 0, best_ask = 0;
+        uint64_t timestamp = 0;
+        bool valid = false;
+    };
+    std::unordered_map<std::string, CachedQuote> _last_quote_params;
+    std::unordered_map<std::string, uint64_t>    _last_requote_ms;
+
+    // v7.1: replay 时钟 (策略每 tick 注入; 节流判定统一时间基准, 0=未注入回退墙钟)
+    uint64_t _last_exchange_time_ms = 0;
+
+    // v7.1: session 休息段状态
+    bool _section_break_active = false;
 };
 
 } // namespace futu

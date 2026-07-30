@@ -8,6 +8,7 @@
 #include <vector>
 #include <deque>
 #include <memory>
+#include <array>
 #include <unordered_map>
 #include "FutuConfig.h"
 #include "ISignalSource.h"
@@ -25,13 +26,16 @@ namespace futu {
 
 struct SignalAggregatorConfig
 {
-    // 信号源开关
-    bool use_volatility = true;
-    bool use_ofi = true;
-    bool use_trade_flow = true;
-    bool use_book_imbalance = true;    // 新增：订单簿不平衡
-    bool use_momentum = true;
-    bool use_lead_lag = true;
+    // 信号源开关 (由 fromVariant 根据 signals.* presence 自动设置)
+    bool use_volatility = true;       // 辅助信号, 始终启用
+    bool use_ofi = false;
+    bool use_trade_flow = false;
+    bool use_book_imbalance = false;
+    bool use_momentum = false;
+    bool use_lead_lag = false;
+    
+    // 配置有效性标志 (model.type 校验失败时置 false)
+    bool valid = true;
     
     // 信号源参数
     uint32_t volatility_window = 100;
@@ -41,7 +45,8 @@ struct SignalAggregatorConfig
     uint32_t lead_lag_window = 50;
     
     // 阈值参数
-    double vol_threshold = 0.003;
+    double vol_elevated   = 0.002;       // should_widen + vol_tier -> ELEVATED (统一阈值)
+    double vol_extreme    = 0.004;       // vol_tier -> EXTREME (should_pause)
     
     // Alpha 权重配置
     double ofi_weight = 0.35;
@@ -61,29 +66,105 @@ struct SignalAggregatorConfig
     
     static SignalAggregatorConfig fromVariant(wtp::WTSVariant* v) {
         SignalAggregatorConfig c;
-        c.use_volatility = FutuConfig::readBool(v, "useVolatility", true);
-        c.use_ofi = FutuConfig::readBool(v, "useOfi", true);
-        c.use_trade_flow = FutuConfig::readBool(v, "useTradeFlow", true);
-        c.use_book_imbalance = FutuConfig::readBool(v, "useBookImbalance", true);
-        c.use_momentum = FutuConfig::readBool(v, "useMomentum", true);
-        c.use_lead_lag = FutuConfig::readBool(v, "useLeadLag", true);
-        c.volatility_window = FutuConfig::readUInt32(v, "volatilityWindow", 100);
-        c.ofi_window = FutuConfig::readUInt32(v, "ofiWindow", 50);
-        c.trade_flow_window = FutuConfig::readUInt32(v, "tradeFlowWindow", 100);
-        c.momentum_window = FutuConfig::readUInt32(v, "momentumWindow", 50);
-        c.lead_lag_window = FutuConfig::readUInt32(v, "leadLagWindow", 50);
-c.vol_threshold = FutuConfig::readDouble(v, "volThreshold", 0.003);
-        c.ofi_weight = FutuConfig::readDouble(v, "ofiWeight", 0.35);
-        c.trade_weight = FutuConfig::readDouble(v, "tradeWeight", 0.25);
-        c.book_imbalance_weight = FutuConfig::readDouble(v, "bookImbalanceWeight", 0.20);
-        c.momentum_weight = FutuConfig::readDouble(v, "momentumWeight", 0.15);
-        c.lead_lag_weight = FutuConfig::readDouble(v, "leadLagWeight", 0.05);
-        c.strong_threshold = FutuConfig::readDouble(v, "strongThreshold", 0.7);
-        c.large_trade_threshold = FutuConfig::readDouble(v, "largeTradeThreshold", 50.0);
-        c.book_imbalance_threshold = FutuConfig::readDouble(v, "bookImbalanceThreshold", 0.2);
-        c.momentum_ema_alpha = FutuConfig::readDouble(v, "momentumEmaAlpha", 0.1);
-        c.lead_lag_lag_ms = FutuConfig::readUInt32(v, "leadLagLagMs", 50);
+        // 默认所有 alpha 信号禁用, volatility 始终启用 (已在构造函数中设置)
+        
+        //------------------------------------------------------------
+        // 1. 解析 signals.* (数据层): presence = enabled
+        //------------------------------------------------------------
+        wtp::WTSVariant* signals = v->get("signals");
+        if (signals) {
+            // OFI
+            wtp::WTSVariant* ofi = signals->get("ofi");
+            if (ofi) {
+                c.use_ofi = true;
+                c.ofi_window = FutuConfig::readUInt32(ofi, "window", 50);
+            }
+            // TradeFlow
+            wtp::WTSVariant* tf = signals->get("trade_flow");
+            if (tf) {
+                c.use_trade_flow = true;
+                c.trade_flow_window = FutuConfig::readUInt32(tf, "window", 100);
+                c.large_trade_threshold = FutuConfig::readDouble(tf, "largeTradeThreshold", 50.0);
+            }
+            // BookImbalance
+            wtp::WTSVariant* bi = signals->get("book_imbalance");
+            if (bi) {
+                c.use_book_imbalance = true;
+                c.book_imbalance_threshold = FutuConfig::readDouble(bi, "threshold", 0.2);
+            }
+            // Momentum
+            wtp::WTSVariant* mom = signals->get("momentum");
+            if (mom) {
+                c.use_momentum = true;
+                c.momentum_window = FutuConfig::readUInt32(mom, "window", 50);
+                c.momentum_ema_alpha = FutuConfig::readDouble(mom, "emaAlpha", 0.1);
+            }
+            // LeadLag
+            wtp::WTSVariant* ll = signals->get("lead_lag");
+            if (ll) {
+                c.use_lead_lag = true;
+                c.lead_lag_window = FutuConfig::readUInt32(ll, "window", 50);
+                c.lead_lag_lag_ms = FutuConfig::readUInt32(ll, "lagMs", 50);
+            }
+        }
+        
+        //------------------------------------------------------------
+        // 2. 解析 model.* (模型层): type 校验 + 权重
+        //------------------------------------------------------------
+        wtp::WTSVariant* model = v->get("model");
+        if (model) {
+            // type 严格校验
+            std::string mtype = FutuConfig::readString(model, "type", "linear");
+            if (mtype != "linear") {
+                WTSLogger::error("SignalAggregator: unsupported model type: {}, only 'linear' is supported", mtype);
+                c.valid = false;
+                return c;
+            }
+            // 权重
+            wtp::WTSVariant* weights = model->get("weights");
+            if (weights) {
+                c.ofi_weight = FutuConfig::readDouble(weights, "ofi", 0.35);
+                c.trade_weight = FutuConfig::readDouble(weights, "trade_flow", 0.25);
+                c.book_imbalance_weight = FutuConfig::readDouble(weights, "book_imbalance", 0.20);
+                c.momentum_weight = FutuConfig::readDouble(weights, "momentum", 0.15);
+                c.lead_lag_weight = FutuConfig::readDouble(weights, "lead_lag", 0.05);
+            } else {
+                WTSLogger::warn("SignalAggregator: model.weights not configured, using default weights");
+            }
+            c.strong_threshold = FutuConfig::readDouble(model, "strongThreshold", 0.7);
+        } else {
+            WTSLogger::warn("SignalAggregator: model section missing, using default linear weights");
+        }
+        
+        //------------------------------------------------------------
+        // 3. 交叉校验: weight 配了但 signal 未启用 -> warn
+        //------------------------------------------------------------
+        if (!c.use_ofi && c.ofi_weight > 0.0)
+            WTSLogger::warn("SignalAggregator: orphan weight for ofi (signal not configured)");
+        if (!c.use_trade_flow && c.trade_weight > 0.0)
+            WTSLogger::warn("SignalAggregator: orphan weight for trade_flow (signal not configured)");
+        if (!c.use_book_imbalance && c.book_imbalance_weight > 0.0)
+            WTSLogger::warn("SignalAggregator: orphan weight for book_imbalance (signal not configured)");
+        if (!c.use_momentum && c.momentum_weight > 0.0)
+            WTSLogger::warn("SignalAggregator: orphan weight for momentum (signal not configured)");
+        if (!c.use_lead_lag && c.lead_lag_weight > 0.0)
+            WTSLogger::warn("SignalAggregator: orphan weight for lead_lag (signal not configured)");
+        
+        //------------------------------------------------------------
+        // 4. 解析 volatility (辅助信号, 始终启用, 缺省=默认值)
+        //------------------------------------------------------------
+        wtp::WTSVariant* vol = v->get("volatility");
+        if (vol) {
+            c.volatility_window = FutuConfig::readUInt32(vol, "window", 100);
+            c.vol_elevated = FutuConfig::readDouble(vol, "elevatedThreshold", 0.002);
+            c.vol_extreme = FutuConfig::readDouble(vol, "extremeThreshold", 0.004);
+        }
+        
+        //------------------------------------------------------------
+        // 5. 公共参数
+        //------------------------------------------------------------
         c.warmup_ticks = FutuConfig::readUInt32(v, "warmupTicks", 50);
+        
         return c;
     }
 };
@@ -222,7 +303,8 @@ public:
         _mid_ma_long.clear();
         _ma_short_sum = 0.0;
         _ma_long_sum = 0.0;
-        _dynamic_weights.clear();
+        _dynamic_weights.fill(0.0);
+        _weights_valid = false;
         _scale_trackers_initialized = false;
     }
 
@@ -238,6 +320,7 @@ private:
         if (_cfg.use_volatility) {
             auto vol = std::make_unique<RealizedVolSignalSource>();
             vol->setWindowSize(_cfg.volatility_window);
+            vol->setVolThresholds(_cfg.vol_elevated, _cfg.vol_extreme);
             _vol_source = vol.get();
             _sources[SignalType::VOLATILITY] = std::move(vol);
         }
@@ -344,7 +427,7 @@ private:
     void computeMarketState() {
         // 修正字段名：volatility -> realized_vol
         _ctx.market_state.vol_estimate = _ctx.volatility.realized_vol;
-        _ctx.market_state.should_widen = (_ctx.volatility.realized_vol > _cfg.vol_threshold);
+        _ctx.market_state.should_widen = (_ctx.volatility.realized_vol > _cfg.vol_elevated);
         // should_pause每tick重算，不复位锁存
         // 原代码只在vol_tier==EXTREME时设true，无else分支复位false
         // 导致should_pause一旦被设就永久锁死，报价永远被阻止
@@ -460,6 +543,7 @@ private:
                 (_ctx.bid_depth + _ctx.ask_depth) / 2.0
             );
             _dynamic_weights = _weight_framework->computeWeights(regime, signal_array, is_cross_term);
+            _weights_valid = true;
         }
         
         //==================================================================
@@ -591,7 +675,9 @@ private:
     // Adaptive Weight Framework members
     //==========================================================================
     std::unique_ptr<AdaptiveWeightFramework> _weight_framework;
-    std::unordered_map<WeightedSignalType, double> _dynamic_weights;
+    // perf#2/#6: array 替代 unordered_map, 消除每 tick 堆分配 + getDynamicWeight 的 hash find
+    std::array<double, static_cast<size_t>(WeightedSignalType::COUNT)> _dynamic_weights{};
+    bool _weights_valid = false;
     uint64_t _tick_counter = 0;
     // IC horizon 回报: mid[t-horizon] 历史 (长度 horizon+1)
     std::deque<double> _mid_history_for_ic;
@@ -627,9 +713,8 @@ private:
     
     /// Get dynamic weight (falls back to fixed weight if framework not active)
     double getDynamicWeight(WeightedSignalType type, double fallback) const {
-        if (!_weight_framework || _dynamic_weights.empty()) return fallback;
-        auto it = _dynamic_weights.find(type);
-        return (it != _dynamic_weights.end()) ? it->second : fallback;
+        if (!_weight_framework || !_weights_valid) return fallback;
+        return _dynamic_weights[static_cast<size_t>(type)];
     }
 };
 

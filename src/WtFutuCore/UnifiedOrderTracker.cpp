@@ -377,7 +377,7 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
         const UnifiedOrderInfo& order = _orders[i];
         if (order.isActive() && !order.isPendingCancel())
         {
-            if (code.empty() || std::string(order.code) == code)
+            if (code.empty() || code == order.code)
                 _active_indices_buf.push_back(i);
         }
     }
