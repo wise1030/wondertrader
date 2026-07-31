@@ -62,7 +62,7 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
     qr.bidQty = computeQty(level);
     qr.askQty = computeQty(level);
 
-    const bool apply_obligation = (!_cfg.obligation_only_l0 || level == 0);
+    const bool apply_obligation = (!_cfg.obligation_only_l0 || level == _cfg.obligation_level);
 
     if (is_obligation_mode)
     {
@@ -86,12 +86,25 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
             // 加仓侧(ask): 带宽上限
             if (qr.askQty > 0) qr.askPrice = std::min(qr.askPrice, ask_cap);
         }
-        // 义务模式: allow 不阻断，至少保持 baseQty
-        qr.bidQty = std::max(qr.bidQty, 1.0);
-        qr.askQty = std::max(qr.askQty, 1.0);
+        // 义务模式: allow 不阻断，手数按 base_qty 计 (义务层可不在 L0, 档位衰减不适用)
+        qr.bidQty = std::max(qr.bidQty, computeQty(0));
+        qr.askQty = std::max(qr.askQty, computeQty(0));
     }
     else
     {
+        // v7.2: force 义务期间(util≥1.0)自由层全撤 — 只留义务层做强制报价,
+        //   scout 在最优价, 打满时挂加仓探测单 = 主动送逆向成交;
+        //   同时避免 scout 成交触发撤义务层, 在减仓关键期制造义务空窗
+        if (force_ask_obligation || force_bid_obligation) {
+            qr.bidQty = 0;
+            qr.askQty = 0;
+        }
+        // v7.2 scout 内层自由单 (level < obligation_level): 小 qty 探测单,
+        //   成交即信号触发撤同侧义务层; min() 语义, 下方 qty 衰减只会更小
+        else if (level < _cfg.obligation_level) {
+            qr.bidQty = std::min(qr.bidQty, _cfg.scout_qty);
+            qr.askQty = std::min(qr.askQty, _cfg.scout_qty);
+        }
         // 自由模式: qty 衰减
         if (long_util > 0.0) {
             double decay = std::exp(-_cfg.qty_decay_factor * long_util);
@@ -102,11 +115,11 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
             qr.askQty = std::max(0.0, std::round(qr.askQty * decay));
         }
         // allow 阻断 + 做市义务加宽
-        // 被block的一边:如果有做市义务需求(always_obligation 或 level==0),
+        // 被block的一边:如果有做市义务需求(always_obligation 且 level==obligation_level),
         //   用 maxObligationSpread 加宽报价(降低成交概率,但满足义务)
         //   否则直接 qty=0
         if (!allow_bid) {
-            if (_cfg.always_obligation && level == 0) {
+            if (_cfg.always_obligation && level == _cfg.obligation_level) {
                 qr.bidPrice = floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
                 qr.bidQty = std::max(1.0, _cfg.obligation_min_qty);
                 qr.is_obligation_bid = true;
@@ -115,7 +128,7 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
             }
         }
         if (!allow_ask) {
-            if (_cfg.always_obligation && level == 0) {
+            if (_cfg.always_obligation && level == _cfg.obligation_level) {
                 qr.askPrice = ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
                 qr.askQty = std::max(1.0, _cfg.obligation_min_qty);
                 qr.is_obligation_ask = true;
@@ -125,8 +138,17 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(
         }
     }
 
-    // 价格保护 (不对义务报价应用)
-    // protectTicks 语义: 允许比盘口好的最大 tick 数 (防穿 + 排队保护)。
+    // 硬约束: 防穿盘口 (对所有层含义务, 不受 price_protection 开关影响) —
+    //   bid 不穿 best_ask, ask 不穿 best_bid。修复旧义务单完全豁免价格保护、
+    //   skew 穿 mid 时理论上可穿盘/自成交的缺陷。宽盘口下基本不触发
+    //   (skewCrossMaxTicks < 半spread), 窄盘口仅把 skew 限制在贴盘 (不越价, 仍被动)。
+    if (qr.bidQty > 0 && best_ask > 0)
+        qr.bidPrice = std::min(qr.bidPrice, best_ask - _cfg.tick_size);
+    if (qr.askQty > 0 && best_bid > 0)
+        qr.askPrice = std::max(qr.askPrice, best_bid + _cfg.tick_size);
+
+    // 价格保护 (软约束, 仅非义务层: 控制排队激进度, 防穿+排队保护)
+    // protectTicks 语义: 允许比盘口好的最大 tick 数。
     //   窄盘口(1-2t): 常规防穿, 不改变报价行为。
     //   宽盘口(远月/低流动性, 11-34t): protectTicks 过小会把报价钳在盘口边缘,
     //   双边价差超出 obligationMaxSpreadTicks → 做市义务违约 (ec2609 实测 8%)。
@@ -246,23 +268,41 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     QuoteLevel& bid_level = _bid_levels[level];
     QuoteLevel& ask_level = _ask_levels[level];
 
-    // 义务模式: 必须双边，先撤所有残留（含部分成交），不走 sticky
-    for (uint32_t id : bid_level.order_ids) {
-        _ctx->stra_cancel(id);
-        if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
+    // 义务模式: 必须双边。v7.1 条件式重挂 (黏性+深度), 替代旧"每tick无脑全撤重挂":
+    //   各侧 need = 无单 || 深度<min_valid_qty || 价格超黏性阈值; 仅 need 侧撤+重挂,
+    //   双侧都不 need 则零撤单零报单 (减少信息流, 与 requoteAfterFill 深度语义一致)。
+    auto sideNeed = [&](QuoteLevel& lv, double newPrice, bool is_bid) -> bool {
+        if (!lv.hasOrders()) return true;
+        if (lv.qty < _cfg.min_valid_qty) return true;   // 深度被部分成交侵蚀至义务以下
+        double cur = lv.price;
+        if (_tracker && !lv.order_ids.empty()) {
+            if (auto* oi = _tracker->getOrderByOrderId(lv.order_ids[0]); oi && !oi->isPendingCancel())
+                cur = oi->price;
+            else
+                return true;   // 死单/pending-cancel -> 重挂
+        }
+        return checkStickyUpdate(newPrice, cur, is_bid);
+    };
+
+    // 义务模式 qr.bidQty/askQty 恒 >= 1 (computeQuotePrices line90-91 保底)
+    bool bid_need = sideNeed(bid_level, qr.bidPrice, true);
+    bool ask_need = sideNeed(ask_level, qr.askPrice, false);
+    if (!bid_need && !ask_need)
+    {
+        WTSLogger::debug("[STICKY] {} skip requote (bid={} ask={} within threshold, depth ok)",
+            _cfg.code, bid_level.price, ask_level.price);
+        return 0;
     }
-    bid_level.order_ids.clear();
-    for (uint32_t id : ask_level.order_ids) {
-        _ctx->stra_cancel(id);
-        if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
-    }
-    ask_level.order_ids.clear();
 
     uint32_t orders = 0;
 
-    // 双边下单 (qty=0 时跳过该侧，避免 Entrust error)
-    // stra_buy/sell 可能返回多个子单 ID（exit + open），全部跟踪
-    if (qr.bidQty > 0) {
+    // 仅 need 侧: 撤残留 + 重挂 (stra_buy/sell 可能返回多个子单 ID, 全部跟踪)
+    if (bid_need && qr.bidQty > 0) {
+        for (uint32_t id : bid_level.order_ids) {
+            _ctx->stra_cancel(id);
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
+        }
+        bid_level.order_ids.clear();
         auto bidIds = _ctx->stra_buy(_cfg.code.c_str(), qr.bidPrice, qr.bidQty);
         for (uint32_t bidId : bidIds) {
             if (bidId != 0) {
@@ -277,7 +317,12 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
         }
     }
 
-    if (qr.askQty > 0) {
+    if (ask_need && qr.askQty > 0) {
+        for (uint32_t id : ask_level.order_ids) {
+            _ctx->stra_cancel(id);
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
+        }
+        ask_level.order_ids.clear();
         auto askIds = _ctx->stra_sell(_cfg.code.c_str(), qr.askPrice, qr.askQty);
         for (uint32_t askId : askIds) {
             if (askId != 0) {
@@ -455,6 +500,35 @@ void FutuQuoter::cancelAll(wtp::IUftStraCtx* ctx)
         }
         level.order_ids.clear();
     }
+}
+
+bool FutuQuoter::onScoutFillCancelObligation(wtp::IUftStraCtx* ctx, uint32_t localid)
+{
+    if (!ctx) return false;
+    if (_cfg.obligation_level >= _bid_levels.size()) return false;  // 防御: 配置校验应已拦截
+
+    auto it = _order_id_to_level.find(localid);
+    if (it == _order_id_to_level.end()) return false;
+    const OrderLevelInfo info = it->second;
+
+    // scout = 自由内层 (level < obligation_level, 价格优于义务层);
+    // 义务层自身/外层自由单成交不触发 (走通用重挂逻辑)
+    if (info.level >= _cfg.obligation_level) return false;
+
+    QuoteLevel& ob_lv = info.is_bid ? _bid_levels[_cfg.obligation_level]
+                                    : _ask_levels[_cfg.obligation_level];
+    if (!ob_lv.order_ids.empty())
+    {
+        WTSLogger::info("[SCOUT] {} scout fill (lvl{}, {}) → cancel obligation lvl{} orders (avoid adverse fill)",
+            _cfg.code, info.level, info.is_bid ? "bid" : "ask", _cfg.obligation_level);
+        for (uint32_t id : ob_lv.order_ids) {
+            if (_tracker) _tracker->markPendingCancel(id, CancelReason::MANUAL);
+            ctx->stra_cancel(id);
+            _order_id_to_level.erase(id);
+        }
+        ob_lv.order_ids.clear();
+    }
+    return true;  // 是 scout 单: 调用方跳过通用重挂, 下一 tick 按新价重挂
 }
 
 void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty,

@@ -86,6 +86,9 @@ _config.quoting.obligation_min_qty = readDouble(cfgQuoting, "obligationMinQty", 
 _config.quoting.obligation_max_spread_ticks = readDouble(cfgQuoting, "obligationMaxSpreadTicks", 10.0);
 _config.quoting.obligation_only_l0 = readBool(cfgQuoting, "obligationOnlyL0", true);
 _config.quoting.always_obligation = readBool(cfgQuoting, "alwaysObligation", true);
+// v7.2 scout 多层结构
+_config.quoting.obligation_level = readUInt32(cfgQuoting, "obligationLevel", 0);
+_config.quoting.scout_qty = readDouble(cfgQuoting, "scoutQty", 1.0);
 }
 
 //------------------------------------------------------------
@@ -198,6 +201,24 @@ return false;
 // 报价参数校验
 if (_config.quoting.num_levels == 0 || _config.quoting.num_levels > 10) {
 WTSLogger::error("UftFutuMmStrategy[{}] invalid numLevels: {}, expected [1, 10]", id, _config.quoting.num_levels);
+return false;
+}
+if (_config.quoting.level_step <= 0 || _config.quoting.level_step > 100.0) {
+WTSLogger::error("UftFutuMmStrategy[{}] invalid levelStep: {}, expected (0, 100] (<=0 会破坏价格阶梯, 内层价格不再优于外层)", id, _config.quoting.level_step);
+return false;
+}
+if (_config.quoting.obligation_level >= _config.quoting.num_levels) {
+WTSLogger::error("UftFutuMmStrategy[{}] invalid obligationLevel: {}, must be < numLevels {}", id, _config.quoting.obligation_level, _config.quoting.num_levels);
+return false;
+}
+if (_config.quoting.scout_qty <= 0 || _config.quoting.scout_qty > _config.quoting.base_qty) {
+WTSLogger::warn("UftFutuMmStrategy[{}] scoutQty={} out of typical range (0, baseQty={}]; scout 应小于义务层手数", id, _config.quoting.scout_qty, _config.quoting.base_qty);
+}
+// v7.2: 路径A(handleBilateralQuote)硬编码 i==0 且不感知 scoutQty/obligationLevel,
+//   与 scout 多层结构(obligationLevel!=0)不兼容 -> L0 会被当双边义务单处理.
+//   路径A为"后议"项, 当前配置均 useBilateralQuote=false 不触发; 此处告警堵潜在误用
+if (_config.quoting.use_bilateral_quote && _config.quoting.obligation_level != 0) {
+WTSLogger::error("UftFutuMmStrategy[{}] useBilateralQuote=true 与 obligationLevel={} 不兼容 (路径A硬编码L0双边, 不支持scout多层); 设 useBilateralQuote=false 或 obligationLevel=0", id, _config.quoting.obligation_level);
 return false;
 }
 if (_config.quoting.base_spread <= 0 || _config.quoting.base_spread > 20) {

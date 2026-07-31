@@ -82,9 +82,13 @@ struct QuoterConfig
     double      qty_decay_factor;          ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_util)
     double      obligation_min_qty;        ///< 软 obligation 报价最小手数 (default: 10)
     double      obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10) — 同时用于报价生成和双边统计判断 (统一, 挂在哪=统计到哪)
-    bool        obligation_only_l0;        ///< 软 obligation 是否仅 L0 (default: true)
+    bool        obligation_only_l0;        ///< 软 obligation 是否仅 obligation_level 层 (default: true)
     bool        always_obligation;         ///< 是否始终履行做市义务(双边报单) (default: true)
-    
+    // v7.2 scout 多层结构: 自由探测层(level<obligation_level)居最优价小qty,
+    //   义务层退居 obligation_level 档; scout 成交即撤同侧义务层防大单逆向成交
+    uint32_t    obligation_level;          ///< 义务层所在档位 (default: 0=最优价层, 向后兼容)
+    double      scout_qty;                 ///< 自由探测层手数 (default: 1.0, 应<义务层)
+
     QuoterConfig()
         : num_levels(1), base_spread(2.0), level_step(1.0)
         , base_qty(5.0), level_qty_multiplier(0.7), tick_size(1.0)
@@ -93,7 +97,8 @@ struct QuoterConfig
         , use_bilateral_quote(false), min_valid_qty(1.0)
         , qty_decay_factor(2.0), obligation_min_qty(10.0)
         , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
-        , always_obligation(true) {}
+        , always_obligation(true)
+        , obligation_level(0), scout_qty(1.0) {}
 };
 
 /// Multi-level quoter for a single contract
@@ -167,6 +172,11 @@ public:
 
     /// Cancel all outstanding quotes
     void cancelAll(wtp::IUftStraCtx* ctx);
+
+    /// v7.2 scout: 自由内层(level<obligation_level)成交 → 撤同侧义务层挂单
+    /// (scout 成交=逆向信号, 避免义务大单在旧价被逆向成交; 重挂由下一tick按新价完成)
+    /// @return true 表示该单是 scout 单 (义务侧撤单已处理, 调用方应跳过通用重挂逻辑)
+    bool onScoutFillCancelObligation(wtp::IUftStraCtx* ctx, uint32_t localid);
 
     /// Handle order update — clear level order ID, trigger stats update
     /// @param localid       本地订单号
@@ -385,9 +395,14 @@ private:
     bool needObligation(uint32_t level,
                          bool force_ask_obligation, bool force_bid_obligation) const
     {
+        // v7.2: 非义务层永不转义务 — 旧逻辑 force 时全层转义务, 会把 scout 层(L0 最优价)
+        //   拖进义务模式: qty 抬到 baseQty 且加仓侧不被 band 钳制 → 打满时最优价
+        //   挂 baseQty 激进加仓单, 主动送逆向成交. force 期间自由层由自由分支置零.
+        if (level != _cfg.obligation_level)
+            return false;
         if (force_ask_obligation || force_bid_obligation)
             return true;
-        if (_cfg.always_obligation && level == 0)
+        if (_cfg.always_obligation)
             return true;
         return false;
     }

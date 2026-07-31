@@ -357,6 +357,8 @@ qcfg.obligation_min_qty = _config.quoting.obligation_min_qty;
 qcfg.obligation_max_spread_ticks = _config.quoting.obligation_max_spread_ticks;
 qcfg.obligation_only_l0 = _config.quoting.obligation_only_l0;
 qcfg.always_obligation = _config.quoting.always_obligation;
+qcfg.obligation_level = _config.quoting.obligation_level;
+qcfg.scout_qty = _config.quoting.scout_qty;
 
 quoter->init(qcfg);
 // Note: UnifiedOrderTracker will be set after it's created (in section 5)
@@ -1475,6 +1477,9 @@ _arb_bridge.onTradeFill(ctx, localid, stdCode, isLong, vol, price);
 
 // 更新 Quoter 订单状态
 // R3 v2: onTrade 补时间参数(UFT: stra_get_time=HHMM, stra_get_secs=SSmmm)
+// v7.2 scout: 自由内层成交 → 撤同侧义务层 (scout_filled 时跳过下方通用重挂,
+//   不以旧价立即重挂义务单 — 规避逆向成交正是设计意图; 下一 tick 按新价重挂)
+bool scout_filled = false;
 {
     uint32_t uTime_HHMM = ctx->stra_get_time();
     uint32_t sec_in_min = ctx->stra_get_secs() / 1000;
@@ -1483,21 +1488,28 @@ _arb_bridge.onTradeFill(ctx, localid, stdCode, isLong, vol, price);
         if (quoter->isMyOrder(localid))
         {
             quoter->onTrade(localid, vol, price, uTime_HHMM, sec_in_min);
+            scout_filled = quoter->onScoutFillCancelObligation(ctx, localid);
             break;
         }
     }
 }
 
-// v7.1: 单边成交侵蚀挂单深度 → 不满足双边做市义务时, 立即恢复
-// 回测: 只撤 MM 单(stra_cancel postTask 安全), 重挂由 processQuoting 同 tick 完成
+// v7.1: 单边成交侵蚀挂单深度 → 不满足双边做市义务时, 恢复
+// 回测: 条件式撤单 — 仅义务深度被破坏才 cancelAll (仅 stra_cancel, postTask 安全),
+//   深度仍满足则保留 (黏性受益)。不发 stra_buy/sell, 避免回调内迭代 _orders。
+//   重挂由下一 tick processQuoting 完成 (B1 条件式重挂)。
 // 生产: 同步 requoteAfterFill (stra_buy/sell 发往交易所, 无 _orders 迭代问题)
-if (_coordinator)
+if (_coordinator && !scout_filled)
 {
     if (_is_backtest)
     {
         auto qit = _quoters.find(stdCode);
         if (qit != _quoters.end())
-            qit->second->cancelAll(ctx);
+        {
+            auto snap = qit->second->getValidQuoteSnapshot();
+            if (!(snap.has_valid_bid && snap.has_valid_ask))
+                qit->second->cancelAll(ctx);
+        }
     }
     else
     {

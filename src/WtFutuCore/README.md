@@ -151,11 +151,15 @@ processTick()
   2. updateMarketData()  → 更新 MarketDataContext
   3. updateSignals()     → SignalAggregator + ToxicFlowDetector
   4. checkRisk()         → FutuRiskMonitor 评估, 执行风控动作
-  5. processQuoting()    → SpreadOptimizer → FutuQuoter.refreshQuotes()
+     └ PAUSE_QUOTING 时仍执行 checkTakerReduce (减仓才能恢复; v7.2 已删除 checkAndHedge)
+  5. processQuoting()    → SpreadOptimizer → FutuQuoter.refreshQuotes() (B1条件式重挂, v7.2黏性生效)
   6. processAutoCancel() → 过时/偏价挂单清理
-  7. checkAndHedge()     → Delta超限自动对冲 (via OrderRouter)
+  7. checkTakerReduce()  → 合约util≥takerReduceThreshold(1.1)时FAK对手价减仓
   8. updateAdaptiveParams() → 周期性参数微调
 ```
+
+成交回调 (on_trade): 组合记账 → arb桥 → scout识别(v7.2: 自由层成交撤同侧义务层)
+→ 条件式重挂(回测cancelAll仅深度破坏时 / 生产requoteAfterFill)
 
 ## 风控体系 (FutuRiskMonitor)
 
@@ -345,18 +349,20 @@ contracts:
 
 # 报价参数
 quoting:
-  numLevels: 3          # 报价档位
+  numLevels: 2          # 报价档位 (2 = L0自由探测层 + L1义务层)
+  obligationLevel: 1    # 义务层档位 (0=L0义务无自由层; 1=scout结构, v7.2)
+  scoutQty: 1.0         # 自由探测层手数 (<义务层; 成交即撤同侧义务层)
   baseSpread: 2.0       # 基础价差(tick)
   baseQty: 1            # 基础手数
-  levelQtyMultiplier: 0.7         # 每档衰减
+  levelQtyMultiplier: 0.7         # 每档衰减 (义务层不适用, 按baseQty计)
   useBilateralQuote: true
 
 # 组合参数
 portfolio:
   maxDelta: 30
-  hedgeRatio: 1.0
-  hedgeDeltaThreshold: 0.8   # Delta利用率触发对冲
-  hedgeCooldownMs: 5000      # 对冲冷却时间
+  hedgeRatio: 1.0              # 对冲比率 (CloseoutExecutor 用)
+  # hedgeDeltaThreshold/hedgeCooldownMs 已随做市阶段Hedge删除 (v7.2):
+  # 仓位风险由连续控制链处理 (WIDEN→skew→takerReduce→PAUSE→HALT)
 
 # 风控参数
 risk:
@@ -385,9 +391,8 @@ modules:
 useMarketMaking: true
 useSpreadArbitrage: true
 useSignalAggregator: true
-useHedging: false           # 对冲默认关闭
-hedgeDeltaThreshold: 0.8
-hedgeCooldownMs: 5000
+# useHedging/hedgeDeltaThreshold/hedgeCooldownMs 已删除 (v7.2):
+# 做市阶段Hedge移除, 仓位风险由连续控制链 + checkTakerReduce(takerReduceThreshold: 1.1)处理
 
 # 信号聚合器
 signalAggregator:
@@ -791,6 +796,50 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 - executeSignal 自检改预计算标量 (O(n) 扫描 -> O(1), `_mm_buy/sell_orders` vector -> `min_sell/max_buy` 标量)
 
 **避免的有害改动**: B7(误报)、B16(误判)、C1(有意设计)、P1(SSO覆盖)、A1-atomic(当前设计正确)
+
+### Phase 8 (v7.2) 报价黏性 + scout 多层结构 (2026-07-31, 回测验证通过)
+
+**背景**: 复核发现两个机制在 `alwaysObligation=true + numLevels=1` 下"空转"——
+黏性(checkStickyUpdate)仅路径 A/B2 调用, 义务路径 B1 每 tick 无脑全撤重挂;
+价格保护仅约束非义务单, 全义务配置下从不生效。
+
+**Stage 1 — B1 条件式重挂 + 硬约束防穿**:
+- B1 (handleObligationQuote) 双侧独立条件式: need = 无单 || 深度<min_valid_qty || 价格超黏性阈值;
+  仅 need 侧撤+重挂, 双侧都不 need 零信息流 (回测实测 STICKY skip 274k 次/5日)
+- 新增硬约束防穿盘 (所有层含义务, 不受 priceProtection 开关影响):
+  bid ≤ best_ask-tick, ask ≥ best_bid+tick — 修复义务单完全豁免保护、skew 穿 mid 时可穿盘/自成交的缺陷
+- 回测成交后处理对齐生产语义: 条件式撤单 (仅义务深度破坏才 cancelAll, 仅 stra_cancel
+  避开回调内 stra_buy/sell 的 _orders 迭代风险), 深度满足则保留 (黏性受益)
+
+**Stage 2 — scout 探测层架构** (自由层价格优于义务层):
+- L0=自由探测层(scout): 最优价(l0_bid/l0_ask 直用), 小 qty(scoutQty=1), B2 路径
+- L1=义务层: 次优价(l0∓levelStep), baseQty 大单(档位衰减不适用), B1 路径
+- scout 成交 = 逆向信号 → `onScoutFillCancelObligation` 立即撤同侧义务层 →
+  跳过通用重挂(不以旧价立即重挂义务单, 规避逆向成交) → 下一 tick 按新价重挂
+- 新配置: `obligationLevel`(义务层档位, 默认0向后兼容), `scoutQty`(探测手数, 默认1.0);
+  校验: obligationLevel<numLevels(报错), levelStep>0(报错, 堵价格阶梯倒挂入口), scoutQty≤baseQty(警告)
+- 关键时序: UftMocker on_trade 先于 on_order, scout 成交时订单条目尚在, 识别可靠
+
+**复核结论 (Q&A)**:
+- **Q1 缺陷(已修)**: force 义务(util≥1.0)时旧 needObligation 对全层返回 true →
+  scout 层被拖入 B1, qty 抬到 baseQty 且加仓侧不被 band 钳制 → 打满时 L0 挂 5 手
+  最优价激进加仓单(逆向敞口)。修复: 非义务层永不转义务 + 自由分支 force 期间 qty 置零
+  (force 时只留义务层, 恢复 v7.2 前语义)。本数据集 force 触发 0 次, 属生产防御
+- **Q2 配置矩阵**: numLevels=1 → 仅 obligationLevel=0, 无自由层;
+  numLevels=2 + obligationLevel=1 → scout 结构; numLevels=2 + obligationLevel=0 →
+  经典"L0义务+L1外层自由单"(外层不享 scoutQty/不触发撤义务, 走 qty衰减+软保护)
+- **Q3 l0价归属**: SpreadOptimizer 的 l0_bid/l0_ask(含alpha/skew/spread)报给 **scout 层(L0)**,
+  义务层 = l0∓1tick。后果: 义务层较 v7.2 前被动 1 tick, skewCrossMid 激进减仓由
+  1手 scout 先行; 减仓不足应调 skewCrossMaxTicks/checkTakerReduce, 而非把义务层拉回 L0
+- **Q4 sub-tick 义务空窗评估** (实测): SCOUT 触发 14,800 次 / ~17.6万 tick(5日,500ms/tick)
+  → 8.4% 的 tick 出现单侧义务空窗, 单侧空窗占比 ≈4.2%, 单次 ≤1 tick。
+  对常规在场率考核(70-90%)可接受; 趋势行情有聚集效应(scout 连续成交 → 义务层连续缺席,
+  正是设计意图的逆向避让)。可选改进: 生产端撤义务后立即外移1tick重挂 / scout触发冷却 /
+  仅 scout 全成才撤义务层
+
+**回测验证** (_ec_5d.yaml, exit=0): Config validation 0错0警(含新校验), 0 segfault,
+0 穿盘报单, SCOUT 14,800 次(日志确认 1手scout成交→撤义务层lvl1),
+报单分布 义务5手×17.9k / scout1手×15.4k, 净收益 ¥442,561 (arb ON + srand 噪声, 不与基线直接比)
 
 ## 待定项
 

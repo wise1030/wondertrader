@@ -87,7 +87,9 @@ strategies:
         # 报价参数 (FutuQuoter)
         # ========================================================
         quoting:
-          numLevels: 1               # 报价档位数 (1-10)
+          numLevels: 2               # 报价档位数 (1-10); 2 = L0自由探测层 + L1义务层
+          obligationLevel: 1         # 义务层所在档位 (1=义务退居次优层, L0 为自由探测单)
+          scoutQty: 1.0              # 自由探测层手数 (<义务层; 成交即撤同侧义务层防大单逆向成交)
           baseSpread: 2.0            # 基础价差 (tick 数, 权威来源; 同时用于 SpreadOptimizer 定价核心 + FutuQuoter fallback)
           baseQty: 2.0               # 基础手数
           levelQtyMultiplier: 0.7      # 档位间数量几何衰减 (0.1-1.0, 每档 ×此值)

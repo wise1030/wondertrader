@@ -118,6 +118,10 @@ struct FutuMmConfig
         double obligation_max_spread_ticks;
         bool obligation_only_l0;
         bool always_obligation;
+        // v7.2 scout 多层结构: 自由探测层(level<obligationLevel)居最优价小qty,
+        //   义务层退居 obligationLevel 档大qty; scout 成交即撤同侧义务层
+        uint32_t obligation_level;
+        double scout_qty;
         Quoting()
             : num_levels(1), base_spread(2.0), base_qty(5.0), level_qty_multiplier(0.7)
             , level_step(1.0), sticky_threshold(1.0)
@@ -126,7 +130,8 @@ struct FutuMmConfig
             , use_bilateral_quote(false)
             , qty_decay_factor(2.0), obligation_min_qty(10.0)
             , obligation_max_spread_ticks(10.0), obligation_only_l0(true)
-            , always_obligation(true) {}
+            , always_obligation(true)
+            , obligation_level(0), scout_qty(1.0) {}
     } quoting;
     
     struct Risk {
