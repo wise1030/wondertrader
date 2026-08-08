@@ -1370,6 +1370,7 @@ bool StrategyCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx)
         // 平掉超出 target×maxPos 的部分 (FAK 对手价, 不追价)
         double target = c.max_position * _cfg.taker_reduce_target_util;
         double qty = std::floor(std::abs(c.position) - target);
+        qty = clampReduceQty(qty, c.position);  // P0-2: 统一截断, 不开反向仓
         if (qty < 1.0)
             continue;
 

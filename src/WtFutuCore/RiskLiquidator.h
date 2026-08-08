@@ -16,21 +16,35 @@
 
 #include <string>
 #include <cmath>
+#include <algorithm>
 #include "../Includes/FasterDefs.h"
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
 #include "FutuPortfolio.h"
 #include "OrderRouter.h"
 
-namespace futu
+namespace futu {
+
+/// \brief 统一减仓数量截断: 请求量 vs 实际可平量, 取较小值, 不超卖/不开反向仓
+///
+/// 所有减仓路径 (RiskLiquidator / CloseoutExecutor / checkTakerReduce) 必须经过此截断。
+/// 旧 CloseoutExecutor 截断到 |remaining|(组合净delta) 而非实际持仓 -> 平仓又开仓事故。
+///
+/// \param requested_qty  请求减仓量(>0)
+/// \param actual_position 该合约实际净持仓(带符号, +多/-空)
+/// \return 截断后的减仓量(>=0), 不超过 |actual_position|
+inline double clampReduceQty(double requested_qty, double actual_position)
 {
+    if (requested_qty <= 0.0 || std::abs(actual_position) < 0.01)
+        return 0.0;
+    return std::min(requested_qty, std::abs(actual_position));
+}
 
 class RiskLiquidator
 {
 public:
-    struct Deps
-    {
-        OrderRouter* router = nullptr;
+    struct Deps {
+        OrderRouter*   router    = nullptr;
         FutuPortfolio* portfolio = nullptr;
     };
 
@@ -46,17 +60,19 @@ public:
         if (!_deps.portfolio)
             return 0;
         double total = 0;
-        for (const auto& c : _deps.portfolio->getAllContractsSnapshot()) {
+        for (const auto& c : _deps.portfolio->getAllContractsSnapshot())
+        {
             if (std::abs(c.position) > 0.01)
                 total += reduceContract(ctx, c.code, std::abs(c.position), 1, reason);
         }
         return total;
     }
 
-    /// 对手价减仓 code 合约 qty 手 (方向自动: 持仓>0→exitLong@bid1, <0→exitShort@ask1)
+    /// 对手价减仓 code 合约 qty 手 (方向自动: 持仓>0->exitLong@bid1, <0->exitShort@ask1)
     /// @param flag 报单标志 (0=限价, 1=FAK); 风险处置建议 1
     /// @return 实际发单手数
-    double reduceContract(wtp::IUftStraCtx* ctx, const std::string& code, double qty, int flag, const char* reason)
+    double reduceContract(wtp::IUftStraCtx* ctx, const std::string& code,
+                          double qty, int flag, const char* reason)
     {
         if (!_deps.router || !_deps.portfolio || qty <= 0)
             return 0;
@@ -64,23 +80,31 @@ public:
         const ContractState* cs = _deps.portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
         if (!cs || std::abs(cs->position) <= 0.01)
             return 0;
-        if (cs->last_price <= 0 || cs->bid1 <= 0 || cs->ask1 <= 0) {
+        if (cs->last_price <= 0 || cs->bid1 <= 0 || cs->ask1 <= 0)
+        {
             WTSLogger::error("[LIQUIDATE] {} skip: invalid price last={} bid={} ask={} ({})",
-                             code,
-                             cs->last_price,
-                             cs->bid1,
-                             cs->ask1,
-                             reason);
+                code, cs->last_price, cs->bid1, cs->ask1, reason);
             return 0;
         }
 
-        double exec_qty = std::min(qty, std::abs(cs->position));
-        if (cs->position > 0) {
-            _deps.router->submitSell(ctx, code.c_str(), cs->bid1, exec_qty, Source::CLOSEOUT, flag);
-            WTSLogger::error("[LIQUIDATE] SELL_CLOSE {} x{:.0f} @ {:.1f} ({})", code, exec_qty, cs->bid1, reason);
-        } else {
-            _deps.router->submitBuy(ctx, code.c_str(), cs->ask1, exec_qty, Source::CLOSEOUT, flag);
-            WTSLogger::error("[LIQUIDATE] BUY_CLOSE {} x{:.0f} @ {:.1f} ({})", code, exec_qty, cs->ask1, reason);
+        // 统一截断: 不超卖, 不开反向仓
+        double exec_qty = clampReduceQty(qty, cs->position);
+        if (exec_qty < 0.01)
+            return 0;
+
+        if (cs->position > 0)
+        {
+            _deps.router->submitSell(ctx, code.c_str(), cs->bid1, exec_qty,
+                Source::CLOSEOUT, flag);
+            WTSLogger::error("[LIQUIDATE] SELL_CLOSE {} x{:.0f} @ {:.1f} ({})",
+                code, exec_qty, cs->bid1, reason);
+        }
+        else
+        {
+            _deps.router->submitBuy(ctx, code.c_str(), cs->ask1, exec_qty,
+                Source::CLOSEOUT, flag);
+            WTSLogger::error("[LIQUIDATE] BUY_CLOSE {} x{:.0f} @ {:.1f} ({})",
+                code, exec_qty, cs->ask1, reason);
         }
         return exec_qty;
     }
