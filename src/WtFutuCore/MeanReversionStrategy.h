@@ -1,13 +1,13 @@
 /*!
  * \file MeanReversionStrategy.h
  * \brief Mean Reversion Strategy for Spread Arbitrage
- * 
+ *
  * Strategy Logic:
  *   - Open when Z-Score exceeds threshold
  *   - Close when Z-Score reverts to mean
  *   - Stop loss on extreme deviation
  *   - Timeout exit on non-convergence
- * 
+ *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
@@ -29,20 +29,20 @@ struct MeanReversionConfig
     double exit_z_threshold;        ///< Z-Score threshold for exit
     double stop_loss_z;             ///< Z-Score threshold for stop loss
     double max_position;            ///< Maximum position size
-    
+
     uint32_t min_samples;           ///< Minimum samples required
     uint32_t convergence_timeout;   ///< Timeout for convergence (seconds)
-    
+
     double base_qty;                ///< Base position size
     double position_scale;          ///< Position scaling factor
-    
+
     bool use_half_life_filter;      ///< Filter by half-life
     double max_half_life;           ///< Maximum acceptable half-life
-    
+
     double add_safety_ratio;        ///< 加仓安全比率，加仓上限 = stop_loss_z * ratio
                                     ///< 默认0.75，即加仓区间不超过止损阈值的75%
                                     ///< 避免在接近止损区域时加仓
-    
+
     MeanReversionConfig()
         : entry_z_threshold(2.0)
         , exit_z_threshold(0.5)
@@ -67,16 +67,16 @@ class MeanReversionStrategy : public ISpreadStrategy
 public:
     MeanReversionStrategy();
     ~MeanReversionStrategy() = default;
-    
+
     //==========================================================================
     // ISpreadStrategy Interface
     //==========================================================================
-    
+
     SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time) override;
-    
+
     /// 均值回归无每 tick 内部状态更新 (状态完全来自 SpreadState)
     void update(const SpreadState& /*state*/, uint64_t /*timestamp*/) override {}
-    
+
     void configure(const SpreadPairConfig& cfg) override
     {
         _config.entry_z_threshold = cfg.entry_z_threshold;
@@ -86,46 +86,46 @@ public:
         _config.convergence_timeout = cfg.convergence_timeout;
         _config.add_safety_ratio = cfg.add_safety_ratio;
     }
-    
+
     void reset() override;
-    
+
     const char* typeName() const override { return "mean_reversion"; }
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     void setConfig(const MeanReversionConfig& config) { _config = config; }
     const MeanReversionConfig& getConfig() const { return _config; }
-    
+
     //==========================================================================
     // Position Size Calculation
     //==========================================================================
-    
+
     /// Calculate position size based on Z-Score
     double calculatePositionSize(double zscore) const;
-    
+
     /// Get strategy name
     static constexpr const char* getName() { return "MeanReversion"; }
-    
+
 private:
     //==========================================================================
     // Internal Methods
     //==========================================================================
-    
+
     bool checkTimeout(const SpreadState& state, uint64_t current_time) const;
     double calculateConfidence(double zscore) const;
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     MeanReversionConfig _config;
-    
+
     //==========================================================================
     // Internal State
     //==========================================================================
-    
+
     uint64_t _last_signal_time;
     SpreadSignalType _last_signal_type;
     double _entry_zscore;

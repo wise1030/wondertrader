@@ -17,7 +17,7 @@ void CorrelationManager::addContract(const std::string& code, double multiplier)
 
 void CorrelationManager::addRelation(const std::string& code1, const std::string& code2, RelationType type, double expectedBeta) {
     if (code1 == code2) return;
-    
+
     std::string key = getPairKey(code1, code2);
     if (_calculators.find(key) == _calculators.end()) {
         auto calc = std::make_shared<SpreadCalculator>();

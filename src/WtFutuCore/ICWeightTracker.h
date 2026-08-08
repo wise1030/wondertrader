@@ -432,7 +432,7 @@ public:
     }
 
     const Config& getConfig() const { return _cfg; }
-    
+
     /// 热更新 Layer1 基础权重 — SignalAggregator::updateWeights 调用,
     /// 旧代码只改 SignalAggregatorConfig, 框架内 base 权重不同步 → 热更新无效.
     void updateBaseWeights(double ofi, double trade, double book, double mom, double ll) {
@@ -442,7 +442,7 @@ public:
         _cfg.base_mom = mom;
         _cfg.base_ll = ll;
     }
-    
+
     void reset() {
         for (auto& [type, tracker] : _ic_trackers) {
             tracker = RollingIC(_cfg.ic_window, _cfg.ic_horizon);

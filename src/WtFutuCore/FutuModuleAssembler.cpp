@@ -146,7 +146,7 @@ _config.modules.use_performance_monitor  = coordBool("usePerformanceMonitor",   
 _config.modules.use_performance_analyzer = coordBool("usePerformanceAnalyzer",  false);
 }
 
-WTSLogger::info("Strategy mode: MM={}, Arb={}", 
+WTSLogger::info("Strategy mode: MM={}, Arb={}",
 _config.modules.use_market_making ? "ON" : "OFF",
 _config.modules.use_spread_arbitrage ? "ON" : "OFF");
 
@@ -331,7 +331,7 @@ WTSLogger::info("BilateralQuoteStats: Per-Quoter init done, ok={} fail={} (total
 
 
 
-WTSLogger::info("UnifiedOrderTracker: initialized (shared by {} FutuQuoters + AutoCancelPolicy + SelfTradePrevention)", 
+WTSLogger::info("UnifiedOrderTracker: initialized (shared by {} FutuQuoters + AutoCancelPolicy + SelfTradePrevention)",
 _quoters.size());
 
 //------------------------------------------------------------
@@ -470,7 +470,7 @@ _coordinator->setRiskMonitor(_risk_monitor.get());
 //------------------------------------------------------------
 for (const auto& ci : _contract_infos)
 {
-_market_data.emplace(ci.code, 
+_market_data.emplace(ci.code,
 FutuComponentFactory::createMarketDataContext(coord_cfg));
 }
 WTSLogger::info("MarketDataContext: mandatory core enabled");
@@ -639,7 +639,7 @@ WTSLogger::info("SpreadArbitrageManager: B-3 gate enabled (Portfolio SSOT, in_fl
 else
 {
 WTSLogger::info("SpreadArbitrageManager: disabled");
-}    
+}
 //------------------------------------------------------------
 // 15. SelfTradePrevention（自成交防护模块）
 //------------------------------------------------------------
@@ -785,7 +785,7 @@ WTSCommodityInfo* commInfo = ctx->stra_get_comminfo(stdCode.c_str());
 if (commInfo)
 {
 _session_cache[ci.code] = {commInfo, commInfo->getSessionInfo()};
-WTSLogger::debug("UftFutuMmStrategy[{}] Session cache added: {} -> sessInfo={}", 
+WTSLogger::debug("UftFutuMmStrategy[{}] Session cache added: {} -> sessInfo={}",
 s.id(), ci.code, (void*)commInfo->getSessionInfo());
 
 if (ci.multiplier <= 0)

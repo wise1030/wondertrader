@@ -1,13 +1,13 @@
 /*!
  * \file TradeFlowSignalSource.h
  * \brief Trade Flow Signal Source
- * 
+ *
  * Analyzes trade flow from order book data:
  *   - Net trade flow (buy - sell)
  *   - Trade imbalance ratio [-1, 1]
  *   - Large trade ratio
  *   - Average trade size
- * 
+ *
  * Uses data from MarketDataContext as single source.
  */
 #pragma once
@@ -31,13 +31,13 @@ public:
     {
         uint32_t window;              ///< Trade history window
         double large_trade_threshold; ///< Large trade threshold
-        
-        Config() 
+
+        Config()
             : window(100)
             , large_trade_threshold(50.0)
         {}
     };
-    
+
     explicit TradeFlowSignalSource(const Config& cfg = Config())
         : _cfg(cfg)
         , _enabled(true)
@@ -49,22 +49,22 @@ public:
         , _trade_count(0)
     {
     }
-    
+
     //==========================================================================
     // ISignalSource Interface
     //==========================================================================
-    
-    const std::string& name() const override 
-    { 
-        static std::string n = "TradeFlow"; 
-        return n; 
+
+    const std::string& name() const override
+    {
+        static std::string n = "TradeFlow";
+        return n;
     }
-    
-    SignalType type() const override 
-    { 
-        return SignalType::TRADE_FLOW; 
+
+    SignalType type() const override
+    {
+        return SignalType::TRADE_FLOW;
     }
-    
+
     void update(const MarketDataContext& book) override
     {
         // TradeFlow双路径数据不一致修复
@@ -101,12 +101,12 @@ public:
         _result.valid = true;
         _result.timestamp = book.getTimestamp();
     }
-    
+
     const SignalResult& result() const override { return _result; }
-    
+
     bool enabled() const override { return _enabled; }
     void setEnabled(bool e) override { _enabled = e; }
-    
+
     void reset() override
     {
         _net_flow = 0;
@@ -117,35 +117,35 @@ public:
         _trade_count = 0;
         _result = TradeFlowSignalResult();
     }
-    
+
     /// Set configuration
     void setConfig(const Config& cfg) { _cfg = cfg; }
-    
+
     //==========================================================================
     // Trade Recording (called when trade is detected)
     //==========================================================================
-    
+
     /// Record a trade
     void onTrade(double qty, bool isBuy, uint64_t timestamp)
     {
         double signed_qty = isBuy ? qty : -qty;
-        
+
         _net_flow += signed_qty;
         _total_volume += qty;
         _trade_count++;
-        
+
         if (qty >= _cfg.large_trade_threshold)
         {
             _large_volume += qty;
         }
-        
+
         // Store in history
         TradeSample sample;
         sample.qty = qty;
         sample.is_buy = isBuy;
         sample.timestamp = timestamp;
         _trade_history.push(sample);
-        
+
         // Remove old samples (time-based window ~5 seconds)
         uint64_t cutoff = timestamp - 5000;
         while (_trade_history.size() > 0 && _trade_history.front().timestamp < cutoff)
@@ -167,20 +167,20 @@ public:
             _trade_history.pop();
         }
     }
-    
+
     //==========================================================================
     // Additional Accessors
     //==========================================================================
-    
+
     double getNetFlow() const { return _result.net_flow; }
     double getNormalizedFlow() const { return _result.net_flow_normalized; }
     double getLargeTradeRatio() const { return _result.large_trade_ratio; }
-    
+
 private:
     Config _cfg;
     bool _enabled;
     TradeFlowSignalResult _result;
-    
+
     // Trade tracking
     struct TradeSample
     {
@@ -189,7 +189,7 @@ private:
         uint64_t timestamp;
     };
     RingBuffer<TradeSample, 256> _trade_history;
-    
+
     double _net_flow;
     double _buy_volume;
     double _sell_volume;

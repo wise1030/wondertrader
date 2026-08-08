@@ -45,11 +45,11 @@ void AsyncArbitrageExecutor::start()
 {
     if (_running.load(std::memory_order_acquire))
         return;
-    
+
     _stop_requested.store(false, std::memory_order_release);
     _arb_thread = std::thread(&AsyncArbitrageExecutor::arbThreadFunc, this);
     _running.store(true, std::memory_order_release);
-    
+
     WTSLogger::info("AsyncArbitrageExecutor started");
 }
 
@@ -57,19 +57,19 @@ void AsyncArbitrageExecutor::stop()
 {
     if (!_running.load(std::memory_order_acquire))
         return;
-    
+
     _stop_requested.store(true, std::memory_order_release);
-    
+
     // 唤醒线程以便快速退出
     _tick_available.store(true, std::memory_order_release);
-    
+
     if (_arb_thread.joinable())
     {
         _arb_thread.join();
     }
-    
+
     _running.store(false, std::memory_order_release);
-    
+
     WTSLogger::info("AsyncArbitrageExecutor stopped, signals={}, orders={}",
         _signals_generated.load(), _orders_executed.load());
 }
@@ -78,43 +78,43 @@ void AsyncArbitrageExecutor::stop()
 // Main Thread Interface
 //==============================================================================
 
-bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, 
+bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price,
                                        double multiplier, uint64_t timestamp)
 {
     ArbTickData tick(code, price, multiplier, timestamp);
-    
+
     // 回测模式: 同步执行 (不开 arb 线程, 避免 data race)
     // 实盘模式: push 到队列由 arb 线程异步处理
     if (!_running.load(std::memory_order_acquire))
     {
         // 回测: 直接同步处理 (不开 arb 线程, 避免 data race)
         processTick(tick);
-        
+
         auto now = std::chrono::high_resolution_clock::now();
         uint64_t current_time = std::chrono::duration_cast<std::chrono::microseconds>(
             now.time_since_epoch()).count();
         processSignals(current_time);
         return true;
     }
-    
+
     bool success = _tick_queue->tryPush(tick);
-    
+
     if (success)
     {
         // 增加tick计数
         _tick_count.fetch_add(1, std::memory_order_relaxed);
-        
+
         // 唤醒套利线程 (busy polling 将检测到此标志)
         _tick_available.store(true, std::memory_order_release);
     }
-    
+
     return success;
 }
 
 size_t AsyncArbitrageExecutor::processPendingOrders(OrderCallback callback)
 {
     size_t count = 0;
-    
+
     ArbOrderRequest order;
     while (_order_queue->tryPop(order))
     {
@@ -136,7 +136,7 @@ size_t AsyncArbitrageExecutor::processPendingOrders(OrderCallback callback)
         }
         _orders_executed.fetch_add(1, std::memory_order_relaxed);
     }
-    
+
     return count;
 }
 
@@ -152,7 +152,7 @@ void AsyncArbitrageExecutor::updateMMOrders(const std::string& code,
     double min_sell = std::numeric_limits<double>::max();
     for (const auto& o : sell_orders)
         if (o.price > 0 && o.price < min_sell) min_sell = o.price;
-    
+
     SpinLockGuard lock(_mm_orders_spin);
     if (max_buy > 0) _mm_max_buy[code] = max_buy;
     else _mm_max_buy.erase(code);
@@ -199,21 +199,21 @@ void AsyncArbitrageExecutor::onOrderFinalized(uint32_t localid)
 void AsyncArbitrageExecutor::arbThreadFunc()
 {
     WTSLogger::info("AsyncArbitrageExecutor thread started (condition variable mode)");
-    
+
     uint64_t last_process_time = 0;
     uint32_t tick_counter = 0;
     uint32_t consecutive_errors = 0;  // C6 fix: 连续异常计数, ≤3 重试, >3 才禁用
     const uint32_t signal_interval_us = _config.signal_interval_us;
     const uint32_t ticks_per_signal = _config.ticks_per_signal;
     const uint32_t max_wait_us = _config.max_wait_us;
-    
+
     while (!_stop_requested.load(std::memory_order_acquire))
     {
         // ================================================================
         // 自适应自旋轮询 (Adaptive Spin-Polling) 替代 condition_variable
         // ================================================================
         uint32_t spin_count = 0;
-        while (!_tick_available.load(std::memory_order_acquire) && 
+        while (!_tick_available.load(std::memory_order_acquire) &&
                !_stop_requested.load(std::memory_order_acquire))
         {
             if (spin_count < 1000) {
@@ -229,10 +229,10 @@ void AsyncArbitrageExecutor::arbThreadFunc()
                 spin_count = 0;
             }
         }
-        
+
         // 重置标志
         _tick_available.store(false, std::memory_order_release);
-        
+
         // ================================================================
         // 异常兜底: 任何处理异常都不能让 arb 线程退出 (主线程仍 pushTick,
         // 线程一死队列塞满后无声丢信号). 异常时禁用套利 + 告警, 保线程存活
@@ -246,23 +246,23 @@ void AsyncArbitrageExecutor::arbThreadFunc()
         size_t ticks_processed = _tick_queue->popAll([this](const ArbTickData& tick) {
             processTick(tick);
         });
-        
+
         tick_counter += static_cast<uint32_t>(ticks_processed);
-        
+
         // ================================================================
         // 获取当前时间
         // ================================================================
         auto now = std::chrono::high_resolution_clock::now();
         uint64_t current_time = std::chrono::duration_cast<std::chrono::microseconds>(
             now.time_since_epoch()).count();
-        
+
         // ================================================================
         // 生成信号条件：
         // 1. 累计 tick 数达到阈值，或
         // 2. 时间间隔达到阈值
         // ================================================================
         bool should_generate = false;
-        
+
         if (tick_counter >= ticks_per_signal)
         {
             should_generate = true;
@@ -272,7 +272,7 @@ void AsyncArbitrageExecutor::arbThreadFunc()
         {
             should_generate = true;
         }
-        
+
         if (should_generate && !_stop_requested.load(std::memory_order_acquire))
         {
             processSignals(current_time);
@@ -310,7 +310,7 @@ void AsyncArbitrageExecutor::arbThreadFunc()
             }
         }
     }
-    
+
     WTSLogger::info("AsyncArbitrageExecutor thread exiting");
 }
 
@@ -318,7 +318,7 @@ void AsyncArbitrageExecutor::processTick(const ArbTickData& tick)
 {
     if (!_arb_manager)
         return;
-    
+
     // Update arbitrage manager with tick data
     _arb_manager->onTick(tick.code, tick.price, tick.multiplier, tick.timestamp);
 }
@@ -327,10 +327,10 @@ void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
 {
     if (!_arb_manager || !_config.enabled.load(std::memory_order_relaxed))
         return;
-    
+
     // Generate signals
     auto signals = _arb_manager->generateSignals(current_time);
-    
+
     for (const auto& signal : signals)
     {
         // Only process high-confidence signals
@@ -381,12 +381,12 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         leg1_is_buy = (st.spread_position < 0);
     }
     bool leg2_is_buy = !leg1_is_buy;
-    
+
     double leg1_price = signal.leg1_price;
     double leg2_price = signal.leg2_price;
     double leg1_qty = signal.leg1_qty > 0 ? signal.leg1_qty : signal.suggested_size;
     double leg2_qty = signal.leg2_qty > 0 ? signal.leg2_qty : signal.suggested_size;
-    
+
     // Get tick sizes for price adjustment
     double leg1_tick_size = 0.2;  // Default
     double leg2_tick_size = 0.2;
@@ -397,17 +397,17 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         auto it2 = _tick_sizes.find(signal.leg2_code);
         if (it2 != _tick_sizes.end()) leg2_tick_size = it2->second;
     }
-    
+
     // Store original prices for profit recalculation
     double orig_leg1_price = leg1_price;
     double orig_leg2_price = leg2_price;
     bool price_adjusted = false;
-    
+
     // Self-trade check (P7: O(1) 预计算标量 — 全局 min_sell/max_buy 即约束边界,
     // 与原"扫全部订单取最严格价"等价, 消除锁内 O(n) 线性扫描).
     {
         SpinLockGuard lock(_mm_orders_spin);
-        
+
         // Check leg1
         if (leg1_is_buy)
         {
@@ -431,7 +431,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
                     signal.leg1_code, orig_leg1_price, leg1_price);
             }
         }
-        
+
         // Check leg2 (same logic)
         if (leg2_is_buy)
         {
@@ -456,7 +456,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
             }
         }
     }
-    
+
     // If price was adjusted, recalculate profit and check threshold
     if (price_adjusted && _min_profit_threshold.load(std::memory_order_relaxed) > 0)
     {
@@ -465,10 +465,10 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         // Profit = (leg2_price - orig_leg2) - (leg1_price - orig_leg1)
         // For SHORT_SPREAD: sell leg1, buy leg2
         // Profit = (orig_leg1 - leg1_price) - (orig_leg2 - leg2_price)
-        
+
         double price_impact_leg1 = leg1_price - orig_leg1_price;
         double price_impact_leg2 = leg2_price - orig_leg2_price;
-        
+
         // Spread impact (negative means profit reduced)
         double spread_impact = 0;
         if (leg1_is_buy)
@@ -481,11 +481,11 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
             // Short spread: getting less for leg1 (bad), paying more for leg2 (bad)
             spread_impact = price_impact_leg1 + (leg2_is_buy ? price_impact_leg2 : -price_impact_leg2);
         }
-        
+
         // Convert to ticks (using average tick size)
         double avg_tick_size = (leg1_tick_size + leg2_tick_size) / 2.0;
         double spread_impact_ticks = spread_impact / avg_tick_size;
-        
+
         // If spread impact exceeds minimum profit threshold, reject signal
         if (-spread_impact_ticks > _min_profit_threshold.load(std::memory_order_relaxed))
         {
@@ -494,10 +494,10 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
             _arb_manager->onArbSignalDropped(signal.pair_id);  // 释放 B-3 in_flight
             return;
         }
-        
+
         WTSLogger::info("Arb signal adjusted: spread impact = {:.2f} ticks", spread_impact_ticks);
     }
-    
+
     // Create order requests
     uint32_t req_id = _next_request_id.fetch_add(2, std::memory_order_relaxed);
 
@@ -532,11 +532,11 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     order2.request_id = req_id + 1;  // 同一对两腿使用连续ID
     order2.order_flag = order_flag;
     order2.is_close = is_close;
-    
+
     // 原子提交：先检查队列是否有足够空间放两腿
     const size_t needed_slots = 2;
     const size_t available = _order_queue->capacity() - _order_queue->size();
-    
+
     if (available < needed_slots)
     {
         WTSLogger::warn("AsyncArb signal DROPPED: order queue full "
@@ -545,7 +545,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         _arb_manager->onArbSignalDropped(signal.pair_id);  // 释放 B-3 in_flight
         return;  // 两腿都不提交，避免单腿风险
     }
-    
+
     // 先push第一腿
     bool push1 = _order_queue->tryPush(order1);
     if (!push1)
@@ -555,7 +555,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         _arb_manager->onArbSignalDropped(signal.pair_id);  // 释放 B-3 in_flight
         return;  // 第一腿失败，不提交第二腿
     }
-    
+
     // 再push第二腿
     bool push2 = _order_queue->tryPush(order2);
     if (!push2)
@@ -565,7 +565,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         WTSLogger::error("AsyncArb CRITICAL: leg2 push failed after leg1 "
                          "succeeded! pair={}, leg1_req_id={}",
             signal.pair_id, req_id);
-        
+
         // 记录单腿敞口，供processPendingOrders检测并自动对冲
         // Arb线程push到_from_arb队列(SPSC安全)，主线程pop
         // 传入delta_ratio=0(arb线程无法获取portfolio delta，主线程回调时补充)
@@ -584,7 +584,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
                             "pair={}, leg1={}", signal.pair_id, signal.leg1_code);
         }
     }
-    
+
     WTSLogger::info("AsyncArb signal: pair={}, leg1={} {}@{} ({}), leg2={} {}@{} ({})",
         signal.pair_id,
         leg1_is_buy ? "BUY" : "SELL", signal.leg1_code, leg1_qty, leg1_price,
@@ -602,14 +602,14 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
 {
     size_t processed = 0;
     auto now = std::chrono::steady_clock::now();
-    
+
     // Dual-queue SPSC-safe design:
     // 1. Pop all new orphan legs from arb thread (SPSC queue)
     // 2. Merge with existing deferred legs
     // 3. Process all: hedge if timeout, defer if not
     // This avoids the old bug where main thread tryPush back into SPSC queue
     // violated single-consumer invariant.
-    
+
     OrphanLeg orphan;
     while (_orphan_legs_from_arb.tryPop(orphan))
     {
@@ -619,14 +619,14 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
         }
         _orphan_legs_deferred.push_back(std::move(orphan));
     }
-    
+
     // Process all deferred legs
     std::vector<OrphanLeg> still_deferred;
     for (auto& leg : _orphan_legs_deferred)
     {
         auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - leg.timestamp).count();
-        
+
         // 根据delta_ratio动态调整超时
         // delta_ratio越高(接近或超过max_delta)，超时越短，对冲越积极
         // delta_ratio=0: 无delta限制，使用原始超时
@@ -649,20 +649,20 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
                 if (effective_force < 2000) effective_force = 2000;
             }
         }
-        
+
         if (age_ms >= static_cast<int64_t>(effective_force))
         {
             // Level 3: 超过force_ms → 强制市价对冲（最紧急）
             bool hedge_is_buy = !leg.leg1_is_buy;
             double hedge_price = leg.leg1_price;  // fallback, callback会覆盖
-            
+
             WTSLogger::error("OrphanLeg URGENT: pair={}, leg1={}{}@{}, "
                              "age={}ms > force={}ms (delta_ratio={:.2f}) → force market hedge on {}",
                 leg.pair_id,
                 leg.leg1_is_buy ? "BUY" : "SELL", leg.leg1_code,
                 leg.leg1_qty, leg.leg1_price,
                 age_ms, effective_force, leg.delta_ratio, leg.leg2_code);
-            
+
             callback(leg.leg2_code, hedge_is_buy, hedge_price,
                      leg.leg1_qty, /*urgent=*/true);
             ++processed;
@@ -672,14 +672,14 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
             // Level 2: 超过timeout_ms → 对手价对冲（积极减仓）
             bool hedge_is_buy = !leg.leg1_is_buy;
             double hedge_price = leg.leg1_price;  // fallback, callback会覆盖
-            
+
             WTSLogger::warn("OrphanLeg HEDGE: pair={}, leg1={}{}@{}, "
                             "age={}ms > timeout={}ms (delta_ratio={:.2f}) → aggressive hedge on {}",
                 leg.pair_id,
                 leg.leg1_is_buy ? "BUY" : "SELL", leg.leg1_code,
                 leg.leg1_qty, leg.leg1_price,
                 age_ms, effective_timeout, leg.delta_ratio, leg.leg2_code);
-            
+
             callback(leg.leg2_code, hedge_is_buy, hedge_price,
                      leg.leg1_qty, /*urgent=*/false);
             ++processed;
@@ -696,10 +696,10 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
             still_deferred.push_back(std::move(leg));
         }
     }
-    
+
     // Swap: keep only still-deferred legs for next call
     _orphan_legs_deferred = std::move(still_deferred);
-    
+
     return processed;
 }
 

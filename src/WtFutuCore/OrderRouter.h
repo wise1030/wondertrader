@@ -1,7 +1,7 @@
 /*!
  * \file OrderRouter.h
  * \brief Unified Order Router for non-MM order sources (Arbitrage, Hedge, Closeout)
- * 
+ *
  * Design principle:
  *   - MM (market making) orders go through FutuQuoter directly → ctx API (zero overhead)
  *   - Non-MM orders (arb/hedge/closeout) go through OrderRouter for:
@@ -9,12 +9,12 @@
  *     2. Per-source rate limiting
  *     3. Priority-based routing (closeout > hedge > arb)
  *     4. Unified order tracking and audit trail
- * 
+ *
  * Latency budget: < 500ns per order on hot path
  *   - RateCounter check: ~5ns (inline arithmetic)
  *   - Self-trade check: ~50-200ns (hash lookup + small vector scan)
  *   - ActiveOrderInfo record: ~100ns (pre-allocated, no heap alloc on steady state)
- * 
+ *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once

@@ -58,7 +58,7 @@ struct TickContext
     uint64_t timestamp;
     uint32_t time_hms;
     uint32_t date;
-    
+
     bool is_trading_session;
     bool market_state_paused;
     bool toxicity_paused;
@@ -121,20 +121,20 @@ struct ModuleParams
 {
     // SpreadOptimizer: 已迁移到 GLFTParams::fromVariant
     double portfolio_max_delta = 0.0;
-    
+
     // ToxicFlowDetector: 已迁移到 ToxicityParams::fromVariant
     uint32_t toxicity_cooloff_ms = 5000;
-    
+
     // AutoCancel (仍需保留)
     uint32_t auto_cancel_max_age_ms = 10000;
     double auto_cancel_price_deviation = 3.0;
     uint32_t auto_cancel_inventory_cooldown_ms = 2000;
-    
+
     // AdaptiveParam (仍需保留)
     uint32_t adaptive_update_interval = 100;
     double adaptive_min_phi = 0.001;
 double adaptive_max_phi = 0.1;
-    
+
     // Alpha influence (仍需保留，由 StrategyCoordinator 使用)
     double alpha_sensitivity = 2.0;
     double cold_start_confidence_factor = 0.005;
@@ -151,22 +151,22 @@ struct CoordinatorConfig
     bool use_spread_optimizer;
     bool use_self_trade_prevention;
     bool use_adaptive_params;
-    
+
     uint32_t param_update_interval;
     uint32_t closeout_minutes_before;
     uint32_t close_time;
     bool closeout_flatten_position;
     uint32_t night_close_time;         // 夜盘收盘时间 (HHMM格式，0=无夜盘)
     uint32_t night_minutes_before;     // 夜盘收盘前N分钟触发
-    
+
     bool perf_enabled;
     uint32_t perf_log_interval;       // propagated from config.yaml via FutuMmConfig
     uint32_t perf_warn_threshold_ns;  // propagated from config.yaml via FutuMmConfig
     uint32_t perf_critical_threshold_ns; // propagated from config.yaml via FutuMmConfig
-    
+
     // perf fields: propagated from config.yaml via FutuMmConfig, not read by StrategyCoordinator itself
     uint64_t perf_monitor_latency_threshold;
-    
+
     // v7.1 taker 紧急减仓 (主动吃单; 应对大量成交突然穿仓)
     double   taker_reduce_threshold = 1.3;     ///< 合约 util ≥ 此值触发 taker 减仓 (0=禁用)
     double   taker_reduce_target_util = 0.8;   ///< 减仓目标: 平到 target × maxPos
@@ -178,10 +178,10 @@ struct CoordinatorConfig
     // v7.1 session 休息段暂停 (每节收盘前 N 分钟撤单+暂停报价/套利;
     // 每日最后一节由 closeout 处理, 不在此列). 0=禁用
     uint32_t section_break_minutes_before = 1;
-    
+
     ModuleParams modules;
     wtp::WTSVariant* _raw_variant = nullptr;
-    
+
     CoordinatorConfig()
         : use_market_making(true), use_spread_arbitrage(false)
         , use_signal_aggregator(true), use_toxicity_detector(true)
@@ -200,7 +200,7 @@ class StrategyCoordinator
 public:
     StrategyCoordinator();
     ~StrategyCoordinator();
-    
+
     void setConfig(const CoordinatorConfig& cfg) { _cfg = cfg; syncPhaseConfig(); }
     const CoordinatorConfig& getConfig() const { return _cfg; }
     void setAlphaSensitivity(double val) { _cfg.modules.alpha_sensitivity = val; }
@@ -210,7 +210,7 @@ public:
     /// 回测中墙钟节流随机器速度漂移 → 订单序列不可复现;
     /// hedge/taker/requote 等节流统一改用 replay 时钟 (0=未注入, 回退墙钟).
     void setExchangeTime(uint64_t ms) { _last_exchange_time_ms = ms; }
-    
+
     bool loadConfig(const std::string& config_file);
     void loadConfigFromVariant(wtp::WTSVariant* cfg);
     void initialize();
@@ -220,7 +220,7 @@ private:
     void syncPhaseConfig();
 
 public:
-    
+
     void setPortfolio(FutuPortfolio* portfolio) { _portfolio = portfolio; }
     void setOrderTracker(UnifiedOrderTracker* tracker) { _order_tracker = tracker; }
     void setRiskMonitor(FutuRiskMonitor* monitor) { _risk_monitor = monitor; }
@@ -232,17 +232,17 @@ public:
     void setSelfTradeCalibrator(SelfTradeCalibrator* calibrator) { _self_trade_calibrator = calibrator; }
     void setCorrelationManager(CorrelationManager* manager) { _correlation_manager = manager; }
     void setOrderRouter(OrderRouter* router) { _order_router = router; }
-    
+
     /// Get trading state (read-only for external queries)
     const TradingState& tradingState() const { return *_trading_state; }
     /// Get trading state (mutable for direct manipulation by risk/toxicity modules)
     TradingState& tradingStateMut() { return *_trading_state; }
     /// Set shared trading state pointer (owned by UftFutuMmStrategy)
     void setTradingState(TradingState* state) { _trading_state = state; }
-    
+
     void setQuoters(wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters) { _quoters = quoters; }
     void setSessionInfo(const std::string& code, wtp::WTSSessionInfo* sessInfo) { _phase_mgr.setSessionInfo(code, sessInfo); }
-    
+
     void setSpreadOptimizers(wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* opts) { _spread_opts = opts; }
     void setOrderBooks(std::unordered_map<std::string, std::unique_ptr<MarketDataContext>>* books) { _market_data = books; }
     void setSignalAggregators(std::unordered_map<std::string, std::unique_ptr<SignalAggregator>>* aggregators) { _signal_aggregators = aggregators; }
@@ -251,7 +251,7 @@ public:
     ///   tick-to-quote 全链路延迟 (含策略层 preamble), 比 chrono 低 3 倍开销
     ProcessingResult processTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick,
                                    uint64_t now_ms = 0, uint64_t tsc_tick0 = 0);
-    
+
     bool processCloseout(wtp::IUftStraCtx* ctx, TickContext& tc);
     /// v7.1: session 休息段检查 — 每节收盘前 section_break_minutes_before 分钟
     /// 进入休息段: 撤全部报价+arb在途单, 停报价/套利; 下一节开始自动恢复。
@@ -275,30 +275,30 @@ public:
     bool requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms);
     // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_scale)
     void updateAdaptiveParams(wtp::IUftStraCtx* ctx, const TickContext& tc);
-    
-    inline bool isTradingHalted() const { 
-        return _trading_state ? _trading_state->qphase == QuotingPhase::RISK_HALTED : false; 
+
+    inline bool isTradingHalted() const {
+        return _trading_state ? _trading_state->qphase == QuotingPhase::RISK_HALTED : false;
     }
-    inline bool isQuotingPaused() const { 
-        return _trading_state ? _trading_state->qphase == QuotingPhase::ERROR : false; 
+    inline bool isQuotingPaused() const {
+        return _trading_state ? _trading_state->qphase == QuotingPhase::ERROR : false;
     }
     inline bool isLongBlocked() const { return _trading_state ? _trading_state->long_blocked.load(std::memory_order_acquire) : false; }
     inline bool isShortBlocked() const { return _trading_state ? _trading_state->short_blocked.load(std::memory_order_acquire) : false; }
-    inline bool isMarketStatePaused() const { 
-        return _trading_state ? _trading_state->qphase == QuotingPhase::MARKET : false; 
+    inline bool isMarketStatePaused() const {
+        return _trading_state ? _trading_state->qphase == QuotingPhase::MARKET : false;
     }
-    inline bool isToxicityPaused() const { 
-        return _trading_state ? _trading_state->qphase == QuotingPhase::TOXICITY : false; 
+    inline bool isToxicityPaused() const {
+        return _trading_state ? _trading_state->qphase == QuotingPhase::TOXICITY : false;
     }
     // setTradingHalted removed — use setQuotingPhase(RISK_HALTED) or enterCloseout()
     void resetSession();
     void resetDaily();
-    
+
     /// 外部恢复路径 (UftFutuMmStrategy::on_trade / on_channel_ready) 绕过
     /// coordinator 的 checkRisk 自动恢复, 需调用本方法同步重置协调器本地风控状态,
     /// 否则风险加宽倍数残留 → 恢复后报价宽度被永久放大 ×1.5/×2.0.
     void onExternalResumeFromRisk() { _quote_chain.riskWiden().reset(); }
-    
+
 private:
     CoordinatorConfig _cfg;
     FutuPortfolio* _portfolio = nullptr;
@@ -321,20 +321,20 @@ private:
     /// Unified trading state (replaces _trading_halted, _quoting_paused, etc.)
     TradingState* _trading_state = nullptr;  // Shared pointer — owned by UftFutuMmStrategy
     bool _channel_ready = true;
-    
+
     uint64_t _tick_count = 0;
-    
+
     // P0-2.3: Global cache for portfolio metrics
     PortfolioContext _global_portfolio_ctx;
     bool _portfolio_ctx_dirty = true;
-    
+
     // 5A-1: 会话阶段统一判定 (session 表/休息窗口/closeout 窗口单一事实来源)
     SessionPhaseManager _phase_mgr;
     wtp::wt_hashmap<std::string, double> _last_mid;
-    
-    
+
+
     // 减仓防重复触发 — removed (attemptPositionReduction deleted)
-    
+
     // 日志限频
     uint64_t _last_halt_log_ms = 0;        // 上次halted日志时间戳(ms)
     uint64_t _last_perf_ms = 0;            // v7.7 C3: perf 统计节流 (原 static, 跨实例共享)

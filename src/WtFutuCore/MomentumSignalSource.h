@@ -1,11 +1,11 @@
 /*!
  * \file MomentumSignalSource.h
  * \brief Momentum Signal Source
- * 
+ *
  * Calculates price momentum from recent price history:
  *   - Simple momentum: (recent_avg - earlier_avg) / earlier_avg
  *   - EMA momentum: EMA-based trend detection
- * 
+ *
  * Momentum is useful for:
  *   - Trend detection
  *   - Market state classification
@@ -32,13 +32,13 @@ public:
     {
         uint32_t window;        ///< Price history window
         double ema_alpha;       ///< EMA smoothing factor
-        
-        Config() 
+
+        Config()
             : window(50)
             , ema_alpha(0.1)
         {}
     };
-    
+
     explicit MomentumSignalSource(const Config& cfg = Config())
         : _cfg(cfg)
         , _enabled(true)
@@ -46,33 +46,33 @@ public:
         , _ema_momentum(0)
     {
     }
-    
+
     //==========================================================================
     // ISignalSource Interface
     //==========================================================================
-    
-    const std::string& name() const override 
-    { 
-        static std::string n = "Momentum"; 
-        return n; 
+
+    const std::string& name() const override
+    {
+        static std::string n = "Momentum";
+        return n;
     }
-    
-    SignalType type() const override 
-    { 
-        return SignalType::MOMENTUM; 
+
+    SignalType type() const override
+    {
+        return SignalType::MOMENTUM;
     }
-    
+
     void update(const MarketDataContext& book) override
     {
         double mid = book.getMidPrice();
         uint64_t ts = book.getTimestamp();
-        
+
         if (mid <= 0)
         {
             _result.valid = false;
             return;
         }
-        
+
         // 增量对数收益 + 滚动和: O(1)/tick
         // 旧代码每 tick 对全部历史(≤127)重算 std::log, 相同相邻对反复计算.
         // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异, 数学性质:
@@ -87,7 +87,7 @@ public:
             _log_return_sum += lr;
         }
         _last_mid = mid;
-        
+
         size_t n = _log_returns.size();
         if (n >= 9)  // 收益数 = 价格数-1, 等价于原 _price_history.size() >= 10
         {
@@ -100,14 +100,14 @@ public:
             _result.valid = false;  // 样本不足，不纳入加权计算
         }
     }
-    
+
     const SignalResult& result() const override { return _result; }
-    
+
     double getAlphaValue() const override { return _result.alpha; }
-    
+
     bool enabled() const override { return _enabled; }
     void setEnabled(bool e) override { _enabled = e; }
-    
+
     void reset() override
     {
         _log_returns.clear();
@@ -116,46 +116,46 @@ public:
         _ema_momentum = 0;
         _result = AlphaSignalResult();
     }
-    
+
     /// Set configuration
     void setConfig(const Config& cfg) { _cfg = cfg; }
-    
+
     //==========================================================================
     // Additional Accessors
     //==========================================================================
-    
+
     /// Get momentum value [-1, 1]
     double getMomentum() const { return _result.alpha; }
-    
+
     /// Get EMA momentum
     double getEMAMomentum() const { return _ema_momentum; }
-    
+
 private:
     Config _cfg;
     bool _enabled;
     AlphaSignalResult _result;
-    
+
     RingBuffer<double, 128> _log_returns;   ///< 对数收益环形缓冲
     double _log_return_sum = 0;             ///< 滚动和(满环时扣减最旧)
     double _last_mid;
     double _ema_momentum;
-    
+
     void calculateMomentum()
     {
         size_t n = _log_returns.size();
         if (n == 0) return;
-        
+
         // 滚动和直接取均值, 乘以1000作为缩放因子(对数收益率通常很小, 如0.0001级别)
         double raw_momentum = _log_return_sum / static_cast<double>(n) * 1000.0;
-        
+
         // Scale and clamp to [-1, 1]
         double momentum = std::tanh(raw_momentum);
-        
+
         _result.alpha = momentum;
-        
+
         // Update EMA momentum
         _ema_momentum = _cfg.ema_alpha * momentum + (1 - _cfg.ema_alpha) * _ema_momentum;
-        
+
         _result.confidence = (n >= 19) ? 1.0 : static_cast<double>(n + 1) / 20.0;
     }
 };

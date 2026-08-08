@@ -1,12 +1,12 @@
 /*!
  * \file SpreadArbitrageTypes.h
  * \brief Cross-Term Spread Arbitrage Type Definitions
- * 
+ *
  * Defines core types for spread arbitrage strategies:
  *   - Spread types and calculations
  *   - Signal and position structures
  *   - Strategy enumerations
- * 
+ *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
@@ -86,46 +86,46 @@ struct SpreadPairConfig
     std::string pair_id;            ///< Unique pair identifier
     std::string leg1_code;          ///< Near-term contract code
     std::string leg2_code;          ///< Far-term contract code
-    
+
     SpreadType spread_type;         ///< Spread calculation method
     double leg1_multiplier;         ///< Leg1 contract multiplier
     double leg2_multiplier;         ///< Leg2 contract multiplier
     double leg1_ratio;              ///< Leg1 hedge ratio
     double leg2_ratio;              ///< Leg2 hedge ratio
-    
+
     // Mean reversion parameters
     double entry_z_threshold;       ///< Entry Z-Score threshold
     double exit_z_threshold;        ///< Exit Z-Score threshold
     double stop_loss_z;             ///< Stop loss Z-Score
-    
+
     // Trend following parameters
     uint32_t trend_ma_fast;         ///< Fast MA period
     uint32_t trend_ma_slow;         ///< Slow MA period
     double min_trend_strength;      ///< Minimum trend strength
     double stop_loss_pct;           ///< Stop loss percentage (e.g. 0.02 = 2%)
     uint32_t max_trend_bars;        ///< Max bars before trend exhaustion exit
-    
+
     // Mean reversion safety
     double add_safety_ratio;        ///< Add-position safety ratio (0,1), fraction of stop_loss_z
-    
+
     // Position limits
     double max_spread_position;     ///< Maximum spread position
     double max_single_leg;          ///< Maximum single leg position
-    
+
     // Time parameters
     uint32_t lookback_window;       ///< Statistical window size
     uint32_t convergence_timeout;   ///< Convergence timeout (seconds)
     uint32_t expiry_threshold;      ///< Days to expiry warning
-    
+
     // Strategy selection
     ArbitrageStrategy primary_strategy;   ///< Primary strategy
     bool use_hybrid;                ///< Use hybrid approach
-    
+
     // Market making enhancement
     bool enhance_quoting;           ///< Enhance quoting with spread signal
     double pause_z_threshold;       ///< Z-Score to pause quoting
     double widen_z_threshold;       ///< Z-Score to widen spread
-    
+
     SpreadPairConfig()
         : spread_type(SpreadType::WEIGHTED)
         , leg1_multiplier(300.0)
@@ -162,17 +162,17 @@ struct SpreadPairConfig
 struct SpreadState
 {
     std::string pair_id;            ///< Pair identifier
-    
+
     // Contract codes for expiry lookup
     std::string leg1_code;          ///< Leg1 contract code (e.g. "CFFEX.IF.2503")
     std::string leg2_code;          ///< Leg2 contract code (e.g. "CFFEX.IF.2506")
-    
+
     // Price data
     double leg1_price;              ///< Current leg1 price
     double leg2_price;              ///< Current leg2 price
     double current_spread;          ///< Current spread value
     double current_price;           ///< Current spread price (for stop loss)
-    
+
     // Market data for microstructure features
     double mid_price;               ///< Mid price
     double bid_price;               ///< Best bid price
@@ -181,35 +181,35 @@ struct SpreadState
     double average_trade_size;      ///< Average trade size
     double buy_volume;              ///< Buy volume
     double sell_volume;             ///< Sell volume
-    
+
     // Statistics
     double spread_mean;             ///< Rolling mean
     double spread_std;              ///< Rolling standard deviation
     double zscore;                  ///< Current Z-Score
-    
+
     // Correlation & Cointegration
     double correlation;             ///< Pearson correlation
     double beta;                    ///< Hedge ratio (cointegration coefficient)
     double half_life;               ///< Mean reversion half-life (seconds)
-    
+
     // Position
     double leg1_position;           ///< Current leg1 position
     double leg2_position;           ///< Current leg2 position
     double spread_position;         ///< Net spread position
-    
+
     // PnL
     double unrealized_pnl;          ///< Unrealized PnL
     double realized_pnl;            ///< Realized PnL
     double entry_spread;            ///< Spread at entry
-    
+
     // Timing
     uint64_t last_update;           ///< Last update timestamp
     uint64_t position_open_time;    ///< Position open timestamp
-    
+
     // Flags
     bool is_active;                 ///< Is actively trading
     bool is_converging;             ///< Is spread converging
-    
+
     SpreadState()
         : leg1_price(0), leg2_price(0)
         , current_spread(0), current_price(0)
@@ -223,10 +223,10 @@ struct SpreadState
         , last_update(0), position_open_time(0)
         , is_active(false), is_converging(false)
     {}
-    
+
     /// Check if has open position
     inline bool hasPosition() const { return std::abs(spread_position) > 0.001; }
-    
+
     /// Get position duration in seconds (now_us 与 position_open_time 同为 µs epoch)
     inline uint64_t positionDuration(uint64_t now_us) const
     {
@@ -244,13 +244,13 @@ struct SpreadSignal
 {
     SpreadSignalType type;          ///< Signal type
     std::string pair_id;            ///< Target spread pair
-    
+
     double confidence;              ///< Signal confidence (0-1)
     double suggested_size;          ///< Suggested position size
-    
+
     double entry_zscore;            ///< Z-Score at signal generation
     double target_zscore;           ///< Target Z-Score for exit
-    
+
     // Leg information
     std::string leg1_code;          ///< Leg1 contract code
     std::string leg2_code;          ///< Leg2 contract code
@@ -258,12 +258,12 @@ struct SpreadSignal
     double leg2_price;              ///< Suggested leg2 price
     double leg1_qty;                ///< Suggested leg1 quantity
     double leg2_qty;                ///< Suggested leg2 quantity
-    
+
     ArbitrageStrategy source;       ///< Strategy that generated signal
     std::string reason;             ///< Human-readable reason
-    
+
     uint64_t timestamp;             ///< Signal timestamp
-    
+
     SpreadSignal()
         : type(SpreadSignalType::NONE)
         , confidence(0), suggested_size(0)
@@ -273,7 +273,7 @@ struct SpreadSignal
         , source(ArbitrageStrategy::MEAN_REVERSION)
         , timestamp(0)
     {}
-    
+
     /// Check if signal is actionable
     inline bool isActionable() const
     {
@@ -294,14 +294,14 @@ struct SpreadRiskMetrics
     double leg2_exposure;           ///< Leg2 exposure
     double net_exposure;            ///< Net exposure after hedging
     double convergence_risk;        ///< Probability of non-convergence
-    
+
     double correlation_risk;        ///< Risk from correlation breakdown
     double beta_instability;        ///< Risk from beta instability
     double liquidity_risk;          ///< Risk from low liquidity
-    
+
     uint32_t days_to_expiry_leg1;   ///< Days to expiry for leg1
     uint32_t days_to_expiry_leg2;   ///< Days to expiry for leg2
-    
+
     SpreadRiskMetrics()
         : var_99(0), max_loss(0)
         , leg1_exposure(0), leg2_exposure(0), net_exposure(0)
@@ -321,12 +321,12 @@ struct QuotingAdjustment
     double bid_skew_adjustment;     ///< Adjustment to bid skew
     double ask_skew_adjustment;     ///< Adjustment to ask skew
     double spread_multiplier;       ///< Spread multiplier
-    
+
     bool suppress_bid;              ///< Suppress bid quoting
     bool suppress_ask;              ///< Suppress ask quoting
-    
+
     double confidence;              ///< Adjustment confidence
-    
+
     QuotingAdjustment()
         : bid_skew_adjustment(0)
         , ask_skew_adjustment(0)
@@ -355,7 +355,7 @@ struct SpreadFeatureVector
     double cost_of_carry;           ///< Cost of carry
     double momentum;                ///< Price momentum
     double mean_reversion_speed;    ///< Mean reversion speed
-    
+
     SpreadFeatureVector()
         : zscore(0), zscore_change(0)
         , correlation(0), correlation_change(0)
@@ -379,14 +379,14 @@ struct StrategyWeights
     double trend_following;         ///< Weight for trend following
     double pairs_trading;           ///< Weight for pairs trading
     double statistical_arb;         ///< Weight for statistical arb
-    
+
     StrategyWeights()
         : mean_reversion(0.4)
         , trend_following(0.2)
         , pairs_trading(0.2)
         , statistical_arb(0.2)
     {}
-    
+
     /// Normalize weights to sum to 1
     void normalize()
     {

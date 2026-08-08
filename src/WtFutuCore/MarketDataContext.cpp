@@ -32,11 +32,11 @@ void OrderBookStateTracker::setContract(const std::string& code, double tickSize
 void OrderBookStateTracker::onTick(wtp::WTSTickData* tick)
 {
     if (!tick) return;
-    
+
     _snapshot.timestamp = tick->actiontime();
     _snapshot.bids.clear();
     _snapshot.asks.clear();
-    
+
     // Extract bid levels
     for (uint32_t i = 0; i < _depth_levels && i < 10; i++)
     {
@@ -46,7 +46,7 @@ void OrderBookStateTracker::onTick(wtp::WTSTickData* tick)
         if (level.price > 0 && level.volume > 0)
             _snapshot.bids.push_back(level);
     }
-    
+
     // Extract ask levels
     for (uint32_t i = 0; i < _depth_levels && i < 10; i++)
     {
@@ -56,7 +56,7 @@ void OrderBookStateTracker::onTick(wtp::WTSTickData* tick)
         if (level.price > 0 && level.volume > 0)
             _snapshot.asks.push_back(level);
     }
-    
+
     updateDerivedMetrics();
 }
 
@@ -68,16 +68,16 @@ void OrderBookStateTracker::updateDerivedMetrics()
         _snapshot.mid_price = (_snapshot.bids[0].price + _snapshot.asks[0].price) / 2.0;
         _snapshot.spread = _snapshot.asks[0].price - _snapshot.bids[0].price;
     }
-    
+
     // Calculate total depth
     _snapshot.bid_depth = 0;
     for (const auto& level : _snapshot.bids)
         _snapshot.bid_depth += level.volume;
-    
+
     _snapshot.ask_depth = 0;
     for (const auto& level : _snapshot.asks)
         _snapshot.ask_depth += level.volume;
-    
+
     // Calculate imbalance
     _snapshot.imbalance = calculateImbalance();
     _snapshot.depth_imbalance = calculateDepthImbalance();
@@ -87,8 +87,8 @@ double OrderBookStateTracker::calculateImbalance() const
 {
     if (_snapshot.bid_depth + _snapshot.ask_depth == 0)
         return 0;
-    
-    return (_snapshot.bid_depth - _snapshot.ask_depth) / 
+
+    return (_snapshot.bid_depth - _snapshot.ask_depth) /
            (_snapshot.bid_depth + _snapshot.ask_depth);
 }
 
@@ -96,24 +96,24 @@ double OrderBookStateTracker::calculateDepthImbalance() const
 {
     // Weight by price distance from mid
     double weighted_bid = 0, weighted_ask = 0;
-    
+
     for (const auto& level : _snapshot.bids)
     {
         double distance = (_snapshot.mid_price - level.price) / _tick_size;
         if (distance > 0)
             weighted_bid += level.volume / distance;
     }
-    
+
     for (const auto& level : _snapshot.asks)
     {
         double distance = (level.price - _snapshot.mid_price) / _tick_size;
         if (distance > 0)
             weighted_ask += level.volume / distance;
     }
-    
+
     if (weighted_bid + weighted_ask == 0)
         return 0;
-    
+
     return (weighted_bid - weighted_ask) / (weighted_bid + weighted_ask);
 }
 
@@ -143,7 +143,7 @@ TradeFlowTracker::TradeFlowTracker()
 void TradeFlowTracker::setConfig(double tickSize, double largeTradeThreshold)
 {
     _large_trade_threshold = largeTradeThreshold;
-    
+
     TickInfererConfig infer_cfg;
     infer_cfg.tick_size = tickSize;
     infer_cfg.large_trade_threshold = largeTradeThreshold;
@@ -158,7 +158,7 @@ void TradeFlowTracker::onTickInference(wtp::WTSTickData* tick, double tickSize)
     double ask1 = tickStruct.ask_prices[0];
     double last_price = tickStruct.price;
     double total_vol = tickStruct.total_volume;
-    
+
     // 推断成交方向
     InferredTransaction inferred = _tick_inferer.inferFromTick(
         bid1, ask1,
@@ -166,13 +166,13 @@ void TradeFlowTracker::onTickInference(wtp::WTSTickData* tick, double tickSize)
         last_price, total_vol,
         tickStruct.action_time
     );
-    
+
     // 默认推断置信度阈值为 0.3
     if (inferred.confidence >= 0.3 && inferred.volume > 0)
     {
         double signed_flow = inferred.is_buy_initiated ? inferred.volume : -inferred.volume;
         bool is_large = inferred.volume > _large_trade_threshold;
-        
+
         // 记录到滑窗
         InferenceRecord rec;
         rec.signed_flow = signed_flow;
@@ -180,16 +180,16 @@ void TradeFlowTracker::onTickInference(wtp::WTSTickData* tick, double tickSize)
         rec.is_large = is_large;
         rec.timestamp = static_cast<uint64_t>(tickStruct.action_time);
         _inference_window.push_back(rec);
-        
+
         // 累加
         _net_trade_flow += signed_flow;
         _total_trade_volume += inferred.volume;
-        
+
         if (is_large)
         {
             _large_trade_volume += inferred.volume;
         }
-        
+
         // 滑窗衰减: 移除超过时间窗口或数量窗口的旧记录
         // 修复: 原代码无衰减, net_trade_flow 在整个 session 单调累积,
         // 在趋势行情中导致 TradeFlow IC=-0.83 (系统性反向).
@@ -208,7 +208,7 @@ void TradeFlowTracker::onTickInference(wtp::WTSTickData* tick, double tickSize)
                 break;
             }
         }
-        
+
         // 记录成交大小
         if (_trade_sizes.size() < _history_size) {
             _trade_sizes.push_back(inferred.volume);
@@ -224,17 +224,17 @@ void TradeFlowTracker::onTickInference(wtp::WTSTickData* tick, double tickSize)
 void TradeFlowTracker::onTransaction(wtp::WTSTransData* data)
 {
     if (!data) return;
-    
+
     // Update trade flow - access struct members via getTransStruct()
     const auto& trans = data->getTransStruct();
     double qty = static_cast<double>(trans.volume);
-    
+
     // Determine trade direction from side field
     bool isBuy = (trans.side == BDT_Buy);
-    
+
     double signed_qty = isBuy ? qty : -qty;
     bool is_large = qty > _large_trade_threshold;
-    
+
     // 与 onTickInference 相同的滑窗衰减 — 旧代码直接累加从不衰减,
     // 在整个 session 单调漂移(与 TradeFlow IC=-0.83 同根因),
     // 且与 tick 推断通道混用同一组累积器导致口径不一致.
@@ -244,14 +244,14 @@ void TradeFlowTracker::onTransaction(wtp::WTSTransData* data)
     rec.is_large = is_large;
     rec.timestamp = static_cast<uint64_t>(trans.action_time);
     _inference_window.push_back(rec);
-    
+
     _net_trade_flow += signed_qty;
     _total_trade_volume += qty;
     if (is_large)
     {
         _large_trade_volume += qty;
     }
-    
+
     // 滑窗衰减: 移除超过时间窗口或数量窗口的旧记录
     while (!_inference_window.empty()) {
         const auto& front = _inference_window.front();
@@ -268,7 +268,7 @@ void TradeFlowTracker::onTransaction(wtp::WTSTransData* data)
             break;
         }
     }
-    
+
     // Track trade sizes with vector ring buffer
     if (_trade_sizes.size() < _history_size) {
         _trade_sizes.push_back(qty);
@@ -283,21 +283,21 @@ void TradeFlowTracker::onTransaction(wtp::WTSTransData* data)
 TradeFlowAnalysis TradeFlowTracker::getAnalysis() const
 {
     TradeFlowAnalysis flow;
-    
+
     flow.net_flow = _net_trade_flow;
-    
+
     if (_total_trade_volume > 0)
     {
         flow.buy_pressure = (_total_trade_volume + _net_trade_flow) / (2 * _total_trade_volume);
         flow.sell_pressure = 1.0 - flow.buy_pressure;
         flow.large_trade_ratio = _large_trade_volume / _total_trade_volume;
     }
-    
+
     if (!_trade_sizes.empty())
     {
         flow.avg_trade_size = _trade_sizes_sum / _trade_sizes.size();
     }
-    
+
     // 统计显著性归一化: 用净流相对于随机波动的 t-statistic
     // 原 buy_pressure/sell_pressure 比值在方向一致时饱和到 ±1.
     // 新: net_flow / (avg_size × sqrt(n)) 衡量方向不平衡的统计显著性
@@ -311,7 +311,7 @@ TradeFlowAnalysis TradeFlowTracker::getAnalysis() const
         double significance = _net_trade_flow / (flow.avg_trade_size * sqrt_n);
         flow.net_flow_normalized = std::tanh(significance / 3.0);
     }
-    
+
     return flow;
 }
 
@@ -324,7 +324,7 @@ void TradeFlowTracker::reset()
     _large_trade_volume = 0;
     _total_trade_volume = 0;
     _inference_window.clear();
-    
+
     _tick_inferer.reset();
 }
 

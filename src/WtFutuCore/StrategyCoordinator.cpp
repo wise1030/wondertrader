@@ -1,7 +1,7 @@
 /*!
 * \file StrategyCoordinator.cpp
 * \brief Strategy Coordinator Implementation
-* 
+*
 * Complete tick processing pipeline - replaces inline on_tick logic.
 */
 
@@ -74,7 +74,7 @@ coordinator = cfg;
 // 调用 loadConfigFromVariant 解析配置
 loadConfigFromVariant(coordinator);
 
-WTSLogger::info("StrategyCoordinator: loaded from '{}' (signal_aggregator={})", 
+WTSLogger::info("StrategyCoordinator: loaded from '{}' (signal_aggregator={})",
 config_file, _cfg.use_signal_aggregator ? "ON" : "OFF");
 
 return true;
@@ -359,7 +359,7 @@ result.quote_placed = processQuoting(ctx, tc, tick);
 
 
 // Stage 7.5: Position reduction removed — skew+clamp handles inventory reduction via quote offset
-// (attemptPositionReduction used 3-tick cross-spread which was too costly; 
+// (attemptPositionReduction used 3-tick cross-spread which was too costly;
 //  enhanced skew with clamp+scale now drives ask to mid for natural reduction)
 
 // Stage 8: Update adaptive parameters
@@ -482,7 +482,7 @@ return false;
 }
 
 // 至少有一个触发点启用才继续
-if (_cfg.closeout_minutes_before <= 0 && 
+if (_cfg.closeout_minutes_before <= 0 &&
     (_cfg.night_close_time == 0 || _cfg.night_minutes_before <= 0)) {
 return false;
 }
@@ -681,7 +681,7 @@ uint32_t currentTime = tc.time_hms;  // HHMM 格式
 tc.is_trading_session = sessInfo->isInTradingTime(currentTime);
 
 if (!tc.is_trading_session)
-{            WTSLogger::debug("StrategyCoordinator: {} not in trading session at {:04d}, skipping", 
+{            WTSLogger::debug("StrategyCoordinator: {} not in trading session at {:04d}, skipping",
 tc.code, currentTime);
 }
 }

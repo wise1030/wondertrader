@@ -1,7 +1,7 @@
 /*!
  * \file ToxicFlowDetector.cpp
  * \brief Toxic Order Flow Detection Implementation (Facade)
- * 
+ *
  * Combines PredictiveToxicity and RealizedToxicity for unified interface.
  */
 #include "ToxicFlowDetector.h"
@@ -32,7 +32,7 @@ ToxicFlowDetector::ToxicFlowDetector()
 void ToxicFlowDetector::setParams(const ToxicityParams& params)
 {
     _params = params;
-    
+
     // Configure sub-components
     PredictiveToxicityConfig pred_cfg;
     pred_cfg.vpin_threshold = params.vpin_threshold;
@@ -43,7 +43,7 @@ void ToxicFlowDetector::setParams(const ToxicityParams& params)
     pred_cfg.trade_weight = params.book_weight;
     pred_cfg.min_warmup_buckets = params.vpin_min_warmup_buckets;
     _predictive.setConfig(pred_cfg);
-    
+
     RealizedToxicityConfig real_cfg;
     real_cfg.weight = params.self_trade_weight;
     real_cfg.min_samples = 3;
@@ -65,7 +65,7 @@ void ToxicFlowDetector::reset()
     _has_book_data = false;
     _cache_dirty = true;
     _cached_metrics = ToxicityMetrics();
-    
+
     _predictive.reset();
     _realized.reset();
 }
@@ -127,14 +127,14 @@ void ToxicFlowDetector::onTickVolume(const char* stdCode, const wtp::WTSTickData
 void ToxicFlowDetector::updateCache() const
 {
     if (!_cache_dirty) return;
-    
+
     _cached_metrics = ToxicityMetrics();
-    
+
     auto pred_result = _predictive.analyze();
-    
+
     _cached_metrics.predictive_toxicity = pred_result.combined_score;
     _cached_metrics.toxic_score = pred_result.combined_score;
-    
+
     // extreme_signal作为独立保护层，在最终加权后叠加
     // 原代码在realized加权之前就把extreme_signal混入toxic_score，然后realized_weight
     // 会稀释extreme_signal的保护效果。例如:
@@ -142,7 +142,7 @@ void ToxicFlowDetector::updateCache() const
     //   原代码: toxic_score = max(0.3, 0.9*0.8)=0.72, 然后 0.6*0.72+0.4*realized = 被稀释
     //   修复后: 先算weighted_score = 0.6*0.3+0.4*realized, 再取max(weighted, 0.9*0.8)
     // extreme_signal是硬性保护信号，不应被realized稀释。
-    
+
     // Integrate realized toxicity into combined score
     // self_trade_weight controls how much realized adverse ratio contributes
     auto real_result = _realized.analyze();
@@ -153,21 +153,21 @@ void ToxicFlowDetector::updateCache() const
         _cached_metrics.toxic_score = (1.0 - realized_weight) * _cached_metrics.toxic_score
                                     + realized_weight * real_result.decayed_score;
     }
-    
+
     // Apply extreme_signal as independent protection layer AFTER realized weighting
     if (pred_result.extreme_signal > 0)
     {
-        _cached_metrics.toxic_score = std::max(_cached_metrics.toxic_score, 
+        _cached_metrics.toxic_score = std::max(_cached_metrics.toxic_score,
                                                pred_result.extreme_signal * _params.extreme_signal_weight);
     }
-    
+
     _cached_metrics.is_toxic = _cached_metrics.toxic_score > _params.adverse_threshold;
-    
+
     if (_cached_metrics.is_toxic)
     {
         _cached_metrics.toxic_side = pred_result.toxic_side;
     }
-    
+
     _cache_dirty = false;
 }
 
@@ -206,7 +206,7 @@ ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(
     _predictive.updateAlpha(alpha, TradeImbalanceResult{});
     _realized.onCalibration(self_calib);
     _realized.onBookAnalysis(book_sig.imbalance_score);
-    
+
     // Return combined analysis
     return analyze();
 }
@@ -236,20 +236,20 @@ void ToxicFlowDetector::feedBookSignal(const DepthImbalanceSignal& book_sig)
 void ToxicFlowDetector::runFusionCycle()
 {
     if (!_fusion_enabled) return;
-    
+
     // 无任何输入源(feedTickInference/feedBookSignal/addSelfTradeCalibration 均未被调用)时
     // fuse() 输出 direction=0 — 直接回灌会用空 alpha 覆盖 Predictive 的有效通道, 必须跳过.
     if (!_signal_fusion.hasAnySource()) return;
-    
+
     // Fuse all available signals into synthetic transaction data
     SyntheticTransactionData synth = _signal_fusion.fuse();
-    
+
     // Feed fused result back into toxicity detection
     AlphaResult alpha;
     alpha.alpha = synth.direction_signal;
     alpha.confidence = synth.confidence;
     alpha.timestamp = synth.timestamp;
-    
+
     onSyntheticAlpha(synth, alpha);
 }
 

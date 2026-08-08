@@ -1,13 +1,13 @@
 /*!
  * \file SpreadArbitrageManager.h
  * \brief Main Manager for Cross-Term Spread Arbitrage System
- * 
+ *
  * Coordinates all spread arbitrage components:
  *   - Spread calculation and monitoring
  *   - Strategy signal generation
  *   - Risk management
  *   - Order execution coordination
- * 
+ *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
@@ -46,18 +46,18 @@ struct SpreadArbitrageConfig
     bool enabled;                   ///< Enable spread arbitrage
     bool enhance_market_making;     ///< Enable MM enhancement
     bool use_hybrid_strategy;       ///< Use hybrid strategy combination
-    
+
     // Strategy selection
     ArbitrageStrategy primary_strategy;
-    
+
     // Portfolio settings
     double max_total_position;      ///< Maximum total position
     uint32_t max_pairs;             ///< Maximum number of pairs
-    
+
     // Signal settings
     double min_signal_confidence;   ///< Minimum confidence for execution
     uint32_t signal_cooldown_ms;    ///< Cooldown between signals
-    
+
     // Integration settings
     double mm_enhancement_weight;   ///< Weight of MM enhancement signals
 
@@ -87,11 +87,11 @@ struct StrategyInstance
 {
     std::string pair_id;
     ArbitrageStrategy strategy_type;
-    
+
     /// 策略插件列表 (hybrid 模式可多个, 单策略模式取 front)
     /// 替代原先 4 个类型成员 + else-if 链, 新增策略无需改本结构
     std::vector<std::unique_ptr<ISpreadStrategy>> strategies;
-    
+
     StrategyInstance() = default;
     StrategyInstance(StrategyInstance&&) = default;
     StrategyInstance& operator=(StrategyInstance&&) = default;
@@ -108,7 +108,7 @@ using SpreadSignalCallback = std::function<void(const SpreadSignal&)>;
 using RiskAlertCallback = std::function<void(const RiskAlert&)>;
 
 /// Callback for quoting adjustments
-using QuotingAdjustCallback = std::function<void(const std::string& pair_id, 
+using QuotingAdjustCallback = std::function<void(const std::string& pair_id,
                                                    const QuotingAdjustment&)>;
 
 //==============================================================================
@@ -120,94 +120,94 @@ class SpreadArbitrageManager
 public:
     SpreadArbitrageManager();
     ~SpreadArbitrageManager() = default;
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     void setConfig(const SpreadArbitrageConfig& config) { _config = config; }
 
     /// v7.1: 注入 replay 时钟 (overshoot 冷却等跨线程时间判定统一基准;
     /// 回测墙钟冷却随机器速度漂移 → 不可复现). atomic 因 arb 线程读.
     void setNowMs(uint64_t ms) { _now_ms.store(ms, std::memory_order_relaxed); }
     const SpreadArbitrageConfig& getConfig() const { return _config; }
-    
+
     /// Load configuration from YAML file
     /// @param config_file Path to spread_arbitrage.yaml
     /// @return true if successful, false otherwise
     bool loadConfig(const std::string& config_file);
-    
+
     void setCalculatorConfig(const SpreadCalculatorConfig& config);
     void setRiskConfig(const SpreadRiskConfig& config);
     void setMmEnhancerConfig(const MmEnhancerConfig& config);
-    
+
     /// Set expiry date callback for risk manager
     void setExpiryDateCallback(ExpiryDateCallback callback);
-    
+
     /// Set current trading date for expiry calculation
     void setCurrentDate(uint32_t current_date);
-    
+
     //==========================================================================
     // Spread Pair Management
     //==========================================================================
-    
+
     /// Add a spread pair for trading
     bool addSpreadPair(const SpreadPairConfig& pair_config);
-    
+
     /// Remove a spread pair
     void removeSpreadPair(const std::string& pair_id);
-    
+
     /// Get all configured pairs
     std::vector<std::string> getSpreadPairs() const;
-    
+
     //==========================================================================
     // Data Input
     //==========================================================================
-    
+
     /// Process incoming tick
     void onTick(const std::string& code, double price, double multiplier, uint64_t timestamp);
-    
+
     /// Process incoming WTSTickData
     void onWtTick(wtp::WTSTickData* tick);
-    
+
     //==========================================================================
     // Signal Generation
     //==========================================================================
-    
+
     /// Generate signals for all pairs
     std::vector<SpreadSignal> generateSignals(uint64_t current_time);
-    
+
     /// Generate signal for specific pair
     SpreadSignal generateSignal(const std::string& pair_id, uint64_t current_time);
-    
+
     //==========================================================================
     // Market Making Integration
     //==========================================================================
-    
+
     /// Get quoting adjustment for a pair
     QuotingAdjustment getQuotingAdjustment(const std::string& pair_id, uint64_t current_time);
-    
+
     /// Check if should pause quoting
     bool shouldPauseQuoting(const std::string& code, bool is_bid) const;
-    
+
     //==========================================================================
     // Position Management
     //==========================================================================
-    
+
     /// Update position for a pair
-    void updatePosition(const std::string& pair_id, 
+    void updatePosition(const std::string& pair_id,
                         double leg1_pos, double leg2_pos,
                         double unrealized_pnl);
-    
+
     /// 从注入的 Portfolio(SSOT) 回填所有 pair 的腿持仓 → spread_position。
     /// 每 tick 调用一次(processSpreadArbitrage), 使策略的退出/止损分支与
     /// 风控仓位检查能读到真实仓位。旧代码 updatePosition 无调用者,
     /// spread_position 恒 0, 全部退出/止损分支为死代码.
     void refreshPositionsFromPortfolio();
-    
+
     /// Get current state for a pair
     SpreadState getSpreadState(const std::string& pair_id) const;
-    
+
     /// Get all pair states
     std::vector<SpreadState> getAllStates() const;
 
@@ -226,7 +226,7 @@ public:
     /// @param pair_id Spread pair id (from consumePairTag)
     /// @param filled_qty Filled quantity (absolute, single-leg fill)
     void onArbOrderFilled(const std::string& pair_id, double filled_qty);
-    
+
     /// 信号在执行器侧被丢弃(未提交任何订单)时释放 in_flight。
     /// B-3 门在信号通过时即置 in_flight; 若执行器因 confidence 过滤/调价超限/
     /// 队列满而丢弃, 不回收则该 pair 卡死至超时(60s+), 期间完全禁发.
@@ -240,63 +240,63 @@ public:
     /// AsyncArbitrageExecutor derives from std::chrono::high_resolution_clock.
     /// Units MUST match — both are milliseconds.
     void setInFlightTimeoutMs(uint64_t milliseconds) { _in_flight_timeout_ms = milliseconds; }
-    
+
     //==========================================================================
     // Risk Management
     //==========================================================================
-    
+
     /// Get current risk summary
     PortfolioRiskSummary getRiskSummary() const;
-    
+
     /// Check if position is allowed
     bool canOpenPosition(const std::string& pair_id, double size) const;
-    
+
     /// Get active risk alerts
     std::vector<RiskAlert> getActiveAlerts() const;
-    
+
     //==========================================================================
     // Callbacks
     //==========================================================================
-    
+
     void setSignalCallback(SpreadSignalCallback callback) { _signal_callback = callback; }
     void setAlertCallback(RiskAlertCallback callback) { _alert_callback = callback; }
     void setQuotingCallback(QuotingAdjustCallback callback) { _quoting_callback = callback; }
-    
+
     /// Set contract multiplier for a specific contract code
     void setContractMultiplier(const std::string& code, double multiplier) { _contract_multipliers[code] = multiplier; }
-    
+
     //==========================================================================
     // Management
     //==========================================================================
-    
+
     void reset();
     void enable() { _config.enabled = true; }
     void disable() { _config.enabled = false; }
     bool isEnabled() const { return _config.enabled; }
-    
+
     size_t getPairCount() const { return _strategies.size(); }
-    
+
 private:
     //==========================================================================
     // Internal Methods
     //==========================================================================
-    
+
     void initializeStrategy(StrategyInstance& instance, const SpreadPairConfig& config);
-    SpreadSignal combineSignals(const std::vector<SpreadSignal>& signals, 
+    SpreadSignal combineSignals(const std::vector<SpreadSignal>& signals,
                                  const SpreadState& state,
                                  uint64_t current_time);
     void dispatchSignal(const SpreadSignal& signal);
     void checkRiskAlerts();
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     SpreadArbitrageConfig _config;
     SpreadCalculatorConfig _calc_config;
     SpreadRiskConfig _risk_config;
     MmEnhancerConfig _mm_config;
-    
+
     // Statistical sub-strategy default parameters (from config file)
     // A9: 作为 pair 级参数的默认值来源 (pair 级未配置时回落), 键名与 spread_arbitrage.yaml 对齐
     uint32_t _default_mr_half_life = 100;
@@ -312,38 +312,38 @@ private:
     double   _default_tf_breakout_threshold = 1.5;
     double   _default_tf_stop_loss_pct = 0.02;
     uint32_t _default_tf_max_trend_bars = 50;
-    
+
     //==========================================================================
     // Components
     //==========================================================================
-    
+
     std::unique_ptr<SpreadCalculatorManager> _calculator_manager;
     std::unique_ptr<SpreadRiskManager> _risk_manager;
     std::unique_ptr<MarketMakingEnhancer> _mm_enhancer;
-    
+
     //==========================================================================
     // Strategy Instances
     //==========================================================================
-    
+
     wtp::wt_hashmap<std::string, StrategyInstance> _strategies;
     wtp::wt_hashmap<std::string, SpreadPairConfig> _pair_configs;
-    
+
     //==========================================================================
     // Position Tracking
     //==========================================================================
-    
+
     wtp::wt_hashmap<std::string, SpreadState> _pair_states;  ///< Spread state per pair
     // alignas(64)+填充: 主/arb 线程高频争用, 隔离缓存行防 false sharing
     alignas(64) mutable std::atomic_flag _pair_states_spin = ATOMIC_FLAG_INIT;  ///< Protects _pair_states
     char _pair_states_spin_pad[64]{};
-     
+
     //==========================================================================
     // Signal State
      //==========================================================================
-     
+
      wtp::wt_hashmap<std::string, uint64_t> _last_signal_time;
      wtp::wt_hashmap<std::string, SpreadSignal> _last_signals;
-    
+
     //==========================================================================
     // Callbacks
     //==========================================================================
@@ -351,11 +351,11 @@ private:
     SpreadSignalCallback _signal_callback;
     RiskAlertCallback _alert_callback;
     QuotingAdjustCallback _quoting_callback;
-    
+
     //==========================================================================
     // Contract Multipliers
     //==========================================================================
-    
+
     wtp::wt_hashmap<std::string, double> _contract_multipliers;  ///< Per-contract multiplier lookup
 
     //==========================================================================

@@ -1,7 +1,7 @@
 /*!
  * \file SelfTradePrevention.cpp
  * \brief Self-Trade Prevention Implementation (UnifiedOrderTracker Wrapper)
- * 
+ *
  * All order tracking is delegated to UnifiedOrderTracker.
  * This class provides legacy API compatibility.
  */
@@ -15,7 +15,7 @@ namespace futu {
 // Order Tracking (delegated to UnifiedOrderTracker)
 //==========================================================================
 
-void SelfTradePrevention::trackMMOrder(const std::string& code, uint32_t order_id, 
+void SelfTradePrevention::trackMMOrder(const std::string& code, uint32_t order_id,
                                         double price, double qty, bool is_buy, uint64_t timestamp)
 {
     if (!_tracker)
@@ -23,7 +23,7 @@ void SelfTradePrevention::trackMMOrder(const std::string& code, uint32_t order_i
         WTSLogger::error("SelfTradePrevention::trackMMOrder: UnifiedOrderTracker not set");
         return;
     }
-    
+
     // Use level_index = 0 for legacy API (no level concept)
     _tracker->trackMMOrder(order_id, 0, code, price, qty, 0.0, timestamp, is_buy);
 }
@@ -55,24 +55,24 @@ SelfTradeCheckResult SelfTradePrevention::checkArbitrageOrder(const ArbitrageOrd
     return checkOrder(request.code, request.is_buy, request.price, request.is_market_order);
 }
 
-SelfTradeCheckResult SelfTradePrevention::checkOrder(const std::string& code, bool is_buy, 
+SelfTradeCheckResult SelfTradePrevention::checkOrder(const std::string& code, bool is_buy,
                                                       double price, bool is_market_order) const
 {
     SelfTradeCheckResult result;
-    
+
     if (!_config.enabled || !_tracker)
         return result;
-    
+
     // Use UnifiedOrderTracker's self-trade check
     auto utResult = _tracker->checkSelfTrade(code, is_buy, price, is_market_order);
-    
+
     // Convert to legacy result
     result.has_risk = utResult.has_risk;
     result.risk_code = utResult.risk_code;
     result.conflict_price = utResult.conflict_price;
     result.conflict_qty = utResult.conflict_qty;
     result.conflicting_order_ids = utResult.conflicting_order_ids;
-    
+
     // Convert action
     switch (utResult.recommended_action)
     {
@@ -89,9 +89,9 @@ SelfTradeCheckResult SelfTradePrevention::checkOrder(const std::string& code, bo
             result.recommended_action = SelfTradeCheckResult::Action::ADJUST_PRICE;
             break;
     }
-    
+
     result.adjusted_price = utResult.adjusted_price;
-    
+
     return result;
 }
 
@@ -102,9 +102,9 @@ SelfTradeCheckResult SelfTradePrevention::checkOrder(const std::string& code, bo
 std::vector<ActiveOrder> SelfTradePrevention::getMMBuyOrders(const std::string& code) const
 {
     std::vector<ActiveOrder> result;
-    
+
     if (!_tracker) return result;
-    
+
     auto orderIds = _tracker->getMMBuyOrderIds(code);
     for (uint32_t id : orderIds)
     {
@@ -122,16 +122,16 @@ std::vector<ActiveOrder> SelfTradePrevention::getMMBuyOrders(const std::string& 
             result.push_back(order);
         }
     }
-    
+
     return result;
 }
 
 std::vector<ActiveOrder> SelfTradePrevention::getMMSellOrders(const std::string& code) const
 {
     std::vector<ActiveOrder> result;
-    
+
     if (!_tracker) return result;
-    
+
     auto orderIds = _tracker->getMMSellOrderIds(code);
     for (uint32_t id : orderIds)
     {
@@ -149,7 +149,7 @@ std::vector<ActiveOrder> SelfTradePrevention::getMMSellOrders(const std::string&
             result.push_back(order);
         }
     }
-    
+
     return result;
 }
 

@@ -1,7 +1,7 @@
 /*!
 * \file UftFutuMmStrategy.cpp
 * \brief GLFT+Alpha Market-Making Strategy Implementation (as UFT Strategy)
-* 
+*
 * 集成业务模块：
 *   - FutuPortfolio: 持仓管理、Delta计算、对冲
 *   - FutuQuoter: 多档位报价执行
@@ -119,10 +119,10 @@ return node ? node->asString() : defVal;
 
 /**
 * @brief 将 fullCode 转换为 stdCode 格式
-* 
+*
 * fullCode 格式: SHFE.ag2606 (交易所.合约代码)
 * stdCode 格式:  SHFE.ag.2606 (交易所.品种.月份)
-* 
+*
 * 使用 CodeHelper::rawMonthCodeToStdCode 实现转换
 */
 std::string fullCodeToStdCode(const std::string& fullCode)
@@ -553,7 +553,7 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     const double ask0 = tick->askprice(0);
     double mid = (bid0 > 0 && ask0 > 0) ? (bid0 + ask0) / 2.0 : 0.0;
     handleMarketDataUpdate(stdCode, tick, mid);
-    
+
     // 3.5 PerformanceAnalyzer tick 更新 (真实 adverse selection 追踪)
     if (_perf_analyzer && mid > 0)
         _perf_analyzer->onTickUpdate(stdCode, mid, tick->actiontime());
@@ -651,7 +651,7 @@ bool isLong, uint32_t offset, double vol, double price)
 }
 
 void UftFutuMmStrategy::on_order(IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
-bool isLong, uint32_t offset, double totalQty, 
+bool isLong, uint32_t offset, double totalQty,
 double leftQty, double price, bool isCanceled)
 {
     FUTU_CB_LOCK_GUARD();  // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
@@ -730,7 +730,7 @@ void UftFutuMmStrategy::on_params_updated()
     // v7.4 P0-2: 实盘回调多线程 (MdSpi/TdSpi/ticker), 外部锁串行化
     FUTU_CB_LOCK_GUARD();
     WTSLogger::info("UftFutuMmStrategy[{}] === PARAMS HOT UPDATE ===", id());
-    
+
     // 热参数应用已拆分至 FutuHotParamManager (架构重构 C2)
     FutuHotParamManager::Targets t;
     t.config = &_config;
@@ -740,7 +740,7 @@ void UftFutuMmStrategy::on_params_updated()
     t.coordinator = _coordinator.get();
     t.portfolio = _portfolio.get();
     _hot_mgr.applyAll(t, id());
-    
+
     WTSLogger::info("UftFutuMmStrategy[{}] === HOT UPDATE COMPLETE ===", id());
 }
 
@@ -757,21 +757,21 @@ class FutuStrategyFact : public IUftStrategyFact
 public:
     FutuStrategyFact() {}
     virtual ~FutuStrategyFact() {}
-    
+
     virtual const char* getName() override { return "FutuStraFact"; }
-    
+
     virtual void enumStrategy(FuncEnumUftStrategyCallback cb) override
     {
         cb(getName(), "FutuMM", true);
     }
-    
+
     virtual UftStrategy* createStrategy(const char* name, const char* id) override
     {
         if (strcmp(name, "FutuMM") == 0)
             return new futu::UftFutuMmStrategy(id);
         return nullptr;
     }
-    
+
     virtual bool deleteStrategy(UftStrategy* stra) override
     {
         delete stra;
@@ -784,7 +784,7 @@ extern "C" {
     {
         return new FutuStrategyFact();
     }
-    
+
     EXPORT_FLAG void deleteStrategyFact(IUftStrategyFact* &fact)
     {
         if (fact)

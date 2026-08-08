@@ -1,14 +1,14 @@
 /*!
  * \file UftFutuMmStrategy.h
  * \brief GLFT+Alpha Market-Making Strategy as UFT Strategy
- * 
+ *
  * 实现GLFT+Alpha做市框架：
  *   - GLFT模型：计算基础价差和库存偏移
  *   - Alpha预测：OFI + Trade Imbalance + Lead-Lag
  *   - 信号融合：Fair Value = Mid + η * α
  *   - 报价计算：P_bid = FairValue - δ/2 - Skew
  *               P_ask = FairValue + δ/2 - Skew
- * 
+ *
  * 作为标准UFT策略运行，通过 WtUftRunner 启动
  */
 #pragma once
@@ -83,9 +83,9 @@ struct ContractInfo {
 };
 
 /// 期货做市策略配置
-/// 
+///
 /// 注意：模块参数已移至独立配置文件管理：
-///   - SpreadOptimizer, AlphaEngine, ToxicityDetector, MarketState, AutoCancel 
+///   - SpreadOptimizer, AlphaEngine, ToxicityDetector, MarketState, AutoCancel
 ///     参数在 coordinator.yaml 的 modules 节点
 ///   - SpreadArbitrage 参数在 spread_arbitrage.yaml
 ///   - SelfTradePrevention 参数在 coordinator.yaml 的 modules 节点
@@ -95,13 +95,13 @@ struct FutuMmConfig
     std::string coordinator_config;
     std::string spread_arbitrage_config;
     bool is_backtest = false;
-    
+
     struct Portfolio {
         double max_delta;
         double hedge_ratio;
         Portfolio() : max_delta(50.0), hedge_ratio(1.0) {}
     } portfolio;
-    
+
     struct Quoting {
         uint32_t num_levels;
         double base_spread;
@@ -135,7 +135,7 @@ struct FutuMmConfig
             , always_obligation(true)
             , obligation_level(0), scout_qty(1.0) {}
     } quoting;
-    
+
     struct Risk {
         double max_exposure;
         double max_daily_loss;
@@ -173,7 +173,7 @@ struct FutuMmConfig
             , delta_rate_window_sec(2), delta_rate_cooldown_ms(15000)
             , auto_clear_irreversible_on_reset(false) {}
     } risk;
-    
+
     struct Closeout {
         uint32_t minutes_before;       // 全天收盘前N分钟触发平仓
         bool flatten_position;
@@ -198,7 +198,7 @@ struct FutuMmConfig
             , depth_ratio_passive(0.3), depth_ratio_mid(0.5), depth_ratio_aggr(0.8)
             , sweep_threshold_ms(5000), sweep_ticks(3), use_fak(true) {}
     } closeout;
-    
+
     struct Perf {
         uint64_t monitor_latency_threshold;
         bool enabled;
@@ -209,7 +209,7 @@ struct FutuMmConfig
             : monitor_latency_threshold(100000), enabled(true)
             , log_interval(1000), warn_threshold_ns(10000), critical_threshold_ns(50000) {}
     } perf;
-    
+
     struct Modules {
         bool use_spread_optimizer;
         bool use_toxicity_detector;
@@ -225,7 +225,7 @@ struct FutuMmConfig
             , use_performance_analyzer(false), use_market_making(true)
             , use_spread_arbitrage(false), use_async_arb_thread(true) {}
     } modules;
-    
+
     struct OrderControl {
         uint32_t order_error_threshold;
         uint32_t max_orders;
@@ -252,39 +252,39 @@ class UftFutuMmStrategy : public UftStrategy
 public:
     UftFutuMmStrategy(const char* id);
     virtual ~UftFutuMmStrategy();
-    
+
     virtual const char* getName() override { return "FutuMM"; }
     virtual const char* getFactName() override { return "FutuStraFact"; }
-    
+
     virtual bool init(WTSVariant* cfg) override;
-    
+
     //==========================================================================
     // UFT 策略回调
     //==========================================================================
-    
+
     virtual void on_init(IUftStraCtx* ctx) override;
     virtual void on_session_begin(IUftStraCtx* ctx, uint32_t uTDate) override;
     virtual void on_session_end(IUftStraCtx* ctx, uint32_t uTDate) override;
-    
+
     virtual void on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* newTick) override;
     virtual void on_order_queue(IUftStraCtx* ctx, const char* stdCode, WTSOrdQueData* newOrdQue) override;
     virtual void on_order_detail(IUftStraCtx* ctx, const char* stdCode, WTSOrdDtlData* newOrdDtl) override;
     virtual void on_transaction(IUftStraCtx* ctx, const char* stdCode, WTSTransData* newTrans) override;
-    
-    virtual void on_trade(IUftStraCtx* ctx, uint32_t localid, const char* stdCode, 
+
+    virtual void on_trade(IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
                          bool isLong, uint32_t offset, double vol, double price) override;
     virtual void on_order(IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
-                         bool isLong, uint32_t offset, double totalQty, double leftQty, 
+                         bool isLong, uint32_t offset, double totalQty, double leftQty,
                          double price, bool isCanceled) override;
     virtual void on_position(IUftStraCtx* ctx, const char* stdCode, bool isLong,
                             double prevol, double preavail, double newvol, double newavail) override;
-    
+
     virtual void on_channel_ready(IUftStraCtx* ctx) override;
     virtual void on_channel_lost(IUftStraCtx* ctx) override;
-    
+
     /// 报单回报回调 - 处理报单错误（如保证金不足）
     virtual void on_entrust(uint32_t localid, bool bSuccess, const char* message) override;
-    
+
     /// 参数热更新回调
     virtual void on_params_updated() override;
 
@@ -298,7 +298,7 @@ private:
     //==========================================================================
     // 内部方法
     //==========================================================================
-    
+
     /// 初始化业务模块
     void initBusinessModules(wtp::IUftStraCtx* ctx);
 
@@ -307,23 +307,23 @@ private:
 
     /// 检查毒性并决定是否熔断
     bool checkToxicityAndCircuitBreak(IUftStraCtx* ctx);
-    
+
     /// 处理跨期价差套利信号
-    
+
     /// 处理套利成交回报
     //==========================================================================
     // on_tick 子函数 (P2-1a: 从 on_tick 拆出)
     //==========================================================================
-    
+
     /// 报价暂停条件恢复（ERROR 状态指数退避恢复）
     void handleQuotingAutoResume();
-    
+
     /// 更新行情数据（markToMarket + correlation + hedge_ratio）
     void handleMarketDataUpdate(const char* stdCode, WTSTickData* tick, double mid);
-    
+
     /// LeadLag 跨合约数据推送
     void handleLeadLagPush(const char* stdCode, WTSTickData* tick, double mid);
-    
+
     /// Coordinator 主处理 + closeout 执行驱动
     void handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick, uint64_t now_ms = 0);
 
@@ -331,89 +331,89 @@ private:
     /// pair 映射与 tracker 订单会永久泄漏 -> closeout inflight 守卫卡死/util 虚高)。
     /// onOrderDone/untrackOrder 对不存在 id 均 no-op。
     void finalizeOrder(uint32_t localid);
-    
+
 private:
     FutuMmConfig _config;
-    
+
     /// 5A-3: 模块装配器 (initBusinessModules 外移, 引用别名绑定下列成员)
     friend class FutuModuleAssembler;
     /// 5A-3: 运行时事件处理 (on_trade/on_channel_ready 外移)
     friend class FutuRuntimeOps;
-    
+
     //==========================================================================
     // 业务模块实例
     //==========================================================================
-    
+
     /// 组合风险管理（持仓、Delta、倾斜、对冲）
     std::unique_ptr<FutuPortfolio> _portfolio;
-    
+
     /// 相关性管理器 (全局多合约)
     std::unique_ptr<CorrelationManager> _correlation_manager;
-    
+
     /// 多档位报价引擎（每合约一个）
     wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>> _quoters;
-    
+
     /// GLFT价差优化器（每合约一个）
     wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>> _spread_optimizers;
-    
 
-    
+
+
     /// 统一订单跟踪器 (FutuQuoter, AutoCancelPolicy, SelfTradePrevention 共享)
     std::unique_ptr<UnifiedOrderTracker> _order_tracker;
-    
+
     /// 策略协调器 (核心处理流水线)
     std::unique_ptr<StrategyCoordinator> _coordinator;
-    
+
     std::unordered_map<std::string, std::unique_ptr<MarketDataContext>> _market_data;
-    
+
     /// 信号聚合器 (新信号架构)
     std::unordered_map<std::string, std::unique_ptr<SignalAggregator>> _signal_aggregators;
-    
+
     /// 风险监控
     std::unique_ptr<FutuRiskMonitor> _risk_monitor;
 
     /// R1: EventNotifier 指针 (WtUftRunner 注入; RiskMonitor 直达 + ArbManager 回调转发)
     wtp::EventNotifier* _event_notifier = nullptr;
-    
+
     /// 收盘平仓编排器 (closeout 驱动职责, 架构重构 C3)
     CloseoutOrchestrator _closeout_orch;
-    
+
     /// 渐进式收盘对冲执行器 (urgency-driven)
     std::unique_ptr<CloseoutExecutor> _closeout_executor;
-    
+
     /// 毒性检测器 (VPIN)
     std::unique_ptr<ToxicFlowDetector> _toxicity_detector;
-    
+
     //==========================================================================
     // 综合信号组件 (for markets without L2 transaction data)
     //==========================================================================
 
     /// 自身成交校准器
-    std::unique_ptr<SelfTradeCalibrator> _self_trade_calibrator;    
+    std::unique_ptr<SelfTradeCalibrator> _self_trade_calibrator;
     //==========================================================================
     // 性能监控
     //==========================================================================
-    
+
     /// 性能监控
     std::unique_ptr<PerformanceMonitor> _performance_monitor;
-    
+
     /// 绩效分析器
     std::unique_ptr<PerformanceAnalyzer> _perf_analyzer;
 
     /// 监控数据桥 (WtMonSvr GUI: stradata/funds.csv 落盘, 默认关)
     MonitorBridge _mon_bridge;
-    
 
-    
+
+
     /// 跨期价差套利管理器
     std::unique_ptr<SpreadArbitrageManager> _spread_arb_manager;
-    
+
     /// 自成交防护模块
     std::unique_ptr<SelfTradePrevention> _stp;
-    
+
     /// 统一下单路由器 (套利/对冲/平仓)
     std::unique_ptr<OrderRouter> _order_router;
-    
+
     /// 异步套利执行器
     std::unique_ptr<AsyncArbitrageExecutor> _async_arb;
 
@@ -422,14 +422,14 @@ private:
 
     std::vector<RiskViolation> _violations_buf;   // 风控违规复用缓冲 (仅 TdSpi 路径 RuntimeOps 使用;
                                                   //   coordinator 有独立成员供 MdSpi checkRisk, 双缓冲零共享)
-    
+
     //==========================================================================
     // 辅助数据
     //==========================================================================
-    
+
     // 合约信息缓存 (ContractInfo 已移至命名空间级)
     std::vector<ContractInfo> _contract_infos;
-    
+
     // 当前 tick 中间价缓存 (v7.6: init 定码预填, 值原子; MdSpi 写/TdSpi 读,
     //   init 后 map 结构不可变 — unordered_dense rehash 需移动元素, 原子值不可移动
     //   故用 unique_ptr 包装)
@@ -450,43 +450,43 @@ private:
 
     // P0-1 (v7.4): 统一强平/减仓原语 (无状态, setDeps 即用)
     RiskLiquidator _liquidator;
-    
+
     // 交易时段信息缓存（初始化时一次性缓存，避免每次 tick 重复查询）
     struct SessionCache {
         wtp::WTSCommodityInfo* commInfo;
         wtp::WTSSessionInfo* sessInfo;
-        
+
         SessionCache() : commInfo(nullptr), sessInfo(nullptr) {}
         SessionCache(wtp::WTSCommodityInfo* c, wtp::WTSSessionInfo* s) : commInfo(c), sessInfo(s) {}
     };
     wtp::wt_hashmap<std::string, SessionCache> _session_cache;
-    
+
     // PortfolioContext 缓存（避免每tick分配）
     mutable PortfolioContext _cached_portfolio_ctx;
     mutable std::atomic<bool> _portfolio_ctx_dirty{true};   // v7.6: MdSpi/TdSpi 双写
-    
+
     // 运行状态 (v7.6: 全部原子化 — MdSpi/TdSpi 跨线程读写)
     std::atomic<bool> _channel_ready{false};
     std::atomic<bool> _price_stale{false};  ///< P1-4: 价格过期标志（channel恢复后到首tick之间）
     TradingState _trading_state;           // 统一交易状态（替代5个bool）
-    
+
     // 保存ctx指针，供on_entrust等无ctx回调使用
     IUftStraCtx* _main_ctx = nullptr;
-    
+
     // 风险控制状态（由 FutuRiskMonitor 管理）
     std::unordered_map<std::string, bool> _blocked_contracts; // 单合约封锁
-    
+
     // 当前 tick 数据缓存（避免重复计算）
     uint64_t _current_tick_timestamp;  // 当前 tick 时间戳
     double _current_tick_mid;          // 当前 tick 中间价
-    
+
     // 下单错误处理（统一处理所有下单错误）
     std::atomic<uint32_t> _order_error_count{0};     // 连续下单错误计数 (v7.6 原子)
     // order_error_threshold: use _config.order_control.order_error_threshold directly
     std::atomic<uint64_t> _quoting_paused_since{0};  // ERROR qphase 开始时间戳(ms)，0=未暂停
-    
+
     // 收盘前平仓状态 (now managed by FutuRiskMonitor state machine)
-    
+
     // 参数调优计数器
     uint32_t _tick_count;        // Tick计数器
     std::atomic<uint64_t> _exchange_time_ms{0};     // v7.1: 最近 tick 的 replay 时间 (actiondate/actiontime 推出, 跨日单调; 节流统一时间基准)
@@ -494,7 +494,7 @@ private:
     uint64_t _tsc_tick0 = 0;            // P0: on_tick 入口 rdtsc (perf monitor 启用时), tick-to-quote 全链路测量
     bool _is_backtest = false;           // 回测标志: on_trade 中只撤不挂(避免 _orders 迭代器失效)
     uint32_t _param_update_interval; // 参数更新间隔(ticks)
-    
+
     //==========================================================================
     // 热更新参数（运行时可修改，无需重启）
     // 仅包含直接影响报价价格计算的参数

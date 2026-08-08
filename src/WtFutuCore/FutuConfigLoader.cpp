@@ -50,7 +50,7 @@ ci.max_position = readDouble(cfgItem, "maxPosition", -1.0);
 ci.max_delta = readDouble(cfgItem, "maxDelta", -1.0);
 // 单合约目标持仓，默认0（平衡），超过时报价倾向于减仓
 ci.target_position = readDouble(cfgItem, "targetPosition", 0.0);
-	// 初始本地持仓: 非零时同步覆盖local_net (用于单策略账户管理遗留持仓)
+    // 初始本地持仓: 非零时同步覆盖local_net (用于单策略账户管理遗留持仓)
 
 _contract_infos.push_back(ci);
 }

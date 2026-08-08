@@ -1,7 +1,7 @@
 /*!
  * \file PerformanceAnalyzer.h
  * \brief Market Making Performance Analysis
- * 
+ *
  * Comprehensive PnL attribution and performance metrics:
  *   - Spread capture analysis
  *   - Inventory PnL decomposition
@@ -41,14 +41,14 @@ struct TradeRecord
     uint64_t    timestamp;
     double      alpha_at_trade;     ///< Alpha signal at trade time
     double      volatility;         ///< Volatility at trade time
-    
+
     TradeRecord()
         : order_id(0), price(0), qty(0)
         , mid_at_trade(0), spread_at_trade(0)
         , is_buy(false), is_crossing(false)
         , timestamp(0), alpha_at_trade(0), volatility(0)
     {}
-    
+
     /// Calculate immediate PnL impact
     double immediatePnL() const
     {
@@ -57,12 +57,12 @@ struct TradeRecord
         else
             return (price - mid_at_trade) * qty;
     }
-    
+
     /// Calculate spread captured
     double spreadCaptured() const
     {
         if (spread_at_trade <= 0) return 0;
-        
+
         if (is_buy)
             return (mid_at_trade - price) / spread_at_trade;
         else
@@ -82,12 +82,12 @@ struct PnLAttribution
     double adverse_selection;   ///< Loss from adverse selection
     double alpha_pnl;           ///< PnL attributed to alpha signals
     double timing_pnl;          ///< PnL from execution timing
-    
+
     PnLAttribution()
         : spread_pnl(0), inventory_pnl(0)
         , adverse_selection(0), alpha_pnl(0), timing_pnl(0)
     {}
-    
+
     double total() const
     {
         return spread_pnl + inventory_pnl + alpha_pnl + timing_pnl - adverse_selection;
@@ -106,40 +106,40 @@ struct PerformanceMetrics
     double unrealized_pnl;      ///< Current unrealized PnL
     double total_volume;        ///< Total traded volume
     uint32_t total_trades;      ///< Number of trades
-    
+
     // Spread metrics
     double avg_spread_captured; ///< Average spread captured per trade
     double spread_capture_rate; ///< Ratio of captured spread to market spread
-    
+
     // Fill metrics
     double fill_rate;           ///< Fills / Quotes
     double cross_rate;          ///< Ratio of crossing trades
     double avg_fill_latency_us; ///< Average fill latency (microseconds)
-    
+
     // Risk metrics
     double max_drawdown;        ///< Maximum drawdown
     double sharpe_ratio;        ///< Sharpe ratio (annualized)
     double sortino_ratio;       ///< Sortino ratio
     double win_rate;            ///< Profitable trades / Total trades
-    
+
     // Adverse selection
     double adverse_ratio;       ///< Adverse selection / Total PnL (旧指标, 保留兼容)
     double real_adverse_per_vol; ///< 真实 adverse (成交后价格逆向) / volume (独立指标)
     double toxicity_events;     ///< Number of toxicity triggers
-    
+
     // Alpha performance
     double alpha_accuracy;      ///< Alpha signal accuracy
     double alpha_pnl_per_trade; ///< PnL per trade with strong alpha
-    
+
     // Inventory
     double avg_inventory;       ///< Average inventory held
     double inventory_turnover;  ///< Inventory turnover rate
     double max_inventory_held;  ///< Maximum inventory held
-    
+
     // Time
     uint64_t trading_time_sec;  ///< Total trading time
     uint32_t trading_days;      ///< Number of trading days
-    
+
     PerformanceMetrics()
         : total_pnl(0), unrealized_pnl(0), total_volume(0), total_trades(0)
         , avg_spread_captured(0), spread_capture_rate(0)
@@ -150,14 +150,14 @@ struct PerformanceMetrics
         , avg_inventory(0), inventory_turnover(0), max_inventory_held(0)
         , trading_time_sec(0), trading_days(0)
     {}
-    
+
     /// Calculate PnL per million traded
     double pnlPerMillion() const
     {
         if (total_volume <= 0) return 0;
         return total_pnl / total_volume * 1e6;
     }
-    
+
     /// Calculate PnL per day
     double pnlPerDay() const
     {
@@ -192,7 +192,7 @@ struct ConditionPerformance
     double volume;
     double win_rate;
     double avg_spread_captured;
-    
+
     ConditionPerformance()
         : condition(MarketCondition::NORMAL)
         , pnl(0), trade_count(0), volume(0)
@@ -208,7 +208,7 @@ struct ConditionPerformance
 struct AnalyzerConfig
 {
     double strong_alpha_threshold;
-    
+
     AnalyzerConfig()
         : strong_alpha_threshold(0.3)
     {}
@@ -220,87 +220,87 @@ class PerformanceAnalyzer
 public:
     PerformanceAnalyzer();
     ~PerformanceAnalyzer() = default;
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     void setConfig(const AnalyzerConfig& config) { _config = config; }
     const AnalyzerConfig& getConfig() const { return _config; }
-    
+
     //==========================================================================
     // Data Input
     //==========================================================================
-    
+
     /// Record a trade
     void recordTrade(const TradeRecord& trade);
-    
+
     /// Tick update — 用于回填成交后价格, 计算真实 adverse selection
     /// 每个新 tick 调用, 检查 pending trades 是否到达评估窗口
     void onTickUpdate(const std::string& code, double mid, uint64_t timestamp);
-    
+
     /// Record a quote (for fill rate calculation)
     void recordQuote(const std::string& code, double bidPrice, double askPrice,
                      double bidQty, double askQty, uint64_t timestamp);
-    
+
     /// Update current position
     void updatePosition(const std::string& code, double position, double avgCost);
-    
+
     /// Record toxicity event
     void recordToxicityEvent();
-    
+
     /// Record alpha signal outcome
     void recordAlphaSignal(double alpha, bool wasCorrect);
-    
+
     //==========================================================================
     // Analysis
     //==========================================================================
-    
+
     /// Get overall performance metrics
     PerformanceMetrics getMetrics() const;
-    
+
     /// Get PnL attribution
     PnLAttribution getPnLAttribution() const;
-    
+
     /// Get performance by market condition
     std::map<MarketCondition, ConditionPerformance> getPerformanceByCondition() const;
-    
+
     /// Get recent trades
     const RingBuffer<TradeRecord, 16384>& getRecentTrades() const { return _trades; }
-    
+
     //==========================================================================
     // Analysis Helpers
     //==========================================================================
-    
+
     /// Calculate adverse selection cost for a trade
     double calculateAdverseSelection(const TradeRecord& trade) const;
-    
+
     /// Determine market condition at a timestamp
     MarketCondition determineMarketCondition(uint64_t timestamp) const;
-    
+
     //==========================================================================
     // Reporting
     //==========================================================================
-    
+
     /// Generate summary report
     std::string generateSummaryReport() const;
-    
+
     //==========================================================================
     // Reset
     //==========================================================================
-    
+
     void reset();
     void resetDaily();
-    
+
 private:
     AnalyzerConfig _config;
-    
+
     // Trade history
     RingBuffer<TradeRecord, 16384> _trades;
-    
+
     // Quote count for fill rate
     uint32_t _quote_count;
-    
+
     // Position tracking
     struct PositionState {
         double position;
@@ -308,7 +308,7 @@ private:
         double realized_pnl;
     };
     wtp::wt_hashmap<std::string, PositionState> _positions;
-    
+
     // Running totals
     double _total_pnl;
     double _total_spread_captured;
@@ -316,30 +316,30 @@ private:
     double _total_volume;
     uint32_t _total_trades;
     uint32_t _winning_trades;
-    
+
     // Drawdown tracking
     double _peak_pnl;
     double _max_drawdown;
-    
+
     // Toxicity events
     uint32_t _toxicity_events;
-    
+
     // Alpha tracking
     uint32_t _alpha_signals;
     uint32_t _alpha_correct;
     double _alpha_pnl;
-    
+
     // PnL history for Sharpe calculation
     RingBuffer<double, 1024> _pnl_history;
-    
+
     // Market condition performance
     std::map<MarketCondition, ConditionPerformance> _condition_perf;
-    
+
     // Time tracking
     uint64_t _start_time;
     uint64_t _last_trade_time;
     uint32_t _trading_days;
-    
+
     // 真实 adverse selection 追踪: 成交后 N tick 价格变动
     struct PendingAdverse {
         std::string code;

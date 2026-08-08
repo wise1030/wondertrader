@@ -1,7 +1,7 @@
 /*!
  * \file FutuPortfolio.cpp
  * \brief Unified Portfolio Management Implementation
- * 
+ *
  * Merged from: InventoryManager + FutuPortfolio
  * Performance optimized: O(1) contract lookup via hash map
  */
@@ -56,7 +56,7 @@ RecursiveSpinGuard _g(_lock);
     // First contract becomes anchor by default
     if (_anchor_code.empty())
         _anchor_code = code;
-    
+
 }
 
 void FutuPortfolio::removeContract(const std::string& code)
@@ -68,7 +68,7 @@ RecursiveSpinGuard _g(_lock);
         return;
 
     size_t idx = it->second;
-    
+
     // If not the last element, swap with last and update its index
     if (idx != _contracts.size() - 1)
     {
@@ -78,7 +78,7 @@ RecursiveSpinGuard _g(_lock);
         _code_to_state[_contracts[idx].code] = idx;
     }
     _contracts.pop_back();
-    
+
     _code_to_state.erase(it);
 }
 
@@ -108,7 +108,7 @@ RecursiveSpinGuard _g(_lock);
     markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
-    
+
     cs->last_price = lastPrice;
     // v7.1: 分向簿有效时按方向分别计算浮盈 (与引擎口径一致,
     //       不受 MM+arb 交织对净额均价的污染影响)
@@ -129,7 +129,7 @@ RecursiveSpinGuard _g(_lock);
         // 平仓后清零浮盈, 避免残留浮盈与 realized_pnl 双重计数
         cs->unrealized_pnl = 0;
     }
-    
+
     // Update daily_pnl whenever markToMarket is called
     updateDailyPnL(code);
 }
@@ -162,7 +162,7 @@ RecursiveSpinGuard _g(_lock);
     markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
-    
+
     // daily_pnl = unrealized_pnl + realized_pnl
     cs->daily_pnl = cs->unrealized_pnl + cs->realized_pnl;
 }

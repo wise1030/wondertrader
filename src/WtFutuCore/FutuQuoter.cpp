@@ -34,7 +34,7 @@ RecursiveSpinGuard _g(_lock);
         _bid_levels[i].level_index = static_cast<uint8_t>(i);
         _ask_levels[i].is_bid = false;
         _ask_levels[i].level_index = static_cast<uint8_t>(i);
-        
+
         double qty = cfg.base_qty * std::pow(cfg.level_qty_multiplier, i);
         _level_qtys[i] = std::max(1.0, std::round(qty));
     }
@@ -611,7 +611,7 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty,
 RecursiveSpinGuard _g(_lock);
     // Find level using tracker or linear search
     QuoteLevel* level = nullptr;
-    
+
     if (_tracker)
     {
         UnifiedOrderInfo orderInfoBuf;
@@ -625,7 +625,7 @@ RecursiveSpinGuard _g(_lock);
                 level = &_ask_levels[idx];
         }
     }
-    
+
     if (!level)
     {
         for (auto& l : _bid_levels) {
@@ -639,7 +639,7 @@ RecursiveSpinGuard _g(_lock);
             }
         }
     }
-    
+
     if (level)
     {
         if (isCanceled || leftQty == 0)
@@ -655,7 +655,7 @@ RecursiveSpinGuard _g(_lock);
         {
             level->qty = leftQty;
             if (_tracker) _tracker->updateOrderQty(localid, leftQty);
-            
+
             if (_tracker)
             {
                 UnifiedOrderInfo orderInfoBuf;
@@ -667,7 +667,7 @@ RecursiveSpinGuard _g(_lock);
                         should_cancel = true;
                     else if (!orderInfo->isBid() && !_allow_ask)
                         should_cancel = true;
-                    
+
                     if (should_cancel && _ctx)
                     {
                         WTSLogger::warn("[QUOTER] Post-submit cancel: {} order {} entered UnTrd but side blocked, cancelling",
@@ -678,7 +678,7 @@ RecursiveSpinGuard _g(_lock);
                 }
             }
         }
-        
+
         // R3 v2: 触发 BilateralStats 更新（uTime_HHMM=0 表示调用方未传时间，跳过；
         // hasSessionInfo()=false 表示 sessinfo 注入失败，统计已 DISABLED）
         if (uTime_HHMM > 0 && _bilateral_stats.hasSessionInfo())

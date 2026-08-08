@@ -83,8 +83,8 @@ uint64_t gen = _deps.order_tracker->getGeneration();
 if (gen != _last_mm_generation)
 {
 _last_mm_generation = gen;
-_deps.async_arb->updateMMOrders(stdCode, 
-_deps.stp->getMMBuyOrders(stdCode), 
+_deps.async_arb->updateMMOrders(stdCode,
+_deps.stp->getMMBuyOrders(stdCode),
 _deps.stp->getMMSellOrders(stdCode));
 }
 }

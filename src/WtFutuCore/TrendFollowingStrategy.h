@@ -1,13 +1,13 @@
 /*!
  * \file TrendFollowingStrategy.h
  * \brief Trend Following Strategy for Spread Arbitrage
- * 
+ *
  * Strategy Logic:
  *   - Detect trend using MA crossover
  *   - Follow trend on momentum confirmation
  *   - Exit on trend reversal signal
  *   - Position size scales with trend strength
- * 
+ *
  * Part of WtFutuCore - Futures High-Frequency Market Making Engine
  */
 #pragma once
@@ -29,22 +29,22 @@ struct TrendFollowingConfig
     uint32_t fast_ma_period;        ///< Fast MA period
     uint32_t slow_ma_period;        ///< Slow MA period
     uint32_t signal_period;         ///< Signal line period
-    
+
     double min_trend_strength;      ///< Minimum trend strength for entry
     double max_adx;                 ///< Maximum ADX for range filter
-    
+
     double entry_threshold;         ///< MA crossover threshold
     double exit_threshold;          ///< Exit threshold (MA re-cross)
-    
+
     double max_position;            ///< Maximum position size
     double base_qty;                ///< Base position size
-    
+
     double stop_loss_pct;           ///< Stop loss percentage, default 2%
     uint32_t max_trend_bars;        ///< Max bars in trend before exhaustion exit
-    
+
     uint32_t confirmation_bars;     ///< Bars to confirm trend
     bool use_volume_filter;         ///< Filter by volume
-    
+
     TrendFollowingConfig()
         : fast_ma_period(20)
         , slow_ma_period(60)
@@ -74,15 +74,15 @@ struct TrendState
     double ma_diff_pct;             ///< MA difference percentage
     double trend_strength;          ///< Trend strength (slope)
     double momentum;                ///< Momentum indicator
-    
+
     int trend_direction;            ///< 1 = uptrend, -1 = downtrend, 0 = neutral
     int bars_in_trend;              ///< Number of bars in current trend
-    
+
     double entry_price;             ///< Entry price for stop loss calculation
-    
+
     bool is_strong_trend;           ///< Is trend strong enough for entry
     bool is_trend_reversal;         ///< Is trend reversing
-    
+
     TrendState()
         : fast_ma(0), slow_ma(0)
         , ma_diff(0), ma_diff_pct(0)
@@ -104,18 +104,18 @@ class TrendFollowingStrategy : public ISpreadStrategy
 public:
     TrendFollowingStrategy();
     ~TrendFollowingStrategy() = default;
-    
+
     //==========================================================================
     // ISpreadStrategy Interface
     //==========================================================================
-    
+
     SpreadSignal generateSignal(const SpreadState& state, uint64_t current_time) override;
-    
+
     void update(const SpreadState& state, uint64_t timestamp) override
     {
         updateSpread(state.current_spread, timestamp);
     }
-    
+
     void configure(const SpreadPairConfig& cfg) override
     {
         _config.fast_ma_period = cfg.trend_ma_fast;
@@ -124,42 +124,42 @@ public:
         _config.stop_loss_pct = cfg.stop_loss_pct;
         _config.max_trend_bars = cfg.max_trend_bars;
     }
-    
+
     void reset() override;
-    
+
     const char* typeName() const override { return "trend_following"; }
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     void setConfig(const TrendFollowingConfig& config) { _config = config; }
     const TrendFollowingConfig& getConfig() const { return _config; }
-    
+
     //==========================================================================
     // Data Update
     //==========================================================================
-    
+
     /// Update with new spread value
     void updateSpread(double spread, uint64_t timestamp);
-    
+
     //==========================================================================
     // Analysis
     //==========================================================================
-    
+
     /// Get current trend state
     TrendState getTrendState() const { return _trend_state; }
-    
+
     /// Get trend direction (-1, 0, 1)
     int getTrendDirection() const { return _trend_state.trend_direction; }
-    
+
     static constexpr const char* getName() { return "TrendFollowing"; }
-    
+
 private:
     //==========================================================================
     // Internal Methods
     //==========================================================================
-    
+
     void updateTrendState();
     double calculateMA(const RingBuffer<double, 128>& data, uint32_t period) const;
     double calculateTrendStrength() const;
@@ -167,33 +167,33 @@ private:
     bool isConfirmedTrend() const;
     double calculatePositionSize(const TrendState& trend) const;
     double calculateConfidence(const TrendState& trend) const;
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
+
     TrendFollowingConfig _config;
-    
+
     //==========================================================================
     // Data History
     //==========================================================================
-    
+
     RingBuffer<double, 128> _spread_history;  // Power of 2
     uint64_t _last_update;
-    
+
     //==========================================================================
     // Moving Averages
     //==========================================================================
-    
+
     double _fast_ma;
     double _slow_ma;
     double _prev_fast_ma;
     double _prev_slow_ma;
-    
+
     //==========================================================================
     // Trend State
     //==========================================================================
-    
+
     TrendState _trend_state;
     int _prev_trend_direction;
     uint32_t _bars_in_current_trend;

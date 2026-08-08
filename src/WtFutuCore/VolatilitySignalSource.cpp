@@ -19,17 +19,17 @@ void RealizedVolSignalSource::setWindowSize(uint32_t windowSize)
 void RealizedVolSignalSource::update(const MarketDataContext& book)
 {
     if (!_enabled) return;
-    
+
     double mid = book.getMidPrice();
     if (mid <= 0) return;
-    
+
     _result.timestamp = book.getTimestamp();
-    
+
     // Incremental return calculation
     if (_last_mid > 0)
     {
         double ret = (mid - _last_mid) / _last_mid;
-        
+
         // Handle full buffer
         if (_returns.size() >= _window_size)
         {
@@ -38,15 +38,15 @@ void RealizedVolSignalSource::update(const MarketDataContext& book)
             _running_sum_sq -= old_ret * old_ret;
             _returns.pop();
         }
-        
+
         // Add new return
         _returns.push(ret);
         _running_sum += ret;
         _running_sum_sq += ret * ret;
-        
+
         updateVolatility();
     }
-    
+
     _last_mid = mid;
     _result.valid = (_returns.size() >= std::min(_window_size / 2, 5u));
 }
@@ -55,16 +55,16 @@ void RealizedVolSignalSource::updateVolatility()
 {
     double n = static_cast<double>(_returns.size());
     if (n < 2) return;
-    
+
     // Variance = E[X^2] - E[X]^2
     double mean = _running_sum / n;
     double variance = (_running_sum_sq / n) - (mean * mean);
-    
+
     // Bessel's correction
     variance *= n / (n - 1.0);
     _result.realized_vol = std::sqrt(std::max(0.0, variance));
     _result.composite_vol = _result.realized_vol;
-    
+
     // Direct tier classification from vol thresholds (no percentile binning).
     // Only 2 boundaries matter: ELEVATED (widen) and EXTREME (pause).
     double vol = _result.realized_vol;
@@ -74,7 +74,7 @@ void RealizedVolSignalSource::updateVolatility()
         _result.vol_tier = VolTier::ELEVATED;
     else
         _result.vol_tier = VolTier::NORMAL;
-    
+
     // Linear percentile mapping for SpreadOptimizer (sigma_sq) and ICWeightTracker (regime).
     // Maps [0, vol_extreme] -> [0, 85], caps at 100.
     _result.vol_percentile = std::min(100.0, vol / _vol_extreme * 85.0);

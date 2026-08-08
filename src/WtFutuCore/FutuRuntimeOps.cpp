@@ -232,7 +232,7 @@ _toxicity_detector->onSelfTradeCalibration(calibration);
     } else {
         actionStr = isOpen ? "OPEN_SHORT" : "CLOSE_SHORT";
     }
-    
+
     // 基于position变化判断实际效果
     // CTP的isLong+offset组合可能不反映实际持仓变化
     // 例如：ag2612有多仓24手时，OPEN_SHORT实际是平多（position减少）
@@ -250,7 +250,7 @@ _toxicity_detector->onSelfTradeCalibration(calibration);
             effectStr = "(flat)";
         }
     }
-    
+
     // F13: 实盘成交路径最大单笔开销 — fmt(0.5-1μs)+同步文件写(2-20μs)/笔。
     //   逐笔明细降 debug; info 每 50 笔采样一条保留可观测性。
     WTSLogger::debug("UftFutuMmStrategy[{}] TRADE: {} {} {}@{} | Delta: {} {}",
@@ -276,12 +276,12 @@ auto& violations = _violations_buf;
 bool hasHardBreach = false;
 for (const auto& v : violations)
 {
-if (v.type == RiskLimitType::POSITION_NET || 
+if (v.type == RiskLimitType::POSITION_NET ||
 v.type == RiskLimitType::EXPOSURE ||
 v.type == RiskLimitType::DAILY_LOSS)
 {
 hasHardBreach = true;
-WTSLogger::debug("UftFutuMmStrategy[{}] Still has hard breach: {} {}", 
+WTSLogger::debug("UftFutuMmStrategy[{}] Still has hard breach: {} {}",
 s.id(), v.code, (int)v.type);
 break;
 }
@@ -641,7 +641,7 @@ _stp->clear();
         WTSLogger::info("[BILATERAL_STATS] {} | {}", code, stats.formatString());
     }
 }
-    
+
     // 绩效分析报告
     if (_perf_analyzer)
     {
@@ -660,8 +660,8 @@ _stp->clear();
             metrics.alpha_accuracy * 100, metrics.alpha_pnl_per_trade,
             metrics.avg_inventory, metrics.inventory_turnover);
     }
-    
-    WTSLogger::info("UftFutuMmStrategy[{}] session end: {}, Delta: {}", 
+
+    WTSLogger::info("UftFutuMmStrategy[{}] session end: {}, Delta: {}",
         s.id(), uTDate, _portfolio->getTotalDelta());
 
     // session_end closeout 状态强制收尾 (已拆分至 CloseoutOrchestrator, 架构重构 C3)

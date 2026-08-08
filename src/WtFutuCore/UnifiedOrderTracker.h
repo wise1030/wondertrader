@@ -1,7 +1,7 @@
 /*!
  * \file UnifiedOrderTracker.h
  * \brief Unified Order Tracking for High-Frequency Market Making
- * 
+ *
  * Single source of truth for order state, combining:
  *   - Order lifecycle management (from legacy SharedOrderTracker)
  *   - Self-trade detection (from legacy SelfTradePrevention)
@@ -9,13 +9,13 @@
  *   - O(1) lookup by order ID
  *   - Efficient per-contract iteration
  *   - Self-trade detection between MM and arbitrage orders
- * 
+ *
  * Performance optimizations:
  *   - Continuous memory layout (vector-based)
  *   - Lightweight per-contract indices (only order IDs)
  *   - Cache-friendly iteration
  *   - Inline access methods
- * 
+ *
  * Thread Safety: NOT thread-safe. Must be called from single thread
  * or use external synchronization.
  */
@@ -121,24 +121,24 @@ struct UnifiedOrderInfo
     uint64_t    cancel_time;        ///< 首次观察到 PENDING_CANCEL 的时刻 (超时清扫用)
     OrderFlags  flags;
     CancelReason cancel_reason;
-    
+
     // Inline helpers
     inline bool isBid() const { return hasFlag(flags, OrderFlags::IS_BID); }
     inline bool isActive() const { return hasFlag(flags, OrderFlags::IS_ACTIVE); }
     inline bool isPendingCancel() const { return hasFlag(flags, OrderFlags::PENDING_CANCEL); }
     inline bool isMMOrder() const { return hasFlag(flags, OrderFlags::IS_MM_ORDER); }
     inline bool isArbOrder() const { return hasFlag(flags, OrderFlags::IS_ARB_ORDER); }
-    
+
     inline void setPendingCancel(CancelReason reason) {
         flags = flags | OrderFlags::PENDING_CANCEL;
         cancel_reason = reason;
     }
-    
+
     inline void clearPendingCancel() {
         flags = static_cast<OrderFlags>(static_cast<uint8_t>(flags) & ~static_cast<uint8_t>(OrderFlags::PENDING_CANCEL));
         cancel_reason = CancelReason::NONE;
     }
-    
+
     UnifiedOrderInfo() : order_id(0), level_index(0), price(0), qty(0), filled_qty(0), original_qty(0), place_mid(0),
         place_time(0), last_check(0), last_inv_cancel_check(0), cancel_time(0),
         flags(OrderFlags::NONE), cancel_reason(CancelReason::NONE) {
@@ -159,13 +159,13 @@ struct UnifiedTrackerConfig
     uint32_t    inv_limit_cooldown_ms;
     uint32_t    max_cancel_rate;
     uint32_t    pending_cancel_timeout_ms;  ///< 撤单 ack 超时, 超时强制 untrack (默认 5000)
-    
+
     // Self-trade prevention
     bool        stp_enabled;
     bool        stp_allow_same_price;
     double      stp_min_price_gap;
-    
-    UnifiedTrackerConfig() 
+
+    UnifiedTrackerConfig()
         : max_orders(20), max_age_ms(10000), price_deviation(3.0),
           sticky_threshold(2.0), inv_limit_cooldown_ms(2000), max_cancel_rate(10),
           pending_cancel_timeout_ms(5000),
@@ -183,7 +183,7 @@ struct UnifiedTrackerStats
     uint32_t orders_canceled;
     uint32_t cancel_requests;
     uint32_t duplicate_cancels;
-    
+
     // Per-reason cancel counts
     uint32_t price_deviation_cancels;
     uint32_t stale_cancels;
@@ -194,17 +194,17 @@ struct UnifiedTrackerStats
     uint32_t market_state_cancels;
     uint32_t closeout_cancels;
     uint32_t self_trade_cancels;
-    
+
     double   avg_order_lifetime_ms;
     double   fill_rate;
     double   cancel_rate;
     uint64_t last_stats_log_time;
-    
+
     // Self-trade stats
     uint32_t stp_checks;
     uint32_t stp_risks_detected;
     uint32_t stp_mm_cancels;
-    
+
     UnifiedTrackerStats() : orders_placed(0), orders_filled(0), orders_canceled(0),
         cancel_requests(0), duplicate_cancels(0), price_deviation_cancels(0),
         stale_cancels(0), timeout_cancels(0), state_change_cancels(0),
@@ -213,7 +213,7 @@ struct UnifiedTrackerStats
         avg_order_lifetime_ms(0), fill_rate(0), cancel_rate(0),
         last_stats_log_time(0), stp_checks(0), stp_risks_detected(0),
         stp_mm_cancels(0) {}
-    
+
     inline void recordCancel(CancelReason reason) {
         switch (reason) {
             case CancelReason::PRICE_DEVIATION: price_deviation_cancels++; break;
@@ -239,7 +239,7 @@ struct CancelAction
     uint32_t    order_id;
     CancelReason reason;
     double      deviation;
-    
+
     CancelAction() : order_id(0), reason(CancelReason::NONE), deviation(0) {}
 };
 
@@ -254,7 +254,7 @@ struct SelfTradeCheckResult
     double conflict_price;
     double conflict_qty;
     std::vector<uint32_t> conflicting_order_ids;
-    
+
     enum class Action : uint8_t
     {
         ALLOW,
@@ -262,9 +262,9 @@ struct SelfTradeCheckResult
         CANCEL_MM_FIRST,
         ADJUST_PRICE
     } recommended_action;
-    
+
     double adjusted_price;
-    
+
     SelfTradeCheckResult()
         : has_risk(false), conflict_price(0), conflict_qty(0),
           recommended_action(Action::ALLOW), adjusted_price(0) {}
@@ -281,7 +281,7 @@ struct ArbitrageOrderRequest
     double price;
     double qty;
     bool is_market_order;
-    
+
     ArbitrageOrderRequest()
         : price(0), qty(0), is_buy(true), is_market_order(false) {}
 };
@@ -301,13 +301,13 @@ public:
         _order_index.reserve(128);
         _order_place_times.reserve(128);
     }
-    
+
     //==========================================================================
     // Configuration
     //==========================================================================
-    
-    void setConfig(const UnifiedTrackerConfig& cfg) { 
-        _cfg = cfg; 
+
+    void setConfig(const UnifiedTrackerConfig& cfg) {
+        _cfg = cfg;
         // P1优化: 根据配置预分配内存
         if (_cfg.max_orders > _orders.capacity()) {
             _orders.reserve(_cfg.max_orders);
@@ -317,24 +317,24 @@ public:
         }
     }
     const UnifiedTrackerConfig& getConfig() const { return _cfg; }
-    
+
     //==========================================================================
     // Order Management - MM Orders
     //==========================================================================
-    
+
     /// Track a market making order
     uint32_t trackMMOrder(uint32_t orderId, uint32_t levelIndex, const std::string& code,
                           double price, double qty, double placeMid, uint64_t placeTime, bool isBid)
     {
         RecursiveSpinGuard _g(_lock);
-        return trackOrderInternal(orderId, levelIndex, code, price, qty, placeMid, placeTime, 
+        return trackOrderInternal(orderId, levelIndex, code, price, qty, placeMid, placeTime,
                                   isBid, true /*isMM*/, false /*isArb*/);
     }
-    
+
     //==========================================================================
     // Order Management - Arbitrage Orders
     //==========================================================================
-    
+
     /// Track an arbitrage order
     uint32_t trackArbOrder(uint32_t orderId, const std::string& code,
                            double price, double qty, double placeMid, uint64_t placeTime, bool isBuy)
@@ -343,11 +343,11 @@ public:
         return trackOrderInternal(orderId, 0 /*levelIndex*/, code, price, qty, placeMid, placeTime,
                                   isBuy, false /*isMM*/, true /*isArb*/);
     }
-    
+
     //==========================================================================
     // Order Management - Common
     //==========================================================================
-    
+
     void updateOrderQty(uint32_t orderId, double remainingQty)
     {
         RecursiveSpinGuard _g(_lock);
@@ -386,30 +386,30 @@ public:
             order->clearPendingCancel();
         }
     }
-    
+
     //==========================================================================
     // Query Methods - O(1)
     //==========================================================================
-    
+
     inline bool isTracked(uint32_t orderId) const {
         RecursiveSpinGuard _g(_lock);
         return _order_index.find(orderId) != _order_index.end();
     }
-    
+
     inline UnifiedOrderInfo* getOrderByOrderId(uint32_t orderId) {
         RecursiveSpinGuard _g(_lock);
         auto it = _order_index.find(orderId);
         if (it != _order_index.end()) return &_orders[it->second];
         return nullptr;
     }
-    
+
     inline const UnifiedOrderInfo* getOrderByOrderId(uint32_t orderId) const {
         RecursiveSpinGuard _g(_lock);
         auto it = _order_index.find(orderId);
         if (it != _order_index.end()) return &_orders[it->second];
         return nullptr;
     }
-    
+
     /// v7.6 阶段2: 锁内快照拷贝 — 供非持锁外部调用方替代裸指针
     /// (裸指针 API 仅限内部在递归锁内使用; 外部经此拷贝消除指针逃逸)
     bool getOrderInfoCopy(uint32_t orderId, UnifiedOrderInfo& out) const {
@@ -419,44 +419,44 @@ public:
         out = *p;
         return true;
     }
-    
+
     inline UnifiedOrderInfo* getOrderByIndex(uint32_t index) {
         RecursiveSpinGuard _g(_lock);
         if (index < _orders.size()) return &_orders[index];
         return nullptr;
     }
-    
+
     inline std::vector<UnifiedOrderInfo>& getOrders() { RecursiveSpinGuard _g(_lock); return _orders; }
     inline const std::vector<UnifiedOrderInfo>& getOrders() const { RecursiveSpinGuard _g(_lock); return _orders; }
     inline uint32_t getOrderCount() const { RecursiveSpinGuard _g(_lock); return _order_count; }
-    
+
     /// 订单集世代号: track/untrack 时递增。
     /// 调用方(如策略主线程)可缓存上次同步的世代号, 未变化时跳过
     /// MM 订单快照的全量深拷贝(updateMMOrders), 消除热路径无效拷贝.
     uint64_t getGeneration() const { RecursiveSpinGuard _g(_lock); return _generation; }
-    
+
     //==========================================================================
     // Per-Contract Query
     //==========================================================================
-    
+
     /// Get all active order IDs for a contract
     std::vector<uint32_t> getOrderIdsForContract(const std::string& code) const;
-    
+
     /// Get active MM buy order IDs for a contract
     std::vector<uint32_t> getMMBuyOrderIds(const std::string& code) const;
-    
+
     /// Get active MM sell order IDs for a contract
     std::vector<uint32_t> getMMSellOrderIds(const std::string& code) const;
-    
+
     /// Get best MM buy price for a contract
     double getBestMMBuy(const std::string& code) const;
-    
+
     /// Get best MM sell price for a contract
     double getBestMMSell(const std::string& code) const;
-    
+
     /// Check if contract has active MM orders
     bool hasMMOrders(const std::string& code) const;
-    
+
     /// Get total pending buy quantity for a contract (for position limit check)
     double getPendingBuyQty(const std::string& code) const;
 
@@ -468,17 +468,17 @@ public:
     /// 的 util 投影不可见, 大幅 arb 建仓期间 util 系统性偏低。
     double getPendingBuyQtyAllSources(const std::string& code) const;
     double getPendingSellQtyAllSources(const std::string& code) const;
-    
+
     //==========================================================================
     // Price Deviation Check
     //==========================================================================
-    
+
     inline bool checkPriceDeviation(uint32_t orderId, double currentMid, double tickSize) {
         RecursiveSpinGuard _g(_lock);
         UnifiedOrderInfo* order = getOrderByOrderId(orderId);
         if (!order || order->isPendingCancel()) return false;
         if (order->place_mid <= 0 || currentMid <= 0 || tickSize <= 0) return false;
-        
+
         double deviation = std::abs(currentMid - order->place_mid) / tickSize;
         if (deviation > _cfg.price_deviation) {
             addPendingQty(order->code, order->isBid(), -order->qty);
@@ -487,7 +487,7 @@ public:
         }
         return false;
     }
-    
+
     inline bool exceedsStickyThreshold(uint32_t orderId, double currentMid, double tickSize) const {
         RecursiveSpinGuard _g(_lock);
         auto it = _order_index.find(orderId);
@@ -496,39 +496,39 @@ public:
         if (order.place_mid <= 0 || currentMid <= 0 || tickSize <= 0) return true;
         return std::abs(currentMid - order.place_mid) / tickSize > _cfg.sticky_threshold;
     }
-    
+
     //==========================================================================
     // Auto-Cancel Checks
     // 注：STATE_CHANGE 和 PRICE_DEVIATION 已移除，由 FutuQuoter 粘性逻辑处理
     //==========================================================================
-    
+
     const std::vector<CancelAction>& checkAutoCancel(
         const std::string& code, uint64_t currentTime, double currentMid, double tickSize,
         bool stateChanged, bool inventoryLimitHit, double current_risk_delta);
-    
+
     //==========================================================================
     // Self-Trade Prevention
     //==========================================================================
-    
+
     /// Check if an arbitrage order would cause self-trade
     SelfTradeCheckResult checkArbitrageOrder(const ArbitrageOrderRequest& request) const;
-    
+
     /// Check for a specific contract and direction
-    SelfTradeCheckResult checkSelfTrade(const std::string& code, bool is_buy, 
+    SelfTradeCheckResult checkSelfTrade(const std::string& code, bool is_buy,
                                          double price, bool is_market_order = false) const;
-    
+
     /// Get MM orders that would conflict with an arbitrage order
-    std::vector<uint32_t> getConflictingMMOrders(const std::string& code, 
+    std::vector<uint32_t> getConflictingMMOrders(const std::string& code,
                                                   bool arb_is_buy, double arb_price) const;
-    
+
     //==========================================================================
     // Statistics
     //==========================================================================
-    
+
     uint32_t getTotalTracked() const { RecursiveSpinGuard _g(_lock); return _order_count; }
     uint32_t getTotalCancellations() const { RecursiveSpinGuard _g(_lock); return _total_cancels; }
     const UnifiedTrackerStats& getStats() const { RecursiveSpinGuard _g(_lock); return _stats; }
-    
+
     void recordFilled() { RecursiveSpinGuard _g(_lock); _stats.orders_filled++; }
 
     /// 记录一笔成交, 返回 true 表示该订单已完全成交(可安全 untrack)。
@@ -547,20 +547,20 @@ public:
         return order.filled_qty >= order.original_qty - 1e-9;
     }
     void recordDuplicateCancel() { RecursiveSpinGuard _g(_lock); _stats.duplicate_cancels++; }
-    
+
     bool shouldCancelDueToRate(uint64_t currentTime);
-    
+
     void updateFillRateStats()
     {
         RecursiveSpinGuard _g(_lock);
         if (_stats.orders_placed > 0)
             _stats.fill_rate = static_cast<double>(_stats.orders_filled) / _stats.orders_placed;
     }
-    
+
     //==========================================================================
     // Reset
     //==========================================================================
-    
+
     void clear()
     {
         RecursiveSpinGuard _g(_lock);
@@ -585,23 +585,23 @@ private:
     //==========================================================================
     // Internal Methods
     //==========================================================================
-    
+
     uint32_t trackOrderInternal(uint32_t orderId, uint32_t levelIndex, const std::string& code,
                                 double price, double qty, double placeMid, uint64_t placeTime,
                                 bool isBid, bool isMM, bool isArb);
-    
+
     void updateBestPrices(const std::string& code, double price, bool is_buy);
-    
+
     //==========================================================================
     // Data Members
     //==========================================================================
-    
+
     UnifiedTrackerConfig _cfg;
-    
+
     // v7.6 阶段2: 递归自旋锁 — 公开方法统一守卫 (MdSpi/TdSpi 双线程访问;
     //   递归: checkAutoCancel→untrackOrder 等嵌套调用)
     mutable RecursiveSpinLock _lock;
-    
+
     // Main storage - continuous memory layout
     std::vector<UnifiedOrderInfo> _orders;
     std::vector<uint32_t> _free_slots;
@@ -609,18 +609,18 @@ private:
     uint32_t _order_count;
     uint64_t _generation = 0;   ///< 订单集世代号(track/untrack 递增)
     uint32_t _total_cancels;
-    
+
     // checkAutoCancel 复用缓冲 (每 tick 调用, 避免重复堆分配; 主线程单线程访问)
     std::vector<CancelAction> _actions_buf;
     std::vector<size_t> _active_indices_buf;
     std::vector<uint32_t> _stale_buf;
-    
+
     // Place times for lifetime calculation
     wtp::wt_hashmap<uint32_t, uint64_t> _order_place_times;
-    
+
     // Cancel timestamps for rate limiting
     std::vector<uint64_t> _cancel_timestamps;
-    
+
     // Per-contract indices (lightweight - only order IDs)
     wtp::wt_hashmap<std::string, std::vector<uint32_t>> _orders_by_code;
 
@@ -638,15 +638,15 @@ private:
         v += delta;
         if (v < 0.0 && v > -1e-9) v = 0.0;  // 浮点残差收敛
     }
-    
+
     // Separate indices for MM buy/sell orders (for self-trade detection)
     wtp::wt_hashmap<std::string, std::vector<uint32_t>> _mm_buy_by_code;
     wtp::wt_hashmap<std::string, std::vector<uint32_t>> _mm_sell_by_code;
-    
+
     // Best price cache
     wtp::wt_hashmap<std::string, double> _best_buy_price;
     wtp::wt_hashmap<std::string, double> _best_sell_price;
-    
+
     // Statistics
     UnifiedTrackerStats _stats;
 };

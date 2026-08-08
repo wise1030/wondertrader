@@ -25,7 +25,7 @@ RecursiveSpinGuard _g(_lock);
     uint32_t index = !_free_slots.empty() ? _free_slots.back() : static_cast<uint32_t>(_orders.size());
     if (!_free_slots.empty()) _free_slots.pop_back();
     else _orders.emplace_back();
-    
+
     // Fill order info
     UnifiedOrderInfo& order = _orders[index];
     order.order_id = orderId;
@@ -40,39 +40,39 @@ RecursiveSpinGuard _g(_lock);
     order.place_time = placeTime;
     order.last_check = placeTime;
     order.last_inv_cancel_check = 0;
-    
+
     // Set flags
     order.flags = OrderFlags::IS_ACTIVE;
     if (isBid) order.flags = order.flags | OrderFlags::IS_BID;
     if (isMM) order.flags = order.flags | OrderFlags::IS_MM_ORDER;
     if (isArb) order.flags = order.flags | OrderFlags::IS_ARB_ORDER;
     order.cancel_reason = CancelReason::NONE;
-    
+
     // Update indices
     _order_index[orderId] = index;
     _order_place_times[orderId] = placeTime;
-    
+
     // Update per-contract indices
     _orders_by_code[code].push_back(orderId);
 
     // F9: 全源 pending 增量 (新单恒 active 非 pendingCancel)
     addPendingQty(code.c_str(), isBid, qty);
-    
+
     if (isMM)
     {
         if (isBid)
             _mm_buy_by_code[code].push_back(orderId);
         else
             _mm_sell_by_code[code].push_back(orderId);
-        
+
         // Update best price cache
         updateBestPrices(code, price, isBid);
     }
-    
+
     _order_count++;
     _generation++;
     _stats.orders_placed++;
-    
+
     return index;
 }
 
@@ -96,13 +96,13 @@ RecursiveSpinGuard _g(_lock);
     // F9: 全源 pending 减量 (pendingCancel 单已在 mark 时扣除, 不重复)
     if (order.isActive() && !order.isPendingCancel())
         addPendingQty(code.c_str(), isBid, -order.qty);
-    
+
     // Update statistics
     if (order.isPendingCancel())
     {
         _stats.orders_canceled++;
         _stats.recordCancel(order.cancel_reason);
-        
+
         // 统一使用 epoch ms (TimeUtils), 与 shouldCancelDueToRate 的调用方时间基准一致.
         // 旧代码用 steady_clock(开机起算), 与 epoch ms 相差数十年 → 撤单率统计恒≈0,
         // max_cancel_rate 限制形同虚设.
@@ -113,7 +113,7 @@ RecursiveSpinGuard _g(_lock);
     {
         _stats.orders_filled++;
     }
-    
+
     // Update average lifetime
     auto timeIt = _order_place_times.find(orderId);
     if (timeIt != _order_place_times.end())
@@ -123,12 +123,12 @@ RecursiveSpinGuard _g(_lock);
         double lifetime = static_cast<double>(now - placeTime);
         if (_stats.orders_placed > 0)
         {
-            _stats.avg_order_lifetime_ms = 
+            _stats.avg_order_lifetime_ms =
                 (_stats.avg_order_lifetime_ms * (_stats.orders_placed - 1) + lifetime) / _stats.orders_placed;
         }
         _order_place_times.erase(timeIt);
     }
-    
+
     // Remove from per-contract indices
     {
         auto codeIt = _orders_by_code.find(code);
@@ -139,7 +139,7 @@ RecursiveSpinGuard _g(_lock);
             if (ids.empty()) _orders_by_code.erase(codeIt);
         }
     }
-    
+
     if (isMM)
     {
         if (isBid)
@@ -193,7 +193,7 @@ RecursiveSpinGuard _g(_lock);
             }
         }
     }
-    
+
     // Clear order and free slot
     _orders[index] = UnifiedOrderInfo();
     _free_slots.push_back(index);
@@ -299,10 +299,10 @@ bool UnifiedOrderTracker::hasMMOrders(const std::string& code) const
 RecursiveSpinGuard _g(_lock);
     auto buyIt = _mm_buy_by_code.find(code);
     if (buyIt != _mm_buy_by_code.end() && !buyIt->second.empty()) return true;
-    
+
     auto sellIt = _mm_sell_by_code.find(code);
     if (sellIt != _mm_sell_by_code.end() && !sellIt->second.empty()) return true;
-    
+
     return false;
 }
 
@@ -378,7 +378,7 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
 RecursiveSpinGuard _g(_lock);
     // 复用成员缓冲 (主线程单线程调用), 消除每 tick 3 次 vector 堆分配
     _actions_buf.clear();
-    
+
     // 清扫卡死的 pending_cancel 单 — 撤单 ack 丢失/通道断连时单永远卡在 PENDING_CANCEL,
     // 占用 max_orders 配额且干扰自成交/在途统计. 超时强制 untrack (ack 若随后到达,
     // onOrderDone 找不到记录, 无副作用).
@@ -401,11 +401,11 @@ RecursiveSpinGuard _g(_lock);
             untrackOrder(oid, currentTime);
         }
     }
-    
+
     // Create snapshot of active order indices
     _active_indices_buf.clear();
     _active_indices_buf.reserve(_orders.size());
-    
+
     for (size_t i = 0; i < _orders.size(); ++i)
     {
         const UnifiedOrderInfo& order = _orders[i];
@@ -415,18 +415,18 @@ RecursiveSpinGuard _g(_lock);
                 _active_indices_buf.push_back(i);
         }
     }
-    
+
     // Process each order
     for (size_t idx : _active_indices_buf)
     {
         UnifiedOrderInfo& order = _orders[idx];
-        
+
         if (!order.isActive() || order.isPendingCancel()) continue;
-        
+
         order.last_check = currentTime;
         CancelAction action;
         action.order_id = order.order_id;
-        
+
         // Priority 1: Inventory limit
         if (inventoryLimitHit && _cfg.inv_limit_cooldown_ms > 0)
         {
@@ -436,7 +436,7 @@ RecursiveSpinGuard _g(_lock);
             bool is_breach_direction = false;
             if (current_risk_delta >= 0 && order.isBid()) is_breach_direction = true;
             else if (current_risk_delta < 0 && !order.isBid()) is_breach_direction = true;
-            
+
             if (is_breach_direction)
             {
                 bool withinCooldown = false;
@@ -454,12 +454,12 @@ RecursiveSpinGuard _g(_lock);
                 }
             }
         }
-        
+
         // ============================================================
         // Priority 2: STALE - 订单过期
         // 价格偏离检查已移至 FutuQuoter.refreshQuotes 的粘性报价逻辑
         // FutuQuoter 比较 newPrice vs placePrice，更准确感知 skew/spread 变化
-        // 
+        //
         // 优化：如果价格仍在有效范围内（偏离小于 2 * sticky_threshold），
         //       不立即撤单，给订单更多成交机会
         // ============================================================
@@ -468,7 +468,7 @@ RecursiveSpinGuard _g(_lock);
             // 价格有效性检查：如果价格仍在合理范围内，延迟撤单
             double price_deviation = std::abs(order.price - currentMid) / tickSize;
             double extended_threshold = _cfg.sticky_threshold * 2.0;  // 扩展阈值
-            
+
             if (price_deviation <= extended_threshold) {
                 // 价格仍在有效范围内，延长订单寿命（给 50% 额外时间）
                 uint64_t extended_age = _cfg.max_age_ms + (_cfg.max_age_ms / 2);
@@ -477,7 +477,7 @@ RecursiveSpinGuard _g(_lock);
                     continue;
                 }
             }
-            
+
             action.reason = CancelReason::STALE;
             _actions_buf.push_back(action);
             addPendingQty(order.code, order.isBid(), -order.qty);
@@ -485,7 +485,7 @@ RecursiveSpinGuard _g(_lock);
             continue;
         }
     }
-    
+
     _total_cancels += static_cast<uint32_t>(_actions_buf.size());
     return _actions_buf;
 }
@@ -505,12 +505,12 @@ SelfTradeCheckResult UnifiedOrderTracker::checkSelfTrade(
 {
 RecursiveSpinGuard _g(_lock);
     SelfTradeCheckResult result;
-    
+
     if (!_cfg.stp_enabled) return result;
-    
+
     // Arbitrage buy would conflict with MM sell orders at or below arbitrage price
     // Arbitrage sell would conflict with MM buy orders at or above arbitrage price
-    
+
     const auto& mmOrders = is_buy ? _mm_sell_by_code : _mm_buy_by_code;
     auto it = mmOrders.find(code);
     if (it == mmOrders.end() || it->second.empty()) return result;
@@ -522,7 +522,7 @@ RecursiveSpinGuard _g(_lock);
         // cancel-ack 窗口内旧单仍 isActive 但即将离场, 不应参与自成交判定,
         // 否则高频刷新时 ARB 信号被旧报价误拒 (与 getPendingBuyQty 过滤口径一致).
         if (!order || !order->isActive() || order->isPendingCancel()) continue;
-        
+
         bool conflict = false;
         if (is_market_order)
         {
@@ -539,7 +539,7 @@ RecursiveSpinGuard _g(_lock);
             // Selling: conflicts with MM buy orders at or above our price
             conflict = (order->price >= price);
         }
-        
+
         if (conflict)
         {
             result.has_risk = true;
@@ -549,13 +549,13 @@ RecursiveSpinGuard _g(_lock);
             result.conflicting_order_ids.push_back(orderId);
         }
     }
-    
+
     if (result.has_risk)
     {
         // Recommend canceling MM orders first
         result.recommended_action = SelfTradeCheckResult::Action::CANCEL_MM_FIRST;
     }
-    
+
     return result;
 }
 
@@ -564,27 +564,27 @@ std::vector<uint32_t> UnifiedOrderTracker::getConflictingMMOrders(
 {
 RecursiveSpinGuard _g(_lock);
     std::vector<uint32_t> result;
-    
+
     const auto& mmOrders = arb_is_buy ? _mm_sell_by_code : _mm_buy_by_code;
     auto it = mmOrders.find(code);
     if (it == mmOrders.end()) return result;
-    
+
     for (uint32_t orderId : it->second)
     {
         const UnifiedOrderInfo* order = getOrderByOrderId(orderId);
         // 排除 PENDING_CANCEL: 已在撤单途中, 无需再判冲突/再撤
         if (!order || !order->isActive() || order->isPendingCancel()) continue;
-        
+
         bool conflict = false;
         if (arb_is_buy)
             conflict = (order->price <= arb_price);
         else
             conflict = (order->price >= arb_price);
-        
+
         if (conflict)
             result.push_back(orderId);
     }
-    
+
     return result;
 }
 

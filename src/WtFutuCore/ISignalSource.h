@@ -1,14 +1,14 @@
 /*!
  * \file ISignalSource.h
  * \brief Signal Source Interface for Market Making
- * 
+ *
  * Provides a plugin architecture for signal sources:
  *   - OFI (Order Flow Imbalance)
  *   - Volatility (Realized + Microstructure)
  *   - Trade Flow
  *   - Alpha
  *   - Market State
- * 
+ *
  * Design Principles:
  *   - Single data source: MarketDataContext
  *   - Plugin architecture: each signal source implements ISignalSource
@@ -80,8 +80,8 @@ struct SignalResult
     double confidence;      ///< Signal confidence [0, 1]
     uint64_t timestamp;
     bool valid;
-    
-    SignalResult(SignalType t) 
+
+    SignalResult(SignalType t)
         : type(t), confidence(0.0), timestamp(0), valid(false) {}
     virtual ~SignalResult() = default;
 };
@@ -93,8 +93,8 @@ struct OFISignalResult : public SignalResult
     double bid_pressure;        ///< Buy pressure [0, 1]
     double ask_pressure;        ///< Sell pressure [0, 1]
     double cumulative_ofi;      ///< Cumulative OFI for trend
-    
-    OFISignalResult() 
+
+    OFISignalResult()
         : SignalResult(SignalType::OFI)
         , ofi(0), bid_pressure(0.5), ask_pressure(0.5), cumulative_ofi(0) {}
 };
@@ -108,8 +108,8 @@ struct VolatilitySignalResult : public SignalResult
     VolTier vol_tier;           ///< Volatility tier for scaling
     double vol_percentile;      ///< Volatility percentile [0, 100]
     double vpin;                ///< Volume toxicity/volatility index
-    
-    VolatilitySignalResult() 
+
+    VolatilitySignalResult()
         : SignalResult(SignalType::VOLATILITY)
         , volatility(0), realized_vol(0), composite_vol(0), vol_tier(VolTier::NORMAL)
         , vol_percentile(50), vpin(0) {}
@@ -124,8 +124,8 @@ struct TradeFlowSignalResult : public SignalResult
     double sell_volume;         ///< Total sell volume
     double large_trade_ratio;   ///< Large trade ratio [0, 1]
     double avg_trade_size;      ///< Average trade size
-    
-    TradeFlowSignalResult() 
+
+    TradeFlowSignalResult()
         : SignalResult(SignalType::TRADE_FLOW)
         , net_flow(0), net_flow_normalized(0)
         , buy_volume(0), sell_volume(0)
@@ -142,8 +142,8 @@ struct BookImbalanceSignalResult : public SignalResult
     bool ask_dominant;           ///< Ask side dominant
     double bid_depth;            ///< Total bid depth
     double ask_depth;            ///< Total ask depth
-    
-    BookImbalanceSignalResult() 
+
+    BookImbalanceSignalResult()
         : SignalResult(SignalType::BOOK_IMBALANCE)
         , simple_imbalance(0), depth_imbalance(0), pressure_intensity(0)
         , bid_dominant(false), ask_dominant(false)
@@ -160,8 +160,8 @@ struct AlphaSignalResult : public SignalResult
     double momentum_component;     ///< Momentum contribution
     double lead_lag_component;     ///< Lead-lag contribution
     bool is_strong_signal;         ///< Strong signal flag
-    
-    AlphaSignalResult() 
+
+    AlphaSignalResult()
         : SignalResult(SignalType::ALPHA)
         , alpha(0), ofi_component(0), trade_component(0)
         , book_imbalance_component(0), momentum_component(0), lead_lag_component(0)
@@ -177,8 +177,8 @@ struct MarketStateSignalResult : public SignalResult
     bool should_pause;          ///< Recommend pausing quotes
     double vol_estimate;        ///< Volatility estimate
     double spread_estimate;     ///< Spread estimate (ticks)
-    
-    MarketStateSignalResult() 
+
+    MarketStateSignalResult()
         : SignalResult(SignalType::MARKET_STATE)
         , state(MarketState::NORMAL)
         , should_widen(false), should_hedge(false), should_pause(false)
@@ -192,8 +192,8 @@ struct ToxicitySignalResult : public SignalResult
     bool toxic_detected;        ///< Toxic flow detected
     double vpin;                ///< VPIN value
     int toxic_side;             ///< Toxic side (1=buy toxic, -1=sell toxic, 0=both/none)
-    
-    ToxicitySignalResult() 
+
+    ToxicitySignalResult()
         : SignalResult(SignalType::TOXICITY)
         , toxicity_score(0), toxic_detected(false), vpin(0), toxic_side(0) {}
 };
@@ -216,14 +216,14 @@ struct SignalContext
     double ask_price = 0;
     double bid_vol = 0;
     double ask_vol = 0;
-    
+
     //========== Order Book Signals (Restored) ==========
     double imbalance = 0;           ///< Simple imbalance [-1, 1]
     double depth_imbalance = 0;     ///< Depth-weighted imbalance [-1, 1]
     double bid_depth = 0;
     double ask_depth = 0;
     double liquidity_score = 0;     ///< [0, 1]
-    
+
     //========== Aggregated Signal Results ==========
     OFISignalResult ofi;
     VolatilitySignalResult volatility;
@@ -232,29 +232,29 @@ struct SignalContext
     AlphaSignalResult alpha;
     MarketStateSignalResult market_state;
     ToxicitySignalResult toxicity;
-    
+
     //========== Convenience Methods ==========
-    
+
     /// Check if quoting should be paused (risk or toxicity)
     bool shouldPause() const {
         return market_state.should_pause || toxicity.toxic_detected;
     }
-    
+
     /// Check if spread should be widened (volatility or state)
-    bool shouldWiden() const { 
-        return market_state.should_widen || volatility.vol_tier >= VolTier::ELEVATED; 
+    bool shouldWiden() const {
+        return market_state.should_widen || volatility.vol_tier >= VolTier::ELEVATED;
     }
-    
+
     /// Check if immediate hedging is needed
-    bool shouldHedge() const { 
-        return market_state.should_hedge; 
+    bool shouldHedge() const {
+        return market_state.should_hedge;
     }
-    
+
     /// Check for strong alpha signal
-    bool isStrongSignal() const { 
-        return alpha.is_strong_signal; 
+    bool isStrongSignal() const {
+        return alpha.is_strong_signal;
     }
-    
+
     /// Get composite volatility for scaling (P0-2.3)
     double getEffectiveVol() const {
         return volatility.composite_vol > 0 ? volatility.composite_vol : volatility.realized_vol;
@@ -284,25 +284,25 @@ class ISignalSource
 {
 public:
     virtual ~ISignalSource() = default;
-    
+
     /// Signal source name
     virtual const std::string& name() const = 0;
-    
+
     /// Signal type
     virtual SignalType type() const = 0;
-    
+
     /// Update signal from MarketDataContext (primary data source)
     virtual void update(const MarketDataContext& book) = 0;
-    
+
     /// Update signal from full context (for secondary signals)
     virtual void updateWithContext(const SignalContext& ctx) { (void)ctx; }
-    
+
     /// Get current signal result
     virtual const SignalResult& result() const = 0;
-    
+
     /// Get alpha value directly (avoids dynamic_cast in hot path)
     virtual double getAlphaValue() const { return 0.0; }
-    
+
     /// Status management
     virtual bool enabled() const = 0;
     virtual void setEnabled(bool enabled) = 0;

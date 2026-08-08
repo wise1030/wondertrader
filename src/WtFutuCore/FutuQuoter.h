@@ -1,15 +1,15 @@
 /*!
  * \file FutuQuoter.h
  * \brief Multi-level bilateral quoting engine for futures market making
- * 
+ *
  * Manages multiple price levels of bids/asks per contract, with:
  *   - Configurable number of levels and per-level quantity
  *   - Auto-adjustment of widths based on portfolio risk (via FutuPortfolio)
  *   - Efficient O(1) cancel-and-replace for quote refreshes
  *   - Unified order tracking with AutoCancelPolicy via UnifiedOrderTracker
- * 
+ *
  * Designed for inline synchronous use within on_tick callback.
- * 
+ *
  * Performance optimizations:
  *   - Uses UnifiedOrderTracker for zero-copy order state access
  *   - Pre-allocated level vectors
@@ -45,9 +45,9 @@ struct QuoteLevel
     std::vector<uint32_t> order_ids;  ///< Active order IDs (stra_buy/sell may return multiple)
     uint8_t     level_index;    ///< Level index for O(1) lookup
     bool        is_bid;         ///< true=bid, false=ask
-    
+
     QuoteLevel() : price(0), qty(0), level_index(0), is_bid(true) {}
-    
+
     /// Check if any active orders
     bool hasOrders() const { return !order_ids.empty(); }
 };
@@ -62,23 +62,23 @@ struct QuoterConfig
     double      base_qty;       ///< Base quantity per level
     double      level_qty_multiplier;  ///< M2: 档位间数量几何衰减系数 (e.g. 0.7 = 每档 ×0.7; 此前叫 qty_decay 易与 qty_decay_factor 混淆)
     double      tick_size;      ///< Minimum price increment
-    
+
     // Sticky 策略参数
     double      sticky_threshold; ///< Price stickiness threshold in ticks
     double      improve_retreat_ratio; ///< Ratio for asymmetric sticky: improve price容忍更大, retreat更敏感 (default: 2.0)
-    
+
     // 价格验证参数
     double      max_price_deviation; ///< Max allowed price deviation from mid (in ticks), 0 = no limit
-    
+
     // 做市报价价格保护参数
     // 防止报价穿过市场最优价格：bid不能超过最优买价+protect_ticks，ask不能低于最优卖价-protect_ticks
     bool        price_protection;    ///< 是否启用价格保护 (default: true)
     double      protect_ticks;       ///< 价格保护tick数 (default: 1.0)
-    
+
     // 双边报价配置
     bool        use_bilateral_quote;  ///< 是否使用双边报价接口 stra_quote() (default: false)
     double      min_valid_qty;        ///< 有效挂单最小数量，用于统计 (default: 1.0)
-    
+
     // v3 软风控参数（use_bilateral_quote=false 路径专用，bilateral 路径不受影响）
     double      qty_decay_factor;          ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_util)
     double      obligation_min_qty;        ///< 软 obligation 报价最小手数 (default: 10)
@@ -111,7 +111,7 @@ public:
 
     /// Initialize with config
     void init(const QuoterConfig& cfg);
-    
+
     /// Set shared order tracker (must be called before refreshQuotes)
     void setOrderTracker(UnifiedOrderTracker* tracker) { _tracker = tracker; }
     UnifiedOrderTracker* getOrderTracker() const { return _tracker; }
@@ -173,7 +173,7 @@ public:
     /// @param force_bid_obligation  v3: 空头打满，强制 bid 软义务报价 (default false)
     /// @return       Number of new orders placed (for rate limiting)
     uint32_t refreshQuotes(wtp::IUftStraCtx* ctx, double mid, double l0_bid_price, double l0_ask_price,
-                           double spread_mult = 1.0, bool allow_bid = true, 
+                           double spread_mult = 1.0, bool allow_bid = true,
                            bool allow_ask = true, uint64_t now = 0,
                            double upper_limit = 0, double lower_limit = 0,
                            double best_bid = 0, double best_ask = 0,
@@ -224,10 +224,10 @@ public:
 
     /// Get all active bid levels
     const std::vector<QuoteLevel>& getBidLevels() const { return _bid_levels; }
-    
+
     /// Get all active ask levels
     const std::vector<QuoteLevel>& getAskLevels() const { return _ask_levels; }
-    
+
     /// Get modifiable bid levels (for direct updates)
     std::vector<QuoteLevel>& getBidLevelsMut() { return _bid_levels; }
     std::vector<QuoteLevel>& getAskLevelsMut() { return _ask_levels; }
@@ -243,7 +243,7 @@ public:
 
     /// Get the quote level for a given order ID
     QuoteLevel* getLevelByOrder(uint32_t localid);
-    
+
     //==========================================================================
     // 双边报价统计接口（R3 v2 - Per-Quoter 值成员）
     //==========================================================================
@@ -292,23 +292,23 @@ private:
     /// @param lower_limit Lower price limit (0 = no check)
     /// @return true if price is valid, false if invalid
     __attribute__((always_inline))
-    inline bool validatePrice(double price, double mid, 
+    inline bool validatePrice(double price, double mid,
                               double upper_limit, double lower_limit) const
     {
         // Check for NaN or Inf
         if (std::isnan(price) || std::isinf(price))
             return false;
-        
+
         // Check for non-positive price
         if (price <= 0)
             return false;
-        
+
         // Check against limits
         if (upper_limit > 0 && price > upper_limit)
             return false;
         if (lower_limit > 0 && price < lower_limit)
             return false;
-        
+
         // Check for extreme deviation from mid (potential calculation error)
         if (_cfg.max_price_deviation > 0 && mid > 0 && _cfg.tick_size > 0)
         {
@@ -316,7 +316,7 @@ private:
             if (deviation_ticks > _cfg.max_price_deviation)
                 return false;
         }
-        
+
         return true;
     }
 
@@ -350,14 +350,14 @@ private:
     std::vector<QuoteLevel> _bid_levels;
     std::vector<QuoteLevel> _ask_levels;
     std::vector<double> _level_qtys;
-    
+
     UnifiedOrderTracker* _tracker;
     wtp::IUftStraCtx* _ctx = nullptr;
     bool _allow_bid = true;
     bool _allow_ask = true;
-    
+
     BilateralQuoteStats _bilateral_stats;   ///< Per-Quoter 值成员（R3 v2）
-    
+
     // 存储level索引+方向，避免bid/ask共用索引时查找冲突
     struct OrderLevelInfo {
         uint8_t level;    ///< Level index
@@ -368,7 +368,7 @@ private:
     //==========================================================================
     // refreshQuotes 子函数 (重构: 报单控制分离)
     //==========================================================================
-    
+
     /// 统一定价计算 (skew + spread_mult + obligation + qty decay)
     /// 输出: bidPrice, askPrice, bidQty, askQty, is_obligation_bid, is_obligation_ask
     struct QuoteResult {
@@ -392,7 +392,7 @@ private:
         //   <=0 时内部按 util 自算, 兼容旧调用)
         double long_decay = 0.0, double short_decay = 0.0,
         bool hard_block_bid = false, bool hard_block_ask = false);
-    
+
     /// 判断当前 level 是否需要履行做市义务(双边报单)
     bool needObligation(uint32_t level,
                          bool force_ask_obligation, bool force_bid_obligation) const
@@ -408,15 +408,15 @@ private:
             return true;
         return false;
     }
-    
+
     /// 路径A: 做市双边接口 (stra_quote, 顶单自动撤旧)
     /// 必须双边报单，allow 不阻断，风控通过价格偏移体现
     uint32_t handleBilateralQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now);
-    
+
     /// 路径B1: 普通报单 + 做市义务 (stra_buy + stra_sell, 先撤残留再双边下单)
     /// 不走 sticky，每 tick 刷新。义务模式下 qty 不衰减。
     uint32_t handleObligationQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now);
-    
+
     /// 路径B2: 普通报单 + 自由报价 (stra_buy + stra_sell, sticky, 可单边)
     /// 允许 qty 衰减和单边阻断
     uint32_t handleFlexibleQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now);

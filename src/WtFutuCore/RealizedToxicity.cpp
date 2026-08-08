@@ -41,9 +41,9 @@ void RealizedToxicity::onBookAnalysis(double imbalance_score)
 void RealizedToxicity::updateCache() const
 {
     if (!_cache_dirty) return;
-    
+
     _cached_result = RealizedToxicityResult();
-    
+
     if (_has_calibration_data)
     {
         _cached_result.adverse_ratio = _latest_calibration.toxicity_level;
@@ -53,22 +53,22 @@ void RealizedToxicity::updateCache() const
         );
         _cached_result.avg_adverse_move = _latest_calibration.toxicity_level * 2.0;
         _cached_result.direction_bias = _latest_calibration.direction_bias;
-        
+
         // Confidence based on sample size
         if (_latest_calibration.sample_size >= _cfg.min_samples)
         {
             double sample_confidence = std::min(1.0, _latest_calibration.sample_size / 10.0);
             _cached_result.confidence = sample_confidence * _latest_calibration.confidence;
         }
-        
+
         // Decayed score: apply weight and time decay
         if (_cached_result.confidence > 0)
         {
-            _cached_result.decayed_score = 
+            _cached_result.decayed_score =
                 _cached_result.adverse_ratio * _cfg.weight * _cached_result.confidence;
         }
     }
-    
+
     _cache_dirty = false;
 }
 

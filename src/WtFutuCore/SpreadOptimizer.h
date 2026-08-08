@@ -18,43 +18,43 @@ struct GLFTParams
     double      base_spread;        ///< Base spread in ticks (minimum spread)
     double      tick_size;          ///< Minimum price increment
     double      depth_sensitivity;  ///< How order book depth affects spread
-    
+
     // Inventory skew parameters (unified with delta)
     double      phi;                ///< Inventory penalty coefficient (used in base spread vol contribution)
-    
+
     // Delta skew parameters
     double      delta_skew_threshold;   ///< Portfolio delta skew trigger threshold (utilization, default 0.3)
     double      delta_skew_factor;      ///< Portfolio delta skew intensity (default 1.5)
     double      portfolio_max_delta;    ///< Portfolio-level Delta soft limit
-    
+
     // Spread bounds
     double      max_spread_mult;    ///< Maximum spread multiplier
     double      min_spread_mult;    ///< Minimum spread multiplier
-    
+
     // ========== GLFT+Alpha 增强参数 ==========
     // 毒性影响（仅通过 toxicity_spread_factor 影响 spread，不影响 skew）
-    
+
     // 置信度加权
     double      confidence_weight_min;   ///< 最小置信度权重 (default 0.2)
     double      confidence_weight_max;   ///< 最大置信度权重 (default 1.0)
-    
+
     // Book imbalance - removed from skew, now only in alpha
-    
+
     // 毒性对 spread 的影响
     double      toxicity_spread_factor;   ///< 毒性对 spread 的扩大系数 (default 1.0)
-    
+
     // 低置信度保护
     double      low_confidence_spread_factor; ///< 低置信度时 spread 扩大系数 (default 0.8)
     double      low_confidence_threshold;     ///< 低置信度阈值 (default 0.3)
-    
+
     // GLFT 波动率贡献缩放
     double      vol_scale;                    ///< phi*sigma_sq 的缩放因子 (default 5.0)
-    
+
     // 深度调整参数
     double      depth_normalization;          ///< 深度归一化常量 (default 100.0)
     double      no_depth_spread_mult;         ///< 无深度数据时 spread 倍数 (default 1.5)
     double      depth_sensitivity_scale;     ///< depth_sensitivity 缩放因子 (default 0.2)
-    
+
     double      pause_spread_mult_ratio;    ///< spread_mult 暂停阈值比例 (default 0.9)
     double      delta_skew_power;           ///< delta skew 非线性幂次 (default 1.5)
     double      inventory_skew_scale;      ///< 库存skew放大系数 (default 2.0, 使中持仓时ask接近贴mid) [legacy delta路径]
@@ -63,11 +63,11 @@ struct GLFTParams
     // v7.1 连续控制重设计: 归一化仓位 skew (pos_util 口径)
     double      inventory_skew_gain;        ///< 归一化库存skew增益 (default 1.0; skew_norm=util^power×gain, 1.0=贴mid)
     double      skew_cross_max_ticks;       ///< util≥1.0 时授权减仓侧穿越 mid 的最大 tick 数 (default 3.0)
-    
+
     // v3 双维 skew 权重（>0 启用加权模式，=0/未设则保留旧 max 模式）
     double      portfolio_skew_weight;     ///< portfolio delta skew 权重 (default 0.5)
     double      contract_skew_weight;      ///< contract delta+pos skew 权重 (default 1.0)
-    
+
     GLFTParams()
         : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5)
         , phi(0.20)
@@ -91,7 +91,7 @@ struct GLFTParams
         , portfolio_skew_weight(0.5)
         , contract_skew_weight(1.0)
     {}
-    
+
     static GLFTParams fromVariant(wtp::WTSVariant* v, double base_spread, double tick_size, double portfolio_max_delta) {
         GLFTParams p;
         p.base_spread = base_spread;
@@ -135,12 +135,12 @@ struct GLFTResult
     double      alpha_adjustment;
     double      spread_mult;
     bool        pause_quoting;
-    
+
     // ========== 分解字段（调试和分析用）==========
     double      toxicity_adjustment;    ///< 毒性对价差的调整
     double      confidence_weight;      ///< 置信度权重
     double      glft_vol_contrib;       ///< GLFT 波动率贡献
-    
+
     GLFTResult() : fair_value(0), bid_price(0), ask_price(0), base_spread(0)
                  , inventory_skew(0), alpha_adjustment(0), spread_mult(1.0)
                  , pause_quoting(false)
@@ -157,7 +157,7 @@ struct RelatedInventory
     double      hedge_ratio;
     double      multiplier;
     double      last_price;
-    
+
     RelatedInventory(const std::string& c, double inv, double corr, double hr, double mult, double px)
         : code(c), inventory(inv), correlation(corr), hedge_ratio(hr), multiplier(mult), last_price(px) {}
 };
@@ -174,7 +174,7 @@ struct PortfolioContext
     double      contract_pos_util;   ///< v7.1: 带符号仓位利用率 (pos+同向pending)/maxPos, 正=多 负=空
     bool        contract_pos_util_valid; ///< v7.1: contract_pos_util 是否有效 (统一口径 skew 开关)
     std::vector<RelatedInventory> related;
-    
+
     PortfolioContext() : total_delta(0), total_exposure(0), current_multiplier(1), current_hedge_ratio(1), current_price(1), contract_max_delta(0)
         , contract_pos_util(0), contract_pos_util_valid(false) {}
     void clear() { related.clear(); total_delta = total_exposure = 0; contract_max_delta = 0; contract_pos_util = 0; contract_pos_util_valid = false; }
@@ -189,7 +189,7 @@ class SpreadOptimizer
 public:
     SpreadOptimizer(const std::string& code = "");
     ~SpreadOptimizer() = default;
-    
+
     void setParams(const GLFTParams& params)
     {
         // F20: seqlock 写协议 (奇=写进行中, 偶=稳定)
@@ -224,7 +224,7 @@ public:
     //==========================================================================
     // Core Functional API
     //==========================================================================
-    
+
     /// 计算最优报价
     /// @param midPrice 中间价
     /// @param contractDelta 当前合约 delta (= position * hedge_ratio, 有正负号)
@@ -238,7 +238,7 @@ public:
         double alphaSensitivity,
         const PortfolioContext* pCtx
     ) const;
-    
+
     // Internal Logic (exposed for testing/secondary use)
     double computeBaseSpread(const SignalContext& ctx) const;
     double computeContractDeltaSkew(double contractDelta, double contractMaxDelta) const;

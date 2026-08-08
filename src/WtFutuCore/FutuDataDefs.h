@@ -1,7 +1,7 @@
 /*!
  * \file FutuDataDefs.h
  * \brief Memory-mapped data block definitions for Futures Market Making
- * 
+ *
  * This file provides namespace aliases to reuse WtUftCore/UftDataDefs.h
  * Avoiding duplicate definitions for better maintainability.
  */

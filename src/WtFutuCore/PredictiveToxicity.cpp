@@ -52,41 +52,41 @@ void PredictiveToxicity::onTrade(double price, double qty, bool isBuy, uint64_t 
     }
     _current_bucket.total_volume += qty;
     _current_bucket.end_time = timestamp;
-    
+
     if (_current_bucket.start_time == 0) {
         _current_bucket.start_time = timestamp;
     }
-    
+
     // Check if bucket is full
     if (_current_bucket.total_volume >= _bucket_size) {
         // Calculate order imbalance
         double imbalance = std::abs(_current_bucket.buy_volume - _current_bucket.sell_volume);
         _order_imbalances.push_back(imbalance);
-        
+
         // Maintain fixed window
         if (_order_imbalances.size() > _cfg.vpin_window) {
             _order_imbalances.pop_front();
         }
-        
+
         // Calculate VPIN
         double sum_imbalance = 0;
         for (double imb : _order_imbalances) {
             sum_imbalance += imb;
         }
-        
+
         if (!_order_imbalances.empty() && _bucket_size > 0) {
             _vpin = sum_imbalance / (_order_imbalances.size() * _bucket_size);
         }
-        
+
         // Save and reset bucket
         _buckets.push_back(_current_bucket);
         if (_buckets.size() > _cfg.vpin_window) {
             _buckets.pop_front();
         }
-        
+
         _current_bucket = VolumeBucket();
         _current_bucket.start_time = timestamp;
-        
+
         _cache_dirty = true;
     }
 }
@@ -94,18 +94,18 @@ void PredictiveToxicity::onTrade(double price, double qty, bool isBuy, uint64_t 
 void PredictiveToxicity::onTickVolume(const char* stdCode, const wtp::WTSTickData* tick)
 {
     if (!tick) return;
-    
+
     if (_bucket_size <= 0) {
         setBucketSize(_cfg.vpin_bucket_size);
         if (_bucket_size <= 0) return;
     }
-    
+
     double qty = tick->volume();
     if (qty <= 0) return;
-    
+
     double price = tick->price();
     uint64_t timestamp = tick->actiontime();
-    
+
     // Infer trade direction
     bool isBuy = true;
     auto it = _last_ticks.find(stdCode);
@@ -113,7 +113,7 @@ void PredictiveToxicity::onTickVolume(const char* stdCode, const wtp::WTSTickDat
         const LastTickInfo& last = it->second;
         double last_mid = (last.bid_px + last.ask_px) / 2.0;
         double current_mid = (tick->bidprice(0) + tick->askprice(0)) / 2.0;
-        
+
         if (price >= tick->askprice(0)) {
             isBuy = true;
         } else if (price <= tick->bidprice(0)) {
@@ -129,7 +129,7 @@ void PredictiveToxicity::onTickVolume(const char* stdCode, const wtp::WTSTickDat
             return;
         }
     }
-    
+
     onTrade(price, qty, isBuy, timestamp);
     _last_ticks[stdCode] = {tick->bidprice(0), tick->askprice(0), tick->totalvolume()};
 }
@@ -141,9 +141,9 @@ void PredictiveToxicity::onTickVolume(const char* stdCode, const wtp::WTSTickDat
 void PredictiveToxicity::updateCache() const
 {
     if (!_cache_dirty) return;
-    
+
     _cached_result = PredictiveToxicityResult();
-    
+
     // Warmup gate
     // 冷启动 _buckets 累积不足时 VPIN 噪声极大(单 bucket 就能算出非零值),
     // 导致 is_toxic 抖动锁死策略。要求至少 min_warmup_buckets 个完整桶后才启用 VPIN。
@@ -151,39 +151,39 @@ void PredictiveToxicity::updateCache() const
     // 与下方注释矛盾, 预热期形成保护真空.
     const bool vpin_ready = (_buckets.size() >= _cfg.min_warmup_buckets);
     _cached_result.vpin = vpin_ready ? _vpin : 0.0;
-    
+
     if (_has_alpha_data)
     {
         // OFI toxicity
         _cached_result.ofi_toxicity = std::abs(_latest_alpha.ofi_component);
-        
+
         // Trade imbalance toxicity
-        _cached_result.trade_toxicity = std::abs(_latest_trade_imb.imbalance_ratio) * 
+        _cached_result.trade_toxicity = std::abs(_latest_trade_imb.imbalance_ratio) *
             (0.5 + 0.5 * _latest_trade_imb.large_trade_ratio);
-        
+
         // Combined alpha toxicity
-        _cached_result.alpha_toxicity = 
+        _cached_result.alpha_toxicity =
             _cfg.ofi_weight * _cached_result.ofi_toxicity +
             _cfg.trade_weight * _cached_result.trade_toxicity;
-        
+
         // Check for extreme signals (> 0.6, lowered from 0.9 for futures MM)
         if (_cached_result.ofi_toxicity > 0.6 || _cached_result.trade_toxicity > 0.6)
         {
             _cached_result.extreme_signal = std::max(_cached_result.ofi_toxicity, _cached_result.trade_toxicity);
         }
     }
-    
+
     // Combined score: weighted combination of VPIN and alpha (not max)
     _cached_result.combined_score = 0.5 * _cached_result.vpin + 0.5 * _cached_result.alpha_toxicity;
-    
+
     // 注意: extreme_signal 不在此叠加 — 由 ToxicFlowDetector 门面在 realized 加权后
     // 统一叠加, 避免双重放大(本类内部叠加一次 + 门面再叠加一次).
-    
+
     // Is toxic?
-    _cached_result.is_toxic = 
+    _cached_result.is_toxic =
         _cached_result.combined_score > _cfg.alpha_threshold ||
         (vpin_ready && _cached_result.vpin > _cfg.vpin_threshold);
-    
+
     // Toxic side
     if (_cached_result.is_toxic && _has_alpha_data)
     {
@@ -192,7 +192,7 @@ void PredictiveToxicity::updateCache() const
         else if (_latest_alpha.ofi_component < 0 && _latest_trade_imb.imbalance_ratio < 0)
             _cached_result.toxic_side = -1;
     }
-    
+
     _cache_dirty = false;
 }
 
@@ -221,7 +221,7 @@ void PredictiveToxicity::reset()
     _has_alpha_data = false;
     _cache_dirty = true;
     _cached_result = PredictiveToxicityResult();
-    
+
     _buckets.clear();
     _order_imbalances.clear();
     _current_bucket = VolumeBucket();
