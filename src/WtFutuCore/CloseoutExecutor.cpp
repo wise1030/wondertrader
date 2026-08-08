@@ -38,6 +38,7 @@ void CloseoutExecutor::start(wtp::IUftStraCtx* ctx,
     _prev_round_ts   = 0;
     _prev_round_qty  = 0;
     _rounds.clear();
+    _consecutive_zero_fills = 0;
 
     // Drain start timestamp: captured on first handleDraining call from snap.timestamp_ms
     // (must be in same time domain as snap.timestamp_ms = ms-from-midnight)
@@ -61,6 +62,7 @@ void CloseoutExecutor::reset()
     _prev_round_qty = 0;
     _code[0]        = '\0';
     _rounds.clear();
+    _consecutive_zero_fills = 0;
 }
 
 void CloseoutExecutor::run(wtp::IUftStraCtx* ctx, const MarketSnapshot& snap)
@@ -271,6 +273,14 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx,
 
     // --- Select price tier ---
     PriceTier tier = selectTier(urgency, time_left_ms);
+
+    // Price chase: consecutive zero-fills -> force SWEEP tier
+    if (_consecutive_zero_fills >= 2 && tier < PriceTier::SWEEP)
+    {
+        tier = PriceTier::SWEEP;
+        WTSLogger::warn("CloseoutExecutor[{}] EXECUTE: {} consecutive zero-fills, forcing SWEEP (price chase)",
+                        (void*)this, _consecutive_zero_fills);
+    }
 
     // --- Calculate batch quantity ---
     double batch_qty = calcBatchQty(_remaining, tier, snap.bid1_qty, snap.ask1_qty);
@@ -534,6 +544,12 @@ void CloseoutExecutor::updateRoundFill(const MarketSnapshot& snap)
     // Only record positive fills
     if (filled < 0)
         filled = 0;
+
+    // Track consecutive zero-fills for price chase
+    if (filled < 0.01)
+        _consecutive_zero_fills++;
+    else
+        _consecutive_zero_fills = 0;
 
     _total_filled += filled;
 

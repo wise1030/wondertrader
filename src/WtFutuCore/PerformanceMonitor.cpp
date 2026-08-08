@@ -250,7 +250,29 @@ std::string PerformanceMonitor::getSummary() const
         oss << "max=" << c2a.max_ns / 1000.0 << "us ";
         oss << "(n=" << c2a.count << ")\n";
     }
-    
+
+    // P0: on_tick 入口 → 主流水线结束 全链路延迟 (rdtsc, SIGNAL_TO_ORDER 通道)
+    auto s2o = getLatencyStats(LatencyType::SIGNAL_TO_ORDER);
+    if (s2o.count > 0)
+    {
+        oss << "Tick-FullChain: ";
+        oss << "mean=" << s2o.mean_ns / 1000.0 << "us, ";
+        oss << "p99=" << s2o.p99_ns / 1000.0 << "us, ";
+        oss << "max=" << s2o.max_ns / 1000.0 << "us ";
+        oss << "(n=" << s2o.count << ")\n";
+    }
+
+    // P0: 报价挂单 → 成交 延迟 (replay 时钟)
+    auto q2f = getLatencyStats(LatencyType::QUOTE_TO_FILL);
+    if (q2f.count > 0)
+    {
+        oss << "Quote-to-Fill: ";
+        oss << "mean=" << q2f.mean_ns / 1000000.0 << "ms, ";
+        oss << "p99=" << q2f.p99_ns / 1000000.0 << "ms, ";
+        oss << "max=" << q2f.max_ns / 1000000.0 << "ms ";
+        oss << "(n=" << q2f.count << ")\n";
+    }
+
     // Throughput
     auto tp = getThroughputStats();
     oss << "Throughput: ";

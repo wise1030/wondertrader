@@ -20,6 +20,7 @@ uint32_t UnifiedOrderTracker::trackOrderInternal(
     double price, double qty, double placeMid, uint64_t placeTime,
     bool isBid, bool isMM, bool isArb)
 {
+RecursiveSpinGuard _g(_lock);
     // Get or allocate slot
     uint32_t index = !_free_slots.empty() ? _free_slots.back() : static_cast<uint32_t>(_orders.size());
     if (!_free_slots.empty()) _free_slots.pop_back();
@@ -53,6 +54,9 @@ uint32_t UnifiedOrderTracker::trackOrderInternal(
     
     // Update per-contract indices
     _orders_by_code[code].push_back(orderId);
+
+    // F9: 全源 pending 增量 (新单恒 active 非 pendingCancel)
+    addPendingQty(code.c_str(), isBid, qty);
     
     if (isMM)
     {
@@ -78,15 +82,20 @@ uint32_t UnifiedOrderTracker::trackOrderInternal(
 
 void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
 {
+RecursiveSpinGuard _g(_lock);
     auto it = _order_index.find(orderId);
     if (it == _order_index.end()) return;
-    
+
     uint32_t index = it->second;
     UnifiedOrderInfo& order = _orders[index];
     std::string code = order.code;
     bool isBid = order.isBid();
     bool isMM = order.isMMOrder();
     double price = order.price;
+
+    // F9: 全源 pending 减量 (pendingCancel 单已在 mark 时扣除, 不重复)
+    if (order.isActive() && !order.isPendingCancel())
+        addPendingQty(code.c_str(), isBid, -order.qty);
     
     // Update statistics
     if (order.isPendingCancel())
@@ -199,6 +208,7 @@ void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
 
 void UnifiedOrderTracker::updateBestPrices(const std::string& code, double price, bool is_buy)
 {
+RecursiveSpinGuard _g(_lock);
     if (is_buy)
     {
         auto it = _best_buy_price.find(code);
@@ -219,6 +229,7 @@ void UnifiedOrderTracker::updateBestPrices(const std::string& code, double price
 
 std::vector<uint32_t> UnifiedOrderTracker::getOrderIdsForContract(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     std::vector<uint32_t> result;
     auto it = _orders_by_code.find(code);
     if (it != _orders_by_code.end())
@@ -235,6 +246,7 @@ std::vector<uint32_t> UnifiedOrderTracker::getOrderIdsForContract(const std::str
 
 std::vector<uint32_t> UnifiedOrderTracker::getMMBuyOrderIds(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     std::vector<uint32_t> result;
     auto it = _mm_buy_by_code.find(code);
     if (it != _mm_buy_by_code.end())
@@ -251,6 +263,7 @@ std::vector<uint32_t> UnifiedOrderTracker::getMMBuyOrderIds(const std::string& c
 
 std::vector<uint32_t> UnifiedOrderTracker::getMMSellOrderIds(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     std::vector<uint32_t> result;
     auto it = _mm_sell_by_code.find(code);
     if (it != _mm_sell_by_code.end())
@@ -267,6 +280,7 @@ std::vector<uint32_t> UnifiedOrderTracker::getMMSellOrderIds(const std::string& 
 
 double UnifiedOrderTracker::getBestMMBuy(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     auto it = _best_buy_price.find(code);
     if (it != _best_buy_price.end()) return it->second;
     return 0;
@@ -274,6 +288,7 @@ double UnifiedOrderTracker::getBestMMBuy(const std::string& code) const
 
 double UnifiedOrderTracker::getBestMMSell(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     auto it = _best_sell_price.find(code);
     if (it != _best_sell_price.end()) return it->second;
     return 0;
@@ -281,6 +296,7 @@ double UnifiedOrderTracker::getBestMMSell(const std::string& code) const
 
 bool UnifiedOrderTracker::hasMMOrders(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     auto buyIt = _mm_buy_by_code.find(code);
     if (buyIt != _mm_buy_by_code.end() && !buyIt->second.empty()) return true;
     
@@ -292,6 +308,7 @@ bool UnifiedOrderTracker::hasMMOrders(const std::string& code) const
 
 double UnifiedOrderTracker::getPendingBuyQty(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     double total_qty = 0;
     auto it = _mm_buy_by_code.find(code);
     if (it != _mm_buy_by_code.end())
@@ -314,6 +331,7 @@ double UnifiedOrderTracker::getPendingBuyQty(const std::string& code) const
 
 double UnifiedOrderTracker::getPendingSellQty(const std::string& code) const
 {
+RecursiveSpinGuard _g(_lock);
     double total_qty = 0;
     auto it = _mm_sell_by_code.find(code);
     if (it != _mm_sell_by_code.end())
@@ -334,6 +352,21 @@ double UnifiedOrderTracker::getPendingSellQty(const std::string& code) const
     return total_qty;
 }
 
+// T4: 全源口径 (MM+arb 全量); F9: 增量维护 O(1) 查询
+double UnifiedOrderTracker::getPendingBuyQtyAllSources(const std::string& code) const
+{
+RecursiveSpinGuard _g(_lock);
+    auto it = _pending_buy_all.find(code);
+    return it != _pending_buy_all.end() ? it->second : 0.0;
+}
+
+double UnifiedOrderTracker::getPendingSellQtyAllSources(const std::string& code) const
+{
+RecursiveSpinGuard _g(_lock);
+    auto it = _pending_sell_all.find(code);
+    return it != _pending_sell_all.end() ? it->second : 0.0;
+}
+
 //==============================================================================
 // Auto-Cancel Check
 //==============================================================================
@@ -342,6 +375,7 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
     const std::string& code, uint64_t currentTime, double currentMid, double tickSize,
     bool stateChanged, bool inventoryLimitHit, double current_risk_delta)
 {
+RecursiveSpinGuard _g(_lock);
     // 复用成员缓冲 (主线程单线程调用), 消除每 tick 3 次 vector 堆分配
     _actions_buf.clear();
     
@@ -414,6 +448,7 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
                     order.last_inv_cancel_check = currentTime;
                     action.reason = CancelReason::INVENTORY_LIMIT;
                     _actions_buf.push_back(action);
+                    addPendingQty(order.code, order.isBid(), -order.qty);
                     order.setPendingCancel(CancelReason::INVENTORY_LIMIT);
                     continue;
                 }
@@ -445,6 +480,7 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
             
             action.reason = CancelReason::STALE;
             _actions_buf.push_back(action);
+            addPendingQty(order.code, order.isBid(), -order.qty);
             order.setPendingCancel(CancelReason::STALE);
             continue;
         }
@@ -460,12 +496,14 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(
 
 SelfTradeCheckResult UnifiedOrderTracker::checkArbitrageOrder(const ArbitrageOrderRequest& request) const
 {
+RecursiveSpinGuard _g(_lock);
     return checkSelfTrade(request.code, request.is_buy, request.price, request.is_market_order);
 }
 
 SelfTradeCheckResult UnifiedOrderTracker::checkSelfTrade(
     const std::string& code, bool is_buy, double price, bool is_market_order) const
 {
+RecursiveSpinGuard _g(_lock);
     SelfTradeCheckResult result;
     
     if (!_cfg.stp_enabled) return result;
@@ -524,6 +562,7 @@ SelfTradeCheckResult UnifiedOrderTracker::checkSelfTrade(
 std::vector<uint32_t> UnifiedOrderTracker::getConflictingMMOrders(
     const std::string& code, bool arb_is_buy, double arb_price) const
 {
+RecursiveSpinGuard _g(_lock);
     std::vector<uint32_t> result;
     
     const auto& mmOrders = arb_is_buy ? _mm_sell_by_code : _mm_buy_by_code;
@@ -555,6 +594,7 @@ std::vector<uint32_t> UnifiedOrderTracker::getConflictingMMOrders(
 
 bool UnifiedOrderTracker::shouldCancelDueToRate(uint64_t currentTime)
 {
+RecursiveSpinGuard _g(_lock);
     if (_cfg.max_cancel_rate > 0)
     {
         auto it = _cancel_timestamps.begin();

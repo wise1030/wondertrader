@@ -136,6 +136,7 @@ strategies:
             pnlRecoveryRatio: 0.5
             maxLossForRecovery: 0    # 0=不限制
             positionBreachPauseThreshold: 1.2
+            positionHardBlockRatio: 1.0  # 持仓硬止比例 (util>=此值 flexible模式qty=0; obligation靠skew保护)
             deltaCriticalMult: 1.5   # Delta 硬限制倍数
             deltaWarningMult: 0.8    # Delta 软警告倍数
             # R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
@@ -151,7 +152,7 @@ strategies:
           minutesBefore: 2           # 收盘前 N 分钟触发
           flattenPosition: true      # 是否平仓
           maxRetries: 10             # 最大重试次数
-          retryIntervalMs: 3000      # 重试间隔 (ms)
+          retryIntervalMs: 2000      # 重试间隔 (ms)
           nightMinutesBefore: 2      # 夜盘收盘前 N 分钟
           # CloseoutExecutor 渐进式参数
           drainTimeoutMs: 3000       # 排空超时
@@ -177,8 +178,19 @@ strategies:
         # ========================================================
         orderErrorThreshold: 3        # 下单错误熔断阈值
         maxOrders: 32                # 最大同时挂单数
+        maxPendingPerSide: 30        # 单侧最大挂单量 (pending超限->撤该侧旧单+跳过本轮; OrderFilter风控)
         stpMinPriceGap: 1.0          # 自成交防护最小价差
         useStp: false                # 自成交防护开关 (独立于套利; useSpreadArbitrage=true 时强制 true)
+
+        # ========================================================
+        # MonitorBridge — WtMonSvr GUI 数据桥 (可选, 默认关)
+        # 开启后策略定期把资金/持仓快照写到 generated/stradata/{id}.json,
+        # 收盘追加 generated/outputs/{id}/funds.csv 历史资金曲线。
+        # 热路径开销: 每 tick 一次时间戳比较 (~ns); 到点才序列化写盘。
+        # ========================================================
+        monitor:
+          enabled: true
+          flushIntervalMs: 1000
 
         # ========================================================
         # 模块开关 — 唯一权威位置在 coordinator.yaml

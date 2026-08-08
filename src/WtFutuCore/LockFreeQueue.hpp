@@ -48,7 +48,13 @@ public:
     {
     }
     
-    ~LockFreeQueue() = default;
+    // v7.7 C5: 析构时 drain 残留元素 — T 可含非平凡成员 (ArbTickData/
+    //   ArbOrderRequest/OrphanLeg 均含 std::string), default 析构泄漏其资源。
+    ~LockFreeQueue()
+    {
+        T item;
+        while (tryPop(item)) {}
+    }
     
     // Non-copyable, non-movable
     LockFreeQueue(const LockFreeQueue&) = delete;
@@ -116,27 +122,6 @@ public:
      */
     bool tryPop(T& item)
     {
-        // 先处理 drop：消费者跳过被覆盖的元素
-        // 这保证了 SPSC 语义：只有消费者修改 _head
-        size_t drops = _drop_count.load(std::memory_order_acquire);
-        if (drops > 0)
-        {
-            size_t skipped = 0;
-            for (size_t i = 0; i < drops; ++i)
-            {
-                const size_t current_head = _head.load(std::memory_order_relaxed);
-                // 检查队列是否为空（可能 drop 数量超过实际元素）
-                if (current_head == _tail.load(std::memory_order_acquire))
-                    break;
-                // 析构被跳过的元素
-                reinterpret_cast<T*>(&_buffer[current_head * sizeof(T)])->~T();
-                _head.store((current_head + 1) & (Capacity - 1), std::memory_order_release);
-                ++skipped;
-            }
-            // 减去已跳过的数量
-            _drop_count.fetch_sub(skipped, std::memory_order_release);
-        }
-        
         const size_t current_head = _head.load(std::memory_order_relaxed);
         
         // Check if queue is empty
@@ -221,10 +206,8 @@ private:
     // Align to cache line to prevent false sharing
     alignas(64) std::atomic<size_t> _head;
     alignas(64) std::atomic<size_t> _tail;
-    alignas(64) std::atomic<size_t> _drop_count{0};  // drop计数器，用于pushOverwrite
     
-    // Buffer storage — 同样 64B 对齐, 否则首元素与 _drop_count 共享 cache line
-    // (生产者写 buffer[0] 与消费者读 drop_count 互踩 false sharing)
+    // Buffer storage — 64B 对齐, 避免首元素与 _tail 共享 cache line
     alignas(64) char _buffer[Capacity * sizeof(T)];
 };
 

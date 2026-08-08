@@ -27,7 +27,8 @@ coordinator:
   # --- v7.1 taker 紧急减仓 (大量成交突然穿仓时主动吃单; 报价永不停) ---
   # 合约 util=(|pos|+pending)/maxPos >= takerReduceThreshold 时,
   # FAK 对手价平掉超出 takerReduceTargetUtil×maxPos 的部分; 每合约限频
-  takerReduceThreshold: 1.1        # 触发阈值 (0=禁用; 低于 PAUSE_QUOTING 的 1.2, 确保减仓先于停报)
+  takerReduceThreshold: 1.1        # 触发阈值 (0=禁用; v7.3: PAUSE_QUOTING 死分支已删除,
+                                   #   仓位控制全部由连续链承担: skew(1.0)->force义务(1.0)->taker(1.1))
   takerReduceTargetUtil: 0.8       # 减仓目标利用率
   takerReduceCooldownMs: 30000     # 每合约限频(ms)
 

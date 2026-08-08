@@ -3,6 +3,7 @@
 #include "../Includes/WTSDataDef.hpp"
 #include "../WTSTools/WTSLogger.h"
 #include <cmath>
+#include <algorithm>
 
 namespace futu {
 
@@ -32,8 +33,14 @@ void CorrelationManager::addRelation(const std::string& code1, const std::string
         calc->setConfig(cfg);
         calc->setSpreadType(SpreadType::SIMPLE_DIFF);
         _calculators[key] = calc;
-        _relation_types[key] = type;
-        _expected_betas[key] = expectedBeta;
+        // F1/F2: 维护预建索引 (onTick/getCalculator/getHedgeRatio 零字符串操作)
+        //   leg1 恒为字典序较小代码 (与原 getPairKey 解析语义一致, beta 方向不变)
+        const bool c1_is_leg1 = (code1 < code2);
+        _code_calcs[code1].emplace_back(calc.get(), c1_is_leg1);
+        _code_calcs[code2].emplace_back(calc.get(), !c1_is_leg1);
+        PairEntry entry{calc, type, expectedBeta};
+        _pair_index[code1][code2] = entry;
+        _pair_index[code2][code1] = entry;
     }
 }
 
@@ -45,8 +52,27 @@ void CorrelationManager::removeContract(const std::string& code) {
             std::string leg1 = it->first.substr(0, slash_pos);
             std::string leg2 = it->first.substr(slash_pos + 1);
             if (leg1 == code || leg2 == code) {
-                _relation_types.erase(it->first);
-                _expected_betas.erase(it->first);
+                // F1/F2: 同步清理预建索引
+                SpreadCalculator* raw = it->second.get();
+                for (const std::string& leg : {leg1, leg2}) {
+                    auto cc = _code_calcs.find(leg);
+                    if (cc != _code_calcs.end()) {
+                        auto& v = cc->second;
+                        v.erase(std::remove_if(v.begin(), v.end(),
+                            [raw](const auto& e) { return e.first == raw; }), v.end());
+                        if (v.empty()) _code_calcs.erase(cc);
+                    }
+                }
+                auto pi1 = _pair_index.find(leg1);
+                if (pi1 != _pair_index.end()) {
+                    pi1->second.erase(leg2);
+                    if (pi1->second.empty()) _pair_index.erase(pi1);
+                }
+                auto pi2 = _pair_index.find(leg2);
+                if (pi2 != _pair_index.end()) {
+                    pi2->second.erase(leg1);
+                    if (pi2->second.empty()) _pair_index.erase(pi2);
+                }
                 it = _calculators.erase(it);
                 continue;
             }
@@ -61,17 +87,12 @@ void CorrelationManager::onTick(const std::string& code, double price, uint64_t 
         it->second.last_price = price;
     }
 
-    for (auto& pair : _calculators) {
-        size_t slash_pos = pair.first.find('/');
-        if (slash_pos == std::string::npos) continue;
-        
-        std::string leg1 = pair.first.substr(0, slash_pos);
-        std::string leg2 = pair.first.substr(slash_pos + 1);
-        
-        if (code == leg1) {
-            pair.second->onLeg1Tick(price, timestamp);
-        } else if (code == leg2) {
-            pair.second->onLeg2Tick(price, timestamp);
+    // F1: 预建索引直达, 消除每 tick × 每 pair 的字符串拆分/比较
+    auto cc = _code_calcs.find(code);
+    if (cc != _code_calcs.end()) {
+        for (const auto& [calc, isLeg1] : cc->second) {
+            if (isLeg1) calc->onLeg1Tick(price, timestamp);
+            else        calc->onLeg2Tick(price, timestamp);
         }
     }
 }
@@ -97,9 +118,13 @@ std::string CorrelationManager::getPairKey(const std::string& code1, const std::
 }
 
 std::shared_ptr<SpreadCalculator> CorrelationManager::getCalculator(const std::string& code1, const std::string& code2) const {
-    auto it = _calculators.find(getPairKey(code1, code2));
-    if (it != _calculators.end()) {
-        return it->second;
+    // F2: 双向预建索引直达, 消除 getPairKey 堆分配 (热路径每非 anchor tick 调用)
+    auto it1 = _pair_index.find(code1);
+    if (it1 != _pair_index.end()) {
+        auto it2 = it1->second.find(code2);
+        if (it2 != it1->second.end()) {
+            return it2->second.calc;
+        }
     }
     return nullptr;
 }
@@ -173,18 +198,21 @@ double CorrelationManager::getHedgeRatio(const std::string& code1, const std::st
 
     if (code1 == code2) return 1.0;
 
-    // 1. 查关系类型
-    std::string key = getPairKey(code1, code2);
-    auto rel_it = _relation_types.find(key);
-    if (rel_it == _relation_types.end())
+    // 1. 查关系类型 (F2: 预建索引直达, 消除 getPairKey 堆分配)
+    auto pi1 = _pair_index.find(code1);
+    if (pi1 == _pair_index.end())
         return 1.0;  // 未注册关系,保守默认
+    auto pi2 = pi1->second.find(code2);
+    if (pi2 == pi1->second.end())
+        return 1.0;  // 未注册关系,保守默认
+    const PairEntry& entry = pi2->second;
 
     // 2. 跨期: 直接返回 1.0
-    if (rel_it->second == RelationType::CROSS_TERM)
+    if (entry.type == RelationType::CROSS_TERM)
         return 1.0;
 
     // 3. 跨品种/其他: 货值等价计算
-    auto calc = getCalculator(code1, code2);
+    const auto& calc = entry.calc;
     if (!calc) return 1.0;
 
     auto it1 = _contracts.find(code1);
@@ -233,8 +261,8 @@ std::vector<CorrelationManager::SpreadTradeSignal> CorrelationManager::getSpread
 void CorrelationManager::reset() {
     _contracts.clear();
     _calculators.clear();
-    _relation_types.clear();
-    _expected_betas.clear();
+    _code_calcs.clear();
+    _pair_index.clear();
 }
 
 } // namespace futu

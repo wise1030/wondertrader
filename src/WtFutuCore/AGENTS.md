@@ -45,3 +45,13 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner -c <config.y
   → 同配置两次运行成交拆分序列不同，策略轨迹有随机性（幅度随交易频率放大）。
   评估策略表现需接受该噪声或多次运行取均值。
 - `AsyncArbitrageExecutor` orphan leg 超时用 `steady_clock`（罕见路径，同理不可复现）。
+
+## 框架层已打补丁（越界修改记录，2026-08-03，GUI 监控接入需要）
+
+- **`src/WtUftRunner/WtUftRunner.cpp`**：`config()` 尾部补 `initEvtNotifier()` 调用。
+  原因：框架缺陷——`initEvtNotifier()` 定义存在但从未被调用（对比 WtRunner.cpp:241 /
+  WtRtRunner.cpp:654 均有调用），导致 config.yaml 的 `notifier` 段被静默忽略，
+  EventNotifier 不发布任何 MQ 事件，WtMonSvr GUI 无法接收实时订单/成交/日志。
+  上游修复后可还原。重建流程：`dist/WtRunnerFutu/rebuild_release.sh`。
+- **`dist/WtRunnerFutu/libWtMsgQue.so`**：EventNotifier 按 CWD 优先查找 MQ 模块，
+  需将该库置于 runner 工作目录（从 dist/bin 拷贝）。

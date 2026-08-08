@@ -31,6 +31,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     const PortfolioContext* pCtx
 ) const
 {
+    const GLFTParams params = snapshotParams();  // F20: seqlock 一致性快照, 防热更新撕裂读
     GLFTResult result;
     
     //==========================================================================
@@ -53,7 +54,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     //     仅当 toxicity_score 足过最小阈值时才应用，过滤噪声
     bool toxic_active = false;
     if (ctx.toxicity.valid && ctx.toxicity.toxic_detected && ctx.toxicity.toxicity_score > 0.05) {
-        double tox_mult = 1.0 + ctx.toxicity.toxicity_score * _params.toxicity_spread_factor;
+        double tox_mult = 1.0 + ctx.toxicity.toxicity_score * params.toxicity_spread_factor;
         spread_mult *= tox_mult;
         result.toxicity_adjustment = tox_mult - 1.0;
         toxic_active = true;
@@ -61,8 +62,8 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
 
     // 2b. 低置信度保护: 仅在 alpha 信号有效时生效
     //     无效信号(confidence=0 because alpha.valid=false)不应触发保护性扩大
-    if (ctx.alpha.valid && confidence < _params.low_confidence_threshold) {
-        double low_conf_mult = 1.0 + (_params.low_confidence_threshold - confidence) / _params.low_confidence_threshold * _params.low_confidence_spread_factor;
+    if (ctx.alpha.valid && confidence < params.low_confidence_threshold) {
+        double low_conf_mult = 1.0 + (params.low_confidence_threshold - confidence) / params.low_confidence_threshold * params.low_confidence_spread_factor;
         spread_mult *= low_conf_mult;
     }
 
@@ -107,12 +108,12 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     //==========================================================================
     // 3. Fair Value with Alpha (置信度加权, 截断不超过 half_spread)
     //==========================================================================
-    result.confidence_weight = _params.confidence_weight_min + 
-        (_params.confidence_weight_max - _params.confidence_weight_min) * confidence;
+    result.confidence_weight = params.confidence_weight_min + 
+        (params.confidence_weight_max - params.confidence_weight_min) * confidence;
     
-    result.alpha_adjustment = alphaSensitivity * alpha * result.confidence_weight * _params.tick_size;
+    result.alpha_adjustment = alphaSensitivity * alpha * result.confidence_weight * params.tick_size;
     
-    double half_spread_price = (result.base_spread / 2.0) * _params.tick_size;
+    double half_spread_price = (result.base_spread / 2.0) * params.tick_size;
     if (std::abs(result.alpha_adjustment) > half_spread_price) {
         result.alpha_adjustment = (result.alpha_adjustment > 0 ? 1.0 : -1.0) * half_spread_price;
     }
@@ -136,7 +137,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     // v7.1: 优先用统一仓位口径 (pos+同向pending)/maxPos 的归一化 skew;
     //       未注入时回退 legacy delta 口径 (行为兼容)
     double contract_skew = (pCtx && pCtx->contract_pos_util_valid)
-        ? computeContractPosSkew(pCtx->contract_pos_util, half_spread, _params.skew_cross_max_ticks)
+        ? computeContractPosSkew(pCtx->contract_pos_util, half_spread, params.skew_cross_max_ticks)
         : computeContractDeltaSkew(contractDelta, contractMaxDelta);
     double portfolio_skew = computePortfolioDeltaSkew(totalDelta);
     
@@ -145,9 +146,9 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     // - contract_skew_weight=1.0:  contract 维度（控单合约+pos，主导力）
     // 旧路径(max)保留：若两个权重之和<=0则退回 max 模式（向前兼容）
     double delta_skew;
-    if (_params.portfolio_skew_weight + _params.contract_skew_weight > 1e-9) {
-        delta_skew = _params.portfolio_skew_weight * portfolio_skew 
-                   + _params.contract_skew_weight * contract_skew;
+    if (params.portfolio_skew_weight + params.contract_skew_weight > 1e-9) {
+        delta_skew = params.portfolio_skew_weight * portfolio_skew 
+                   + params.contract_skew_weight * contract_skew;
     } else {
         delta_skew = (std::abs(portfolio_skew) > std::abs(contract_skew)) 
                      ? portfolio_skew : contract_skew;
@@ -161,7 +162,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     double total_skew = delta_skew;
 
     double clamp_limit = cross_authorized
-        ? half_spread + _params.skew_cross_max_ticks : half_spread;
+        ? half_spread + params.skew_cross_max_ticks : half_spread;
     total_skew = std::max(-clamp_limit, std::min(clamp_limit, total_skew));
     result.inventory_skew = total_skew;
     
@@ -172,13 +173,13 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     // 毒性高时，库存偏斜应被放大（更积极地减仓），而不仅仅是加宽价差。
     // spread_mult扩大了half_spread_price（保护性），同时也放大skew（进攻性），
     // 两者协同才能在毒性环境下快速出清库存。
-    double skew_price = total_skew * _params.tick_size * spread_mult;
+    double skew_price = total_skew * params.tick_size * spread_mult;
     
     // 第二次截断上限 = (half_spread_price + 穿越授权扩展) * spread_mult
     // 截断上限与 total_skew 的最大值一致 (含 v7.1 穿越权限扩展),
     // 否则 spread_mult>1 时 skew 被截回, 放大设计意图被抵消
     double skew_limit = (half_spread_price +
-        (cross_authorized ? _params.skew_cross_max_ticks * _params.tick_size : 0.0)) * spread_mult;
+        (cross_authorized ? params.skew_cross_max_ticks * params.tick_size : 0.0)) * spread_mult;
     if (std::abs(skew_price) > skew_limit) {
         skew_price = (skew_price > 0 ? 1.0 : -1.0) * skew_limit;
     }
@@ -186,8 +187,8 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
     result.bid_price = result.fair_value - half_spread_price + skew_price;
     result.ask_price = result.fair_value + half_spread_price + skew_price;
     
-    result.bid_price = std::floor(result.bid_price / _params.tick_size) * _params.tick_size;
-    result.ask_price = std::ceil(result.ask_price / _params.tick_size) * _params.tick_size;
+    result.bid_price = std::floor(result.bid_price / params.tick_size) * params.tick_size;
+    result.ask_price = std::ceil(result.ask_price / params.tick_size) * params.tick_size;
     
     //==========================================================================
     // 8. Crossed Quote Protection
@@ -196,16 +197,16 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
         result.pause_quoting = true;
         result.bid_price = result.fair_value - half_spread_price;
         result.ask_price = result.fair_value + half_spread_price;
-        result.bid_price = std::floor(result.bid_price / _params.tick_size) * _params.tick_size;
-        result.ask_price = std::ceil(result.ask_price / _params.tick_size) * _params.tick_size;
+        result.bid_price = std::floor(result.bid_price / params.tick_size) * params.tick_size;
+        result.ask_price = std::ceil(result.ask_price / params.tick_size) * params.tick_size;
     }
     
     //==========================================================================
     // 9. Multipliers & Flags
     //==========================================================================
-    result.spread_mult = result.base_spread / _params.base_spread;
+    result.spread_mult = result.base_spread / params.base_spread;
     result.pause_quoting = result.pause_quoting || ctx.shouldPause() ||
-                           (result.spread_mult >= _params.max_spread_mult * _params.pause_spread_mult_ratio);
+                           (result.spread_mult >= params.max_spread_mult * params.pause_spread_mult_ratio);
     
     //==========================================================================
     // 10. Debug Log
@@ -235,21 +236,23 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(
 
 double SpreadOptimizer::computeBaseSpread(const SignalContext& ctx) const
 {
+    const GLFTParams params = snapshotParams();  // F20
     double avg_depth = (ctx.bid_depth + ctx.ask_depth) / 2.0;
-    double depth_adj = (avg_depth <= 0) ? _params.no_depth_spread_mult : (1.0 / (1.0 + (avg_depth / _params.depth_normalization) * _params.depth_sensitivity * _params.depth_sensitivity_scale));
+    double depth_adj = (avg_depth <= 0) ? params.no_depth_spread_mult : (1.0 / (1.0 + (avg_depth / params.depth_normalization) * params.depth_sensitivity * params.depth_sensitivity_scale));
     
-    double spread = _params.base_spread * depth_adj;
+    double spread = params.base_spread * depth_adj;
     
     if (ctx.volatility.valid) {
-        double sigma_sq = ctx.volatility.vol_percentile / _params.vol_percentile_scale;
-        spread += _params.phi * sigma_sq * _params.vol_scale;
+        double sigma_sq = ctx.volatility.vol_percentile / params.vol_percentile_scale;
+        spread += params.phi * sigma_sq * params.vol_scale;
     }
     
-    return std::clamp(spread, _params.base_spread * _params.min_spread_mult, _params.base_spread * _params.max_spread_mult);
+    return std::clamp(spread, params.base_spread * params.min_spread_mult, params.base_spread * params.max_spread_mult);
 }
 
 double SpreadOptimizer::computeContractDeltaSkew(double contractDelta, double contractMaxDelta) const
 {
+    const GLFTParams params = snapshotParams();  // F20
     if (contractMaxDelta <= 0) return 0.0;
     
     double utilization = contractDelta / contractMaxDelta;
@@ -257,11 +260,12 @@ double SpreadOptimizer::computeContractDeltaSkew(double contractDelta, double co
     double direction = (utilization > 0) ? -1.0 : 1.0;
     // 修正2: 乘以inventory_skew_scale增强中持仓skew力度
     // scale=2.0时util=0.6→skew=-0.930(接近-half_base=-1.0), ask从+0.566降至+0.070
-    return direction * fastPow(std::abs(utilization), _params.delta_skew_power) * _params.inventory_skew_scale;
+    return direction * fastPow(std::abs(utilization), params.delta_skew_power) * params.inventory_skew_scale;
 }
 
 double SpreadOptimizer::computeContractPosSkew(double signed_pos_util, double half_spread_ticks, double cross_max_ticks) const
 {
+    const GLFTParams params = snapshotParams();  // F20
     if (half_spread_ticks <= 0) return 0.0;
 
     double util = std::abs(signed_pos_util);
@@ -271,7 +275,7 @@ double SpreadOptimizer::computeContractPosSkew(double signed_pos_util, double ha
     // v7.1 归一化库存 skew: skew_norm = util^power × gain
     //   norm=1.0 → 减仓侧贴 mid; gain=1.0, power=1.5 时:
     //   util=0.5→0.35×half, util=0.8→0.72×half, util=1.0→贴mid
-    double norm = fastPow(util, _params.delta_skew_power) * _params.inventory_skew_gain;
+    double norm = fastPow(util, params.delta_skew_power) * params.inventory_skew_gain;
     // 穿越权限: util≥1.0 时允许 norm>1.0 (减仓侧穿越 mid 主动减仓),
     //   上限 = 1 + cross_max/half; util<1.0 时 cap=1.0 保证义务合规
     double cap = 1.0;
@@ -283,14 +287,15 @@ double SpreadOptimizer::computeContractPosSkew(double signed_pos_util, double ha
 
 double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta) const
 {
-    if (_params.portfolio_max_delta <= 0) return 0.0;
+    const GLFTParams params = snapshotParams();  // F20
+    if (params.portfolio_max_delta <= 0) return 0.0;
     
-    double util = std::abs(totalDelta) / _params.portfolio_max_delta;
-    if (util <= _params.delta_skew_threshold) return 0.0;
+    double util = std::abs(totalDelta) / params.portfolio_max_delta;
+    if (util <= params.delta_skew_threshold) return 0.0;
     
-    double excess = util - _params.delta_skew_threshold;
+    double excess = util - params.delta_skew_threshold;
     double direction = (totalDelta > 0) ? -1.0 : 1.0;
-    return direction * _params.delta_skew_factor * fastPow(excess, _params.delta_skew_power);
+    return direction * params.delta_skew_factor * fastPow(excess, params.delta_skew_power);
 }
 
 } // namespace futu

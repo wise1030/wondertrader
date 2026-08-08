@@ -24,6 +24,7 @@
 #include "../Includes/ExecuteDefs.h"
 #include "../Includes/WTSMarcos.h"
 #include "../Includes/FasterDefs.h"
+#include "SpinLockGuard.h"
 #include "BilateralQuoteStats.h"
 
 NS_WTP_BEGIN
@@ -118,10 +119,16 @@ public:
     /// Get configuration
     const QuoterConfig& config() const { return _cfg; }
     void updateQuotingParams(double base_spread, double base_qty, double level_qty_multiplier, double level_step) {
+        RecursiveSpinGuard _g(_lock);
         _cfg.base_spread = base_spread;
         _cfg.base_qty = base_qty;
         _cfg.level_qty_multiplier = level_qty_multiplier;
         _cfg.level_step = level_step;
+        // T3: min_valid_qty 与 base_qty 同语义 (init: UftFutuMmStrategy.cpp
+        //   qcfg.min_valid_qty = base_qty)。热调小 baseQty 后若滞留旧值,
+        //   义务层 qty(新)<min_valid_qty(旧) -> sideNeed 恒真每 tick 撤挂
+        //   + 快照恒 invalid -> requoteAfterFill 风暴。
+        _cfg.min_valid_qty = base_qty;
         // 重算预计算数量表 — init() 中 _level_qtys 由 base_qty*level_qty_multiplier^i 预计算,
         // 旧代码只改 _cfg 不刷表, 热更新对实际下单量无效.
         for (uint32_t i = 0; i < _level_qtys.size(); i++)
@@ -131,14 +138,17 @@ public:
         }
     }
     void updateStickyParams(double sticky_threshold, double improve_retreat_ratio) {
+        RecursiveSpinGuard _g(_lock);
         _cfg.sticky_threshold = sticky_threshold;
         _cfg.improve_retreat_ratio = improve_retreat_ratio;
     }
     void updateProtectionParams(bool price_protection, double protect_ticks) {
+        RecursiveSpinGuard _g(_lock);
         _cfg.price_protection = price_protection;
         _cfg.protect_ticks = protect_ticks;
     }
     void updateMaxPriceDeviation(double max_price_deviation) {
+        RecursiveSpinGuard _g(_lock);
         _cfg.max_price_deviation = max_price_deviation;
     }
 
@@ -168,10 +178,15 @@ public:
                            double upper_limit = 0, double lower_limit = 0,
                            double best_bid = 0, double best_ask = 0,
                            double long_util = 0.0, double short_util = 0.0,
-                           bool force_ask_obligation = false, bool force_bid_obligation = false);
+                           bool force_ask_obligation = false, bool force_bid_obligation = false,
+                           bool hard_block_bid = false, bool hard_block_ask = false);
 
-    /// Cancel all outstanding quotes
+    /// Cancel all outstanding quotes (both sides)
     void cancelAll(wtp::IUftStraCtx* ctx);
+
+    /// Cancel all outstanding quotes on one side only
+    /// @param cancel_bid  true=cancel all bid orders, false=cancel all ask orders
+    void cancelSide(wtp::IUftStraCtx* ctx, bool cancel_bid);
 
     /// v7.2 scout: 自由内层(level<obligation_level)成交 → 撤同侧义务层挂单
     /// (scout 成交=逆向信号, 避免义务大单在旧价被逆向成交; 重挂由下一tick按新价完成)
@@ -260,31 +275,6 @@ public:
     ValidQuoteSnapshot getValidQuoteSnapshot() const;
 
 private:
-    /// Compute price for a given level
-    /// @param mid        Current mid-price
-    /// @param skew       Price skew in TICKS (will be multiplied by tick_size)
-    /// @param spread_mult Spread multiplier
-    /// @param level      Quote level index
-    __attribute__((always_inline)) 
-    inline double computeBidPrice(double mid, double skew, double spread_mult, uint32_t level) const
-    {
-        double offset = (_cfg.base_spread + level * _cfg.level_step) * spread_mult * _cfg.tick_size;
-        // skew is in ticks, convert to price
-        double skew_price = skew * _cfg.tick_size;
-        double raw = mid + skew_price - offset;
-        return floor(raw / _cfg.tick_size) * _cfg.tick_size;
-    }
-
-    __attribute__((always_inline))
-    inline double computeAskPrice(double mid, double skew, double spread_mult, uint32_t level) const
-    {
-        double offset = (_cfg.base_spread + level * _cfg.level_step) * spread_mult * _cfg.tick_size;
-        // skew is in ticks, convert to price
-        double skew_price = skew * _cfg.tick_size;
-        double raw = mid + skew_price + offset;
-        return ceil(raw / _cfg.tick_size) * _cfg.tick_size;
-    }
-
     /// Compute quantity for a given level
     __attribute__((always_inline))
     inline double computeQty(uint32_t level) const
@@ -348,6 +338,14 @@ private:
     }
 
 private:
+    // v7.6 阶段3: per-quoter 递归自旋锁 — refreshQuotes/cancelAll(MdSpi)
+    //   vs onTrade/onOrder/onEntrustAck/onScoutFill(TdSpi)。
+    //   整方法守卫 (非四段式): stra 调用在锁内, 与 _order_api_mtx 形成
+    //   quoter_lock → order_api_mtx 单向锁序。
+    //   已知残留: getBilateralStats() 返回引用的外部使用 (session begin/end
+    //   统计, RtTicker 安静期, 影响=统计失真非崩溃), 未加锁。
+    mutable RecursiveSpinLock _lock;
+
     QuoterConfig _cfg;
     std::vector<QuoteLevel> _bid_levels;
     std::vector<QuoteLevel> _ask_levels;
@@ -389,7 +387,11 @@ private:
         double best_bid, double best_ask,
         double long_util, double short_util,
         bool force_ask_obligation, bool force_bid_obligation,
-        bool is_obligation_mode);
+        bool is_obligation_mode,
+        // F8: 预计算 qty 衰减 (refreshQuotes 入口每 tick 1 次 exp;
+        //   <=0 时内部按 util 自算, 兼容旧调用)
+        double long_decay = 0.0, double short_decay = 0.0,
+        bool hard_block_bid = false, bool hard_block_ask = false);
     
     /// 判断当前 level 是否需要履行做市义务(双边报单)
     bool needObligation(uint32_t level,

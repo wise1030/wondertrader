@@ -9,21 +9,26 @@
 | 语言 | C++17 |
 | 框架 | WonderTrader UFT (Ultra-Fast Trading) |
 | 编译产物 | `libWtFutuCore.so` (动态策略库) |
-| 源文件 | 90 个 .h/.cpp/.hpp (含拆分组件), 约 3.0 万行 |
+| 源文件 | 101 个 .h/.cpp/.hpp (含拆分组件), 约 3.3 万行 |
 | 命名空间 | `futu` |
 | 工厂名 | `FutuStraFact.FutuMM` |
 
-## 架构总览 (v7.0 - 含 V6/V7 深度分析修复)
+## 架构总览 (v7.6 - 含 V6/V7 深度分析修复 + 批次1-4 修复 + 5A 重构 + 并发精细化)
 
 ```
-UftFutuMmStrategy (入口策略, ~2100行, 较 v4 减 800行)
+UftFutuMmStrategy (入口策略壳, 802行: 回调锁+转发+on_tick主循环+初始化编排)
+├── FutuModuleAssembler     (模块装配+合约信息加载, 5A-3 拆出)
+├── FutuRuntimeOps          (成交/订单/报单/通道/会话事件处理, 5A-3 拆出)
 ├── FutuConfigLoader        (配置解析+校验, 拆分组件)
 ├── FutuHotParamManager     (26热参数注册+分发, 拆分组件)
 ├── CloseoutOrchestrator    (收盘平仓编排, 拆分组件)
 ├── ArbExecutionBridge      (套利执行桥+残腿防护, 拆分组件)
-├── StrategyCoordinator (做市流水线)
-│   ├── FutuPortfolio        (组合/持仓/Delta/敞口/对冲)
-│   ├── FutuRiskMonitor      (风控状态机: 7级响应[soft+hard]+EventNotifier告警+自动恢复+滑窗读侧剔除)
+├── StrategyCoordinator (做市流水线, 1432行)
+│   ├── SessionPhaseManager  (会话阶段统一判定: 交易时段/休息窗口/closeout窗口, 5A-1)
+│   ├── QuotePolicyChain     (报价决策链: RiskWiden→ArbCloseSync→Toxicity
+│   │                         →LimitPrice→ColdStart→FillRetreat, 5A-2)
+│   ├── FutuPortfolio        (组合/持仓/Delta/敞口/对冲; 分向成本簿+聚合缓存)
+│   ├── FutuRiskMonitor      (风控状态机: 5级响应+EventNotifier告警+四道闸恢复+滑窗读侧剔除)
 │   ├── ToxicFlowDetector    (毒性检测门面)
 │   │   ├── PredictiveToxicity  (VPIN + OFI + Alpha, warmup 期 alpha 通道保留)
 │   │   ├── RealizedToxicity    (自成交校准)
@@ -36,12 +41,14 @@ UftFutuMmStrategy (入口策略, ~2100行, 较 v4 减 800行)
 │   │   ├── MomentumSignalSource    (动量 O(1) 增量 log 收益)
 │   │   ├── LeadLagSignalSource     (跨合约领先滞后)
 │   │   └── VolatilitySignalSource  (波动率, 辅助)
-│   ├── SpreadOptimizer      (per合约, GLFT价差模型)
+│   ├── SpreadOptimizer      (per合约, GLFT价差模型, seqlock 参数读取)
 │   ├── FutuQuoter           (per合约, 多档双边报价)
 │   ├── OrderRouter          (套利/对冲/平仓统一下单, <500ns/order)
-│   ├── UnifiedOrderTracker  (订单状态单一真相源, original_qty 部分成交跟踪)
-│   ├── CorrelationManager   (跨合约相关性与beta)
-│   ├── PerformanceMonitor   (无锁延迟/吞吐监控)
+│   ├── UnifiedOrderTracker  (订单状态单一真相源, original_qty 部分成交跟踪,
+│   │                         REJECTED 终结态, pending 全源增量维护)
+│   ├── RiskLiquidator       (统一强平/减仓原语: 对手价FAK+三级价格校验+qty clamp, P0-1)
+│   ├── CorrelationManager   (跨合约相关性与beta, 预建索引)
+│   ├── PerformanceMonitor   (无锁延迟/吞吐监控 + TscClock rdtsc 埋点)
 │   └── SelfTradeCalibrator  (自成交校准)
 ├── SpreadArbitrageManager (跨期套利协调器)
 │   ├── ISpreadStrategy 注册表 (插件化, 新增策略 1 行注册)
@@ -50,6 +57,7 @@ UftFutuMmStrategy (入口策略, ~2100行, 较 v4 减 800行)
 │   └── 策略实例: MeanReversion / TrendFollowing / PairsTrading / StatisticalArb
 ├── AsyncArbitrageExecutor (独立线程, 无锁SPSC队列, 跨线程安全)
 │   配置: useAsyncArbThread=true(实盘异步) / false(回测同步)
+├── MonitorBridge          (WtMonSvr GUI 数据桥: stradata/funds.csv 落盘, 默认关)
 ├── SelfTradePrevention
 ├── BilateralQuoteStats / PerformanceAnalyzer
 └── FutuConfigValidator (启动时配置校验)
@@ -76,7 +84,7 @@ UftFutuMmStrategy (入口策略, ~2100行, 较 v4 减 800行)
 
 ### 统一交易状态 (TradingState)
 
-分层状态机 (HSM)，集中管理做市阶段 + 报价子状态，单线程写契约 + DEBUG 线程断言：
+分层状态机 (HSM)，集中管理做市阶段 + 报价子状态：
 
 ```cpp
 struct TradingState {
@@ -92,7 +100,11 @@ struct TradingState {
 };
 ```
 
-> **V7 修复 (A1)**: 外部恢复路径 (on_trade / channel_ready) 现通过 `Coordinator::onExternalResumeFromRisk()` 同步重置软风控倍数 `_risk_spread_mult`，避免恢复后报价宽度被永久放大。
+> **v7.4 线程契约修正 (P0-2)**: 框架源码核实实盘回调**非单线程**——`on_tick` 系列=CTP MdSpi 线程、`on_trade/on_order/on_entrust`=CTP TdSpi 线程、`on_session_end`(盘中)=RtTicker 定时线程，均同步直达策略无队列（回测单线程无法暴露）。策略层 13 个回调入口由 `_cb_mtx`(recursive_mutex) 统一串行化；TradingState 的单线程 tid 断言经 `setExternalLocking(true)` 停用。
+>
+> **v7.6 复核与原子化**: 逐变量复核确认两线程共享集合达 15 类（"_exchange_time_ms 由 MdSpi 写/TdSpi 读"等），"行情线程管行情变量"假设不成立。TradingState 全字段 `std::atomic<Enum>`，`tryResumeFrom`→CAS、`setQuotingPhase`→read-check-CAS 循环（canTransition 校验不丢失）；多字段复合操作（reset）为逐字段 store，仅 session 安静期调用。详见 Phase 11。
+
+> **V7 修复 (A1)**: 外部恢复路径 (on_trade / channel_ready) 现通过 `Coordinator::onExternalResumeFromRisk()` 同步重置软风控倍数（v7.5 起由 `RiskWidenPolicy` 持有），避免恢复后报价宽度被永久放大。
 
 ### 信号架构 (SignalAggregator + 三层权重框架)
 
@@ -147,38 +159,46 @@ Anchor合约Tick到达
 
 ```
 processTick()
+  0. processCloseout()     → closeout 状态机驱动 (SessionPhaseManager 窗口判定)
+  0.5 processSectionBreak() → 每节收盘前 N 分钟撤单+暂停 (SessionPhaseManager)
   1. preCheck()          → 会话/市场状态/毒性/风控预检
   2. updateMarketData()  → 更新 MarketDataContext
   3. updateSignals()     → SignalAggregator + ToxicFlowDetector
   4. checkRisk()         → FutuRiskMonitor 评估, 执行风控动作
-     └ PAUSE_QUOTING 时仍执行 checkTakerReduce (减仓才能恢复; v7.2 已删除 checkAndHedge)
-  5. processQuoting()    → SpreadOptimizer → FutuQuoter.refreshQuotes() (B1条件式重挂, v7.2黏性生效)
+     └ BLOCK_SIDE 时仍执行 checkTakerReduce (减仓才能恢复)
+  5. processQuoting()    → SpreadOptimizer(GLFT) → QuotePolicyChain
+                           (RiskWiden→ArbCloseSync→Toxicity→LimitPrice→ColdStart→FillRetreat)
+                           → FutuQuoter.refreshQuotes() (B1条件式重挂, v7.2黏性生效)
   6. processAutoCancel() → 过时/偏价挂单清理
   7. checkTakerReduce()  → 合约util≥takerReduceThreshold(1.1)时FAK对手价减仓
   8. updateAdaptiveParams() → 周期性参数微调
 ```
 
-成交回调 (on_trade): 组合记账 → arb桥 → scout识别(v7.2: 自由层成交撤同侧义务层)
+成交回调 (on_trade, FutuRuntimeOps::processTradeFill): 分向簿记账 → arb桥 → scout识别(v7.2: 自由层成交撤同侧义务层)
 → 条件式重挂(回测cancelAll仅深度破坏时 / 生产requoteAfterFill)
+→ tracker REJECTED/成交终结 → 恢复四道闸(checkAndRecover)
 
 ## 风控体系 (FutuRiskMonitor)
 
 ### v7.1 连续控制重设计 (2026-07-23)
 
 **核心原则**: 仓位风险由**无状态连续控制**处理, 报价永在线(做市义务); 离散硬动作只保留给
-真正的极端情况(日亏损/组合敞口)。仓位 breach **不再触发** BLOCK_SIDE/PAUSE_QUOTING/RISK_HALTED。
+真正的极端情况(日亏损/组合敞口)。仓位 breach **不再触发** BLOCK_SIDE/RISK_HALTED (PAUSE_QUOTING v7.3 已删除)。
 
 **统一利用率口径**: `util = (|pos| + 同向pending) / maxPos` — skew/qty衰减/义务/taker 共用
 
 | 层 | 触发条件 | 动作 | 类型 |
 |----|---------|------|------|
 | NORMAL | util < 0.8 | 正常报价 (skew + qty衰减连续调节) | 连续 |
-| **WIDEN_SPREAD** | 组合delta util ≥ 0.8/0.9 | `spread_mult = 1.2/1.5` (每tick无状态重算) | 策略(soft) |
+| **WIDEN_SPREAD** | 组合delta util ≥ 0.8/0.9 | `spread_mult = 1.2/1.5` (每tick无状态重算, RiskWidenPolicy) | 策略(soft) |
 | **skew 穿越授权** | util ≥ 1.0 | 减仓侧允许穿越 mid 最多 `skewCrossMaxTicks`(3), 主动减仓 | 连续 |
 | **obligation reduce** | util ≥ 1.0 | 加仓侧=带宽极限价+min qty; 减仓侧=skew攻击性(clamp不覆写) | 连续 |
 | **TAKER_REDUCE** | util ≥ 1.3 | FAK对手价平到 0.8×maxPos, 每合约30s限频 | 离散(主动吃单) |
-| FLATTEN_POSITION | 非仓位类 breachCount ≥ 2 | 撤单 + 停 arb + anchor 强平 | 硬风控 |
-| HALT_TRADING | DAILY_LOSS CRITICAL 或任意 CRITICAL | IRREVERSIBLE 强平 + 全停 | 终极 |
+| HALT_TRADING | DAILY_LOSS CRITICAL 或任意 CRITICAL | IRREVERSIBLE + RiskLiquidator 对手价FAK强平 + 全停 | 终极 |
+
+> **v7.3 两头化收口**: PAUSE_QUOTING/FLATTEN_POSITION 已删除——数学不可达死分支
+> (breachCount 恒 ≤1, flatten_threshold=2 永不可达; PAUSE 触发阈被 takerReduce 先行拦截)。
+> 设计明确为"软连续控制 + 硬 HALT"两头化: 仓位风险全走连续链, 极端情况直落 HALT 强平。
 
 **设计要点**:
 - **无状态 = 无死锁**: 仓位调节是 util 的纯函数, 仓位降了 skew 自动缓和, 无需恢复状态机
@@ -260,11 +280,56 @@ notifier:
 - **不可逆风险** (日亏损超限): 需人工干预(`clearIrreversible`)
 - **BLOCK_SIDE 恢复**(R2.7, 仅 DELTA/EXPOSURE 触发): BLOCK_SIDE_LONG/SHORT 设 `qphase=RISK_HALTED`,走统一恢复路径(`canRecover` + `resumeFromRisk` + `unblockLong/Short`)
 
+
+### 三层减仓机制 (Position Liquidation Architecture)
+
+仓位风险管理采用三层防线, 从被动到主动到紧急, 覆盖从"启动遗留"到"运行累积"到"极端亏损"的全部场景:
+
+| 维度 | ① AUTO REDUCE | ② TAKER_REDUCE | ③ FORCE FLAT |
+|------|---------------|----------------|--------------|
+| **调用者** | FutuRuntimeOps (onChannelReady) | StrategyCoordinator (onTick) | StrategyCoordinator (checkRisk) |
+| **底层方法** | `RiskLiquidator::reduceContract` | 直接 `submitSell/Buy` | `RiskLiquidator::forceFlatAll` |
+| **触发时机** | 策略启动 channel ready 后 (一次性) | 每 tick 持续检查 | 风控检测到 IRREVERSIBLE |
+| **触发条件** | `\|pos\| > maxPosition` | `\|pos\|/maxPos >= takerReduceThreshold` (默认1.3) | 日内亏损超 maxDailyLoss |
+| **减仓目标** | 减**到** maxPosition (如30) | 减**到** maxPos×targetUtil (默认0.8, 如24) | **全部清零** |
+| **Cooldown** | 无 (失败等下笔成交重试) | 30s/合约 (takerReduceCooldownMs) | 无 (一次性) |
+| **处理范围** | 一次只处理一个超限合约 (`break`) | 遍历所有超限合约 | 全部合约 |
+| **可恢复** | 自动 (REVERSIBLE) | 自动 | 需人工干预 (clearIrreversible) |
+| **场景** | 启动时发现遗留超限持仓 | 运行中持仓累积到130% | 日内亏损触顶, 紧急清仓 |
+
+**调用关系**:
+```
+onChannelReady (启动)
+  └─> checkRiskLimits -> POSITION_NET breach?
+        └─> RiskLiquidator::reduceContract  ① AUTO REDUCE
+
+onTick (每tick)
+  └─> checkTakerReduce                       ② TAKER_REDUCE
+  └─> checkRisk -> IRREVERSIBLE?
+        └─> RiskLiquidator::forceFlatAll     ③ FORCE FLAT
+```
+
+**净持仓口径**: 三个机制均使用 `ContractState.position` (NET position, 正=多 负=空),
+而非 gross 多/空分别检查。方向由 net 符号决定: `pos > 0 -> submitSell` (平多),
+`pos < 0 -> submitBuy` (平空)。这意味着当 net 为正时, 空头侧不会被减仓机制触碰,
+只能通过正常报价的 bid 成交自然消化。
+
+**平仓类型 (v7.7 修复)**: 减仓订单统一使用 `submitSell`/`submitBuy` (走 `stra_sell`/`stra_buy`),
+由框架 action policy 自动判断平仓类型 (WOT_CLOSE vs WOT_CLOSETODAY)。
+旧实现使用 `submitExitLong`/`submitExitShort` (走 `stra_exit_long`/`stra_exit_short`) 并硬编码
+`isToday=true`, 导致对昨日持仓发平今单被 CTP 拒绝 ("平今仓位不足")。
+修复后框架根据 `commInfo->getCoverMode()` 自动选择: SHFE/INE/DCE 用 WOT_CLOSE (平仓),
+CFFEX 用 WOT_CLOSETODAY (平今)。
+
 ### 收盘平仓状态机
 ```
-IDLE → PENDING → EXECUTING → COMPLETED
-                  ↘ FAILED → RETRYING → ...
+IDLE → TRIGGERED → DRAINING → ASSESSING → EXECUTING → COMPLETED
+                     ↘ FAILED → RETRYING ↗
 ```
+- 窗口判定统一走 SessionPhaseManager (夜盘跨日映射 + 白盘双触发点)
+- DRAINING 等活跃态下 checkRisk 复跑 (closeout 不再是风控盲区, 批次2)
+- FAK 部分成交/自撤单不误判 FAILED (仅零成交拒单才 markFailed, 批次1)
+- 触发源日志: CLOSEOUT_TRIGGERED/DRAINING/COMPLETED/FAILED
 
 ## 毒性检测 (ToxicFlowDetector)
 
@@ -317,8 +382,6 @@ dist/WtRunnerFutu/             # 实盘部署目录
 ├── Logs/                      # 运行日志
 └── generated/outputs/         # 策略输出
 ```
-
-### 配置分层说明 (v5 模块化统一)
 
 ### 配置分层说明 (v5+ — 单一权威位置)
 
@@ -562,7 +625,8 @@ cd dist/WtRunnerFutu
 1. WtUftRunner 加载 config.yaml
 2. 动态加载 libWtFutuCore.so (FutuStraFact.FutuMM)
 3. UftFutuMmStrategy::init() 读取配置
-4. initBusinessModules() 创建并连接所有组件:
+4. on_init: FutuModuleAssembler::loadContractInfos (合约信息/session缓存/收盘时间推导)
+5. FutuModuleAssembler::assemble() 创建并连接所有组件:
    - FutuPortfolio (组合管理)
    - FutuRiskMonitor (风控)
    - SpreadOptimizer (per合约)
@@ -570,14 +634,14 @@ cd dist/WtRunnerFutu
    - FutuQuoter (per合约)
    - ToxicFlowDetector (含内嵌SyntheticSignalFusion)
    - OrderRouter (套利/对冲/平仓)
-   - StrategyCoordinator (流水线)
+   - StrategyCoordinator (流水线, 含 SessionPhaseManager/QuotePolicyChain)
    - SpreadArbitrageManager (套利)
    - AsyncArbitrageExecutor (异步执行)
    - PerformanceAnalyzer/Monitor
-5. FutuConfigValidator 校验配置参数
-6. 注册热更新参数
-7. 订阅合约行情
-8. 进入tick驱动循环
+6. FutuConfigValidator 校验配置参数
+7. 注册热更新参数
+8. 订阅合约行情
+9. 进入tick驱动循环
 ```
 
 ### 启动日志关键信息
@@ -617,18 +681,23 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 ### 做市核心
 | 模块 | 文件 | 说明 |
 |------|------|------|
-| UftFutuMmStrategy | .h/.cpp | 入口策略, 回调分发+轻量委托 |
+| UftFutuMmStrategy | .h/.cpp | 入口策略壳 (802行), 回调锁+转发+on_tick主循环 |
+| FutuModuleAssembler | .h/.cpp | 模块装配+合约信息加载 (5A-3, friend+别名零改动搬迁) |
+| FutuRuntimeOps | .h/.cpp | 成交/订单/报单/通道/会话事件处理 (5A-3) |
 | FutuConfigLoader | .h/.cpp | 配置解析+边界校验 (拆分组件) |
 | FutuHotParamManager | .h/.cpp | 26热参数注册+分发 (拆分组件) |
 | CloseoutOrchestrator | .h/.cpp | 收盘平仓全生命周期编排 (拆分组件) |
 | ArbExecutionBridge | .h/.cpp | 套利执行桥+残腿防护 (拆分组件) |
-| StrategyCoordinator | .h/.cpp | 做市流水线编排 |
+| StrategyCoordinator | .h/.cpp | 做市流水线编排 (1432行) |
+| SessionPhaseManager | .h | 会话阶段统一判定: 交易时段/休息窗口/closeout窗口 (5A-1, 纯函数) |
+| QuotePolicyChain | .h | 报价决策链 6 policy (5A-2): RiskWiden/ArbCloseSync/Toxicity/LimitPrice/ColdStart/FillRetreat |
+| RiskLiquidator | .h | 统一强平/减仓原语 (P0-1): 对手价FAK+三级价格校验+qty clamp |
 | FutuQuoter | .h/.cpp | 多档双边报价引擎 |
-| SpreadOptimizer | .h/.cpp | GLFT价差优化(公允价+偏斜) |
+| SpreadOptimizer | .h/.cpp | GLFT价差优化(公允价+偏斜, seqlock 参数读取) |
 | SignalAggregator | .h | 6源信号聚合(SignalSlot表驱动) |
 | ICWeightTracker | .h | 三层权重框架 + RollingScaleTracker + IC追踪 |
 | OrderRouter | .h/.cpp | 非做市统一下单路由 |
-| TradingState | .h | 统一交易状态管理 (分层状态机) |
+| TradingState | .h | 统一交易状态管理 (分层状态机, 外部锁契约) |
 | ISpreadStrategy | .h | 套利策略插件接口 + 注册表 |
 
 ### 信号源
@@ -688,6 +757,10 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | FutureTypes | .h | 期货类型定义 |
 | SpinLockGuard | .h | 自旋锁RAII |
 | LockFreeQueue | .hpp | SPSC无锁队列(cache line 对齐) |
+| TscClock | .h | rdtsc 时钟+10ms校准 (perf 埋点 ~6ns) |
+| MonitorBridge | .h/.cpp | WtMonSvr GUI 数据桥 (stradata/funds.csv 落盘, 默认关) |
+| SpinLockGuard | .h | 自旋锁RAII + RecursiveSpinLock (owner-tid+计数可重入, v7.6) |
+| OrderApiGuard | .h | 下单 API 互斥 (v7.6): 21 个 stra_* 调用点统一包裹, 锁序单向 |
 
 ## 设计原则
 
@@ -703,6 +776,12 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 10. **异步套利**: 独立线程+无锁SPSC队列, ~50ns tick推送, 配置开关useAsyncArbThread(实盘true/回测false), 异常兜底保线程存活
 11. **分层配置(单一权威)**: 每个开关/参数只有唯一位置 — config.yaml=身份+业务参数(无开关), coordinator.yaml=模块开关+模块参数, spread_arbitrage.yaml=套利子系统, hotparams.yaml=热更新参数。代码内 fallback 仅用于"键缺失时使用编译期默认", 不构成第二处配置。
 12. **O(1)自成交检查**: MM 订单快照预计算 min_sell/max_buy 标量, executeSignal 自检从 O(n) 线性扫描降为 O(1) 比较
+13. **回调串行化 (v7.4)**: 实盘回调三线程 (MdSpi/TdSpi/ticker) 直达策略, 13 个回调入口 `_cb_mtx` 统一串行化; 回测无竞争 ~20ns
+14. **统一强平原语 (v7.4)**: RiskLiquidator 无状态服务, 所有"对手价平仓"路径 (HALT FORCE FLAT / channel_ready AUTO REDUCE) 单一实现, 三级价格校验 + qty clamp
+15. **时间窗口单一事实来源 (v7.5)**: SessionPhaseManager 纯函数判定交易时段/休息窗口/closeout 窗口, closeout 执行状态机与之正交
+16. **报价决策链 (v7.5)**: GLFT 后的 6 个调整阶段为 QuotePolicyChain 固定顺序链, 风控倍数/毒性冷却状态由 policy 自持, 调整阈值改动单点化
+17. **分层并发防护 (v7.6)**: L0 标量/状态机原子+CAS → L1 结构递归自旋锁 (Tracker/Portfolio/Router/Bridge/Orch/Quoter) → L2 下单 API 互斥 (orderApiMutex); 指针逃逸经快照 API 消除; `FUTU_CALLBACK_LOCK` 编译开关 (1=大锁基线/0=细粒度) 双模式可回退
+18. **锁序单向 (v7.6)**: 结构锁 → orderApiMutex 单向不可逆; orderApiMutex 内不取结构锁; RecursiveSpinLock 处理方法嵌套 (checkAutoCancel→untrackOrder)
 
 ## 优化历程 (ROADMAP V2)
 
@@ -716,6 +795,10 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | **Phase 5** | **深度分析 v5: 48 项 Bug 修复 + 性能优化 + 架构重构** | **✅ 完成** |
 | **Phase 6** | **深度分析 v6: 37 项诊断, 15 项 P0/P1/P2 修复** | **✅ 完成** |
 | **Phase 7** | **深度分析 v7: 44 项诊断, 21 项真实修复 + 5 项误判避免** | **✅ 完成** |
+| **Phase 8** | **报价黏性 + scout 多层结构 (v7.2)** | **✅ 完成** |
+| **Phase 9** | **批次1-4: P0 bug/控制链收口/性能/架构 (v7.3-v7.4)** | **✅ 完成** |
+| **Phase 10** | **5A 重构: SessionPhaseManager/策略壳瘦身/QuotePolicyChain (v7.5)** | **✅ 完成** |
+| **Phase 11** | **并发精细化: L0原子/L1结构锁/L2下单互斥 (v7.6)** | **✅ 完成** |
 
 ### Phase 5 关键改造 (详见 docs/DEEP_ANALYSIS_V5.md)
 
@@ -747,7 +830,7 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 ### Phase 6 关键改造 (详见 docs/DEEP_ANALYSIS_V6.md + V6_REVIEW.md)
 
 **资金安全/数据正确性 (P0, 4 项)**:
-- `flatten_threshold` 默认 3->2 (FLATTEN_POSITION 从不可达变可达)
+- `flatten_threshold` 默认 3->2 (FLATTEN_POSITION 从不可达变可达; 后于 v7.3 证明数学不可达并删除)
 - `getPositionReductionToLimit` int32_t->double 截断修复
 - `timestampToMs` 删除 (fill_time 已是 epoch ms)
 - TrendFollowing `entry_price` 赋值 (止损从死代码复活)
@@ -841,7 +924,139 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 0 穿盘报单, SCOUT 14,800 次(日志确认 1手scout成交→撤义务层lvl1),
 报单分布 义务5手×17.9k / scout1手×15.4k, 净收益 ¥442,561 (arb ON + srand 噪声, 不与基线直接比)
 
+### Phase 9 (v7.3-v7.4) 批次1-4 修复 (2026-08-03, 逐批回测验证通过)
+
+**批次1 — P0 bug (9项)**:
+- C1 单边盘口(锁板) mid=0 污染 markToMarket → 双边>0才接受; last_price 仅正价写入; 强平价 bid1/ask1>0 校验
+- C2 recordFill 时间戳墙钟→replay ms (FillRetreat/毒性检测从失效恢复真实样本驱动)
+- C3+M3 套利平仓方向与 live_pos 同号 drop; 拒单/空 localids 补 cancelByPair+markLegRejected
+- M1+M2 拒单统一幂等 finalizeOrder (tracker REJECTED 终结态 + router onOrderDone)
+- M9 closeout FAK 部分成交/自撤单不误判 FAILED (仅零成交拒单)
+- 业务#2 on_trade 恢复统一走 checkAndRecover 四道闸 + 对称复活 arb
+- 业务#3 delta-rate 停机同步撤单; 业务#4 BLOCK_SIDE 停 arb executor
+- F20 SpreadOptimizer GLFTParams mutex→seqlock (版本号翻转+读侧快照)
+
+**批次2 — 控制链收口 (v7.3)**:
+- 删除 PAUSE_QUOTING/FLATTEN_POSITION 数学不可达死分支 → "软连续控制+硬HALT"两头化
+- closeout 窗口 checkRisk 复跑 (DRAINING 等 4 活跃态, 强平过程不再是风控盲区)
+- min_valid_qty 热同步 (=base_qty); checkPreTradePosition 切 pending 全源口径
+
+**批次3 — 性能快赢 (8项, 基线: Tick-FullChain mean=185μs)**:
+- P0 埋点: TscClock (rdtsc+10ms校准) + SIGNAL_TO_ORDER/Quote-to-Fill 通道 + 60s [PERF] 摘要
+- F1/F2 CorrelationManager 预建索引 (_code_calcs/_pair_index); F4 FutuPortfolio 7值单pass聚合缓存
+- F5 chrono 门控; F6/F7 tc.time_hms/session 指针复用; F8 exp 提升; F9 pending 增量维护; F13 TRADE日志降debug
+
+**批次4 — 架构重构 (P0 项)**:
+- P0-2 回调线程模型: 框架源码核实实盘三线程回调 (on_tick=MdSpi/on_trade=TdSpi/on_session_end=ticker),
+  策略 13 回调 `_cb_mtx` 串行化; TradingState tid 断言改外部锁契约
+- P0-1 RiskLiquidator 统一强平原语 (对手价FAK+三级价格校验+qty clamp), 替换 coordinator HALT FORCE FLAT
+  与 channel_ready AUTO REDUCE 两处重复漂移实现 (顺带修 m19: 被动挂单+无价格校验)
+- 死代码清理: onSpreadTrade (74行) / FutuQuoter computeBid/AskPrice / SpreadCalculator._alpha /
+  LockFreeQueue._drop_count; C9 liquidity_score 接线 total_volume; C10 last_update 时间戳;
+  C12 calculateDaysBetween 换精确 Gregorian (Hinnant days-from-civil)
+
+### Phase 10 (v7.5) 5A 重构 (2026-08-04, 逐波回测验证通过)
+
+**5A-1 SessionPhaseManager** (纯函数, 时间窗口单一事实来源):
+- 统一三处窗口判定: processSectionBreak(休息窗口) / preCheck(交易时段) / checkCloseout(夜盘跨日+白盘双触发)
+- 状态机(IDLE→TRIGGERED→DRAINING→...) 仍归 FutuRiskMonitor, manager 只管时间窗口
+- 对拍: SECTION_BREAK 1014/1129, CLOSEOUT_TRIGGERED 5天全部 14:45, 与基线逐点一致
+
+**5A-3 策略壳瘦身** (UftFutuMmStrategy 2271→802行, -65%):
+- FutuModuleAssembler (816行): initBusinessModules 652行装配 + 73行合约信息加载外移
+- FutuRuntimeOps (952行): on_trade 282 / on_channel_ready 159 / on_session_begin+end 135 /
+  on_entrust 85 / on_order 66 / on_channel_lost 40 / finalizeOrder 40 外移
+- 手法: friend + 引用别名, 函数体逐行零改动搬迁; 锁保留在策略壳
+
+**5A-2 QuotePolicyChain** (报价决策链模块化):
+- processQuoting 内联 145 行 → 35 行链装配; 6 policy: RiskWiden→ArbCloseSync→Toxicity
+  →LimitPrice→ColdStart→FillRetreat (执行顺序与旧实现严格一致)
+- 状态迁移: _risk_spread_mult→RiskWidenPolicy (soft覆盖/hard闩锁/恢复清零 4写入点);
+  _toxicity_resume_time→ToxicityPolicy (冷却查询/抑制/复位 3处)
+
+**回测验证** (每波 _ec_5d.yaml): 35-36k 成交, dynbalance ¥28-31万 (srand 噪声范围),
+closeout 5 COMPLETED/10 TRIGGERED/0 FAILED, 0 segfault, Config validation 0 errors
+
+### Phase 11 (v7.6) 并发精细化三阶段 (2026-08-05, 双模式回测验证通过)
+
+**背景**: v7.4 `_cb_mtx` 大锁是正确性基线但非终态。逐变量复核确认 MdSpi/TdSpi
+共享集合 15 类 (其中 4 类崩溃级: `_violations_buf` vector + 3 个 hashmap,
+2 类资金正确性级: FutuPortfolio/TradingState)。用户决策: 事件队列方案因
+延迟不可接受而排除, 采用分层细粒度 + 编译开关可回退。
+
+**阶段 1 — L0 零锁化 (原子+CAS)**:
+- TradingState 全字段 `std::atomic<Enum>`: tryResumeFrom→CAS,
+  setQuotingPhase→read-check-CAS 循环 (canTransition 校验与写入原子化)
+- 策略 5 标量原子化 (_exchange_time_ms/_order_error_count/_quoting_paused_since/
+  _channel_ready/_price_stale) + _portfolio_ctx_dirty
+- _last_mid 改 init 定码原子槽 (结构不可变, 消除 hashmap 结构竞态)
+- _violations_buf 双缓冲核实 (天然已拆); RiskWidenPolicy/ToxicityPolicy 状态原子化
+
+**阶段 2 — L1 结构锁 + 指针逃逸治理**:
+- 新增 RecursiveSpinLock (owner-tid+计数可重入, 处理 checkAutoCancel→untrackOrder
+  等公开方法嵌套)
+- 6 结构全方法守卫: UnifiedOrderTracker(44方法)/FutuPortfolio(40+)/
+  OrderRouter(16)/ArbExecutionBridge(5)/CloseoutOrchestrator(5)/_last_quote_params
+- **关键发现**: getContract/getOrderByOrderId 裸指针逃逸使方法级锁变假安全 →
+  新增快照 API (getContractSnapshot/getAllContractsSnapshot/
+  getPositionBreachedSnapshot/getOrderInfoCopy), 转换 25+ 外部读点;
+  hedge_ratio 裸指针直写收编为 smoothUpdateHedgeRatio 锁内方法
+
+**阶段 3 — Quoter + 下单互斥 + 编译开关**:
+- FutuQuoter per-quoter 递归守卫 (17方法, 整方法守卫; 已知残留:
+  getBilateralStats 外部引用, 统计对象低危已文档化)
+- OrderApiGuard: 21 个 stra_* 调用点统一包裹 (orderApiMutex),
+  覆盖框架级 UftStraContext 内部容器竞态 (不可越界修框架)
+- 锁序单向: 结构锁 → orderApiMutex 不可逆, orderApiMutex 内不取结构锁
+- FUTU_CALLBACK_LOCK 编译开关: 1=大锁基线(默认)/0=细粒度, 双模式可回退
+
+**验证** (_ec_5d.yaml 双模式):
+- 模式 1 (大锁): 34,643 成交, dynbalance ¥290,923, closeout 5/10/0, 0 crash
+- 模式 0 (细粒度): 28,777 成交, 0 crash, 功能等价 (同序列日亏分支设计行为正确)
+- 验证插曲: 两次回测 11×CLOSEOUT_FAILED 查证为 srand 序列落入真实日亏分支
+  (-323k 触发 LOSS_CRITICAL IRREVERSIBLE), 该极端路径上 RiskLiquidator FORCE FLAT/
+  executor HALT 门/日界 auto-clear 全部按设计工作, 非回归
+
+**竞态消除现状**: 复核清单 15 类中, 大锁模式全覆盖; 细粒度模式 14 类由
+原子/结构锁/orderApiMutex 覆盖, 仅 BilateralQuoteStats 外部引用为文档化
+已知残留 (统计失真级, 非崩溃级)。
+
 ## 待定项
+
+### 成交路径事件队列化解耦 (已评估, 驳回)
+
+**状态**: 评估完成, 驳回 (2026-08-06)
+
+**背景**: 外部诊断建议 (性能#7) 将成交路径重活与 on_tick 解耦——on_trade 只做
+无锁记账+置标志, 成交事件走 SPSC 队列由独立线程处理, 让 on_tick 永不阻塞。
+
+**驳回依据** (理由修正: 不是"队列延迟高"):
+- 两种队列变体延迟本质不同: 主循环下一 tick 消费 (最坏 1 tick=500ms, 不可接受)
+  vs 独立自旋消费线程 (~0.1-1μs, 可接受)。性能#7 提的是后者, "延迟高"不成立。
+- 真正驳回理由: ①收益≈0——大锁竞争实测概率 ~0.001%/tick (成交 0.5/s ×
+  tick 临界区 ~20μs), 每周几次 ~20μs 尾延迟接近噪声; ②CTP 约束在进程外
+  (500ms 切片+ms 级交易所往返), 进程内 μs 级优化边际贡献≈0;
+  ③复杂度/风险不对称 (回调重排保障/shutdown drain/第三业务线程)。
+
+**重启条件**: 极端行情 tick 风暴导致碰撞率质变 (perf monitor 实盘数据显示
+Tick-FullChain p99 恶化) 时, 以"独立自旋消费线程"变体重估。
+
+### v7.7 诊断复核修复 (2026-08-06, 回测验证通过)
+
+外部诊断报告复核: P1 属实 1 项 (修复), 部分误判 2 项 (性能#2 analyze 缓存已解决/
+性能#4 cancelAll 频率前提不准), 方向冲突 1 项 (性能#7/#8 事件队列, 见上条驳回)。
+
+| 修复 | 级别 | 说明 |
+|---|---|---|
+| A1 stra_* 漏网包裹 | P1 | stra_quote(FutuQuoter)/stra_exit_long/short(OrderRouter) 补 orderApiCall — v7.6 批量正则只匹配 buy/sell/cancel 三名字所致; exit 是双线程强平路径, 框架级竞态消除 |
+| 业务#2 forceFlatAnchor → forceFlatAll | P2 | HALT IRREVERSIBLE 强平从"仅 anchor×|组合delta|手数"改全组合逐合约实际持仓对手价 FAK (多合约敞口残留修复) |
+| 性能#1 TickContext 快照复用 | P2 | processTick 入口一次性 getContractSnapshot 存 tc.cs, preCheck/quoting 3+ 处复用 (等价性: 后续 Stage 仅读不变量字段) |
+| A3 装配完备性校验 | P2 | FutuModuleAssembler 收口 [ASSEMBLY] 依赖非空校验, 运行期空指针前移为启动期报错 |
+| A4 去 const_cast | P3 | processSectionBreak 改 TickContext& 非 const 签名 |
+| C2/C3/C4/C5/A2/性能#3 | P3 | setQuotingPhase 复用 canTransitionQuoting; static 节流变量成员化; RecursiveSpinLock 不变式注释固化; LockFreeQueue 析构 drain (元素含 std::string); 锁序文档补全 (含无环验证结论); ARB-ENH 观测模式运行期开关 (s_observe_enhancer 默认关) |
+| 业务#3 adaptive 文档化 | P3 | use_adaptive_params=true 时启动警告 (updateAdaptiveParams 空占位, 功能未激活) |
+
+**回测验证**: 36,333 成交, dynbalance ¥304,358, closeout 5/10/0, ASSEMBLY 校验通过, 0 crash
 
 ### Trade-through 毒性检测 (暂缓)
 

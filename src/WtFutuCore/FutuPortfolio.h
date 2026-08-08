@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <atomic>
 #include "../Includes/FasterDefs.h"
+#include "SpinLockGuard.h"
 #include "../Includes/WTSMarcos.h"
 #include "../WTSTools/WTSLogger.h"
 
@@ -218,18 +219,42 @@ public:
     /// Get contract state - O(1) lookup
     inline ContractState* getContract(const std::string& code)
     {
+        RecursiveSpinGuard _g(_lock);
         auto it = _code_to_state.find(code);
         return (it != _code_to_state.end()) ? &_contracts[it->second] : nullptr;
     }
     
     inline const ContractState* getContract(const std::string& code) const
     {
+        RecursiveSpinGuard _g(_lock);
         auto it = _code_to_state.find(code);
         return (it != _code_to_state.end()) ? &_contracts[it->second] : nullptr;
     }
     
     /// Get all contracts
-    const std::vector<ContractState>& getAllContracts() const { return _contracts; }
+    const std::vector<ContractState>& getAllContracts() const { RecursiveSpinGuard _g(_lock); return _contracts; }
+    
+    /// v7.6 阶段2: 锁内快照拷贝 — 替代裸指针/容器引用逃逸
+    /// (裸指针 getContract/getAllContracts 仅限内部递归锁内与既有调用方过渡使用)
+    bool getContractSnapshot(const std::string& code, ContractState& out) const {
+        RecursiveSpinGuard _g(_lock);
+        const ContractState* p = getContract(code);
+        if (!p) return false;
+        out = *p;
+        return true;
+    }
+    std::vector<ContractState> getAllContractsSnapshot() const {
+        RecursiveSpinGuard _g(_lock);
+        return _contracts;
+    }
+    bool getPositionBreachedSnapshot(ContractState& out) const {
+        RecursiveSpinGuard _g(_lock);
+        if (const ContractState* p = getPositionBreachedContract()) { out = *p; return true; }
+        return false;
+    }
+    /// v7.1/v7.6: hedge_ratio 平滑更新 (MdSpi 每 tick; 原经裸指针直写, 收编为锁内方法。
+    ///   沿用旧语义: 写后不置聚合脏标, 最晚下一 tick onTick 置脏后收敛)
+    void smoothUpdateHedgeRatio(const std::string& code, double beta, long sample_count);
     
     //==========================================================================
     // Market Data Updates
@@ -295,86 +320,68 @@ public:
     /// NOT thread-safe: must be called from the same thread as onTick/onPositionUpdate
     inline double getTotalDelta() const
     {
-        double delta = 0;
-        for (const auto& c : _contracts)
-            delta += c.delta();
-        return delta;
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return _agg_total_delta;
     }
-    
+
     /// Total portfolio delta 扣除目标持仓后的净 delta
     /// 用于 skew 计算和风险暴露评估
     inline double getNetDelta() const
     {
-        double net_delta = 0;
-        for (const auto& c : _contracts)
-        {
-            // 扣除目标持仓后的净 delta 贡献
-            double excess_pos = c.position - c.target_position;
-            net_delta += excess_pos * c.hedge_ratio;
-        }
-        return net_delta;
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return _agg_net_delta;
     }
-    
+
     /// Total absolute exposure (扣除目标持仓，考虑多空对冲)
     /// 计算逻辑：分开统计多头暴露和空头暴露，取较大值
     /// 原因：多空方向相反可以相互对冲，净暴露风险更小
     inline double getTotalExposure() const
     {
-        double long_exposure = 0;
-        double short_exposure = 0;
-        for (const auto& c : _contracts)
-        {
-            double exp = c.exposure();
-            double net_pos = c.position - c.target_position;
-            if (net_pos > 0)
-                long_exposure += exp;
-            else if (net_pos < 0)
-                short_exposure += exp;
-        }
-        return std::max(long_exposure, short_exposure);
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return std::max(_agg_long_exposure, _agg_short_exposure);
     }
-    
+
     // 新增毛暴露计算，跨品种多空不能简单对冲
     // getTotalExposure取max低估了跨品种风险(如rb多头+I空头，品种不同无法对冲)
     // getTotalGrossExposure返回sum(long+short)，用于更严格的风控检查
     inline double getTotalGrossExposure() const
     {
-        double total = 0;
-        for (const auto& c : _contracts)
-        {
-            total += c.exposure();
-        }
-        return total;
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return _agg_gross_exposure;
     }
-    
+
     /// Total unrealized P&L
     inline double getTotalUnrealizedPnL() const
     {
-        double pnl = 0;
-        for (const auto& c : _contracts)
-            pnl += c.unrealized_pnl;
-        return pnl;
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return _agg_unrealized_pnl;
     }
-    
+
     /// Total daily P&L
     inline double getTotalPnL() const
     {
-        double pnl = 0;
-        for (const auto& c : _contracts)
-            pnl += c.daily_pnl;
-        return pnl;
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return _agg_total_pnl;
     }
     
     /// Net inventory deviation from target (扣除单合约目标持仓)
     /// 用于 skew 计算：偏离目标的程度
     inline double getInventoryDeviation() const
     {
+        RecursiveSpinGuard _g(_lock);
         return getNetDelta();
     }
     
     /// Get position for specific contract - O(1)
     inline double getPosition(const std::string& code) const
     {
+        RecursiveSpinGuard _g(_lock);
         const ContractState* cs = getContract(code);
         return cs ? cs->position : 0;
     }
@@ -382,6 +389,7 @@ public:
     /// Get net position for specific contract (扣除目标持仓) - O(1)
     inline double getNetPosition(const std::string& code) const
     {
+        RecursiveSpinGuard _g(_lock);
         const ContractState* cs = getContract(code);
         return cs ? (cs->position - cs->target_position) : 0;
     }
@@ -406,6 +414,7 @@ public:
     /// Check if any single contract limit is breached (硬指标)
     inline bool isAnyContractLimitBreached() const
     {
+        RecursiveSpinGuard _g(_lock);
         for (const auto& c : _contracts)
         {
             if (c.isPositionLimitBreached())
@@ -417,6 +426,7 @@ public:
     /// Get the first contract that breached its POSITION limit (持仓手数限制，硬指标)
     inline const ContractState* getPositionBreachedContract() const
     {
+        RecursiveSpinGuard _g(_lock);
         for (const auto& c : _contracts)
         {
             if (c.isPositionLimitBreached())
@@ -534,6 +544,7 @@ public:
     // getSnapshot*(). Atomic<double> on x86-64 is lock-free (~10ns).
     //==========================================================================
     void publishPnLSnapshot() {
+        RecursiveSpinGuard _g(_lock);
         _snapshot_unrealized_pnl.store(getTotalUnrealizedPnL(), std::memory_order_relaxed);
         _snapshot_total_pnl.store(getTotalPnL(), std::memory_order_relaxed);
     }
@@ -545,6 +556,10 @@ public:
     }
 
 private:
+    // v7.6 阶段2: 递归自旋锁 — 公开方法统一守卫 (MdSpi 行情写/TdSpi 成交写;
+    //   递归: getter→getContract→refreshAggregates 等嵌套调用)
+    mutable RecursiveSpinLock _lock;
+    
     PortfolioParams _params;
     std::string _anchor_code;
     
@@ -555,6 +570,50 @@ private:
     
     std::atomic<double> _snapshot_unrealized_pnl{0};
     std::atomic<double> _snapshot_total_pnl{0};
+
+    // F4: 聚合值缓存 — 原每 tick 8-10 次 O(n合约) 全扫描 (TotalDelta/NetDelta/
+    //   Exposure×2/PnL×2/DeltaUtilization), 合并为单次 pass + dirty 标记。
+    //   所有内部 mutator (onTick/markToMarket/onTradeFill/updatePosition/
+    //   resync/reset 等) 置脏; onTick 每 tick 触发 => 缓存每 tick 至多重算一次,
+    //   同一 tick 内 10 次 getter 调用共享一次扫描。
+    //   注意: hedge_ratio 存在经 getContract() 指针的外部直写 (策略层平滑更新),
+    //   该写不置脏, 影响最晚下一 tick 的 onTick 置脏后收敛 (可接受)。
+    mutable bool _agg_dirty = true;
+    mutable double _agg_total_delta = 0;
+    mutable double _agg_net_delta = 0;
+    mutable double _agg_long_exposure = 0;
+    mutable double _agg_short_exposure = 0;
+    mutable double _agg_gross_exposure = 0;
+    mutable double _agg_unrealized_pnl = 0;
+    mutable double _agg_total_pnl = 0;
+
+    inline void markAggregatesDirty() { _agg_dirty = true; }
+
+    inline void refreshAggregates() const
+    {
+        if (!_agg_dirty) return;
+        double td = 0, nd = 0, lx = 0, sx = 0, gx = 0, up = 0, tp = 0;
+        for (const auto& c : _contracts)
+        {
+            td += c.delta();
+            double excess_pos = c.position - c.target_position;
+            nd += excess_pos * c.hedge_ratio;
+            double exp = c.exposure();
+            gx += exp;
+            if (excess_pos > 0) lx += exp;
+            else if (excess_pos < 0) sx += exp;
+            up += c.unrealized_pnl;
+            tp += c.daily_pnl;
+        }
+        _agg_total_delta = td;
+        _agg_net_delta = nd;
+        _agg_long_exposure = lx;
+        _agg_short_exposure = sx;
+        _agg_gross_exposure = gx;
+        _agg_unrealized_pnl = up;
+        _agg_total_pnl = tp;
+        _agg_dirty = false;
+    }
 };
 
 } // namespace futu

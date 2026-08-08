@@ -3,6 +3,7 @@
  * \brief Unified Order Router implementation for non-MM sources
  */
 #include "OrderRouter.h"
+#include "OrderApiGuard.h"
 #include "UnifiedOrderTracker.h"
 #include "../Includes/WTSMarcos.h"
 #include "../Includes/IUftStraCtx.h"
@@ -13,6 +14,7 @@ namespace futu {
 
 OrderRouter::OrderRouter()
 {
+RecursiveSpinGuard _g(_lock);
     // Pre-allocate rate counters for all 3 sources
     _rate_counters[static_cast<int>(Source::ARBITRAGE)] = RateCounter{};
     _rate_counters[static_cast<int>(Source::HEDGING)]   = RateCounter{};
@@ -26,6 +28,7 @@ OrderRouter::OrderRouter()
 
 void OrderRouter::setRateLimit(Source src, uint32_t limit, uint32_t window_ms)
 {
+RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto& rc = _rate_counters[key];
     rc.limit = limit;
@@ -39,6 +42,7 @@ OrderSubmitResult OrderRouter::submitBuy(wtp::IUftStraCtx* ctx,
                                           Source src,
                                           int flag)
 {
+RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     // 价格0保护 — 防止无效价格下单
@@ -66,7 +70,7 @@ OrderSubmitResult OrderRouter::submitBuy(wtp::IUftStraCtx* ctx,
     }
 
     // 3. Execute via ctx API
-    result.localids = ctx->stra_buy(code, price, qty, flag);
+    result.localids = orderApiCall([&]{ return ctx->stra_buy(code, price, qty, flag); });
 
     // 4. Track active order
     if (!result.localids.empty())
@@ -87,6 +91,7 @@ OrderSubmitResult OrderRouter::submitSell(wtp::IUftStraCtx* ctx,
                                            Source src,
                                            int flag)
 {
+RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     // 价格0保护 — 防止无效价格下单
@@ -111,7 +116,7 @@ OrderSubmitResult OrderRouter::submitSell(wtp::IUftStraCtx* ctx,
         return result;
     }
 
-    result.localids = ctx->stra_sell(code, price, qty, flag);
+    result.localids = orderApiCall([&]{ return ctx->stra_sell(code, price, qty, flag); });
 
     if (!result.localids.empty())
     {
@@ -132,6 +137,7 @@ OrderSubmitResult OrderRouter::submitExitLong(wtp::IUftStraCtx* ctx,
                                                Source src,
                                                int flag)
 {
+RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
@@ -150,7 +156,7 @@ OrderSubmitResult OrderRouter::submitExitLong(wtp::IUftStraCtx* ctx,
         return result;
     }
 
-    uint32_t localid = ctx->stra_exit_long(code, price, qty, isToday, flag);
+    uint32_t localid = orderApiCall([&]{ return ctx->stra_exit_long(code, price, qty, isToday, flag); });
     if (localid != 0)
     {
         result.localids.push_back(localid);
@@ -168,6 +174,7 @@ OrderSubmitResult OrderRouter::submitExitShort(wtp::IUftStraCtx* ctx,
                                                 Source src,
                                                 int flag)
 {
+RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
@@ -186,7 +193,7 @@ OrderSubmitResult OrderRouter::submitExitShort(wtp::IUftStraCtx* ctx,
         return result;
     }
 
-    uint32_t localid = ctx->stra_exit_short(code, price, qty, isToday, flag);
+    uint32_t localid = orderApiCall([&]{ return ctx->stra_exit_short(code, price, qty, isToday, flag); });
     if (localid != 0)
     {
         result.localids.push_back(localid);
@@ -198,6 +205,7 @@ OrderSubmitResult OrderRouter::submitExitShort(wtp::IUftStraCtx* ctx,
 
 void OrderRouter::cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid)
 {
+RecursiveSpinGuard _g(_lock);
     // 标记 pending_cancel (与 cancelAllBySource/cancelByPair 一致),
     // 使 getActiveOrders/totalActiveOrders 在 cancel-ack 窗口内不再视其为活跃.
     for (auto& kv : _active_orders)
@@ -211,11 +219,12 @@ void OrderRouter::cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid)
             }
         }
     }
-    ctx->stra_cancel(localid);
+    orderApiCall([&]{ return ctx->stra_cancel(localid); });
 }
 
 void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
 {
+RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto it = _active_orders.find(key);
     if (it == _active_orders.end()) return;
@@ -228,18 +237,20 @@ void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
         if (!info.pending_cancel)
         {
             info.pending_cancel = true;
-            ctx->stra_cancel(info.localid);
+            orderApiCall([&]{ return ctx->stra_cancel(info.localid); });
         }
     }
 }
 
 void OrderRouter::registerPairOrder(uint32_t localid, const std::string& pair_id)
 {
+RecursiveSpinGuard _g(_lock);
     _oid_to_pair[localid] = pair_id;
 }
 
 size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id)
 {
+RecursiveSpinGuard _g(_lock);
     // 收集该 pair 全部活跃 localid (含历史加仓组, A7)
     std::vector<uint32_t> ids;
     ids.reserve(4);
@@ -266,7 +277,7 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
                     if (!info.pending_cancel)
                     {
                         info.pending_cancel = true;
-                        ctx->stra_cancel(oid);
+                        orderApiCall([&]{ return ctx->stra_cancel(oid); });
                         ++n;
                     }
                     sent = true;
@@ -279,7 +290,7 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
         // 恒不成立 → 防御性补撤不可达. 改为仅判 !sent.
         if (!sent)
         {
-            ctx->stra_cancel(oid);
+            orderApiCall([&]{ return ctx->stra_cancel(oid); });
             ++n;
         }
     }
@@ -288,6 +299,7 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
 
 bool OrderRouter::checkSelfTrade(const char* code, bool is_buy, double price) const
 {
+RecursiveSpinGuard _g(_lock);
     if (!_mm_tracker) return false;
 
     // Delegate to UnifiedOrderTracker's existing self-trade check
@@ -303,6 +315,7 @@ bool OrderRouter::checkSelfTrade(const char* code, bool is_buy, double price) co
 
 void OrderRouter::onOrderDone(uint32_t localid)
 {
+RecursiveSpinGuard _g(_lock);
     auto src_it = _order_source_map.find(localid);
     if (src_it == _order_source_map.end()) return;
 
@@ -329,6 +342,7 @@ void OrderRouter::onOrderDone(uint32_t localid)
 
 std::vector<ActiveOrderInfo> OrderRouter::getActiveOrders(Source src) const
 {
+RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto it = _active_orders.find(key);
     if (it == _active_orders.end()) return {};
@@ -344,12 +358,14 @@ std::vector<ActiveOrderInfo> OrderRouter::getActiveOrders(Source src) const
 
 RateCounter& OrderRouter::getRateCounter(Source src)
 {
+RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     return _rate_counters[key];
 }
 
 size_t OrderRouter::totalActiveOrders() const
 {
+RecursiveSpinGuard _g(_lock);
     size_t total = 0;
     for (const auto& kv : _active_orders)
     {
@@ -366,6 +382,7 @@ size_t OrderRouter::totalActiveOrders() const
 void OrderRouter::recordActiveOrder(uint32_t localid, const char* code, bool is_buy,
                                      double price, double qty, Source src, uint64_t now_ms)
 {
+RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto& orders = _active_orders[key];
 

@@ -92,8 +92,8 @@ enum class RiskAction
     WIDEN_SPREAD,       ///< Widen quotes (策略性软响应: util 0.8→×1.5, 0.9→×2.0)
     BLOCK_SIDE_LONG,    ///< Block opening long positions
     BLOCK_SIDE_SHORT,   ///< Block opening short positions
-    PAUSE_QUOTING,      ///< Stop quoting temporarily (auto-recovery)
-    FLATTEN_POSITION,   ///< Exit all positions (breachCount 持续高位升级)
+    PAUSE_QUOTING,      ///< v7.3 已退役: 判定数学上不可达, 分支已删 (保留枚举值防序号错位)
+    FLATTEN_POSITION,   ///< v7.3 已退役: breachCount 恒<=1 不可达, 分支已删; 强平由 HALT FORCE FLAT 承担
     HALT_TRADING        ///< Stop all trading (irreversible, requires manual intervention)
 };
 
@@ -108,19 +108,19 @@ struct RateLimits
     uint32_t delta_rate_cooldown_ms;
     
     // 分级响应阈值
-    double position_breach_pause_threshold;  ///< POSITION_NET 利用率触发 PAUSE_QUOTING (default 1.2)
+    double position_breach_pause_threshold;  ///< v7.3: 仅作 canRecover 恢复闸 (pos < maxPos×1.2 才允许恢复);
+                                             ///<   PAUSE_QUOTING 入口已删除, 名称保留兼容配置
     double delta_critical_mult;              ///< Delta critical 倍数 (default 1.5)
     double delta_warning_mult;              ///< Delta warning 倍数 (default 0.8)
 
     // R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
     double position_warning_l1;              ///< util L1 → WIDEN_SPREAD ×1.5 (default 0.8)
     double position_warning_l2;              ///< util L2 → WIDEN_SPREAD ×2.0 (default 0.9)
-    
+    double position_hard_block_ratio;        ///< 持仓硬止比例 (default 1.0, 仅flexible模式)
+
     // 升级响应阈值
     uint32_t widen_threshold;               ///< breachCount 触发 WIDEN_SPREAD (default 1)
-    // H3: pause_threshold 已删除 — PAUSE 实际走 long_breach&&short_breach 路径,
-    //     breachCount 升级只到 FLATTEN (比 PAUSE 更激进, 跳过中间挡合理)
-    uint32_t flatten_threshold;             ///< breachCount 触发 FLATTEN_POSITION (default 2; checkRiskLimits 最多产生 EXPOSURE+POSITION_NET=2 BREACH)
+    // v7.3: flatten_threshold 已删除 — FLATTEN_POSITION 不可达分支随 PAUSE 一并清理
     
     RateLimits()
         : max_orders_per_sec(50)
@@ -134,8 +134,8 @@ struct RateLimits
         , delta_warning_mult(0.8)
         , position_warning_l1(0.8)
         , position_warning_l2(0.9)
+        , position_hard_block_ratio(1.0)
         , widen_threshold(1)
-        , flatten_threshold(2)
     {}
     
     static RateLimits fromVariant(wtp::WTSVariant* v) {
@@ -151,8 +151,8 @@ struct RateLimits
         r.delta_warning_mult = FutuConfig::readDouble(v, "deltaWarningMult", 0.8);
         r.position_warning_l1 = FutuConfig::readDouble(v, "positionWarningL1", 0.8);
         r.position_warning_l2 = FutuConfig::readDouble(v, "positionWarningL2", 0.9);
+        r.position_hard_block_ratio = FutuConfig::readDouble(v, "positionHardBlockRatio", 1.0);
         r.widen_threshold = FutuConfig::readUInt32(v, "widenThreshold", 1);
-        r.flatten_threshold = FutuConfig::readUInt32(v, "flattenThreshold", 2);
         return r;
     }
 };
@@ -204,8 +204,8 @@ struct CloseoutConfig
     
     CloseoutConfig()
         : minutes_before(5)
-        , max_retries(3)
-        , retry_interval_ms(5000)
+        , max_retries(10)
+        , retry_interval_ms(2000)
         , night_close_time(0)
         , night_minutes_before(5)
     {}
@@ -213,8 +213,8 @@ struct CloseoutConfig
     static CloseoutConfig fromVariant(wtp::WTSVariant* v) {
         CloseoutConfig c;
         c.minutes_before = FutuConfig::readUInt32(v, "minutesBefore", 5);
-        c.max_retries = FutuConfig::readUInt32(v, "maxRetries", 3);
-        c.retry_interval_ms = FutuConfig::readUInt32(v, "retryIntervalMs", 5000);
+        c.max_retries = FutuConfig::readUInt32(v, "maxRetries", 10);
+        c.retry_interval_ms = FutuConfig::readUInt32(v, "retryIntervalMs", 2000);
         c.night_close_time = FutuConfig::readUInt32(v, "nightCloseTime", 0);
         c.night_minutes_before = FutuConfig::readUInt32(v, "nightMinutesBefore", c.minutes_before);
         return c;
@@ -300,6 +300,7 @@ public:
     
     void setRateLimits(const RateLimits& limits) { _rate_limits = limits; }
     const RateLimits& getRateLimits() const { return _rate_limits; }
+    void setMaxPendingPerSide(double v) { _max_pending_per_side = v; }
     
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
     const RecoveryConfig& getRecoveryConfig() const { return _recovery_config; }
@@ -349,6 +350,10 @@ public:
     struct PreTradeResult {
         bool allow_bid;
         bool allow_ask;
+        bool pending_drain_bid;        ///< pending超限 -> 撤该侧旧单+跳过本轮(obligation也生效)
+        bool pending_drain_ask;
+        bool hard_block_bid;           ///< 持仓超限 -> flexible模式qty=0 (obligation靠skew)
+        bool hard_block_ask;
         double long_utilization;       ///< projected_long  / max_position，>=1 → ask 义务
         double short_utilization;      ///< projected_short / max_position，>=1 → bid 义务
         bool force_ask_obligation;     ///< 多头打满 → ask 必须保持义务报价
@@ -467,6 +472,11 @@ public:
         return _closeout_state;
     }
     
+    /// Get night session close time (HHMM, 0=no night session) -- Bug A close_time
+    inline uint32_t getNightCloseTime() const {
+        return _closeout_config.night_close_time;
+    }
+    
     /// Check if closeout has been triggered
     inline bool isCloseoutTriggered() const {
         return _closeout_state.state != CloseoutSub::IDLE;
@@ -558,6 +568,7 @@ public:
 
 private:
     RateLimits _rate_limits;
+    double _max_pending_per_side{0.0};  ///< Per-side max pending qty (from OrderControl, 0=disabled)
     RecoveryConfig _recovery_config;
     
     // Lock-free atomic counters for rate tracking

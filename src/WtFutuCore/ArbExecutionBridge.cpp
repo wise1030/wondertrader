@@ -20,6 +20,7 @@ namespace futu {
 
 void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick)
 {
+RecursiveSpinGuard _g(_lock);
 // v7.1: replay 时钟注入 (stale 对冲清理/时间戳统一基准, 回测可复现)
 {
     uint32_t ad = tick->actiondate();
@@ -141,6 +142,15 @@ if (order.is_close && _deps.portfolio)
     double live_pos = _deps.portfolio->getPosition(order.code);
     double signed_qty = order.is_buy ? exe_qty : -exe_qty;
     double predicted = live_pos + signed_qty;
+    // C3: 平仓方向与实际仓位同号(含 live_pos==0: MM 已消耗完 / 符号已翻转)时,
+    //     "平仓"实为开仓 -> 直接丢弃。原 live_pos*predicted<0 判定不含此情形,
+    //     exe_qty<0.5 也不拦 -> 止损/超时平仓单变 5 手裸开仓。
+    if (live_pos * signed_qty >= 0)
+    {
+        WTSLogger::info("[ARB_CLOSE] {} skip: close dir mismatches live_pos={:.1f} (signed_qty={:.1f}), consumed/flipped by MM",
+            order.code, live_pos, signed_qty);
+        return;
+    }
     if (live_pos * predicted < 0)
     {
         double clamped = std::abs(live_pos);
@@ -155,7 +165,8 @@ if (order.is_close && _deps.portfolio)
     }
     if (order.order_flag == 1)  // FAK → 对手价
     {
-        const ContractState* cs = _deps.portfolio->getContract(order.code);
+        ContractState cs_buf;
+        const ContractState* cs = _deps.portfolio->getContractSnapshot(order.code, cs_buf) ? &cs_buf : nullptr;
         if (cs)
         {
             if (order.is_buy && cs->ask1 > 0) exe_price = cs->ask1;
@@ -180,6 +191,21 @@ if (router_result.rejected)
 WTSLogger::warn("AsyncArb SELL {} rejected - invalid price={}", order.code, exe_price);
 else if (!router_result.localids.empty())
 WTSLogger::info("AsyncArb SELL {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
+}
+
+// M3: 腿失败兜底 — rejected(价格非法) 或空 localids(引擎下单失败/STP 调价后
+//     price<=0 被 OrderRouter 拒) 与 rate_limited/self_trade_blocked 同为单腿失败:
+//     必须撤对侧 + 标记残腿, 否则已推出的另一条腿裸奔至 in_flight 超时 (60-120s)。
+if ((router_result.rejected || router_result.localids.empty())
+    && !router_result.rate_limited && !router_result.self_trade_blocked)
+{
+if (!order.pair_id.empty()) {
+    WTSLogger::warn("AsyncArb leg FAILED for pair={} (rejected={}, empty_ids={}), canceling opposite leg",
+        order.pair_id, router_result.rejected, router_result.localids.empty());
+    _deps.order_router->cancelByPair(ctx, order.pair_id);  // A7
+    markLegRejected(order.pair_id, order.qty);
+}
+return;
 }
 
 // Scheme B-3: tag each returned localid with the pair_id so on_trade can
@@ -260,7 +286,8 @@ _deps.async_arb->processOrphanLegs([this, ctx](const std::string& code,
     double hedge_price = price;  // fallback
     if (_deps.portfolio)
     {
-        const ContractState* cs = _deps.portfolio->getContract(code);
+        ContractState cs_buf;
+        const ContractState* cs = _deps.portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
         if (cs)
         {
             // 对冲方向: is_buy → 用ask1买入, !is_buy → 用bid1卖出
@@ -388,6 +415,7 @@ if (_deps.arb_manager && _deps.order_router)
 void ArbExecutionBridge::onTradeFill(wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
                                       bool isLong, double vol, double price)
 {
+RecursiveSpinGuard _g(_lock);
 if (!_deps.async_arb || !_deps.arb_manager)
     return;
 
@@ -408,7 +436,8 @@ if (_deps.async_arb->consumePairTag(localid, arb_pair_id))
         double hedge_qty = std::min(vol, remaining);
         if (hedge_qty > 0)
         {
-            const ContractState* cs = _deps.portfolio ? _deps.portfolio->getContract(stdCode) : nullptr;
+            ContractState cs_buf;
+            const ContractState* cs = (_deps.portfolio && _deps.portfolio->getContractSnapshot(stdCode, cs_buf)) ? &cs_buf : nullptr;
             double hedge_price = isLong
                 ? (cs && cs->bid1 > 0 ? cs->bid1 : price)
                 : (cs && cs->ask1 > 0 ? cs->ask1 : price);
@@ -437,6 +466,7 @@ if (_deps.async_arb->consumePairTag(localid, arb_pair_id))
 
 void ArbExecutionBridge::markLegRejected(const std::string& pair_id, double order_qty)
 {
+RecursiveSpinGuard _g(_lock);
     auto& st = _arb_hedge_on_fill[pair_id];
     // 多次拒单/撤单: 取最大预期上限; 0(未知) 不覆盖已知上限
     if (st.original_qty <= 0 || order_qty > st.original_qty)
@@ -447,6 +477,7 @@ void ArbExecutionBridge::markLegRejected(const std::string& pair_id, double orde
 
 void ArbExecutionBridge::onLegCancelled(wtp::IUftStraCtx* ctx, const std::string& pair_id)
 {
+RecursiveSpinGuard _g(_lock);
     // A4: 套利腿被撤(超时清理/交易所撤单) = 单腿失败, 与 rate_limited/STP 同语义:
     // 撤对侧在途单(防继续成交扩大裸腿) + 标记残腿防护 + 释放 in_flight.
     // 注意: 撤单时刻已存在的裸腿(对侧已成交部分)无法由本机制回补,
@@ -461,6 +492,7 @@ void ArbExecutionBridge::onLegCancelled(wtp::IUftStraCtx* ctx, const std::string
 
 void ArbExecutionBridge::resetSession()
 {
+RecursiveSpinGuard _g(_lock);
     _arb_hedge_on_fill.clear();
     // _arb_last_order_price / _last_mm_generation 有意跨 session 保留:
     // 订单世代号单调递增, 价格去重随新挂单自然覆盖

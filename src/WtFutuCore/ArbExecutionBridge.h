@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <cstdint>
 #include "../Includes/FasterDefs.h"
+#include "SpinLockGuard.h"
 
 namespace wtp {
 class IUftStraCtx;
@@ -77,6 +78,9 @@ private:
     Deps _deps;
 
     // 同价去重: 上次套利挂单价 (防 WT 底层自动撤单重下, 保护排队优先级)
+    // v7.6 阶段2: 递归自旋锁 — onTick(MdSpi) vs onTradeFill/onLegCancelled(TdSpi)
+    mutable RecursiveSpinLock _lock;
+
     wtp::wt_hashmap<std::string, double> _arb_last_order_price;
     // A3: 残腿对冲状态 (pair_id → 预期上限/已对冲量).
     // 旧实现为 unordered_set<pair_id>, 首笔成交即 erase → 分笔成交时后续裸腿残留.

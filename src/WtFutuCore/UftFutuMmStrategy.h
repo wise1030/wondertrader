@@ -20,8 +20,10 @@
 #include "TradingState.h"
 #include "FutuRiskMonitor.h"
 #include "FutuHotParamManager.h"
+#include "RiskLiquidator.h"
 #include "CloseoutOrchestrator.h"
 #include "ArbExecutionBridge.h"
+#include "MonitorBridge.h"
 #include "../WtUftCore/EventNotifier.h"  // R1: 告警外发通道 (策略层作为组合根)
 #include <string>
 #include <vector>
@@ -153,8 +155,9 @@ struct FutuMmConfig
         double position_warning_l1;   ///< R2.2: util L1 → WIDEN_SPREAD ×1.5
         double position_warning_l2;   ///< R2.2: util L2 → WIDEN_SPREAD ×2.0
         uint32_t widen_threshold;
+        double position_hard_block_ratio;  ///< P1b: 持仓硬止比例 (flexible模式qty=0; obligation靠skew)
         // H3: pause_threshold 已删除 (死参数)
-        uint32_t flatten_threshold;
+        // v7.3: flatten_threshold 已删除 (FLATTEN_POSITION 不可达分支清理)
         uint32_t delta_rate_window_sec;
         uint32_t delta_rate_cooldown_ms;
         bool auto_clear_irreversible_on_reset;  ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
@@ -166,8 +169,8 @@ struct FutuMmConfig
             , pnl_recovery_ratio(0.5), max_loss_for_recovery(0)
             , position_breach_pause_threshold(1.2), delta_critical_mult(1.5)
             , delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9)
-            , widen_threshold(1)
-            , flatten_threshold(2), delta_rate_window_sec(2), delta_rate_cooldown_ms(15000)
+            , widen_threshold(1), position_hard_block_ratio(1.0)
+            , delta_rate_window_sec(2), delta_rate_cooldown_ms(15000)
             , auto_clear_irreversible_on_reset(false) {}
     } risk;
     
@@ -226,13 +229,21 @@ struct FutuMmConfig
     struct OrderControl {
         uint32_t order_error_threshold;
         uint32_t max_orders;
+        double max_pending_per_side;  ///< Per-side max pending qty (0=disabled). When exceeded, drain that side.
         double stp_min_price_gap;
         bool use_stp;            ///< Self-Trade Prevention switch (independent of arb).
                                   ///< Default false; FORCED true when use_spread_arbitrage=true
                                   ///< (arb sends marketable orders that can hit own quotes).
         OrderControl() : order_error_threshold(10), max_orders(32),
+                         max_pending_per_side(30.0),
                          stp_min_price_gap(1.0), use_stp(false) {}
     } order_control;
+
+    struct Monitor {
+        bool enabled;                ///< MonitorBridge 总开关 (WtMonSvr GUI 数据桥)
+        uint32_t flush_interval_ms;  ///< stradata 落盘节流间隔
+        Monitor() : enabled(false), flush_interval_ms(1000) {}
+    } monitor;
 };
 
 /// 期货做市策略 - 作为 UFT 策略运行
@@ -300,9 +311,6 @@ private:
     /// 处理跨期价差套利信号
     
     /// 处理套利成交回报
-    void onSpreadTrade(IUftStraCtx* ctx, const std::string& pair_id, 
-                       const std::string& code, bool is_buy, double qty, double price);
-    
     //==========================================================================
     // on_tick 子函数 (P2-1a: 从 on_tick 拆出)
     //==========================================================================
@@ -318,9 +326,19 @@ private:
     
     /// Coordinator 主处理 + closeout 执行驱动
     void handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick, uint64_t now_ms = 0);
+
+    /// M1/M2: 订单终结统一幂等清理 (拒单路径无 on_order 回调, router 活跃表/
+    /// pair 映射与 tracker 订单会永久泄漏 -> closeout inflight 守卫卡死/util 虚高)。
+    /// onOrderDone/untrackOrder 对不存在 id 均 no-op。
+    void finalizeOrder(uint32_t localid);
     
 private:
     FutuMmConfig _config;
+    
+    /// 5A-3: 模块装配器 (initBusinessModules 外移, 引用别名绑定下列成员)
+    friend class FutuModuleAssembler;
+    /// 5A-3: 运行时事件处理 (on_trade/on_channel_ready 外移)
+    friend class FutuRuntimeOps;
     
     //==========================================================================
     // 业务模块实例
@@ -381,6 +399,9 @@ private:
     
     /// 绩效分析器
     std::unique_ptr<PerformanceAnalyzer> _perf_analyzer;
+
+    /// 监控数据桥 (WtMonSvr GUI: stradata/funds.csv 落盘, 默认关)
+    MonitorBridge _mon_bridge;
     
 
     
@@ -399,7 +420,8 @@ private:
     /// 套利执行桥 (套利下单编排/残腿对冲/快照同步, 架构重构 C4)
     ArbExecutionBridge _arb_bridge;
 
-    std::vector<RiskViolation> _violations_buf;   // 风控违规复用缓冲(零堆分配)
+    std::vector<RiskViolation> _violations_buf;   // 风控违规复用缓冲 (仅 TdSpi 路径 RuntimeOps 使用;
+                                                  //   coordinator 有独立成员供 MdSpi checkRisk, 双缓冲零共享)
     
     //==========================================================================
     // 辅助数据
@@ -408,8 +430,26 @@ private:
     // 合约信息缓存 (ContractInfo 已移至命名空间级)
     std::vector<ContractInfo> _contract_infos;
     
-    // 当前 tick 中间价缓存
-    wtp::wt_hashmap<std::string, double> _last_mid;
+    // 当前 tick 中间价缓存 (v7.6: init 定码预填, 值原子; MdSpi 写/TdSpi 读,
+    //   init 后 map 结构不可变 — unordered_dense rehash 需移动元素, 原子值不可移动
+    //   故用 unique_ptr 包装)
+    struct MidSlot { std::atomic<double> v{0.0}; };
+    wtp::wt_hashmap<std::string, std::unique_ptr<MidSlot>> _last_mid;
+
+    // v7.4 P0-2: 回调串行化锁 — 框架源码核实实盘回调非单线程:
+    //   on_tick 系列=CTP MdSpi 线程, on_trade/on_order/on_entrust=CTP TdSpi
+    //   线程, on_session_end(盘中)=RtTicker 定时线程, 均同步直达策略无队列。
+    //   回测单线程, 此锁恒无竞争 ~20ns; 实盘竞争仅发生在成交/ tick 同时刻。
+    //   recursive: 防回调路径嵌套(如实盘 on_trade 内 stra_buy 的同步回执)。
+    //
+    // v7.6 编译开关 FUTU_CALLBACK_LOCK (默认 1=大锁, 生产基线):
+    //   1 = 全部回调 _cb_mtx 串行化 (保守, 结构锁冗余但无害);
+    //   0 = 细粒度模式 — 依赖阶段1-3的原子/结构锁/order_api_mtx,
+    //       _cb_mtx 不再加 (实盘灰度验证前勿用)。
+    std::recursive_mutex _cb_mtx;
+
+    // P0-1 (v7.4): 统一强平/减仓原语 (无状态, setDeps 即用)
+    RiskLiquidator _liquidator;
     
     // 交易时段信息缓存（初始化时一次性缓存，避免每次 tick 重复查询）
     struct SessionCache {
@@ -423,13 +463,12 @@ private:
     
     // PortfolioContext 缓存（避免每tick分配）
     mutable PortfolioContext _cached_portfolio_ctx;
-    mutable bool _portfolio_ctx_dirty;
+    mutable std::atomic<bool> _portfolio_ctx_dirty{true};   // v7.6: MdSpi/TdSpi 双写
     
-    // 运行状态
-    bool _channel_ready;
-    bool _price_stale = false;  ///< P1-4: 价格过期标志（channel恢复后到首tick之间）
+    // 运行状态 (v7.6: 全部原子化 — MdSpi/TdSpi 跨线程读写)
+    std::atomic<bool> _channel_ready{false};
+    std::atomic<bool> _price_stale{false};  ///< P1-4: 价格过期标志（channel恢复后到首tick之间）
     TradingState _trading_state;           // 统一交易状态（替代5个bool）
-    uint64_t _toxicity_resume_time; // 熔断恢复时间
     
     // 保存ctx指针，供on_entrust等无ctx回调使用
     IUftStraCtx* _main_ctx = nullptr;
@@ -442,15 +481,17 @@ private:
     double _current_tick_mid;          // 当前 tick 中间价
     
     // 下单错误处理（统一处理所有下单错误）
-    uint32_t _order_error_count;     // 连续下单错误计数
+    std::atomic<uint32_t> _order_error_count{0};     // 连续下单错误计数 (v7.6 原子)
     // order_error_threshold: use _config.order_control.order_error_threshold directly
-    uint64_t _quoting_paused_since;  // ERROR qphase 开始时间戳(ms)，0=未暂停
+    std::atomic<uint64_t> _quoting_paused_since{0};  // ERROR qphase 开始时间戳(ms)，0=未暂停
     
     // 收盘前平仓状态 (now managed by FutuRiskMonitor state machine)
     
     // 参数调优计数器
     uint32_t _tick_count;        // Tick计数器
-    uint64_t _exchange_time_ms = 0;     // v7.1: 最近 tick 的 replay 时间 (actiondate/actiontime 推出, 跨日单调; 节流统一时间基准)
+    std::atomic<uint64_t> _exchange_time_ms{0};     // v7.1: 最近 tick 的 replay 时间 (actiondate/actiontime 推出, 跨日单调; 节流统一时间基准)
+                                                    // v7.6 原子: MdSpi 每 tick 写, TdSpi 读 (quote→fill 延迟/recordFill/untrack)
+    uint64_t _tsc_tick0 = 0;            // P0: on_tick 入口 rdtsc (perf monitor 启用时), tick-to-quote 全链路测量
     bool _is_backtest = false;           // 回测标志: on_trade 中只撤不挂(避免 _orders 迭代器失效)
     uint32_t _param_update_interval; // 参数更新间隔(ticks)
     

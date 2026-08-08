@@ -4,7 +4,7 @@
 #include <string>
 #include <cmath>
 #include <cstdint>
-#include <mutex>
+#include <atomic>
 #include "../Includes/FasterDefs.h"
 #include "FutuConfig.h"
 #include "ISignalSource.h"
@@ -190,21 +190,35 @@ public:
     SpreadOptimizer(const std::string& code = "");
     ~SpreadOptimizer() = default;
     
-    void setParams(const GLFTParams& params) { _params = params; }
-    const GLFTParams& getParams() const { return _params; }
-    
-    /// Thread-safe parameter update (replaces const_cast usage in hot-update)
-    void updateParams(const GLFTParams& new_params)
+    void setParams(const GLFTParams& params)
     {
-        std::lock_guard<std::mutex> guard(_params_mutex);
-        _params = new_params;
+        // F20: seqlock 写协议 (奇=写进行中, 偶=稳定)
+        _params_seq.fetch_add(1, std::memory_order_acq_rel);
+        _params = params;
+        _params_seq.fetch_add(1, std::memory_order_release);
     }
-    
+
+    /// F20: 按值返回一致性快照 (旧 const& 接口在热更新线程并发写时是 data race:
+    ///   读侧无锁读 ~200B GLFTParams 可撕裂)。const auto& 调用点靠临时量
+    ///   生命周期延长保持兼容。
+    GLFTParams getParams() const { return snapshotParams(); }
+
+    /// Thread-safe parameter update (replaces const_cast usage in hot-update)
+    void updateParams(const GLFTParams& new_params) { setParams(new_params); }
+
     /// Thread-safe parameter read (snapshot for tick processing)
     GLFTParams snapshotParams() const
     {
-        std::lock_guard<std::mutex> guard(_params_mutex);
-        return _params;
+        // F20: seqlock 读协议 — 读到奇数版本或版本变化则重试。
+        // 热更新极罕见(GUI 手工), 稳态零重试; 读侧无锁 ~20ns, 替代旧 mutex。
+        GLFTParams copy;
+        uint64_t s0, s1;
+        do {
+            s0 = _params_seq.load(std::memory_order_acquire);
+            copy = _params;
+            s1 = _params_seq.load(std::memory_order_acquire);
+        } while (s0 != s1 || (s0 & 1));
+        return copy;
     }
 
     //==========================================================================
@@ -234,7 +248,7 @@ public:
     double computePortfolioDeltaSkew(double totalDelta) const;
 
 private:
-    mutable std::mutex _params_mutex;  // Protects _params for hot-update
+    mutable std::atomic<uint64_t> _params_seq{0};  // F20: seqlock 版本号 (奇=写进行中)
     GLFTParams _params;
     std::string _code;
     mutable double _smoothed_spread_mult = 1.0;

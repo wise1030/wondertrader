@@ -25,25 +25,19 @@ SpreadRiskManager::SpreadRiskManager()
 
 int32_t SpreadRiskManager::calculateDaysBetween(uint32_t date1, uint32_t date2)
 {
-    // Convert YYYYMMDD to days since epoch (simplified algorithm)
-    // Using a simple approximation: 365.25 days per year, 30.44 days per month
+    // YYYYMMDD -> 精确 Gregorian 天数 (Howard Hinnant days-from-civil, 全历法正确)
     auto toDays = [](uint32_t d) -> int32_t {
-        uint32_t year = d / 10000;
-        uint32_t month = (d % 10000) / 100;
+        int32_t y = static_cast<int32_t>(d / 10000);
+        uint32_t m = (d % 10000) / 100;
         uint32_t day = d % 100;
-        
-        // Days from year 2000
-        int32_t days = (year - 2000) * 365 + (year - 2000) / 4;
-        // Add days for months (simplified)
-        static const int32_t monthDays[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
-        days += monthDays[(month - 1) % 12];
-        // Leap year adjustment
-        if (month > 2 && (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0))
-            days += 1;
-        days += day;
-        return days;
+        y -= (m <= 2) ? 1 : 0;
+        int32_t era = (y >= 0 ? y : y - 399) / 400;
+        uint32_t yoe = static_cast<uint32_t>(y - era * 400);
+        uint32_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+        uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        return era * 146097 + static_cast<int32_t>(doe) - 719468;
     };
-    
+
     return toDays(date2) - toDays(date1);
 }
 
@@ -165,6 +159,9 @@ PortfolioRiskSummary SpreadRiskManager::calculatePortfolioRisk() const
             summary.total_position += std::abs(state.spread_position);
             summary.total_exposure += std::abs(state.leg1_position * state.leg1_price) +
                                        std::abs(state.leg2_position * state.leg2_price);
+            // 流动性: 当日成交量相对最低要求的比例, 截断到 [0,1]
+            liquidity_sum += std::min(1.0, state.total_volume /
+                              std::max(1.0, static_cast<double>(_config.min_daily_volume)));
         }
         
         // Track correlation
@@ -200,7 +197,7 @@ PortfolioRiskSummary SpreadRiskManager::calculatePortfolioRisk() const
     // Current drawdown
     summary.max_drawdown = _current_drawdown;
     
-    // Liquidity score (placeholder)
+    // Liquidity score: 活跃对成交量达标率均值
     summary.liquidity_score = liquidity_sum / std::max(1u, summary.active_pairs);
     
     // Check stop loss

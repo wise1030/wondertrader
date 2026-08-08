@@ -108,7 +108,8 @@ std::vector<ActiveOrder> SelfTradePrevention::getMMBuyOrders(const std::string& 
     auto orderIds = _tracker->getMMBuyOrderIds(code);
     for (uint32_t id : orderIds)
     {
-        const UnifiedOrderInfo* info = _tracker->getOrderByOrderId(id);
+        UnifiedOrderInfo info_buf;
+        const UnifiedOrderInfo* info = _tracker->getOrderInfoCopy(id, info_buf) ? &info_buf : nullptr;
         if (info)
         {
             ActiveOrder order;
@@ -134,7 +135,8 @@ std::vector<ActiveOrder> SelfTradePrevention::getMMSellOrders(const std::string&
     auto orderIds = _tracker->getMMSellOrderIds(code);
     for (uint32_t id : orderIds)
     {
-        const UnifiedOrderInfo* info = _tracker->getOrderByOrderId(id);
+        UnifiedOrderInfo info_buf;
+        const UnifiedOrderInfo* info = _tracker->getOrderInfoCopy(id, info_buf) ? &info_buf : nullptr;
         if (info)
         {
             ActiveOrder order;

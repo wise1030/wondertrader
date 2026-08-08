@@ -20,6 +20,7 @@
 #include <memory>
 #include <cstdint>
 #include "../Includes/FasterDefs.h"
+#include "SpinLockGuard.h"
 
 namespace wtp {
 class IUftStraCtx;
@@ -76,6 +77,10 @@ private:
     static constexpr uint32_t CLOSEOUT_HEDGE_WAIT_TICKS = 2;
 
     Deps _deps;
+
+    // v7.6 阶段2: 递归自旋锁 — onTick(MdSpi) vs onOrderEvent(TdSpi)/
+    //   finalizeAtSessionEnd/resetSession(RtTicker)
+    mutable RecursiveSpinLock _lock;
 
     bool _closeout_hedge_executed = false;   ///< 本 session closeout 对冲是否已触发
     bool _closeout_hedge_pending = false;    ///< 是否正在等待延迟启动

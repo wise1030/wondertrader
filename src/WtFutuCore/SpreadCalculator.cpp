@@ -43,7 +43,6 @@ SpreadCalculator::SpreadCalculator()
     , _correlation(0)
     , _beta(1.0)
     , _smoothed_beta(1.0)   // 初始值 1.0，与 beta 同步
-    , _alpha(0)
     , _half_life(0)
     , _last_update(0)
     , _initialized(false)
@@ -312,8 +311,6 @@ double SpreadCalculator::calculateBeta() const
     
     double beta = (valid_count * sum_xy - sum_x * sum_y) / denom;
     
-    _alpha = (sum_y - beta * sum_x) / valid_count;
-    
     // Beta 解释：
     // beta ≈ 1.0 表示两合约收益率高度同步（同品种跨期）
     // beta > 1.0 表示 leg1 收益率波动更大
@@ -388,12 +385,11 @@ void SpreadCalculator::computeCorrelationAndBeta()
     double denom = valid_count * sum_xx - sum_x * sum_x;
     if (std::abs(denom) < 1e-10)
     {
-        _beta = 1.0;  // 与原 calculateBeta 一致: 此时不改 _alpha
+        _beta = 1.0;
     }
     else
     {
         _beta = (valid_count * sum_xy - sum_x * sum_y) / denom;
-        _alpha = (sum_y - _beta * sum_x) / valid_count;
     }
 }
 
@@ -481,7 +477,6 @@ void SpreadCalculator::reset()
     _correlation = 0;
     _beta = 1.0;
     _smoothed_beta = 1.0;
-    _alpha = 0;
     _half_life = 0;
     _initialized = false;
     

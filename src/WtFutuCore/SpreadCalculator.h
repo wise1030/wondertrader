@@ -202,7 +202,6 @@ private:
     double _correlation;
     double _beta;
     double _smoothed_beta;      ///< EMA smoothed beta for stable hedge ratio
-    mutable double _alpha;  // mutable for modification in const calculateBeta()
     double _half_life;
     
     // log-return 复用缓冲 (computeCorrelationAndBeta 单次扫描填充,

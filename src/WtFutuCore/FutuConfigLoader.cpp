@@ -50,6 +50,7 @@ ci.max_position = readDouble(cfgItem, "maxPosition", -1.0);
 ci.max_delta = readDouble(cfgItem, "maxDelta", -1.0);
 // 单合约目标持仓，默认0（平衡），超过时报价倾向于减仓
 ci.target_position = readDouble(cfgItem, "targetPosition", 0.0);
+	// 初始本地持仓: 非零时同步覆盖local_net (用于单策略账户管理遗留持仓)
 
 _contract_infos.push_back(ci);
 }
@@ -103,6 +104,7 @@ if (cfgPortfolio) {
 // 下单错误处理参数（统一处理所有下单错误）
 _config.order_control.order_error_threshold = readUInt32(cfg, "orderErrorThreshold", 10);
 _config.order_control.max_orders = readUInt32(cfg, "maxOrders", 32);
+_config.order_control.max_pending_per_side = readDouble(cfg, "maxPendingPerSide", 30.0);
 _config.order_control.stp_min_price_gap = readDouble(cfg, "stpMinPriceGap", 1.0);
 _config.order_control.use_stp = readBool(cfg, "useStp", false);
 
@@ -160,7 +162,7 @@ _config.risk.delta_warning_mult = readDouble(cfgFrequency, "deltaWarningMult", 0
 _config.risk.position_warning_l1 = readDouble(cfgFrequency, "positionWarningL1", 0.8);
 _config.risk.position_warning_l2 = readDouble(cfgFrequency, "positionWarningL2", 0.9);
 _config.risk.widen_threshold = readUInt32(cfgFrequency, "widenThreshold", 1);
-_config.risk.flatten_threshold = readUInt32(cfgFrequency, "flattenThreshold", 2);
+_config.risk.position_hard_block_ratio = readDouble(cfgFrequency, "positionHardBlockRatio", 1.0);
 _config.risk.auto_clear_irreversible_on_reset = readBool(cfgFrequency, "autoClearIrreversibleOnReset", false);
 }
 }
@@ -260,6 +262,17 @@ WTSLogger::info("UftFutuMmStrategy[{}] parameter validation passed", id);
 }
 
 // 注意：业务模块初始化移到 on_init 中，以便从基础数据管理模块获取合约参数
+
+//------------------------------------------------------------
+// MonitorBridge (WtMonSvr GUI 数据桥) — 可选, 默认关
+//------------------------------------------------------------
+{
+WTSVariant* cfgMon = cfg->get("monitor");
+if (cfgMon) {
+_config.monitor.enabled = readBool(cfgMon, "enabled", false);
+_config.monitor.flush_interval_ms = readUInt32(cfgMon, "flushIntervalMs", 1000);
+}
+}
 
 return true;
 }

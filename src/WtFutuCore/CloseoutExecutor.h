@@ -235,6 +235,7 @@ private:
 
     // Execution history for fill-rate estimation
     std::vector<ExecutionRound> _rounds;
+    uint32_t       _consecutive_zero_fills = 0;  ///< Consecutive zero-fill rounds (for price chase)
 };
 
 } // namespace futu

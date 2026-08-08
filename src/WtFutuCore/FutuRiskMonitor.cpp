@@ -8,6 +8,7 @@
 #include "FutuRiskMonitor.h"
 #include "FutuPortfolio.h"
 #include "UnifiedOrderTracker.h"
+#include "SessionPhaseManager.h"
 #include "../WTSTools/WTSLogger.h"
 #include "../WtUftCore/EventNotifier.h"
 #include <algorithm>
@@ -248,7 +249,8 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
     }
     
     // Check for single contract POSITION limit breaches (持仓手数限制)
-    const ContractState* pos_breached = portfolio->getPositionBreachedContract();
+    ContractState pos_breached_buf;
+    const ContractState* pos_breached = portfolio->getPositionBreachedSnapshot(pos_breached_buf) ? &pos_breached_buf : nullptr;
     if (pos_breached)
     {
         RiskViolation v;
@@ -364,28 +366,21 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
         }
     }
     
-    // If both directions blocked, pause quoting
-    if (long_breach && short_breach)
-    {
-        outCategory = RiskCategory::REVERSIBLE;
-        return RiskAction::PAUSE_QUOTING;
-    }
+    // v7.3: PAUSE_QUOTING 与 FLATTEN_POSITION 分支已删除 (控制链断环清理)。
+    //   原 PAUSE 要求 long_breach && short_breach, 但每笔 violation 的 delta 只有
+    //   一个符号且 EXPOSURE 每 tick 最多一条 -> 数学上不可达;
+    //   原 FLATTEN 要求 breachCount>=2, 但唯一能产 BREACH 的 EXPOSURE 每 tick
+    //   最多一条 -> 恒 <=1 不可达。控制链实为"两头化":
+    //   软连续控制(skew/force/takerReduce, 仓位永在线) + 硬 HALT(日亏/CRITICAL)。
+    //   EXPOSURE breach 走下方单向 BLOCK_SIDE。
 
-    // R2.3: 在单向 BLOCK 之前, 先检查 breachCount 是否需要升级到 FLATTEN.
-    //   多类 BREACH 同时发生 (breachCount >= flatten_threshold) → 强平,
-    //   比单方向 block 更激进: 撤单 + 停 arb + anchor 强平.
-    //   (此前为死代码: 早返回拦截了升级路径, FLATTEN 永远不可达)
+    // R2.3 遗留: breachCount 仅供下方 WIDEN 升级路径使用。
     int breachCount = 0;
     for (const auto& v : violations)
     {
-        // POSITION_NET 不计入: 仓位 breach 由连续控制处理, 不参与 FLATTEN 升级
+        // POSITION_NET 不计入: 仓位 breach 由连续控制处理, 不参与升级
         if (v.severity == RiskSeverity::BREACH && v.type != RiskLimitType::POSITION_NET)
             breachCount++;
-    }
-    if (breachCount >= _rate_limits.flatten_threshold)
-    {
-        outCategory = RiskCategory::REVERSIBLE;
-        return RiskAction::FLATTEN_POSITION;
     }
 
     // Block specific direction
@@ -526,7 +521,7 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     // PAUSE blocks quoting -> no fills -> pos can't decrease -> never recovers.
     // With the relaxed threshold, MM resumes at 60 but checkPreTradePosition's
     // v3 soft limit (obligation mode at util>=1.0) drives natural reduction.
-    for (const auto& c : portfolio->getAllContracts())
+    for (const auto& c : portfolio->getAllContractsSnapshot())
     {
         if (c.max_position > 0 &&
             std::abs(c.position) > c.max_position * _rate_limits.position_breach_pause_threshold)
@@ -605,7 +600,8 @@ bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)
         _short_blocked.load(std::memory_order_relaxed))
     {
         // Check if positions have normalized
-        const ContractState* breached = portfolio ? portfolio->getPositionBreachedContract() : nullptr;
+        ContractState breached_buf;
+        const ContractState* breached = (portfolio && portfolio->getPositionBreachedSnapshot(breached_buf)) ? &breached_buf : nullptr;
         if (!breached)
         {
             unblockLong();
@@ -949,24 +945,15 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
         _closeout_state.state == CloseoutSub::FAILED)
         return false;
     
-    // ctx->stra_get_time() 返回 HHMM (4位), 不是 HHMMSS。
-    // 兼容两种格式：>= 10000 视为 HHMMSS, 否则 HHMM。
+    // 5A-1: 时间窗口判定 (时段门/格式校验/跨日映射) 统一走
+    //   SessionPhaseManager 静态函数; 此处保留状态机门
+    //   (IDLE / night_closeout_done) 与触发副作用 (状态标记/日志/转换)。
     uint32_t currentHour, currentMin;
-    if (currentTime >= 10000) {
-        currentHour = currentTime / 10000;
-        currentMin = (currentTime / 100) % 100;
-    } else {
-        currentHour = currentTime / 100;
-        currentMin = currentTime % 100;
-    }
-    
-    if (currentHour > 23 || currentMin > 59)
+    if (!SessionPhaseManager::parseHhmm(currentTime, currentHour, currentMin))
     {
         WTSLogger::warn("[RISK] Invalid current time format: {}", currentTime);
         return false;
     }
-    
-    uint32_t currentTotalMin = currentHour * 60 + currentMin;
     
     //==========================================================================
     // 双触发点平仓逻辑
@@ -974,99 +961,43 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
     // 有夜盘的品种有两个平仓触发点:
     //   1. 夜盘收盘前 night_minutes_before 分钟 (如 02:25)
     //   2. 全天收盘前 minutes_before 分钟 (如 15:10)
-    //
-    // 夜盘收盘时间格式 (HHMM):
-    //   跨日品种: 230 (02:30), 100 (01:00) — 收盘在凌晨
-    //   不跨日品种: 2300 (23:00), 2330 (23:30) — 收盘在当晚
-    //   无夜盘: 0
-    //
-    // 全天收盘时间格式 (HHMMSS):
-    //   150000 (15:00), 151500 (15:15)
     //==========================================================================
     
     // --- 触发点1: 夜盘收盘 ---
-    // 只在夜盘时段 (21:00-05:59) 检查，避免白盘时段误触发
     // 跳过已完成的夜盘 closeout（防止 reset 后重触发）
-    if (_closeout_config.night_close_time > 0 && _closeout_config.night_minutes_before > 0
-        && (currentHour >= 21 || currentHour < 6)
-        && !_closeout_state.night_closeout_done)
+    if (!_closeout_state.night_closeout_done
+        && SessionPhaseManager::inNightCloseoutWindow(currentTime,
+            _closeout_config.night_close_time, _closeout_config.night_minutes_before)
+        && _closeout_state.state == CloseoutSub::IDLE)
     {
-        uint32_t nightClose = _closeout_config.night_close_time;
-        uint32_t nightCloseHour = nightClose / 100;
-        uint32_t nightCloseMin = nightClose % 100;
-        
-        // 夜盘收盘时间合法性校验，防止八进制误配
-        // C++中以0开头的整数字面量被解析为八进制，如0230→八进制=十进制152(01:52)而非23:00。
-        // 配置文件也可能误配为非法值。校验hour<=23, minute<=59。
-        if (nightCloseHour > 23 || nightCloseMin > 59)
-        {
-            WTSLogger::warn("[RISK] Invalid night_close_time format: {} (hour={}, min={}), "
-                           "possible octal misconfiguration. Expected HHMM format.",
-                           nightClose, nightCloseHour, nightCloseMin);
-            // Skip night session closeout check for invalid time
-        }
-        else
-        {
-        uint32_t nightCloseTotalMin = nightCloseHour * 60 + nightCloseMin;
-        
-        bool is_overnight = (nightCloseHour < 6);  // 收盘在凌晨 → 跨日品种
-        
+        uint32_t nightCloseHour = _closeout_config.night_close_time / 100;
+        uint32_t nightCloseMin  = _closeout_config.night_close_time % 100;
+        bool is_overnight = (nightCloseHour < 6);
+        // record this is a night closeout so COMPLETED handler
+        // only resets state for night→day transition, not day closeout
+        _closeout_state.is_night_closeout = true;
+        markCloseoutTriggered(currentTime * 100);
         if (is_overnight)
         {
-            // 跨日品种: 统一时间轴映射
-            // 21:00-23:59 → 保持原值 (1260-1439)
-            // 00:00-05:59 → +1440    (0-359 → 1440-1799)
-            // close=02:30 → 150+1440 = 1590
-            int32_t closeAbs = static_cast<int32_t>(nightCloseTotalMin) + 1440;
-            int32_t triggerAbs = closeAbs - static_cast<int32_t>(_closeout_config.night_minutes_before);
-            
-            int32_t currentAbs;
-            if (currentTotalMin >= 1260) {
-                currentAbs = static_cast<int32_t>(currentTotalMin);  // 21:00-23:59
-            } else {
-                currentAbs = static_cast<int32_t>(currentTotalMin) + 1440;  // 00:00-05:59
-            }
-            
-            if (currentAbs >= triggerAbs && _closeout_state.state == CloseoutSub::IDLE)
-            {
-            // record this is a night closeout so COMPLETED handler
-            // only resets state for night→day transition, not day closeout
-            _closeout_state.is_night_closeout = true;
-                markCloseoutTriggered(currentTime * 100);
-                broadcastAlert("CLOSEOUT_TRIGGERED", 
-                    fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}+1d, {} minutes before",
-                        currentHour, currentMin, nightCloseHour, nightCloseMin, _closeout_config.night_minutes_before));
-                return true;
-            }
+            broadcastAlert("CLOSEOUT_TRIGGERED", 
+                fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}+1d, {} minutes before",
+                    currentHour, currentMin, nightCloseHour, nightCloseMin, _closeout_config.night_minutes_before));
         }
         else
         {
-            // 不跨日品种: 夜盘收盘在当晚 (23:00, 23:30)
-            int32_t triggerTotalMin = static_cast<int32_t>(nightCloseTotalMin) 
-                                    - static_cast<int32_t>(_closeout_config.night_minutes_before);
-            if (triggerTotalMin < 0) triggerTotalMin = 0;
-            
-            if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
-                && _closeout_state.state == CloseoutSub::IDLE)
-            {
-            // record this is a night closeout
-            _closeout_state.is_night_closeout = true;
-                markCloseoutTriggered(currentTime * 100);
-                broadcastAlert("CLOSEOUT_TRIGGERED", 
-                    fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}, {} minutes before",
-                        currentHour, currentMin, nightCloseHour, nightCloseMin, _closeout_config.night_minutes_before));
-                return true;
-            }
+            broadcastAlert("CLOSEOUT_TRIGGERED", 
+                fmt::format("Night closeout triggered at {}:{:02d}, night close {}:{:02d}, {} minutes before",
+                    currentHour, currentMin, nightCloseHour, nightCloseMin, _closeout_config.night_minutes_before));
         }
-        } // end else (valid night_close_time)
+        return true;
     }
     
     // --- 触发点2: 全天收盘 (白盘) ---
-    // 只在白盘时段 (06:00-15:59) 检查，避免夜盘 21:00+ 误触发
-    // (原 currentHour<=20 把 20:59 也吃进来导致夜盘开盘前就平仓)
-    if (_closeout_config.minutes_before > 0
-        && currentHour >= 6 && currentHour <= 15)
+    if (SessionPhaseManager::inDayCloseoutWindow(currentTime, closeTime,
+            _closeout_config.minutes_before)
+        && _closeout_state.state == CloseoutSub::IDLE)
     {
+        // 日志用收盘时间 (与 inDayCloseoutWindow 内同一解析+修正逻辑)
         uint32_t closeHour, closeMin;
         if (closeTime < 10000)
         {
@@ -1078,31 +1009,20 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
             closeHour = closeTime / 10000;
             closeMin = (closeTime / 100) % 100;
         }
-        
         if (closeHour > 23 || closeMin > 59)
         {
-            WTSLogger::warn("[RISK] Invalid close time format: {}, using default 15:15", closeTime);
             closeHour = 15;
             closeMin = 15;
         }
         
-        uint32_t closeTotalMin = closeHour * 60 + closeMin;
-        int32_t triggerTotalMin = static_cast<int32_t>(closeTotalMin) 
-                                - static_cast<int32_t>(_closeout_config.minutes_before);
-        if (triggerTotalMin < 0) triggerTotalMin = 0;
-        
-        if (static_cast<int32_t>(currentTotalMin) >= triggerTotalMin 
-            && _closeout_state.state == CloseoutSub::IDLE)
-        {
-            // day closeout, not night; reset night flag for next session
-            _closeout_state.is_night_closeout = false;
-            _closeout_state.night_closeout_done = false;
-            markCloseoutTriggered(currentTime * 100);
-            broadcastAlert("CLOSEOUT_TRIGGERED", 
-                fmt::format("Day closeout triggered at {}:{:02d}, close time {}:{:02d}, {} minutes before",
-                    currentHour, currentMin, closeHour, closeMin, _closeout_config.minutes_before));
-            return true;
-        }
+        // day closeout, not night; reset night flag for next session
+        _closeout_state.is_night_closeout = false;
+        _closeout_state.night_closeout_done = false;
+        markCloseoutTriggered(currentTime * 100);
+        broadcastAlert("CLOSEOUT_TRIGGERED", 
+            fmt::format("Day closeout triggered at {}:{:02d}, close time {}:{:02d}, {} minutes before",
+                currentHour, currentMin, closeHour, closeMin, _closeout_config.minutes_before));
+        return true;
     }
     
     return _closeout_state.state != CloseoutSub::IDLE;
@@ -1141,15 +1061,18 @@ FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(
     const UnifiedOrderTracker* tracker) const
 {
     // v3 软风控：不再 BLOCK，返回 utilization 让 Quoter 做 qty 衰减
-    PreTradeResult result{true, true, 0.0, 0.0, false, false};
+    PreTradeResult result{true, true, false, false, false, false, 0.0, 0.0, false, false};
     
     if (!portfolio) return result;
     
-    const ContractState* cs = portfolio->getContract(code);
+    ContractState cs_buf;
+    const ContractState* cs = portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
     if (!cs || cs->max_position <= 0) return result;
     
-    double pending_buy = tracker ? tracker->getPendingBuyQty(code) : 0;
-    double pending_sell = tracker ? tracker->getPendingSellQty(code) : 0;
+    // T4: 全源 pending (MM+arb+closeout 在途), 旧 MM-only 口径下 arb 两腿
+    //     在途对 util 投影不可见, 大幅 arb 建仓期间 skew/force/taker 系统性偏低。
+    double pending_buy = tracker ? tracker->getPendingBuyQtyAllSources(code) : 0;
+    double pending_sell = tracker ? tracker->getPendingSellQtyAllSources(code) : 0;
     double projected_long = (cs->position > 0 ? cs->position : 0) + pending_buy;
     double projected_short = (cs->position < 0 ? std::abs(cs->position) : 0) + pending_sell;
     
@@ -1170,6 +1093,40 @@ FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(
             code, cs->position, pending_sell, projected_short, cs->max_position, result.short_utilization);
     }
     
+
+    // === Pending OrderFilter: per-side pending qty drain ===
+    if (_max_pending_per_side > 0)
+    {
+        if (pending_buy > _max_pending_per_side) {
+            result.pending_drain_bid = true;
+            WTSLogger::warn("[RISK_V3] {} PENDING_DRAIN: pending_buy={:.0f} > {:.0f} -> drain bid",
+                code, pending_buy, _max_pending_per_side);
+        }
+        if (pending_sell > _max_pending_per_side) {
+            result.pending_drain_ask = true;
+            WTSLogger::warn("[RISK_V3] {} PENDING_DRAIN: pending_sell={:.0f} > {:.0f} -> drain ask",
+                code, pending_sell, _max_pending_per_side);
+        }
+    }
+
+    // === hard_block: flexible-only (obligation靠skew保护) ===
+    if (_rate_limits.position_hard_block_ratio > 0)
+    {
+        double abs_pos = std::abs(cs->position);
+        double hard_threshold = cs->max_position * _rate_limits.position_hard_block_ratio;
+        if (abs_pos >= hard_threshold)
+        {
+            if (cs->position > 0) {
+                result.hard_block_bid = true;
+            } else {
+                result.hard_block_ask = true;
+            }
+            WTSLogger::warn("[RISK_V3] {} HARD_BLOCK: pos={:.0f} >= {:.0f}*{:.2f} -> block {} (flexible only)",
+                code, cs->position, cs->max_position,
+                _rate_limits.position_hard_block_ratio,
+                cs->position > 0 ? "bid" : "ask");
+        }
+    }
     return result;
 }
 

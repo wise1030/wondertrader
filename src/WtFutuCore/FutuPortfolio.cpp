@@ -8,6 +8,7 @@
 #include "FutuPortfolio.h"
 #include "SpreadArbitrageManager.h"  // B5: onOvershootDetected / hasActiveCloseIntent
 #include "../Includes/WTSDataDef.hpp"
+#include "../Share/TimeUtils.hpp"
 #include "../WTSTools/WTSLogger.h"
 #include <cmath>
 
@@ -15,11 +16,14 @@ namespace futu {
 
 FutuPortfolio::FutuPortfolio()
 {
+RecursiveSpinGuard _g(_lock);
 }
 
 void FutuPortfolio::addContract(const std::string& code, double multiplier, double tickSize, double hedgeRatio,
                                  double maxPosition, double contractMaxDelta, double targetPosition)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     // O(1) check if contract already exists
     auto it = _code_to_state.find(code);
     if (it != _code_to_state.end())
@@ -57,6 +61,8 @@ void FutuPortfolio::addContract(const std::string& code, double multiplier, doub
 
 void FutuPortfolio::removeContract(const std::string& code)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     auto it = _code_to_state.find(code);
     if (it == _code_to_state.end())
         return;
@@ -78,20 +84,28 @@ void FutuPortfolio::removeContract(const std::string& code)
 
 void FutuPortfolio::onTick(const char* stdCode, wtp::WTSTickData* tick)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     if (!tick) return;
 
     // O(1) lookup
     ContractState* cs = getContract(stdCode);
     if (!cs) return;
 
-    cs->last_price = tick->price();
+    // M5: 当日无成交 tick 的 price()==0, 直接覆盖会把策略层刚写入的 mid 打回 0
+    //     -> exposure() 对 last_price<=0 返回 0 -> 毛暴露硬风控静默失效。
+    //     仅正价才写, 否则保留 markToMarket/上一有效值。
+    if (tick->price() > 0)
+        cs->last_price = tick->price();
     cs->bid1 = tick->bidprice(0);
     cs->ask1 = tick->askprice(0);
-    cs->last_update = 0; // Could use tick timestamp
+    cs->last_update = TimeUtils::getLocalTimeNow();
 }
 
 void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
     
@@ -122,6 +136,8 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
 
 void FutuPortfolio::addRealizedPnl(const std::string& code, double pnl)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
     cs->realized_pnl += pnl;
@@ -130,6 +146,8 @@ void FutuPortfolio::addRealizedPnl(const std::string& code, double pnl)
 
 void FutuPortfolio::setReferencePrice(const std::string& code, double refPrice)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs || refPrice <= 0) return;
     cs->avg_cost = refPrice;
@@ -140,6 +158,8 @@ void FutuPortfolio::setReferencePrice(const std::string& code, double refPrice)
 
 void FutuPortfolio::updateDailyPnL(const std::string& code)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
     
@@ -149,6 +169,8 @@ void FutuPortfolio::updateDailyPnL(const std::string& code)
 
 void FutuPortfolio::resetDailyPnl()
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     for (auto& cs : _contracts)
     {
         cs.realized_pnl = 0;
@@ -169,6 +191,8 @@ void FutuPortfolio::resetDailyPnl()
 
 void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     // O(1) lookup
     ContractState* cs = getContract(stdCode);
     if (!cs) return;
@@ -182,6 +206,8 @@ void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
 
 void FutuPortfolio::updatePosition(const std::string& code, double position, double avgCost)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
 
@@ -195,6 +221,8 @@ void FutuPortfolio::updatePosition(const std::string& code, double position, dou
 
 void FutuPortfolio::onTradeFill(const std::string& code, bool is_long_side, int offset, double vol, double price)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs || vol <= 0) return;
 
@@ -243,6 +271,8 @@ void FutuPortfolio::onTradeFill(const std::string& code, bool is_long_side, int 
 
 void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
 {
+RecursiveSpinGuard _g(_lock);
+    markAggregatesDirty();  // F4
     ContractState* cs = getContract(code);
     if (!cs) return;
 
@@ -272,6 +302,7 @@ void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
 
 void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double now)
 {
+RecursiveSpinGuard _g(_lock);
     if (!_arb_manager) return;
     if (prev == 0.0 || prev * now >= 0.0) return;  // 未翻转 (含从零建仓/回到零)
     if (_arb_manager->hasActiveCloseIntent(code))
@@ -287,6 +318,7 @@ void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double
 
 std::vector<const ContractState*> FutuPortfolio::getContractsNeedingReduction(double threshold) const
 {
+RecursiveSpinGuard _g(_lock);
     std::vector<const ContractState*> result;
     for (const auto& c : _contracts)
     {
@@ -296,6 +328,29 @@ std::vector<const ContractState*> FutuPortfolio::getContractsNeedingReduction(do
         }
     }
     return result;
+}
+
+void FutuPortfolio::smoothUpdateHedgeRatio(const std::string& code, double beta, long sample_count)
+{
+RecursiveSpinGuard _g(_lock);
+ContractState* cs = getContract(code);
+if (!cs) return;
+if (!cs->hedge_ratio_initialized && cs->last_price > 0 && std::isfinite(beta) && beta > 0) {
+    cs->hedge_ratio = beta;
+    cs->hedge_ratio_initialized = true;
+} else {
+    bool should_update = (sample_count >= 100);
+    if (should_update && cs->hedge_ratio > 0) {
+        double change_ratio = std::abs(beta - cs->hedge_ratio) / cs->hedge_ratio;
+        if (change_ratio > 0.2) {
+            beta = cs->hedge_ratio * (1.0 + (beta > cs->hedge_ratio ? 0.2 : -0.2));
+        }
+    }
+    if (should_update && std::isfinite(beta) && beta > 0) {
+        cs->hedge_ratio = beta;
+    }
+}
+// 沿用旧语义: 不置聚合脏标 (原裸指针直写不置脏, 最晚下一 tick onTick 置脏收敛)
 }
 
 } // namespace futu

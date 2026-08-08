@@ -106,9 +106,20 @@ private:
     
     // Shared SpreadCalculator logic reduces code duplication massively!
     wtp::wt_hashmap<std::string, std::shared_ptr<SpreadCalculator>> _calculators;
-    wtp::wt_hashmap<std::string, RelationType> _relation_types;
-    wtp::wt_hashmap<std::string, double> _expected_betas;
-    
+
+    // F1: code → (calculator*, isLeg1) 预建索引 — onTick 零字符串操作
+    //   (旧实现每 tick × 每 pair: find('/') + 2×substr + 2×string 比较)
+    //   注意: leg1 恒为字典序较小代码 (与原 getPairKey 解析语义一致)
+    wtp::wt_hashmap<std::string, std::vector<std::pair<SpreadCalculator*, bool>>> _code_calcs;
+    // F2: 双向 pair 索引 — getCalculator/getHedgeRatio 零 pair_key 堆分配
+    //   (旧 getPairKey "code1/code2" ≈25字符 > SSO, 每查询 2-3 次 malloc)
+    struct PairEntry {
+        std::shared_ptr<SpreadCalculator> calc;
+        RelationType type = RelationType::CROSS_TERM;
+        double expected_beta = 1.0;
+    };
+    wtp::wt_hashmap<std::string, wtp::wt_hashmap<std::string, PairEntry>> _pair_index;
+
     static std::string getPairKey(const std::string& code1, const std::string& code2);
     std::shared_ptr<SpreadCalculator> getCalculator(const std::string& code1, const std::string& code2) const;
 };

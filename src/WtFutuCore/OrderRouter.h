@@ -24,6 +24,7 @@
 #include <string_view>
 #include <vector>
 #include "../Includes/FasterDefs.h"
+#include "SpinLockGuard.h"
 #include "../Includes/ExecuteDefs.h"
 
 NS_WTP_BEGIN
@@ -199,6 +200,7 @@ public:
     /// invisible here.
     uint32_t getActiveCountBySource(Source src) const
     {
+        RecursiveSpinGuard _g(_lock);
         auto it = _active_orders.find(static_cast<int>(src));
         if (it == _active_orders.end()) return 0;
         // 排除 pending_cancel (与 totalActiveOrders/getActiveOrders 口径一致).
@@ -269,6 +271,9 @@ private:
                            double price, double qty, Source src, uint64_t now_ms);
 
     /// Per-source rate counters (pre-allocated for 3 sources)
+    // v7.6 阶段2: 递归自旋锁 — MdSpi(下单/注册) vs TdSpi(onOrderDone) 双线程
+    mutable RecursiveSpinLock _lock;
+
     wtp::wt_hashmap<int, RateCounter> _rate_counters;
 
     /// Per-source active order lists (pre-allocated vectors)
