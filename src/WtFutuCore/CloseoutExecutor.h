@@ -23,13 +23,14 @@
 #include <vector>
 #include "../Includes/FasterDefs.h"
 #include "OrderRouter.h"
-#include "FutuRiskMonitor.h"  // CloseoutSub enum (P1-1: merged state machine)
+#include "FutuRiskMonitor.h" // CloseoutSub enum (P1-1: merged state machine)
 
 NS_WTP_BEGIN
 class IUftStraCtx;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 class UnifiedOrderTracker;
 class FutuPortfolio;
@@ -41,59 +42,62 @@ struct ContractState;
 /// Price escalation tier for urgency-driven execution
 enum class PriceTier : uint8_t
 {
-    PASSIVE         = 0,  ///< Same side +1 tick
-    MID_PASSIVE     = 1,  ///< Mid price
-    AGGRESSIVE      = 2,  ///< Opposite price
-    VERY_AGGRESSIVE = 3,  ///< Opposite +1 tick
-    SWEEP           = 4,  ///< Opposite +N ticks
+    PASSIVE = 0,         ///< Same side +1 tick
+    MID_PASSIVE = 1,     ///< Mid price
+    AGGRESSIVE = 2,      ///< Opposite price
+    VERY_AGGRESSIVE = 3, ///< Opposite +1 tick
+    SWEEP = 4,           ///< Opposite +N ticks
 };
 
 /// Single execution round record (for fill-rate estimation)
 struct ExecutionRound
 {
-    uint64_t  submit_ts     = 0;
-    double    submitted_qty = 0;
-    double    filled_qty    = 0;
-    uint64_t  fill_ts       = 0;
-    uint64_t  elapsed_ms    = 0;
-    PriceTier tier          = PriceTier::PASSIVE;
+    uint64_t submit_ts = 0;
+    double submitted_qty = 0;
+    double filled_qty = 0;
+    uint64_t fill_ts = 0;
+    uint64_t elapsed_ms = 0;
+    PriceTier tier = PriceTier::PASSIVE;
 };
 
 /// Market snapshot passed each tick (decoupled from WTS types)
 struct MarketSnapshot
 {
-    double    bid1         = 0;
-    double    ask1         = 0;
-    double    bid1_qty     = 0;
-    double    ask1_qty     = 0;
-    double    price_tick   = 0;
-    double    upper_limit  = 0;   ///< P2-2: 涨停价
-    double    lower_limit  = 0;   ///< P2-2: 跌停价
-    uint64_t  timestamp_ms = 0;
+    double bid1 = 0;
+    double ask1 = 0;
+    double bid1_qty = 0;
+    double ask1_qty = 0;
+    double price_tick = 0;
+    double upper_limit = 0; ///< P2-2: 涨停价
+    double lower_limit = 0; ///< P2-2: 跌停价
+    uint64_t timestamp_ms = 0;
 };
 
 /// CloseoutExecutor configuration
 struct CloseoutExecConfig
 {
-    uint32_t drain_timeout_ms     = 3000;  ///< Phase 1 drain timeout
-    double   depth_ratio_passive  = 0.3;   ///< Passive tier: max depth fraction
-    double   depth_ratio_mid      = 0.5;   ///< Mid tier: max depth fraction
-    double   depth_ratio_aggr     = 0.8;   ///< Aggressive tier: max depth fraction
-    uint32_t sweep_threshold_ms   = 5000;  ///< Time left (ms) to enter SWEEP
-    uint32_t sweep_ticks          = 3;     ///< SWEEP: opponent price + N ticks
-    bool     use_fak              = true;  ///< Use FAK for all orders
-    uint32_t max_batch_size       = 20;    ///< Absolute cap on single batch qty (lots)
+    uint32_t drain_timeout_ms = 3000;   ///< Phase 1 drain timeout
+    double depth_ratio_passive = 0.3;   ///< Passive tier: max depth fraction
+    double depth_ratio_mid = 0.5;       ///< Mid tier: max depth fraction
+    double depth_ratio_aggr = 0.8;      ///< Aggressive tier: max depth fraction
+    uint32_t sweep_threshold_ms = 5000; ///< Time left (ms) to enter SWEEP
+    uint32_t sweep_ticks = 3;           ///< SWEEP: opponent price + N ticks
+    bool use_fak = true;                ///< Use FAK for all orders
+    uint32_t max_batch_size = 20;       ///< Absolute cap on single batch qty (lots)
 
     /// Get depth ratio for a tier
     double depthRatio(PriceTier tier) const
     {
-        switch (tier)
-        {
-            case PriceTier::PASSIVE:         return depth_ratio_passive;
-            case PriceTier::MID_PASSIVE:     return depth_ratio_mid;
-            case PriceTier::AGGRESSIVE:
-            case PriceTier::VERY_AGGRESSIVE: return depth_ratio_aggr;
-            case PriceTier::SWEEP:           return 1.0;
+        switch (tier) {
+        case PriceTier::PASSIVE:
+            return depth_ratio_passive;
+        case PriceTier::MID_PASSIVE:
+            return depth_ratio_mid;
+        case PriceTier::AGGRESSIVE:
+        case PriceTier::VERY_AGGRESSIVE:
+            return depth_ratio_aggr;
+        case PriceTier::SWEEP:
+            return 1.0;
         }
         return depth_ratio_passive;
     }
@@ -129,10 +133,7 @@ public:
     /// @param code          Anchor contract code
     /// @param close_time_ms Session close timestamp (ms)
     /// @param hedge_ratio   Hedge ratio of anchor contract
-    void start(wtp::IUftStraCtx* ctx,
-               const char* code,
-               uint64_t close_time_ms,
-               double hedge_ratio);
+    void start(wtp::IUftStraCtx* ctx, const char* code, uint64_t close_time_ms, double hedge_ratio);
 
     /// Advance the state machine. Call every on_tick.
     /// @param ctx  Strategy context
@@ -146,14 +147,13 @@ public:
     // State queries
     //==========================================================================
     CloseoutSub getPhase() const { return _phase; }
-    bool isIdle() const      { return _phase == CloseoutSub::IDLE; }
+    bool isIdle() const { return _phase == CloseoutSub::IDLE; }
     bool isCompleted() const { return _phase == CloseoutSub::COMPLETED; }
-    bool isFailed() const    { return _phase == CloseoutSub::FAILED; }
-    bool isActive() const    { return _phase != CloseoutSub::IDLE
-                                    && _phase != CloseoutSub::COMPLETED; }
+    bool isFailed() const { return _phase == CloseoutSub::FAILED; }
+    bool isActive() const { return _phase != CloseoutSub::IDLE && _phase != CloseoutSub::COMPLETED; }
 
-    double getRemaining() const    { return _remaining; }
-    double getTotalFilled() const  { return _total_filled; }
+    double getRemaining() const { return _remaining; }
+    double getTotalFilled() const { return _total_filled; }
     uint32_t getRoundCount() const { return static_cast<uint32_t>(_rounds.size()); }
 
 private:
@@ -182,19 +182,16 @@ private:
     PriceTier selectTier(double urgency, uint32_t time_left_ms) const;
 
     /// Calculate batch quantity for this round (depth-aware)
-    double calcBatchQty(double remaining, PriceTier tier,
-                        double bid1_qty, double ask1_qty) const;
+    double calcBatchQty(double remaining, PriceTier tier, double bid1_qty, double ask1_qty) const;
 
     /// Compute execution price for a tier
-    double computePrice(PriceTier tier, bool is_buy,
-                        double bid, double ask, double tick) const;
+    double computePrice(PriceTier tier, bool is_buy, double bid, double ask, double tick) const;
 
     /// Estimate fill rate (lots/ms) from recent rounds
     double estimateFillRate() const;
 
     /// Submit a hedge order (FAK)
-    void submitHedgeOrder(wtp::IUftStraCtx* ctx,
-                          bool is_buy, double price, double qty);
+    void submitHedgeOrder(wtp::IUftStraCtx* ctx, bool is_buy, double price, double qty);
 
     /// Record the previous round's fill (called at start of each round)
     void updateRoundFill(const MarketSnapshot& snap);
@@ -205,37 +202,37 @@ private:
     //==========================================================================
     // Dependencies
     //==========================================================================
-    OrderRouter*           _router    = nullptr;
-    UnifiedOrderTracker*   _tracker   = nullptr;
-    FutuPortfolio*         _portfolio = nullptr;
-    CloseoutExecConfig     _cfg;
+    OrderRouter* _router = nullptr;
+    UnifiedOrderTracker* _tracker = nullptr;
+    FutuPortfolio* _portfolio = nullptr;
+    CloseoutExecConfig _cfg;
 
     //==========================================================================
     // State
     //==========================================================================
-    CloseoutSub  _phase          = CloseoutSub::IDLE;
-    char           _code[32]       = {};
-    uint64_t       _close_time_ms  = 0;
-    double         _hedge_ratio    = 1.0;
+    CloseoutSub _phase = CloseoutSub::IDLE;
+    char _code[32] = {};
+    uint64_t _close_time_ms = 0;
+    double _hedge_ratio = 1.0;
 
-    double         _remaining      = 0;      ///< Lots left to hedge (+need buy, -need sell)
-    double         _total_to_hedge = 0;
-    double         _total_filled   = 0;
-    double         _inflight_qty   = 0;      ///< Qty submitted but not yet confirmed filled/cancelled
+    double _remaining = 0; ///< Lots left to hedge (+need buy, -need sell)
+    double _total_to_hedge = 0;
+    double _total_filled = 0;
+    double _inflight_qty = 0; ///< Qty submitted but not yet confirmed filled/cancelled
 
-    uint64_t       _start_ts       = 0;
-    uint64_t       _drain_start_ts = 0;
-    bool           _sweep_done     = false;
+    uint64_t _start_ts = 0;
+    uint64_t _drain_start_ts = 0;
+    bool _sweep_done = false;
 
     // Previous round info (for fill tracking)
-    double         _prev_round_pos = 0;      ///< Portfolio position before last order
-    uint64_t       _prev_round_ts  = 0;
-    PriceTier      _prev_round_tier = PriceTier::PASSIVE;
-    double         _prev_round_qty  = 0;
+    double _prev_round_pos = 0; ///< Portfolio position before last order
+    uint64_t _prev_round_ts = 0;
+    PriceTier _prev_round_tier = PriceTier::PASSIVE;
+    double _prev_round_qty = 0;
 
     // Execution history for fill-rate estimation
     std::vector<ExecutionRound> _rounds;
-    uint32_t       _consecutive_zero_fills = 0;  ///< Consecutive zero-fill rounds (for price chase)
+    uint32_t _consecutive_zero_fills = 0; ///< Consecutive zero-fill rounds (for price chase)
 };
 
 } // namespace futu

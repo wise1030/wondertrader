@@ -9,17 +9,17 @@
 #include "SelfTradePrevention.h"
 #include "../WTSTools/WTSLogger.h"
 
-namespace futu {
+namespace futu
+{
 
 //==========================================================================
 // Order Tracking (delegated to UnifiedOrderTracker)
 //==========================================================================
 
-void SelfTradePrevention::trackMMOrder(const std::string& code, uint32_t order_id,
-                                        double price, double qty, bool is_buy, uint64_t timestamp)
+void SelfTradePrevention::trackMMOrder(
+    const std::string& code, uint32_t order_id, double price, double qty, bool is_buy, uint64_t timestamp)
 {
-    if (!_tracker)
-    {
+    if (!_tracker) {
         WTSLogger::error("SelfTradePrevention::trackMMOrder: UnifiedOrderTracker not set");
         return;
     }
@@ -55,8 +55,8 @@ SelfTradeCheckResult SelfTradePrevention::checkArbitrageOrder(const ArbitrageOrd
     return checkOrder(request.code, request.is_buy, request.price, request.is_market_order);
 }
 
-SelfTradeCheckResult SelfTradePrevention::checkOrder(const std::string& code, bool is_buy,
-                                                      double price, bool is_market_order) const
+SelfTradeCheckResult
+SelfTradePrevention::checkOrder(const std::string& code, bool is_buy, double price, bool is_market_order) const
 {
     SelfTradeCheckResult result;
 
@@ -74,20 +74,19 @@ SelfTradeCheckResult SelfTradePrevention::checkOrder(const std::string& code, bo
     result.conflicting_order_ids = utResult.conflicting_order_ids;
 
     // Convert action
-    switch (utResult.recommended_action)
-    {
-        case futu::SelfTradeCheckResult::Action::ALLOW:
-            result.recommended_action = SelfTradeCheckResult::Action::ALLOW;
-            break;
-        case futu::SelfTradeCheckResult::Action::CANCEL_MM_FIRST:
-            result.recommended_action = SelfTradeCheckResult::Action::CANCEL_MM_FIRST;
-            break;
-        case futu::SelfTradeCheckResult::Action::REJECT:
-            result.recommended_action = SelfTradeCheckResult::Action::REJECT;
-            break;
-        case futu::SelfTradeCheckResult::Action::ADJUST_PRICE:
-            result.recommended_action = SelfTradeCheckResult::Action::ADJUST_PRICE;
-            break;
+    switch (utResult.recommended_action) {
+    case futu::SelfTradeCheckResult::Action::ALLOW:
+        result.recommended_action = SelfTradeCheckResult::Action::ALLOW;
+        break;
+    case futu::SelfTradeCheckResult::Action::CANCEL_MM_FIRST:
+        result.recommended_action = SelfTradeCheckResult::Action::CANCEL_MM_FIRST;
+        break;
+    case futu::SelfTradeCheckResult::Action::REJECT:
+        result.recommended_action = SelfTradeCheckResult::Action::REJECT;
+        break;
+    case futu::SelfTradeCheckResult::Action::ADJUST_PRICE:
+        result.recommended_action = SelfTradeCheckResult::Action::ADJUST_PRICE;
+        break;
     }
 
     result.adjusted_price = utResult.adjusted_price;
@@ -103,15 +102,14 @@ std::vector<ActiveOrder> SelfTradePrevention::getMMBuyOrders(const std::string& 
 {
     std::vector<ActiveOrder> result;
 
-    if (!_tracker) return result;
+    if (!_tracker)
+        return result;
 
     auto orderIds = _tracker->getMMBuyOrderIds(code);
-    for (uint32_t id : orderIds)
-    {
+    for (uint32_t id : orderIds) {
         UnifiedOrderInfo info_buf;
         const UnifiedOrderInfo* info = _tracker->getOrderInfoCopy(id, info_buf) ? &info_buf : nullptr;
-        if (info)
-        {
+        if (info) {
             ActiveOrder order;
             order.code = info->code;
             order.order_id = info->order_id;
@@ -130,15 +128,14 @@ std::vector<ActiveOrder> SelfTradePrevention::getMMSellOrders(const std::string&
 {
     std::vector<ActiveOrder> result;
 
-    if (!_tracker) return result;
+    if (!_tracker)
+        return result;
 
     auto orderIds = _tracker->getMMSellOrderIds(code);
-    for (uint32_t id : orderIds)
-    {
+    for (uint32_t id : orderIds) {
         UnifiedOrderInfo info_buf;
         const UnifiedOrderInfo* info = _tracker->getOrderInfoCopy(id, info_buf) ? &info_buf : nullptr;
-        if (info)
-        {
+        if (info) {
             ActiveOrder order;
             order.code = info->code;
             order.order_id = info->order_id;

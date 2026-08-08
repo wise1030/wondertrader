@@ -10,7 +10,8 @@
 
 #include "UftFutuMmStrategy.h"
 
-namespace futu {
+namespace futu
+{
 
 class FutuConfigLoader
 {
@@ -21,8 +22,8 @@ public:
     /// @param contracts 输出: 合约列表
     /// @param strategy_id 用于日志标识
     /// @return true=解析与校验通过
-    static bool load(wtp::WTSVariant* cfg, FutuMmConfig& config,
-                     std::vector<ContractInfo>& contracts, const char* strategy_id);
+    static bool
+    load(wtp::WTSVariant* cfg, FutuMmConfig& config, std::vector<ContractInfo>& contracts, const char* strategy_id);
 };
 
 } // namespace futu

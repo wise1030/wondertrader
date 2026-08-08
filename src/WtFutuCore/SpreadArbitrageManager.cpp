@@ -14,13 +14,16 @@
 #include <cmath>
 #include <chrono>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // 内置策略注册 (新增策略在此追加一行即可, 无需改 Manager 其他代码)
 //==============================================================================
-namespace {
-struct BuiltinStrategyRegistrar {
+namespace
+{
+struct BuiltinStrategyRegistrar
+{
     BuiltinStrategyRegistrar()
     {
         auto& reg = SpreadStrategyRegistry::instance();
@@ -39,11 +42,9 @@ static BuiltinStrategyRegistrar _builtin_registrar;
 } // anonymous namespace
 
 SpreadArbitrageManager::SpreadArbitrageManager()
-    : _calculator_manager(std::make_unique<SpreadCalculatorManager>())
-    , _risk_manager(std::make_unique<SpreadRiskManager>())
-    , _mm_enhancer(std::make_unique<MarketMakingEnhancer>())
-{
-}
+    : _calculator_manager(std::make_unique<SpreadCalculatorManager>()),
+      _risk_manager(std::make_unique<SpreadRiskManager>()), _mm_enhancer(std::make_unique<MarketMakingEnhancer>())
+{}
 
 bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
 {
@@ -63,27 +64,32 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
 
     // Helper functions
     auto readBool = [](WTSVariant* v, const char* key, bool defVal) -> bool {
-        if (!v) return defVal;
+        if (!v)
+            return defVal;
         WTSVariant* node = v->get(key);
         return node ? node->asBoolean() : defVal;
     };
     auto readDouble = [](WTSVariant* v, const char* key, double defVal) -> double {
-        if (!v) return defVal;
+        if (!v)
+            return defVal;
         WTSVariant* node = v->get(key);
         return node ? node->asDouble() : defVal;
     };
     auto readUInt32 = [](WTSVariant* v, const char* key, uint32_t defVal) -> uint32_t {
-        if (!v) return defVal;
+        if (!v)
+            return defVal;
         WTSVariant* node = v->get(key);
         return node ? (uint32_t)node->asInt64() : defVal;
     };
     auto readInt32 = [](WTSVariant* v, const char* key, int defVal) -> int {
-        if (!v) return defVal;
+        if (!v)
+            return defVal;
         WTSVariant* node = v->get(key);
         return node ? (int)node->asInt64() : defVal;
     };
     auto readString = [](WTSVariant* v, const char* key, const std::string& defVal) -> std::string {
-        if (!v) return defVal;
+        if (!v)
+            return defVal;
         WTSVariant* node = v->get(key);
         return node ? node->asString() : defVal;
     };
@@ -127,10 +133,10 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
         _arb_close_cfg.enabled = readBool(close_node, "enabled", false);
         WTSVariant* allow = close_node->get("allow_signals");
         if (allow) {
-            _arb_close_cfg.allow_signals.close_long  = readBool(allow, "close_long", false);
+            _arb_close_cfg.allow_signals.close_long = readBool(allow, "close_long", false);
             _arb_close_cfg.allow_signals.close_short = readBool(allow, "close_short", false);
             _arb_close_cfg.allow_signals.timeout_exit = readBool(allow, "timeout_exit", false);
-            _arb_close_cfg.allow_signals.stop_loss   = readBool(allow, "stop_loss", false);
+            _arb_close_cfg.allow_signals.stop_loss = readBool(allow, "stop_loss", false);
         }
         WTSVariant* slp = close_node->get("stop_loss_policy");
         if (slp) {
@@ -153,9 +159,11 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
         _arb_close_cfg.intent_broadcast = readBool(close_node, "intent_broadcast", true);
 
         WTSLogger::info("SpreadArbMgr: arb_close loaded, enabled={}, allow[SL={},TO={},CL={},CS={}]",
-            _arb_close_cfg.enabled,
-            _arb_close_cfg.allow_signals.stop_loss, _arb_close_cfg.allow_signals.timeout_exit,
-            _arb_close_cfg.allow_signals.close_long, _arb_close_cfg.allow_signals.close_short);
+                        _arb_close_cfg.enabled,
+                        _arb_close_cfg.allow_signals.stop_loss,
+                        _arb_close_cfg.allow_signals.timeout_exit,
+                        _arb_close_cfg.allow_signals.close_long,
+                        _arb_close_cfg.allow_signals.close_short);
     }
 
     // Read statistical sub-strategy parameters (global defaults, per-pair overrides in pairs section)
@@ -191,19 +199,21 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
     if (pairs && pairs->isArray()) {
         for (uint32_t i = 0; i < pairs->size(); ++i) {
             WTSVariant* pair_cfg = pairs->get(i);
-            if (!pair_cfg) continue;
+            if (!pair_cfg)
+                continue;
 
             SpreadPairConfig pair;
             pair.pair_id = readString(pair_cfg, "id", "");
             pair.leg1_code = readString(pair_cfg, "leg1", "");
             pair.leg2_code = readString(pair_cfg, "leg2", "");
             pair.leg1_ratio = readDouble(pair_cfg, "ratio", 1.0);
-            pair.leg2_ratio = readDouble(pair_cfg, "ratio2", 1.0);  // A1: 此前硬编码 1.0, 支持独立 leg2 比率
+            pair.leg2_ratio = readDouble(pair_cfg, "ratio2", 1.0); // A1: 此前硬编码 1.0, 支持独立 leg2 比率
             pair.max_spread_position = readDouble(pair_cfg, "maxPosition", 10.0);
             // A9: pair 级未配置时回落到 statistical 段全局默认
             pair.entry_z_threshold = readDouble(pair_cfg, "entryZScore", _default_mr_entry_threshold);
             pair.exit_z_threshold = readDouble(pair_cfg, "exitZScore", _default_mr_exit_threshold);
-            pair.stop_loss_z = readDouble(pair_cfg, "stopLossZ", _default_mr_stop_loss_z);  // A9: 此前无加载, 恒为默认 4.0
+            pair.stop_loss_z =
+                readDouble(pair_cfg, "stopLossZ", _default_mr_stop_loss_z); // A9: 此前无加载, 恒为默认 4.0
             pair.lookback_window = readUInt32(pair_cfg, "windowSize", 200);
             pair.primary_strategy = _config.primary_strategy;
             pair.stop_loss_pct = readDouble(pair_cfg, "stopLossPct", _default_tf_stop_loss_pct);
@@ -219,19 +229,24 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
     // H4: 加载 risk_limits 段 → SpreadRiskConfig (此前未加载, 用编译期默认值)
     WTSVariant* risk_node = arb->get("risk_limits");
     if (risk_node) {
-        _risk_config.portfolio_stop_loss     = readDouble(risk_node, "portfolioStopLoss",     50000.0);
-        _risk_config.max_total_position      = readDouble(risk_node, "maxTotalPosition",      50.0);
-        _risk_config.max_single_pair         = readDouble(risk_node, "maxSinglePair",         20.0);
-        _risk_config.max_correlation_break   = readDouble(risk_node, "maxCorrelationBreak",   0.3);
-        _risk_config.max_divergence_zscore   = readDouble(risk_node, "maxDivergenceZscore",   5.0);
-        _risk_config.max_divergence_time     = readUInt32(risk_node, "maxDivergenceTime",     7200);
+        _risk_config.portfolio_stop_loss = readDouble(risk_node, "portfolioStopLoss", 50000.0);
+        _risk_config.max_total_position = readDouble(risk_node, "maxTotalPosition", 50.0);
+        _risk_config.max_single_pair = readDouble(risk_node, "maxSinglePair", 20.0);
+        _risk_config.max_correlation_break = readDouble(risk_node, "maxCorrelationBreak", 0.3);
+        _risk_config.max_divergence_zscore = readDouble(risk_node, "maxDivergenceZscore", 5.0);
+        _risk_config.max_divergence_time = readUInt32(risk_node, "maxDivergenceTime", 7200);
         _risk_manager->setConfig(_risk_config);
-        WTSLogger::info("SpreadArbitrageManager: risk_limits loaded, portfolioStopLoss={:.0f}, maxTotalPos={:.0f}, maxSinglePair={:.0f}",
-            _risk_config.portfolio_stop_loss, _risk_config.max_total_position, _risk_config.max_single_pair);
+        WTSLogger::info("SpreadArbitrageManager: risk_limits loaded, portfolioStopLoss={:.0f}, maxTotalPos={:.0f}, "
+                        "maxSinglePair={:.0f}",
+                        _risk_config.portfolio_stop_loss,
+                        _risk_config.max_total_position,
+                        _risk_config.max_single_pair);
     }
 
     WTSLogger::info("SpreadArbitrageManager: Loaded config from {}, enabled={}, pairs={}",
-        config_file, _config.enabled, _strategies.size());
+                    config_file,
+                    _config.enabled,
+                    _strategies.size());
 
     return true;
 }
@@ -311,34 +326,29 @@ std::vector<std::string> SpreadArbitrageManager::getSpreadPairs() const
 {
     std::vector<std::string> pairs;
     pairs.reserve(_strategies.size());
-    for (const auto& kv : _strategies)
-    {
+    for (const auto& kv : _strategies) {
         pairs.push_back(kv.first);
     }
     return pairs;
 }
 
-void SpreadArbitrageManager::initializeStrategy(StrategyInstance& instance,
-                                                  const SpreadPairConfig& config)
+void SpreadArbitrageManager::initializeStrategy(StrategyInstance& instance, const SpreadPairConfig& config)
 {
     // 注册表驱动创建: 新增策略只需在文件顶部注册一行, 无需改本函数
     const std::string& name = strategyTypeName(config.primary_strategy);
     auto strat = SpreadStrategyRegistry::instance().create(name);
-    if (!strat)
-    {
+    if (!strat) {
         // Default to mean reversion
         strat = SpreadStrategyRegistry::instance().create("mean_reversion");
         WTSLogger::warn("SpreadArbitrageManager: unknown strategy '{}', fallback to mean_reversion", name);
     }
-    if (strat)
-    {
+    if (strat) {
         strat->configure(config);
         instance.strategies.push_back(std::move(strat));
     }
 }
 
-void SpreadArbitrageManager::onTick(const std::string& code, double price,
-                                     double multiplier, uint64_t timestamp)
+void SpreadArbitrageManager::onTick(const std::string& code, double price, double multiplier, uint64_t timestamp)
 {
     if (!_config.enabled)
         return;
@@ -352,17 +362,15 @@ void SpreadArbitrageManager::onTick(const std::string& code, double price,
     // Acquire exclusive lock for writing
     SpinLockGuard lock(_pair_states_spin);
 
-    for (const auto& pair_id : pairs)
-    {
+    for (const auto& pair_id : pairs) {
         auto state = _calculator_manager->getSpreadState(pair_id);
 
         // Update strategy data — 插件循环, 替代原 else-if 链
         auto strat_it = _strategies.find(pair_id);
-        if (strat_it != _strategies.end())
-        {
-            for (auto& strat : strat_it->second.strategies)
-            {
-                if (strat) strat->update(state, timestamp);
+        if (strat_it != _strategies.end()) {
+            for (auto& strat : strat_it->second.strategies) {
+                if (strat)
+                    strat->update(state, timestamp);
             }
         }
 
@@ -383,10 +391,10 @@ void SpreadArbitrageManager::onTick(const std::string& code, double price,
         stored_state.half_life = state.half_life;
         stored_state.leg1_price = state.leg1_price;
         stored_state.leg2_price = state.leg2_price;
-        stored_state.is_active = state.is_active;   // BUG FIX: previously missed,
-                                                    // strategies always early-returned
-                                                    // (is_active=false) → 0 raw signals
-                                                    // ever, B-3 gate never exercised.
+        stored_state.is_active = state.is_active; // BUG FIX: previously missed,
+                                                  // strategies always early-returned
+                                                  // (is_active=false) → 0 raw signals
+                                                  // ever, B-3 gate never exercised.
         stored_state.last_update = timestamp;
 
         // Update risk manager
@@ -405,12 +413,9 @@ void SpreadArbitrageManager::onWtTick(wtp::WTSTickData* tick)
     // Look up multiplier from configured contract multipliers
     double multiplier = 1.0;
     auto mult_it = _contract_multipliers.find(code);
-    if (mult_it != _contract_multipliers.end())
-    {
+    if (mult_it != _contract_multipliers.end()) {
         multiplier = mult_it->second;
-    }
-    else
-    {
+    } else {
         WTSLogger::warn("SpreadArbManager: no multiplier configured for {}, using default 1.0", code);
     }
     uint64_t timestamp = tick->actiontime();
@@ -431,8 +436,7 @@ std::vector<SpreadSignal> SpreadArbitrageManager::generateSignals(uint64_t curre
     // generateSignals 在 arb 线程执行, 每 arb 周期调用一次 (5ms interval), 频率足够.
     // A2 fix: 使用 atomic 快照避免 arb 线程与主线程的 data race.
     // 主线程通过 publishPnLSnapshot() 每 tick 更新这两个 atomic<double>.
-    if (_portfolio_ptr && _risk_manager)
-    {
+    if (_portfolio_ptr && _risk_manager) {
         double unrealized = _portfolio_ptr->getSnapshotUnrealizedPnL();
         double total = _portfolio_ptr->getSnapshotTotalPnL();
         double realized = total - unrealized;
@@ -442,13 +446,11 @@ std::vector<SpreadSignal> SpreadArbitrageManager::generateSignals(uint64_t curre
         _risk_manager->updatePortfolioPnL(unrealized, realized);
     }
 
-    for (const auto& kv : _strategies)
-    {
+    for (const auto& kv : _strategies) {
         const auto& pair_id = kv.first;
         SpreadSignal signal = generateSignal(pair_id, current_time);
 
-        if (signal.isActionable())
-        {
+        if (signal.isActionable()) {
             signals.push_back(signal);
             dispatchSignal(signal);
         }
@@ -479,7 +481,7 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         if (time_it != _last_signal_time.end())
             last_time = time_it->second;
         if (current_time / 1000ULL - last_time / 1000ULL < _config.signal_cooldown_ms)
-            return signal;  // Still in cooldown (guard 析构释放锁)
+            return signal; // Still in cooldown (guard 析构释放锁)
 
         auto state_it = _pair_states.find(pair_id);
         if (state_it == _pair_states.end())
@@ -489,8 +491,7 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         // _risk_manager 由 updatePairState 在 _pair_states_spin 下写入, 读取也需同一锁.
         can_open = _risk_manager->canOpenPosition(pair_id, 1.0);
     }
-    if (!can_open)
-    {
+    if (!can_open) {
         signal.type = SpreadSignalType::NONE;
         return signal;
     }
@@ -503,9 +504,9 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     const auto& instance = strat_it->second;
 
     // 插件循环: 主策略在 front; hybrid 模式取置信度最高的信号
-    for (const auto& strat : instance.strategies)
-    {
-        if (!strat) continue;
+    for (const auto& strat : instance.strategies) {
+        if (!strat)
+            continue;
         SpreadSignal s = strat->generateSignal(state, current_time);
         if (signal.type == SpreadSignalType::NONE || s.confidence > signal.confidence)
             signal = s;
@@ -522,17 +523,19 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     // tries to format a null code → segfault. Populate from SpreadState so
     // the signal is self-contained. Done before B-3 gate which only touches
     // leg*_qty.
-    if (signal.type != SpreadSignalType::NONE)
-    {
-        if (signal.leg1_code.empty()) signal.leg1_code = state.leg1_code;
-        if (signal.leg2_code.empty()) signal.leg2_code = state.leg2_code;
-        if (signal.leg1_price <= 0)   signal.leg1_price = state.leg1_price;
-        if (signal.leg2_price <= 0)   signal.leg2_price = state.leg2_price;
+    if (signal.type != SpreadSignalType::NONE) {
+        if (signal.leg1_code.empty())
+            signal.leg1_code = state.leg1_code;
+        if (signal.leg2_code.empty())
+            signal.leg2_code = state.leg2_code;
+        if (signal.leg1_price <= 0)
+            signal.leg1_price = state.leg1_price;
+        if (signal.leg2_price <= 0)
+            signal.leg2_price = state.leg2_price;
     }
 
     // Check confidence threshold
-    if (signal.confidence < _config.min_signal_confidence)
-    {
+    if (signal.confidence < _config.min_signal_confidence) {
         signal.type = SpreadSignalType::NONE;
     }
 
@@ -552,15 +555,13 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     //
     // If Portfolio not injected, gate is bypassed (legacy behavior).
     //==========================================================================
-    if (_portfolio_ptr != nullptr && signal.type != SpreadSignalType::NONE)
-    {
+    if (_portfolio_ptr != nullptr && signal.type != SpreadSignalType::NONE) {
         signal = applyB3Gate(pair_id, signal, current_time);
     }
 
     // Store last signal time/signal under spinlock
     // (arb thread writes here, main thread reads in getQuotingAdjustment)
-    if (signal.isActionable())
-    {
+    if (signal.isActionable()) {
         SpinLockGuard lock(_pair_states_spin);
         _last_signal_time[pair_id] = current_time;
         _last_signals[pair_id] = signal;
@@ -569,8 +570,7 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     return signal;
 }
 
-QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustment(const std::string& pair_id,
-                                                                 uint64_t current_time)
+QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustment(const std::string& pair_id, uint64_t current_time)
 {
     QuotingAdjustment adj;
 
@@ -593,8 +593,7 @@ QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustment(const std::string
     {
         SpinLockGuard lock(_pair_states_spin);
         auto signal_it = _last_signals.find(pair_id);
-        if (signal_it != _last_signals.end())
-        {
+        if (signal_it != _last_signals.end()) {
             signal = signal_it->second;
         }
     }
@@ -602,8 +601,7 @@ QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustment(const std::string
     adj = _mm_enhancer->calculateAdjustment(state_copy, signal, current_time);
 
     // Dispatch quoting callback
-    if (_quoting_callback && adj.confidence > 0)
-    {
+    if (_quoting_callback && adj.confidence > 0) {
         _quoting_callback(pair_id, adj);
     }
 
@@ -618,8 +616,7 @@ bool SpreadArbitrageManager::shouldPauseQuoting(const std::string& code, bool is
     // Lock for _pair_states
     SpinLockGuard lock(_pair_states_spin);
 
-    for (const auto& pair_id : pairs)
-    {
+    for (const auto& pair_id : pairs) {
         auto state_it = _pair_states.find(pair_id);
         if (state_it == _pair_states.end())
             continue;
@@ -627,12 +624,10 @@ bool SpreadArbitrageManager::shouldPauseQuoting(const std::string& code, bool is
         const auto& state = state_it->second;
         auto config_it = _pair_configs.find(pair_id);
 
-        if (config_it != _pair_configs.end())
-        {
+        if (config_it != _pair_configs.end()) {
             const auto& config = config_it->second;
 
-            if (config.enhance_quoting)
-            {
+            if (config.enhance_quoting) {
                 // Pause bid if Z-Score very high
                 if (is_bid && state.zscore > config.pause_z_threshold)
                     return true;
@@ -649,9 +644,9 @@ bool SpreadArbitrageManager::shouldPauseQuoting(const std::string& code, bool is
 
 void SpreadArbitrageManager::refreshPositionsFromPortfolio()
 {
-    if (!_portfolio_ptr) return;
-    for (const auto& kv : _pair_configs)
-    {
+    if (!_portfolio_ptr)
+        return;
+    for (const auto& kv : _pair_configs) {
         const SpreadPairConfig& cfg = kv.second;
         double leg1_pos = _portfolio_ptr->getPosition(cfg.leg1_code);
         double leg2_pos = _portfolio_ptr->getPosition(cfg.leg2_code);
@@ -660,8 +655,9 @@ void SpreadArbitrageManager::refreshPositionsFromPortfolio()
 }
 
 void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
-                                             double leg1_pos, double leg2_pos,
-                                             double unrealized_pnl)
+                                            double leg1_pos,
+                                            double leg2_pos,
+                                            double unrealized_pnl)
 {
     // Acquire exclusive lock for writing
     SpinLockGuard lock(_pair_states_spin);
@@ -676,14 +672,12 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
 
     // 同向腿防护: 双腿同号不构成价差仓(与 computeDerivedSpread 的 signbit 检查一致),
     // 旧代码会把同向双腿算成有效价差仓.
-    if (leg1_pos * leg2_pos > 0)
-    {
+    if (leg1_pos * leg2_pos > 0) {
         state.leg1_position = leg1_pos;
         state.leg2_position = leg2_pos;
         state.unrealized_pnl = unrealized_pnl;
         state.spread_position = 0;
-        if (prev_position != 0)
-        {
+        if (prev_position != 0) {
             state.position_open_time = 0;
             state.entry_spread = 0;
         }
@@ -700,8 +694,7 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
     // This counts how many complete spread pairs we have
 
     auto config_it = _pair_configs.find(pair_id);
-    if (config_it != _pair_configs.end())
-    {
+    if (config_it != _pair_configs.end()) {
         const auto& config = config_it->second;
 
         // Calculate matched pairs
@@ -711,8 +704,7 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
         double leg1_ratio = config.leg1_ratio;
         double leg2_ratio = config.leg2_ratio;
 
-        if (leg1_ratio > 0 && leg2_ratio > 0)
-        {
+        if (leg1_ratio > 0 && leg2_ratio > 0) {
             // Number of "pair units" each leg represents
             double leg1_pairs = std::abs(leg1_pos) / leg1_ratio;
             double leg2_pairs = std::abs(leg2_pos) / leg2_ratio;
@@ -724,15 +716,11 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
             int sign = (leg1_pos >= 0) ? 1 : -1;
 
             state.spread_position = matched_pairs * sign;
-        }
-        else
-        {
+        } else {
             // Fallback to simple difference if ratios are invalid
             state.spread_position = leg1_pos - leg2_pos;
         }
-    }
-    else
-    {
+    } else {
         // Default 1:1 spread
         double leg1_pairs = std::abs(leg1_pos);
         double leg2_pairs = std::abs(leg2_pos);
@@ -745,15 +733,13 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
     // 时间基准: 与策略 generateSignal 的 current_time 一致 (µs epoch)。
     // 旧代码用 state.last_update(tick->actiontime() 打包整数 HHMMSSmmm),
     // 导致 positionDuration 算出天文数字, 超时退出逻辑失效.
-    if (prev_position == 0 && state.spread_position != 0)
-    {
-        state.position_open_time = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::high_resolution_clock::now().time_since_epoch()).count());
+    if (prev_position == 0 && state.spread_position != 0) {
+        state.position_open_time =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::high_resolution_clock::now().time_since_epoch())
+                                      .count());
         state.entry_spread = state.current_spread;
-    }
-    else if (state.spread_position == 0)
-    {
+    } else if (state.spread_position == 0) {
         state.position_open_time = 0;
         state.entry_spread = 0;
     }
@@ -804,14 +790,13 @@ double SpreadArbitrageManager::computeDerivedSpread(const SpreadPairConfig& cfg)
 
     // Minimum unit threshold (defense against float residue)
     double min_unit = std::min(r1, r2) * 0.5;
-    if (matched < min_unit) return 0.0;
+    if (matched < min_unit)
+        return 0.0;
 
     return matched * sign;
 }
 
-ArbIntent SpreadArbitrageManager::computeIntent(double z,
-                                                  const SpreadPairConfig& cfg,
-                                                  ArbIntent prev) const
+ArbIntent SpreadArbitrageManager::computeIntent(double z, const SpreadPairConfig& cfg, ArbIntent prev) const
 {
     // Mean-reversion semantics:
     //   z > +entry_z  → spread too high, want SHORT (sell spread, wait for revert)
@@ -821,15 +806,17 @@ ArbIntent SpreadArbitrageManager::computeIntent(double z,
     double entry = cfg.entry_z_threshold;
     double exit_z = cfg.exit_z_threshold;
 
-    if (z > entry)      return ArbIntent::WANT_SHORT;
-    if (z < -entry)     return ArbIntent::WANT_LONG;
-    if (std::abs(z) < exit_z) return ArbIntent::WANT_FLAT;
+    if (z > entry)
+        return ArbIntent::WANT_SHORT;
+    if (z < -entry)
+        return ArbIntent::WANT_LONG;
+    if (std::abs(z) < exit_z)
+        return ArbIntent::WANT_FLAT;
     return prev;
 }
 
-SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
-                                                  const SpreadSignal& raw,
-                                                  uint64_t current_time_us)
+SpreadSignal
+SpreadArbitrageManager::applyB3Gate(const std::string& pair_id, const SpreadSignal& raw, uint64_t current_time_us)
 {
     SpreadSignal result = raw;
 
@@ -839,8 +826,7 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
 
     // Look up config
     auto cfg_it = _pair_configs.find(pair_id);
-    if (cfg_it == _pair_configs.end())
-    {
+    if (cfg_it == _pair_configs.end()) {
         result.type = SpreadSignalType::NONE;
         return result;
     }
@@ -853,12 +839,10 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     //   TIMEOUT:    C2 解禁 (GFD mid, 超时升级)
     //   REBALANCE:  保持抑制
     // -----------------------------------------------------------------
-    if (is_close_signal(raw.type))
-    {
-        if (!_arb_close_cfg.is_allowed(raw.type))
-        {
+    if (is_close_signal(raw.type)) {
+        if (!_arb_close_cfg.is_allowed(raw.type)) {
             result.type = SpreadSignalType::NONE;
-            return result;  // 原 B-3 行为
+            return result; // 原 B-3 行为
         }
 
         // 通过门控: STOP_LOSS / TIMEOUT (或配置解禁的 CLOSE)
@@ -866,29 +850,26 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
         auto& arb_state = _pair_arb_states[pair_id];
 
         // B5: 过冲冷却期抑制一切信号
-        if (isInOvershootCooldown(pair_id))
-        {
+        if (isInOvershootCooldown(pair_id)) {
             result.type = SpreadSignalType::NONE;
             return result;
         }
 
         // B4: 平仓 in_flight 超时强制清理 (止损单卡死兜底, 远短于开仓 60s)
-        if (arb_state.close_in_flight_qty > 0.5 &&
-            arb_state.close_in_flight_set_time != 0 &&
-            (current_time - arb_state.close_in_flight_set_time) >= _arb_close_cfg.close_in_flight_timeout_ms)
-        {
+        if (arb_state.close_in_flight_qty > 0.5 && arb_state.close_in_flight_set_time != 0 &&
+            (current_time - arb_state.close_in_flight_set_time) >= _arb_close_cfg.close_in_flight_timeout_ms) {
             WTSLogger::warn("SpreadArbMgr[{}] close_in_flight timeout: clearing {} elapsed_ms={}",
-                pair_id, arb_state.close_in_flight_qty,
-                current_time - arb_state.close_in_flight_set_time);
+                            pair_id,
+                            arb_state.close_in_flight_qty,
+                            current_time - arb_state.close_in_flight_set_time);
             arb_state.close_in_flight_qty = 0;
             arb_state.close_in_flight_set_time = 0;
             clearActiveCloseIntent(pair_id);
-            _timed_out_pairs.push_back(pair_id);  // 复用撤单清理通道
+            _timed_out_pairs.push_back(pair_id); // 复用撤单清理通道
         }
 
         // B4: 平仓防双发 (有在飞平仓单则抑制新平仓信号)
-        if (arb_state.close_in_flight_qty > 0.5)
-        {
+        if (arb_state.close_in_flight_qty > 0.5) {
             result.type = SpreadSignalType::NONE;
             return result;
         }
@@ -896,22 +877,20 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
         // B3 第一层 (arb 线程粗判): 零持仓降级 + clamp 到实际持仓 × max_close_size_pct
         double derived = computeDerivedSpread(cfg);
         arb_state.last_derived_position = derived;
-        if (std::abs(derived) < 0.5)
-        {
-            result.type = SpreadSignalType::NONE;  // 已被 MM 消耗完, 无需主动平仓
+        if (std::abs(derived) < 0.5) {
+            result.type = SpreadSignalType::NONE; // 已被 MM 消耗完, 无需主动平仓
             return result;
         }
-        double close_qty = std::min(std::abs(raw.suggested_size),
-                                    std::abs(derived) * _arb_close_cfg.max_close_size_pct);
-        if (close_qty < 0.5)
-        {
+        double close_qty =
+            std::min(std::abs(raw.suggested_size), std::abs(derived) * _arb_close_cfg.max_close_size_pct);
+        if (close_qty < 0.5) {
             result.type = SpreadSignalType::NONE;
             return result;
         }
 
         // 方向一致性校验: derived > 0 (多 spread) 的平仓方向 = CLOSE_LONG / STOP_LOSS / TIMEOUT
         // 信号类型与持仓符号由 executeSignal 二次推导 (A5), 此处仅标记 direction 供 intent
-        int close_direction = (derived > 0) ? +1 : -1;  // +1 = 平多 (卖leg1买leg2)
+        int close_direction = (derived > 0) ? +1 : -1; // +1 = 平多 (卖leg1买leg2)
 
         result.suggested_size = close_qty;
         result.leg1_qty = close_qty * cfg.leg1_ratio;
@@ -922,13 +901,16 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
         arb_state.close_in_flight_set_time = current_time;
 
         // B1: 广播平仓 intent (Coordinator 抑制 MM 同侧报价)
-        if (_arb_close_cfg.intent_broadcast)
-        {
+        if (_arb_close_cfg.intent_broadcast) {
             setActiveCloseIntent(pair_id, close_direction, close_qty, current_time);
         }
 
         WTSLogger::info("SpreadArbMgr[{}] CLOSE-GATE pass: type={} derived={:.2f} qty={:.2f} dir={}",
-            pair_id, (int)raw.type, derived, close_qty, close_direction);
+                        pair_id,
+                        (int)raw.type,
+                        derived,
+                        close_qty,
+                        close_direction);
         return result;
     }
 
@@ -938,18 +920,13 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     // -----------------------------------------------------------------
     ArbIntent intent;
     int target_sign;
-    if (raw.type == SpreadSignalType::OPEN_LONG_SPREAD)
-    {
+    if (raw.type == SpreadSignalType::OPEN_LONG_SPREAD) {
         intent = ArbIntent::WANT_LONG;
         target_sign = +1;
-    }
-    else if (raw.type == SpreadSignalType::OPEN_SHORT_SPREAD)
-    {
+    } else if (raw.type == SpreadSignalType::OPEN_SHORT_SPREAD) {
         intent = ArbIntent::WANT_SHORT;
         target_sign = -1;
-    }
-    else
-    {
+    } else {
         // Non-action signal types (NONE / PAUSE_QUOTING / RESUME_QUOTING):
         // do not gate, return as-is
         return result;
@@ -963,8 +940,7 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     auto& arb_state = _pair_arb_states[pair_id];
 
     // Intent transition tracking
-    if (arb_state.intent != intent)
-    {
+    if (arb_state.intent != intent) {
         arb_state.intent = intent;
         arb_state.intent_set_tick = current_time;
     }
@@ -979,21 +955,19 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     // In-flight check (block double-fire)
     // Reset in_flight if timeout elapsed (defense against stuck orders).
     // -----------------------------------------------------------------
-    if (arb_state.in_flight_qty > 0.5 &&
-        arb_state.in_flight_set_time != 0 &&
-        (current_time - arb_state.in_flight_set_time) >= _in_flight_timeout_ms)
-    {
+    if (arb_state.in_flight_qty > 0.5 && arb_state.in_flight_set_time != 0 &&
+        (current_time - arb_state.in_flight_set_time) >= _in_flight_timeout_ms) {
         WTSLogger::warn("SpreadArbMgr[{}] in_flight timeout: clearing {} elapsed_ms={}",
-            pair_id, arb_state.in_flight_qty,
-            current_time - arb_state.in_flight_set_time);
+                        pair_id,
+                        arb_state.in_flight_qty,
+                        current_time - arb_state.in_flight_set_time);
         arb_state.in_flight_qty = 0;
         arb_state.in_flight_direction = 0;
         arb_state.in_flight_set_time = 0;
         _timed_out_pairs.push_back(pair_id);
     }
 
-    if (arb_state.in_flight_qty > 0.5)
-    {
+    if (arb_state.in_flight_qty > 0.5) {
         // Previous order still in-flight; suppress new signal
         result.type = SpreadSignalType::NONE;
         return result;
@@ -1003,7 +977,8 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     // Compute gap (target = sign * max_spread_position, derived is signed)
     // -----------------------------------------------------------------
     double max_pos = cfg.max_spread_position;
-    if (max_pos <= 0) max_pos = 5.0;  // Defensive default
+    if (max_pos <= 0)
+        max_pos = 5.0; // Defensive default
     double target = target_sign * max_pos;
     double gap = target - derived;
 
@@ -1013,8 +988,7 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     // Threshold = 1 lot (minimum tradable unit for futures).
     // -----------------------------------------------------------------
     double min_order_size = 1.0;
-    if (std::abs(gap) < min_order_size)
-    {
+    if (std::abs(gap) < min_order_size) {
         result.type = SpreadSignalType::NONE;
         return result;
     }
@@ -1033,12 +1007,10 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     int order_dir = (gap > 0) ? +1 : -1;
     double projected = derived + order_dir * order_qty;
     double abs_limit = max_pos * 1.05;
-    if (std::abs(projected) > abs_limit)
-    {
+    if (std::abs(projected) > abs_limit) {
         // Shrink order_qty to stay within limit
         double room = abs_limit - std::abs(derived);
-        if (room < min_order_size)
-        {
+        if (room < min_order_size) {
             result.type = SpreadSignalType::NONE;
             return result;
         }
@@ -1052,13 +1024,21 @@ SpreadSignal SpreadArbitrageManager::applyB3Gate(const std::string& pair_id,
     result.leg1_qty = order_qty * cfg.leg1_ratio;
     result.leg2_qty = order_qty * cfg.leg2_ratio;
 
-    arb_state.in_flight_qty = order_qty * (cfg.leg1_ratio + cfg.leg2_ratio);  // A1: 此前硬编码 *2.0, 与 ratio 不匹配时 in_flight 永不清零/过早清零
+    arb_state.in_flight_qty =
+        order_qty *
+        (cfg.leg1_ratio + cfg.leg2_ratio); // A1: 此前硬编码 *2.0, 与 ratio 不匹配时 in_flight 永不清零/过早清零
     arb_state.in_flight_direction = order_dir;
     arb_state.in_flight_set_time = current_time;
 
     WTSLogger::debug("SpreadArbMgr[{}] B3-gate: intent={} derived={:.2f} target={:.2f} "
                      "gap={:.2f} order_qty={:.2f} dir={}",
-        pair_id, (int)intent, derived, target, gap, order_qty, order_dir);
+                     pair_id,
+                     (int)intent,
+                     derived,
+                     target,
+                     gap,
+                     order_qty,
+                     order_dir);
 
     return result;
 }
@@ -1068,52 +1048,48 @@ void SpreadArbitrageManager::onArbSignalDropped(const std::string& pair_id)
     {
         SpinLockGuard lock(_pair_arb_spin);
         auto it = _pair_arb_states.find(pair_id);
-        if (it != _pair_arb_states.end())
-        {
+        if (it != _pair_arb_states.end()) {
             it->second.in_flight_qty = 0;
-            it->second.close_in_flight_qty = 0;       // B4
+            it->second.close_in_flight_qty = 0; // B4
             it->second.close_in_flight_set_time = 0;
         }
     }
-    clearActiveCloseIntent(pair_id);  // B1
+    clearActiveCloseIntent(pair_id); // B1
 }
 
 void SpreadArbitrageManager::onArbOrderFilled(const std::string& pair_id, double filled_qty)
 {
-    if (filled_qty <= 0) return;
+    if (filled_qty <= 0)
+        return;
 
     bool close_done = false;
     {
         SpinLockGuard lock(_pair_arb_spin);
         auto it = _pair_arb_states.find(pair_id);
-        if (it == _pair_arb_states.end()) return;
+        if (it == _pair_arb_states.end())
+            return;
 
         auto& arb_state = it->second;
 
         // B4: 平仓成交优先扣 close_in_flight, 再扣 open in_flight
         double remaining = filled_qty;
-        if (arb_state.close_in_flight_qty > 0 && remaining > 0)
-        {
+        if (arb_state.close_in_flight_qty > 0 && remaining > 0) {
             double ded = std::min(arb_state.close_in_flight_qty, remaining);
             arb_state.close_in_flight_qty -= ded;
             remaining -= ded;
-            if (arb_state.close_in_flight_qty < 0.5)
-            {
+            if (arb_state.close_in_flight_qty < 0.5) {
                 arb_state.close_in_flight_qty = 0;
                 arb_state.close_in_flight_set_time = 0;
                 close_done = true;
             }
         }
-        if (remaining > 0)
-        {
+        if (remaining > 0) {
             arb_state.in_flight_qty = std::max(0.0, arb_state.in_flight_qty - remaining);
-            if (arb_state.in_flight_qty < 0.5)
-            {
+            if (arb_state.in_flight_qty < 0.5) {
                 arb_state.in_flight_qty = 0;
                 arb_state.in_flight_direction = 0;
                 arb_state.in_flight_set_time = 0;
-                WTSLogger::debug("SpreadArbMgr[{}] in-flight fully cleared after fill {:.2f}",
-                    pair_id, filled_qty);
+                WTSLogger::debug("SpreadArbMgr[{}] in-flight fully cleared after fill {:.2f}", pair_id, filled_qty);
             }
         }
     }
@@ -1139,8 +1115,7 @@ std::vector<SpreadState> SpreadArbitrageManager::getAllStates() const
     SpinLockGuard lock(_pair_states_spin);
     std::vector<SpreadState> states;
     states.reserve(_pair_states.size());
-    for (const auto& kv : _pair_states)
-    {
+    for (const auto& kv : _pair_states) {
         states.push_back(kv.second);
     }
     return states;
@@ -1163,8 +1138,7 @@ std::vector<RiskAlert> SpreadArbitrageManager::getActiveAlerts() const
 
 void SpreadArbitrageManager::dispatchSignal(const SpreadSignal& signal)
 {
-    if (_signal_callback)
-    {
+    if (_signal_callback) {
         _signal_callback(signal);
     }
 }
@@ -1175,22 +1149,18 @@ void SpreadArbitrageManager::checkRiskAlerts()
     // 此处在 arb 线程读取, 必须持同一锁, 否则 vector copy ctor 与 clear/push_back 并发 -> SIGSEGV.
     SpinLockGuard lock(_pair_states_spin);
     auto alerts = _risk_manager->generateAlerts();
-    for (const auto& alert : alerts)
-    {
-        if (_alert_callback)
-        {
+    for (const auto& alert : alerts) {
+        if (_alert_callback) {
             _alert_callback(alert);
         }
     }
 }
 
-SpreadSignal SpreadArbitrageManager::combineSignals(
-    const std::vector<SpreadSignal>& signals,
-    const SpreadState& state,
-    uint64_t current_time)
+SpreadSignal SpreadArbitrageManager::combineSignals(const std::vector<SpreadSignal>& signals,
+                                                    const SpreadState& state,
+                                                    uint64_t current_time)
 {
-    if (signals.empty())
-    {
+    if (signals.empty()) {
         SpreadSignal none;
         none.type = SpreadSignalType::NONE;
         none.pair_id = state.pair_id;
@@ -1205,21 +1175,18 @@ SpreadSignal SpreadArbitrageManager::combineSignals(
     double long_conf = 0, short_conf = 0;
     double long_size = 0, short_size = 0;
 
-    for (const auto& sig : signals)
-    {
-        if (sig.type == SpreadSignalType::NONE) continue;
+    for (const auto& sig : signals) {
+        if (sig.type == SpreadSignalType::NONE)
+            continue;
 
-        bool is_long = (sig.type == SpreadSignalType::OPEN_LONG_SPREAD ||
-                        sig.type == SpreadSignalType::CLOSE_SHORT_SPREAD);
+        bool is_long =
+            (sig.type == SpreadSignalType::OPEN_LONG_SPREAD || sig.type == SpreadSignalType::CLOSE_SHORT_SPREAD);
 
-        if (is_long)
-        {
+        if (is_long) {
             long_weight += sig.confidence;
             long_conf = std::max(long_conf, sig.confidence);
             long_size += sig.suggested_size;
-        }
-        else
-        {
+        } else {
             short_weight += sig.confidence;
             short_conf = std::max(short_conf, sig.confidence);
             short_size += sig.suggested_size;
@@ -1231,28 +1198,22 @@ SpreadSignal SpreadArbitrageManager::combineSignals(
     result.timestamp = current_time;
 
     double total_weight = long_weight + short_weight;
-    if (total_weight <= 0)
-    {
+    if (total_weight <= 0) {
         result.type = SpreadSignalType::NONE;
         return result;
     }
 
-    if (long_weight > short_weight && long_conf > 0.5)
-    {
+    if (long_weight > short_weight && long_conf > 0.5) {
         result.type = SpreadSignalType::OPEN_LONG_SPREAD;
         result.confidence = long_weight / total_weight;
         result.suggested_size = long_size / static_cast<double>(signals.size());
         result.reason = "Combined signal: long consensus";
-    }
-    else if (short_weight > long_weight && short_conf > 0.5)
-    {
+    } else if (short_weight > long_weight && short_conf > 0.5) {
         result.type = SpreadSignalType::OPEN_SHORT_SPREAD;
         result.confidence = short_weight / total_weight;
         result.suggested_size = short_size / static_cast<double>(signals.size());
         result.reason = "Combined signal: short consensus";
-    }
-    else
-    {
+    } else {
         result.type = SpreadSignalType::NONE;
         result.reason = "Conflicting signals, no consensus";
     }
@@ -1266,11 +1227,10 @@ void SpreadArbitrageManager::reset()
     _risk_manager->reset();
     _mm_enhancer->reset();
 
-    for (auto& kv : _strategies)
-    {
-        for (auto& strat : kv.second.strategies)
-        {
-            if (strat) strat->reset();
+    for (auto& kv : _strategies) {
+        for (auto& strat : kv.second.strategies) {
+            if (strat)
+                strat->reset();
         }
     }
 
@@ -1279,7 +1239,8 @@ void SpreadArbitrageManager::reset()
 
     // B1/B5: 清理平仓 intent 与过冲冷却 (session 级复位)
     {
-        while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
+        while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+        }
         _active_close_intents.clear();
         _overshoot_cooldowns.clear();
         _overshoot_pairs.clear();
@@ -1303,7 +1264,9 @@ void SpreadArbitrageManager::reset()
 //==============================================================================
 
 void SpreadArbitrageManager::setActiveCloseIntent(const std::string& pair_id,
-                                                   int direction, double qty, uint64_t now_ms)
+                                                  int direction,
+                                                  double qty,
+                                                  uint64_t now_ms)
 {
     CloseIntent intent;
     intent.pair_id = pair_id;
@@ -1311,14 +1274,16 @@ void SpreadArbitrageManager::setActiveCloseIntent(const std::string& pair_id,
     intent.qty = qty;
     intent.set_time = now_ms;
 
-    while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
+    while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+    }
     _active_close_intents[pair_id] = intent;
     _intent_spin.clear(std::memory_order_release);
 }
 
 void SpreadArbitrageManager::clearActiveCloseIntent(const std::string& pair_id)
 {
-    while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
+    while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+    }
     _active_close_intents.erase(pair_id);
     _intent_spin.clear(std::memory_order_release);
 }
@@ -1331,26 +1296,28 @@ bool SpreadArbitrageManager::hasActiveCloseIntent(const std::string& leg_code) c
 int SpreadArbitrageManager::getArbCloseDirection(const std::string& leg_code) const
 {
     // 1:N 映射: 该合约所属全部 pair, 任一活跃 intent 即返回其方向 (any-match)
-    if (!_calculator_manager) return 0;
+    if (!_calculator_manager)
+        return 0;
     const auto& pairs = _calculator_manager->getPairsForContract(leg_code);
-    if (pairs.empty()) return 0;
+    if (pairs.empty())
+        return 0;
 
-    while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
+    while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+    }
     int result = 0;
-    for (const auto& pid : pairs)
-    {
+    for (const auto& pid : pairs) {
         auto it = _active_close_intents.find(pid);
-        if (it == _active_close_intents.end()) continue;
+        if (it == _active_close_intents.end())
+            continue;
         auto cfg_it = _pair_configs.find(pid);
-        if (cfg_it == _pair_configs.end()) continue;
+        if (cfg_it == _pair_configs.end())
+            continue;
         // 平多 (dir=+1): 卖 leg1 买 leg2; 平空 (dir=-1): 买 leg1 卖 leg2
         bool is_leg1 = (cfg_it->second.leg1_code == leg_code);
         // leg 方向: dir=+1 → leg1=-1(卖), leg2=+1(买); dir=-1 → 反
-        int leg_dir = (it->second.direction > 0)
-            ? (is_leg1 ? -1 : +1)
-            : (is_leg1 ? +1 : -1);
+        int leg_dir = (it->second.direction > 0) ? (is_leg1 ? -1 : +1) : (is_leg1 ? +1 : -1);
         result = leg_dir;
-        break;  // any-match: 取首个活跃 intent
+        break; // any-match: 取首个活跃 intent
     }
     _intent_spin.clear(std::memory_order_release);
     return result;
@@ -1362,45 +1329,50 @@ int SpreadArbitrageManager::getArbCloseDirection(const std::string& leg_code) co
 
 void SpreadArbitrageManager::onOvershootDetected(const std::string& leg_code)
 {
-    if (!_arb_close_cfg.oversold_protection) return;
-    if (!_calculator_manager) return;
+    if (!_arb_close_cfg.oversold_protection)
+        return;
+    if (!_calculator_manager)
+        return;
 
     const auto& pairs = _calculator_manager->getPairsForContract(leg_code);
-    uint64_t now_ms = _now_ms.load(std::memory_order_relaxed); if (now_ms == 0) now_ms = TimeUtils::getLocalTimeNow();
+    uint64_t now_ms = _now_ms.load(std::memory_order_relaxed);
+    if (now_ms == 0)
+        now_ms = TimeUtils::getLocalTimeNow();
 
-    for (const auto& pid : pairs)
-    {
+    for (const auto& pid : pairs) {
         // B5 连坐过滤: 只冷却有活跃平仓 intent 的 pair.
         // Portfolio.checkOvershootSignFlip 已在合约层做 any-match 过滤 (任一 pair 有 intent 才报),
         // 但合约属多 pair 时, 其它 pair 可能无 intent (纯 MM flip 或被波及) — 这些不应连坐.
         // 精准冷却避免误停无参与 pair 的正常交易 (1h 冷却对高频是重大影响).
         bool has_intent;
         {
-            while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
+            while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+            }
             has_intent = (_active_close_intents.find(pid) != _active_close_intents.end());
-            if (has_intent)
-            {
+            if (has_intent) {
                 _overshoot_cooldowns[pid] = now_ms + _arb_close_cfg.overshoot_cooldown_ms;
                 _overshoot_pairs.push_back(pid);
             }
             _intent_spin.clear(std::memory_order_release);
         }
 
-        if (!has_intent)
-        {
-            WTSLogger::info("SpreadArbMgr[{}] OVERSHOOT on leg {}: pair has no close intent, skip cooldown (no collateral)",
-                pid, leg_code);
+        if (!has_intent) {
+            WTSLogger::info(
+                "SpreadArbMgr[{}] OVERSHOOT on leg {}: pair has no close intent, skip cooldown (no collateral)",
+                pid,
+                leg_code);
             continue;
         }
 
         WTSLogger::error("SpreadArbMgr[{}] OVERSHOOT detected on leg {}: pair enters cooldown {}ms, canceling orders",
-            pid, leg_code, _arb_close_cfg.overshoot_cooldown_ms);
+                         pid,
+                         leg_code,
+                         _arb_close_cfg.overshoot_cooldown_ms);
 
         clearActiveCloseIntent(pid);
 
         // 告警外发 (复用 RiskAlert 回调通道, 由策略层转发 EventNotifier)
-        if (_alert_callback)
-        {
+        if (_alert_callback) {
             RiskAlert alert;
             alert.type = RiskAlert::Type::STOP_LOSS;
             alert.level = RiskAlert::Level::CRITICAL;
@@ -1416,25 +1388,28 @@ void SpreadArbitrageManager::onOvershootDetected(const std::string& leg_code)
 
 bool SpreadArbitrageManager::isLegInActivePair(const std::string& code) const
 {
-    if (!_calculator_manager) return false;
+    if (!_calculator_manager)
+        return false;
     return _calculator_manager->isSpreadContract(code);
 }
 
 bool SpreadArbitrageManager::isInOvershootCooldown(const std::string& pair_id) const
 {
-    while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
+    while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+    }
     auto it = _overshoot_cooldowns.find(pair_id);
     bool in_cd = (it != _overshoot_cooldowns.end()) &&
-                 ((_now_ms.load(std::memory_order_relaxed) > 0 ? _now_ms.load(std::memory_order_relaxed) : TimeUtils::getLocalTimeNow()) < it->second);
+                 ((_now_ms.load(std::memory_order_relaxed) > 0 ? _now_ms.load(std::memory_order_relaxed)
+                                                               : TimeUtils::getLocalTimeNow()) < it->second);
     _intent_spin.clear(std::memory_order_release);
     return in_cd;
 }
 
 bool SpreadArbitrageManager::popOvershootPairs(std::vector<std::string>& out_pairs)
 {
-    while (_intent_spin.test_and_set(std::memory_order_acquire)) {}
-    if (_overshoot_pairs.empty())
-    {
+    while (_intent_spin.test_and_set(std::memory_order_acquire)) {
+    }
+    if (_overshoot_pairs.empty()) {
         _intent_spin.clear(std::memory_order_release);
         return false;
     }
@@ -1454,30 +1429,30 @@ double SpreadArbitrageManager::getPairZscore(const std::string& pair_id) const
     // 注册后 _pair_zscore_idx 只读 (addSpreadPair 仅 init/config 期调用),
     // ankerl map 无写并发时读安全.
     auto it = _pair_zscore_idx.find(pair_id);
-    return (it != _pair_zscore_idx.end())
-        ? _pair_zscore_cache[it->second]->load(std::memory_order_relaxed)
-        : 0.0;
+    return (it != _pair_zscore_idx.end()) ? _pair_zscore_cache[it->second]->load(std::memory_order_relaxed) : 0.0;
 }
 
 double SpreadArbitrageManager::getAggregateZscore(const std::string& leg_code) const
 {
-    if (!_calculator_manager) return 0.0;
+    if (!_calculator_manager)
+        return 0.0;
     const auto& pairs = _calculator_manager->getPairsForContract(leg_code);
     double max_abs_z = 0.0;
-    for (const auto& pid : pairs)
-    {
+    for (const auto& pid : pairs) {
         double z = getPairZscore(pid);
-        if (std::abs(z) > std::abs(max_abs_z)) max_abs_z = z;
+        if (std::abs(z) > std::abs(max_abs_z))
+            max_abs_z = z;
     }
     return max_abs_z;
 }
 
-QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustmentForLeg(const std::string& leg_code,
-                                                                       uint64_t now_ms)
+QuotingAdjustment SpreadArbitrageManager::getQuotingAdjustmentForLeg(const std::string& leg_code, uint64_t now_ms)
 {
-    if (!_calculator_manager) return QuotingAdjustment();
+    if (!_calculator_manager)
+        return QuotingAdjustment();
     const auto& pairs = _calculator_manager->getPairsForContract(leg_code);
-    if (pairs.empty()) return QuotingAdjustment();
+    if (pairs.empty())
+        return QuotingAdjustment();
     return getQuotingAdjustment(pairs.front(), now_ms);
 }
 

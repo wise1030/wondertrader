@@ -6,17 +6,13 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
-
-MarketMakingEnhancer::MarketMakingEnhancer()
-    : _last_decay_time(0)
+namespace futu
 {
-}
 
-QuotingAdjustment MarketMakingEnhancer::calculateAdjustment(
-    const SpreadState& state,
-    const SpreadSignal& signal,
-    uint64_t current_time)
+MarketMakingEnhancer::MarketMakingEnhancer() : _last_decay_time(0) {}
+
+QuotingAdjustment
+MarketMakingEnhancer::calculateAdjustment(const SpreadState& state, const SpreadSignal& signal, uint64_t current_time)
 {
     QuotingAdjustment adj;
 
@@ -24,8 +20,7 @@ QuotingAdjustment MarketMakingEnhancer::calculateAdjustment(
     applyDecay(current_time);
 
     // Check confidence threshold
-    if (signal.confidence < _config.min_signal_confidence)
-    {
+    if (signal.confidence < _config.min_signal_confidence) {
         adj.confidence = 0;
         return adj;
     }
@@ -52,10 +47,8 @@ QuotingAdjustment MarketMakingEnhancer::calculateAdjustment(
     return adj;
 }
 
-QuotingState MarketMakingEnhancer::applySignal(
-    const SpreadState& state,
-    const SpreadSignal& signal,
-    uint64_t current_time)
+QuotingState
+MarketMakingEnhancer::applySignal(const SpreadState& state, const SpreadSignal& signal, uint64_t current_time)
 {
     QuotingAdjustment adj = calculateAdjustment(state, signal, current_time);
 
@@ -67,14 +60,11 @@ QuotingState MarketMakingEnhancer::applySignal(
     _quoting_state.suppress_ask = adj.suppress_ask;
 
     // Clamp values
-    _quoting_state.bid_skew = std::max(-_config.max_skew_adjustment,
-                                        std::min(_config.max_skew_adjustment,
-                                                 _quoting_state.bid_skew));
-    _quoting_state.ask_skew = std::max(-_config.max_skew_adjustment,
-                                        std::min(_config.max_skew_adjustment,
-                                                 _quoting_state.ask_skew));
-    _quoting_state.spread_multiplier = std::min(_quoting_state.spread_multiplier,
-                                                 _config.max_spread_multiplier);
+    _quoting_state.bid_skew =
+        std::max(-_config.max_skew_adjustment, std::min(_config.max_skew_adjustment, _quoting_state.bid_skew));
+    _quoting_state.ask_skew =
+        std::max(-_config.max_skew_adjustment, std::min(_config.max_skew_adjustment, _quoting_state.ask_skew));
+    _quoting_state.spread_multiplier = std::min(_quoting_state.spread_multiplier, _config.max_spread_multiplier);
 
     _quoting_state.last_adjustment = adj.bid_skew_adjustment;
     _quoting_state.last_adjustment_time = current_time;
@@ -137,8 +127,7 @@ bool MarketMakingEnhancer::shouldSuppressAsk(double zscore) const
 
 void MarketMakingEnhancer::applyDecay(uint64_t current_time)
 {
-    if (_last_decay_time == 0)
-    {
+    if (_last_decay_time == 0) {
         _last_decay_time = current_time;
         return;
     }

@@ -18,7 +18,8 @@
 #include "../Share/RingBuffer.hpp"
 #include <memory>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Trend Following Configuration
@@ -26,39 +27,29 @@ namespace futu {
 
 struct TrendFollowingConfig
 {
-    uint32_t fast_ma_period;        ///< Fast MA period
-    uint32_t slow_ma_period;        ///< Slow MA period
-    uint32_t signal_period;         ///< Signal line period
+    uint32_t fast_ma_period; ///< Fast MA period
+    uint32_t slow_ma_period; ///< Slow MA period
+    uint32_t signal_period;  ///< Signal line period
 
-    double min_trend_strength;      ///< Minimum trend strength for entry
-    double max_adx;                 ///< Maximum ADX for range filter
+    double min_trend_strength; ///< Minimum trend strength for entry
+    double max_adx;            ///< Maximum ADX for range filter
 
-    double entry_threshold;         ///< MA crossover threshold
-    double exit_threshold;          ///< Exit threshold (MA re-cross)
+    double entry_threshold; ///< MA crossover threshold
+    double exit_threshold;  ///< Exit threshold (MA re-cross)
 
-    double max_position;            ///< Maximum position size
-    double base_qty;                ///< Base position size
+    double max_position; ///< Maximum position size
+    double base_qty;     ///< Base position size
 
-    double stop_loss_pct;           ///< Stop loss percentage, default 2%
-    uint32_t max_trend_bars;        ///< Max bars in trend before exhaustion exit
+    double stop_loss_pct;    ///< Stop loss percentage, default 2%
+    uint32_t max_trend_bars; ///< Max bars in trend before exhaustion exit
 
-    uint32_t confirmation_bars;     ///< Bars to confirm trend
-    bool use_volume_filter;         ///< Filter by volume
+    uint32_t confirmation_bars; ///< Bars to confirm trend
+    bool use_volume_filter;     ///< Filter by volume
 
     TrendFollowingConfig()
-        : fast_ma_period(20)
-        , slow_ma_period(60)
-        , signal_period(10)
-        , min_trend_strength(0.001)
-        , max_adx(50)
-        , entry_threshold(0.0)
-        , exit_threshold(0.0)
-        , max_position(15.0)
-        , base_qty(1.0)
-        , stop_loss_pct(0.02)
-        , max_trend_bars(50)
-        , confirmation_bars(3)
-        , use_volume_filter(false)
+        : fast_ma_period(20), slow_ma_period(60), signal_period(10), min_trend_strength(0.001), max_adx(50),
+          entry_threshold(0.0), exit_threshold(0.0), max_position(15.0), base_qty(1.0), stop_loss_pct(0.02),
+          max_trend_bars(50), confirmation_bars(3), use_volume_filter(false)
     {}
 };
 
@@ -68,30 +59,24 @@ struct TrendFollowingConfig
 
 struct TrendState
 {
-    double fast_ma;                 ///< Current fast MA value
-    double slow_ma;                 ///< Current slow MA value
-    double ma_diff;                 ///< Fast - Slow difference
-    double ma_diff_pct;             ///< MA difference percentage
-    double trend_strength;          ///< Trend strength (slope)
-    double momentum;                ///< Momentum indicator
+    double fast_ma;        ///< Current fast MA value
+    double slow_ma;        ///< Current slow MA value
+    double ma_diff;        ///< Fast - Slow difference
+    double ma_diff_pct;    ///< MA difference percentage
+    double trend_strength; ///< Trend strength (slope)
+    double momentum;       ///< Momentum indicator
 
-    int trend_direction;            ///< 1 = uptrend, -1 = downtrend, 0 = neutral
-    int bars_in_trend;              ///< Number of bars in current trend
+    int trend_direction; ///< 1 = uptrend, -1 = downtrend, 0 = neutral
+    int bars_in_trend;   ///< Number of bars in current trend
 
-    double entry_price;             ///< Entry price for stop loss calculation
+    double entry_price; ///< Entry price for stop loss calculation
 
-    bool is_strong_trend;           ///< Is trend strong enough for entry
-    bool is_trend_reversal;         ///< Is trend reversing
+    bool is_strong_trend;   ///< Is trend strong enough for entry
+    bool is_trend_reversal; ///< Is trend reversing
 
     TrendState()
-        : fast_ma(0), slow_ma(0)
-        , ma_diff(0), ma_diff_pct(0)
-        , trend_strength(0), momentum(0)
-        , trend_direction(0)
-        , bars_in_trend(0)
-        , entry_price(0)
-        , is_strong_trend(false)
-        , is_trend_reversal(false)
+        : fast_ma(0), slow_ma(0), ma_diff(0), ma_diff_pct(0), trend_strength(0), momentum(0), trend_direction(0),
+          bars_in_trend(0), entry_price(0), is_strong_trend(false), is_trend_reversal(false)
     {}
 };
 
@@ -178,7 +163,7 @@ private:
     // Data History
     //==========================================================================
 
-    RingBuffer<double, 128> _spread_history;  // Power of 2
+    RingBuffer<double, 128> _spread_history; // Power of 2
     uint64_t _last_update;
 
     //==========================================================================

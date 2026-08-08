@@ -9,64 +9,61 @@
 #include <sstream>
 #include <iomanip>
 
-namespace futu {
-
-PerformanceMonitor::PerformanceMonitor()
-    : _enabled(true)
-    , _start_time(Clock::now())
+namespace futu
 {
-}
+
+PerformanceMonitor::PerformanceMonitor() : _enabled(true), _start_time(Clock::now()) {}
 
 void PerformanceMonitor::recordTickToQuote(uint64_t latencyNs)
 {
-    if (!_enabled) return;
+    if (!_enabled)
+        return;
 
     _tick_to_quote_history.push(latencyNs);
-    _current_latency_ns[static_cast<int>(LatencyType::TICK_TO_QUOTE)].store(
-        latencyNs, std::memory_order_relaxed);
+    _current_latency_ns[static_cast<int>(LatencyType::TICK_TO_QUOTE)].store(latencyNs, std::memory_order_relaxed);
 
     // H5: 改用 yaml 配置的 _latency_threshold_ns (此前硬编码 100000, yaml 调整无效)
-    if (latencyNs > _latency_threshold_ns)
-    {
+    if (latencyNs > _latency_threshold_ns) {
         WTSLogger::warn("[PERF] High tick-to-quote latency: {} us (threshold={} us)",
-            latencyNs / 1000.0, _latency_threshold_ns / 1000.0);
+                        latencyNs / 1000.0,
+                        _latency_threshold_ns / 1000.0);
     }
 }
 
 void PerformanceMonitor::recordOrderToAck(uint64_t latencyNs)
 {
-    if (!_enabled) return;
+    if (!_enabled)
+        return;
 
     _order_to_ack_history.push(latencyNs);
-    _current_latency_ns[static_cast<int>(LatencyType::ORDER_TO_ACK)].store(
-        latencyNs, std::memory_order_relaxed);
+    _current_latency_ns[static_cast<int>(LatencyType::ORDER_TO_ACK)].store(latencyNs, std::memory_order_relaxed);
 }
 
 void PerformanceMonitor::recordQuoteToFill(uint64_t latencyNs)
 {
-    if (!_enabled) return;
+    if (!_enabled)
+        return;
 
     _quote_to_fill_history.push(latencyNs);
-    _current_latency_ns[static_cast<int>(LatencyType::QUOTE_TO_FILL)].store(
-        latencyNs, std::memory_order_relaxed);
+    _current_latency_ns[static_cast<int>(LatencyType::QUOTE_TO_FILL)].store(latencyNs, std::memory_order_relaxed);
 }
 
 void PerformanceMonitor::recordCancelToAck(uint64_t latencyNs)
 {
-    if (!_enabled) return;
+    if (!_enabled)
+        return;
 
     _cancel_to_ack_history.push(latencyNs);
-    _current_latency_ns[static_cast<int>(LatencyType::CANCEL_TO_ACK)].store(
-        latencyNs, std::memory_order_relaxed);
+    _current_latency_ns[static_cast<int>(LatencyType::CANCEL_TO_ACK)].store(latencyNs, std::memory_order_relaxed);
 }
 
 void PerformanceMonitor::recordSignalToOrder(uint64_t latencyNs)
 {
-    if (!_enabled) return;
+    if (!_enabled)
+        return;
 
     _signal_to_order_history.push(latencyNs);
-    _current_latency_ns[static_cast<int>(LatencyType::SIGNAL_TO_ORDER)].store(
-        latencyNs, std::memory_order_relaxed);
+    _current_latency_ns[static_cast<int>(LatencyType::SIGNAL_TO_ORDER)].store(latencyNs, std::memory_order_relaxed);
 }
 
 void PerformanceMonitor::recordTickProcessed()
@@ -106,14 +103,15 @@ LatencyStats PerformanceMonitor::calculateStats(const RingBuffer<uint64_t, LATEN
     std::vector<uint64_t> sorted_data;
     sorted_data.reserve(size);
 
-    for (size_t i = 0; i < size; ++i)
-    {
+    for (size_t i = 0; i < size; ++i) {
         uint64_t val = history[i];
         sorted_data.push_back(val);
         stats.total_ns += val;
 
-        if (val < stats.min_ns) stats.min_ns = val;
-        if (val > stats.max_ns) stats.max_ns = val;
+        if (val < stats.min_ns)
+            stats.min_ns = val;
+        if (val > stats.max_ns)
+            stats.max_ns = val;
     }
 
     stats.count = size;
@@ -124,7 +122,8 @@ LatencyStats PerformanceMonitor::calculateStats(const RingBuffer<uint64_t, LATEN
 
     // Calculate percentiles
     auto percentile = [&sorted_data, size](double p) -> double {
-        if (size == 1) return static_cast<double>(sorted_data[0]);
+        if (size == 1)
+            return static_cast<double>(sorted_data[0]);
         double index = (p / 100.0) * (size - 1);
         size_t lower = static_cast<size_t>(std::floor(index));
         size_t upper = static_cast<size_t>(std::ceil(index));
@@ -139,8 +138,7 @@ LatencyStats PerformanceMonitor::calculateStats(const RingBuffer<uint64_t, LATEN
 
     // Calculate standard deviation
     double variance = 0;
-    for (uint64_t val : sorted_data)
-    {
+    for (uint64_t val : sorted_data) {
         double diff = static_cast<double>(val) - stats.mean_ns;
         variance += diff * diff;
     }
@@ -151,20 +149,19 @@ LatencyStats PerformanceMonitor::calculateStats(const RingBuffer<uint64_t, LATEN
 
 LatencyStats PerformanceMonitor::getLatencyStats(LatencyType type) const
 {
-    switch (type)
-    {
-        case LatencyType::TICK_TO_QUOTE:
-            return calculateStats(_tick_to_quote_history);
-        case LatencyType::ORDER_TO_ACK:
-            return calculateStats(_order_to_ack_history);
-        case LatencyType::QUOTE_TO_FILL:
-            return calculateStats(_quote_to_fill_history);
-        case LatencyType::CANCEL_TO_ACK:
-            return calculateStats(_cancel_to_ack_history);
-        case LatencyType::SIGNAL_TO_ORDER:
-            return calculateStats(_signal_to_order_history);
-        default:
-            return LatencyStats();
+    switch (type) {
+    case LatencyType::TICK_TO_QUOTE:
+        return calculateStats(_tick_to_quote_history);
+    case LatencyType::ORDER_TO_ACK:
+        return calculateStats(_order_to_ack_history);
+    case LatencyType::QUOTE_TO_FILL:
+        return calculateStats(_quote_to_fill_history);
+    case LatencyType::CANCEL_TO_ACK:
+        return calculateStats(_cancel_to_ack_history);
+    case LatencyType::SIGNAL_TO_ORDER:
+        return calculateStats(_signal_to_order_history);
+    default:
+        return LatencyStats();
     }
 }
 
@@ -220,8 +217,7 @@ std::string PerformanceMonitor::getSummary() const
 
     // Tick-to-Quote latency
     auto t2q = getLatencyStats(LatencyType::TICK_TO_QUOTE);
-    if (t2q.count > 0)
-    {
+    if (t2q.count > 0) {
         oss << "Tick-to-Quote: ";
         oss << "mean=" << t2q.mean_ns / 1000.0 << "us, ";
         oss << "p99=" << t2q.p99_ns / 1000.0 << "us, ";
@@ -231,8 +227,7 @@ std::string PerformanceMonitor::getSummary() const
 
     // Order-to-Ack latency
     auto o2a = getLatencyStats(LatencyType::ORDER_TO_ACK);
-    if (o2a.count > 0)
-    {
+    if (o2a.count > 0) {
         oss << "Order-to-Ack:  ";
         oss << "mean=" << o2a.mean_ns / 1000.0 << "us, ";
         oss << "p99=" << o2a.p99_ns / 1000.0 << "us, ";
@@ -242,8 +237,7 @@ std::string PerformanceMonitor::getSummary() const
 
     // Cancel-to-Ack latency
     auto c2a = getLatencyStats(LatencyType::CANCEL_TO_ACK);
-    if (c2a.count > 0)
-    {
+    if (c2a.count > 0) {
         oss << "Cancel-to-Ack: ";
         oss << "mean=" << c2a.mean_ns / 1000.0 << "us, ";
         oss << "p99=" << c2a.p99_ns / 1000.0 << "us, ";
@@ -253,8 +247,7 @@ std::string PerformanceMonitor::getSummary() const
 
     // P0: on_tick 入口 → 主流水线结束 全链路延迟 (rdtsc, SIGNAL_TO_ORDER 通道)
     auto s2o = getLatencyStats(LatencyType::SIGNAL_TO_ORDER);
-    if (s2o.count > 0)
-    {
+    if (s2o.count > 0) {
         oss << "Tick-FullChain: ";
         oss << "mean=" << s2o.mean_ns / 1000.0 << "us, ";
         oss << "p99=" << s2o.p99_ns / 1000.0 << "us, ";
@@ -264,8 +257,7 @@ std::string PerformanceMonitor::getSummary() const
 
     // P0: 报价挂单 → 成交 延迟 (replay 时钟)
     auto q2f = getLatencyStats(LatencyType::QUOTE_TO_FILL);
-    if (q2f.count > 0)
-    {
+    if (q2f.count > 0) {
         oss << "Quote-to-Fill: ";
         oss << "mean=" << q2f.mean_ns / 1000000.0 << "ms, ";
         oss << "p99=" << q2f.p99_ns / 1000000.0 << "ms, ";
@@ -298,8 +290,7 @@ void PerformanceMonitor::reset()
     _cancel_to_ack_history.clear();
     _signal_to_order_history.clear();
 
-    for (int i = 0; i < 5; ++i)
-    {
+    for (int i = 0; i < 5; ++i) {
         _current_latency_ns[i].store(0, std::memory_order_relaxed);
     }
 
@@ -309,23 +300,22 @@ void PerformanceMonitor::reset()
 
 void PerformanceMonitor::resetLatency(LatencyType type)
 {
-    switch (type)
-    {
-        case LatencyType::TICK_TO_QUOTE:
-            _tick_to_quote_history.clear();
-            break;
-        case LatencyType::ORDER_TO_ACK:
-            _order_to_ack_history.clear();
-            break;
-        case LatencyType::QUOTE_TO_FILL:
-            _quote_to_fill_history.clear();
-            break;
-        case LatencyType::CANCEL_TO_ACK:
-            _cancel_to_ack_history.clear();
-            break;
-        case LatencyType::SIGNAL_TO_ORDER:
-            _signal_to_order_history.clear();
-            break;
+    switch (type) {
+    case LatencyType::TICK_TO_QUOTE:
+        _tick_to_quote_history.clear();
+        break;
+    case LatencyType::ORDER_TO_ACK:
+        _order_to_ack_history.clear();
+        break;
+    case LatencyType::QUOTE_TO_FILL:
+        _quote_to_fill_history.clear();
+        break;
+    case LatencyType::CANCEL_TO_ACK:
+        _cancel_to_ack_history.clear();
+        break;
+    case LatencyType::SIGNAL_TO_ORDER:
+        _signal_to_order_history.clear();
+        break;
     }
 
     _current_latency_ns[static_cast<int>(type)].store(0, std::memory_order_relaxed);

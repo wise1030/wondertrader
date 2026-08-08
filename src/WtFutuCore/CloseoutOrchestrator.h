@@ -22,12 +22,14 @@
 #include "../Includes/FasterDefs.h"
 #include "SpinLockGuard.h"
 
-namespace wtp {
+namespace wtp
+{
 class IUftStraCtx;
 class WTSTickData;
-}
+} // namespace wtp
 
-namespace futu {
+namespace futu
+{
 
 class CloseoutExecutor;
 class FutuRiskMonitor;
@@ -40,7 +42,8 @@ class CloseoutOrchestrator
 {
 public:
     /// 依赖注入 (init 时设置一次, 所有指针生命周期由策略类保证)
-    struct Deps {
+    struct Deps
+    {
         CloseoutExecutor* executor = nullptr;
         FutuRiskMonitor* risk_monitor = nullptr;
         FutuPortfolio* portfolio = nullptr;
@@ -48,7 +51,7 @@ public:
         OrderRouter* order_router = nullptr;
         wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters = nullptr;
         const std::string* anchor_code = nullptr;
-        uint32_t close_time = 150000;   ///< HHMMSS
+        uint32_t close_time = 150000; ///< HHMMSS
         bool flatten_position = true;
         const char* strategy_id = "";
     };
@@ -64,8 +67,8 @@ public:
 
     /// on_order 回报中的 closeout 订单跟踪
     /// @param now_ms epoch 毫秒
-    void onOrderEvent(wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
-                      bool isCanceled, double leftQty, uint64_t now_ms);
+    void onOrderEvent(
+        wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode, bool isCanceled, double leftQty, uint64_t now_ms);
 
     /// session_end 强制收尾 (非终态 → markCloseoutFailed + 清守卫)
     void finalizeAtSessionEnd(uint64_t now_ms);
@@ -82,11 +85,11 @@ private:
     //   finalizeAtSessionEnd/resetSession(RtTicker)
     mutable RecursiveSpinLock _lock;
 
-    bool _closeout_hedge_executed = false;   ///< 本 session closeout 对冲是否已触发
-    bool _closeout_hedge_pending = false;    ///< 是否正在等待延迟启动
-    uint32_t _closeout_hedge_wait_ticks = 0; ///< 已等待 tick 数
-    std::unordered_set<uint32_t> _closeout_pending_ids;  ///< closeout 对冲单 ID (兜底, 主识别走 OrderRouter)
-    uint64_t _now_ms = 0;  ///< v7.1: replay 时钟 (onTick 注入; mark* 与 RiskMonitor._current_time 同基准, 0=回退墙钟)
+    bool _closeout_hedge_executed = false;              ///< 本 session closeout 对冲是否已触发
+    bool _closeout_hedge_pending = false;               ///< 是否正在等待延迟启动
+    uint32_t _closeout_hedge_wait_ticks = 0;            ///< 已等待 tick 数
+    std::unordered_set<uint32_t> _closeout_pending_ids; ///< closeout 对冲单 ID (兜底, 主识别走 OrderRouter)
+    uint64_t _now_ms = 0; ///< v7.1: replay 时钟 (onTick 注入; mark* 与 RiskMonitor._current_time 同基准, 0=回退墙钟)
 };
 
 } // namespace futu

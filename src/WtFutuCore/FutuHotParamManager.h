@@ -15,9 +15,13 @@
 #include "../Includes/FasterDefs.h"
 
 // 前向声明, 减少头文件依赖
-namespace wtp { class IUftStraCtx; }
+namespace wtp
+{
+class IUftStraCtx;
+}
 
-namespace futu {
+namespace futu
+{
 
 struct FutuMmConfig;
 class FutuQuoter;
@@ -31,7 +35,8 @@ struct SignalAggregatorConfig;
 //==========================================================================
 // 热参数索引 (与原 UftFutuMmStrategy::HotParamIndex 一致)
 //==========================================================================
-enum HotParamIndex : uint32_t {
+enum HotParamIndex : uint32_t
+{
     HP_BASE_SPREAD = 0,
     HP_BASE_QTY,
     HP_LEVEL_QTY_MULTIPLIER,
@@ -61,7 +66,8 @@ enum HotParamIndex : uint32_t {
     HP_COUNT
 };
 
-struct HotParamEntry {
+struct HotParamEntry
+{
     const char* name;
     double default_val;
     double* ptr;
@@ -73,7 +79,8 @@ public:
     FutuHotParamManager() : _hot_params{} {}
 
     /// 应用热更新所需的模块引用集合 (由策略类在 on_params_updated 时组装)
-    struct Targets {
+    struct Targets
+    {
         FutuMmConfig* config;
         wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters;
         wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* spread_opts;
@@ -86,7 +93,8 @@ public:
     /// @param glft_defaults 从首个 SpreadOptimizer 读取的默认 GLFT 参数
     /// @param sig_defaults  从首个 SignalAggregator 读取的默认权重
     /// @param alpha_sensitivity coordinator 模块的 alpha 灵敏度
-    void registerParams(wtp::IUftStraCtx* ctx, const FutuMmConfig& config,
+    void registerParams(wtp::IUftStraCtx* ctx,
+                        const FutuMmConfig& config,
                         const GLFTParams& glft_defaults,
                         const SignalAggregatorConfig& sig_defaults,
                         double alpha_sensitivity);
@@ -94,7 +102,8 @@ public:
     /// 应用全部热参数到各模块 (on_params_updated 委托)
     void applyAll(const Targets& t, const char* strategy_id);
 
-    double hotVal(HotParamIndex idx) const {
+    double hotVal(HotParamIndex idx) const
+    {
         return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val;
     }
     bool isHotChanged(HotParamIndex idx) const { return _hot_params[idx].ptr != nullptr; }

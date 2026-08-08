@@ -5,18 +5,25 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 CorrelationManager::CorrelationManager() {}
 
-void CorrelationManager::addContract(const std::string& code, double multiplier) {
+void CorrelationManager::addContract(const std::string& code, double multiplier)
+{
     if (_contracts.find(code) == _contracts.end()) {
         _contracts[code] = {multiplier, 0.0};
     }
 }
 
-void CorrelationManager::addRelation(const std::string& code1, const std::string& code2, RelationType type, double expectedBeta) {
-    if (code1 == code2) return;
+void CorrelationManager::addRelation(const std::string& code1,
+                                     const std::string& code2,
+                                     RelationType type,
+                                     double expectedBeta)
+{
+    if (code1 == code2)
+        return;
 
     std::string key = getPairKey(code1, code2);
     if (_calculators.find(key) == _calculators.end()) {
@@ -44,7 +51,8 @@ void CorrelationManager::addRelation(const std::string& code1, const std::string
     }
 }
 
-void CorrelationManager::removeContract(const std::string& code) {
+void CorrelationManager::removeContract(const std::string& code)
+{
     _contracts.erase(code);
     for (auto it = _calculators.begin(); it != _calculators.end();) {
         size_t slash_pos = it->first.find('/');
@@ -58,20 +66,23 @@ void CorrelationManager::removeContract(const std::string& code) {
                     auto cc = _code_calcs.find(leg);
                     if (cc != _code_calcs.end()) {
                         auto& v = cc->second;
-                        v.erase(std::remove_if(v.begin(), v.end(),
-                            [raw](const auto& e) { return e.first == raw; }), v.end());
-                        if (v.empty()) _code_calcs.erase(cc);
+                        v.erase(std::remove_if(v.begin(), v.end(), [raw](const auto& e) { return e.first == raw; }),
+                                v.end());
+                        if (v.empty())
+                            _code_calcs.erase(cc);
                     }
                 }
                 auto pi1 = _pair_index.find(leg1);
                 if (pi1 != _pair_index.end()) {
                     pi1->second.erase(leg2);
-                    if (pi1->second.empty()) _pair_index.erase(pi1);
+                    if (pi1->second.empty())
+                        _pair_index.erase(pi1);
                 }
                 auto pi2 = _pair_index.find(leg2);
                 if (pi2 != _pair_index.end()) {
                     pi2->second.erase(leg1);
-                    if (pi2->second.empty()) _pair_index.erase(pi2);
+                    if (pi2->second.empty())
+                        _pair_index.erase(pi2);
                 }
                 it = _calculators.erase(it);
                 continue;
@@ -81,7 +92,8 @@ void CorrelationManager::removeContract(const std::string& code) {
     }
 }
 
-void CorrelationManager::onTick(const std::string& code, double price, uint64_t timestamp) {
+void CorrelationManager::onTick(const std::string& code, double price, uint64_t timestamp)
+{
     auto it = _contracts.find(code);
     if (it != _contracts.end()) {
         it->second.last_price = price;
@@ -91,13 +103,16 @@ void CorrelationManager::onTick(const std::string& code, double price, uint64_t 
     auto cc = _code_calcs.find(code);
     if (cc != _code_calcs.end()) {
         for (const auto& [calc, isLeg1] : cc->second) {
-            if (isLeg1) calc->onLeg1Tick(price, timestamp);
-            else        calc->onLeg2Tick(price, timestamp);
+            if (isLeg1)
+                calc->onLeg1Tick(price, timestamp);
+            else
+                calc->onLeg2Tick(price, timestamp);
         }
     }
 }
 
-void CorrelationManager::onTick(wtp::WTSTickData* tick) {
+void CorrelationManager::onTick(wtp::WTSTickData* tick)
+{
     if (tick) {
         double price = tick->price();
         // nan/inf 防御 — 防止脏 tick 污染 SpreadCalculator 的 leg_history → calculateBeta=nan
@@ -105,7 +120,10 @@ void CorrelationManager::onTick(wtp::WTSTickData* tick) {
             static thread_local uint64_t cm_nan_cnt = 0;
             if ((++cm_nan_cnt & 0xFFF) == 1) {
                 WTSLogger::warn("CorrelationManager: {} non-finite price={} ts={} (cnt={}), dropping",
-                    tick->code(), price, tick->actiontime(), cm_nan_cnt);
+                                tick->code(),
+                                price,
+                                tick->actiontime(),
+                                cm_nan_cnt);
             }
             return;
         }
@@ -113,11 +131,14 @@ void CorrelationManager::onTick(wtp::WTSTickData* tick) {
     }
 }
 
-std::string CorrelationManager::getPairKey(const std::string& code1, const std::string& code2) {
+std::string CorrelationManager::getPairKey(const std::string& code1, const std::string& code2)
+{
     return (code1 < code2) ? (code1 + "/" + code2) : (code2 + "/" + code1);
 }
 
-std::shared_ptr<SpreadCalculator> CorrelationManager::getCalculator(const std::string& code1, const std::string& code2) const {
+std::shared_ptr<SpreadCalculator> CorrelationManager::getCalculator(const std::string& code1,
+                                                                    const std::string& code2) const
+{
     // F2: 双向预建索引直达, 消除 getPairKey 堆分配 (热路径每非 anchor tick 调用)
     auto it1 = _pair_index.find(code1);
     if (it1 != _pair_index.end()) {
@@ -129,7 +150,8 @@ std::shared_ptr<SpreadCalculator> CorrelationManager::getCalculator(const std::s
     return nullptr;
 }
 
-CorrelationStats CorrelationManager::getCorrelation(const std::string& code1, const std::string& code2) const {
+CorrelationStats CorrelationManager::getCorrelation(const std::string& code1, const std::string& code2) const
+{
     CorrelationStats stats;
     auto calc = getCalculator(code1, code2);
     if (calc) {
@@ -144,7 +166,9 @@ CorrelationStats CorrelationManager::getCorrelation(const std::string& code1, co
     return stats;
 }
 
-std::vector<std::pair<std::string, CorrelationStats>> CorrelationManager::getCorrelationsFor(const std::string& code) const {
+std::vector<std::pair<std::string, CorrelationStats>>
+CorrelationManager::getCorrelationsFor(const std::string& code) const
+{
     std::vector<std::pair<std::string, CorrelationStats>> result;
     for (const auto& pair : _calculators) {
         size_t slash_pos = pair.first.find('/');
@@ -161,12 +185,14 @@ std::vector<std::pair<std::string, CorrelationStats>> CorrelationManager::getCor
     return result;
 }
 
-double CorrelationManager::getSpreadZScore(const std::string& code1, const std::string& code2) const {
+double CorrelationManager::getSpreadZScore(const std::string& code1, const std::string& code2) const
+{
     auto calc = getCalculator(code1, code2);
     return calc ? calc->getZScore() : 0.0;
 }
 
-double CorrelationManager::getAggregateDelta(const std::map<std::string, double>& positions) const {
+double CorrelationManager::getAggregateDelta(const std::map<std::string, double>& positions) const
+{
     double total_delta = 0.0;
     for (const auto& pos : positions) {
         auto it = _contracts.find(pos.first);
@@ -178,7 +204,8 @@ double CorrelationManager::getAggregateDelta(const std::map<std::string, double>
     return total_delta;
 }
 
-double CorrelationManager::getHedgeRatio(const std::string& code1, const std::string& code2) const {
+double CorrelationManager::getHedgeRatio(const std::string& code1, const std::string& code2) const
+{
     // ============================================================
     // hedge_ratio 按关系类型分叉:
     //
@@ -196,15 +223,16 @@ double CorrelationManager::getHedgeRatio(const std::string& code1, const std::st
     //   按跨期处理 (return 1.0) — 保守默认
     // ============================================================
 
-    if (code1 == code2) return 1.0;
+    if (code1 == code2)
+        return 1.0;
 
     // 1. 查关系类型 (F2: 预建索引直达, 消除 getPairKey 堆分配)
     auto pi1 = _pair_index.find(code1);
     if (pi1 == _pair_index.end())
-        return 1.0;  // 未注册关系,保守默认
+        return 1.0; // 未注册关系,保守默认
     auto pi2 = pi1->second.find(code2);
     if (pi2 == pi1->second.end())
-        return 1.0;  // 未注册关系,保守默认
+        return 1.0; // 未注册关系,保守默认
     const PairEntry& entry = pi2->second;
 
     // 2. 跨期: 直接返回 1.0
@@ -213,19 +241,23 @@ double CorrelationManager::getHedgeRatio(const std::string& code1, const std::st
 
     // 3. 跨品种/其他: 货值等价计算
     const auto& calc = entry.calc;
-    if (!calc) return 1.0;
+    if (!calc)
+        return 1.0;
 
     auto it1 = _contracts.find(code1);
     auto it2 = _contracts.find(code2);
-    if (it1 == _contracts.end() || it2 == _contracts.end()) return 1.0;
+    if (it1 == _contracts.end() || it2 == _contracts.end())
+        return 1.0;
 
     double m1 = it1->second.multiplier;
     double m2 = it2->second.multiplier;
     double p1 = it1->second.last_price;
     double p2 = it2->second.last_price;
 
-    if (!std::isfinite(p1) || !std::isfinite(p2) || p1 <= 0 || p2 <= 0) return 1.0;
-    if (!std::isfinite(m1) || !std::isfinite(m2) || m1 <= 0 || m2 <= 0) return 1.0;
+    if (!std::isfinite(p1) || !std::isfinite(p2) || p1 <= 0 || p2 <= 0)
+        return 1.0;
+    if (!std::isfinite(m1) || !std::isfinite(m2) || m1 <= 0 || m2 <= 0)
+        return 1.0;
 
     double price_beta_lex = calc->getBeta();
     double price_beta_user;
@@ -238,14 +270,20 @@ double CorrelationManager::getHedgeRatio(const std::string& code1, const std::st
 
     double hedge_ratio = (p1 * m1 * price_beta_user) / (p2 * m2);
 
-    if (!std::isfinite(hedge_ratio) || hedge_ratio <= 0) return 1.0;
-    if (hedge_ratio < 0.05) hedge_ratio = 0.05;
-    if (hedge_ratio > 20.0) hedge_ratio = 20.0;
+    if (!std::isfinite(hedge_ratio) || hedge_ratio <= 0)
+        return 1.0;
+    if (hedge_ratio < 0.05)
+        hedge_ratio = 0.05;
+    if (hedge_ratio > 20.0)
+        hedge_ratio = 20.0;
 
     return hedge_ratio;
 }
 
-bool CorrelationManager::hasSpreadOpportunity(const std::string& code1, const std::string& code2, double& spreadRatio) const {
+bool CorrelationManager::hasSpreadOpportunity(const std::string& code1,
+                                              const std::string& code2,
+                                              double& spreadRatio) const
+{
     auto calc = getCalculator(code1, code2);
     if (calc && std::abs(calc->getZScore()) > _config.spread_z_threshold) {
         spreadRatio = 1.0;
@@ -254,11 +292,13 @@ bool CorrelationManager::hasSpreadOpportunity(const std::string& code1, const st
     return false;
 }
 
-std::vector<CorrelationManager::SpreadTradeSignal> CorrelationManager::getSpreadSignals() const {
+std::vector<CorrelationManager::SpreadTradeSignal> CorrelationManager::getSpreadSignals() const
+{
     return {};
 }
 
-void CorrelationManager::reset() {
+void CorrelationManager::reset()
+{
     _contracts.clear();
     _calculators.clear();
     _code_calcs.clear();

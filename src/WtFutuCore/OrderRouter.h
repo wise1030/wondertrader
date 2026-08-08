@@ -31,16 +31,17 @@ NS_WTP_BEGIN
 class IUftStraCtx;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 class UnifiedOrderTracker;
 
 /// Order source classification for priority routing
 enum class Source : uint8_t
 {
-    ARBITRAGE     = 0,  ///< 套利下单
-    HEDGING       = 1,  ///< 对冲下单
-    CLOSEOUT      = 2   ///< 平仓/强平 (highest priority)
+    ARBITRAGE = 0, ///< 套利下单
+    HEDGING = 1,   ///< 对冲下单
+    CLOSEOUT = 2   ///< 平仓/强平 (highest priority)
 };
 
 /// Get numeric priority for a source (higher = more important)
@@ -52,51 +53,49 @@ inline int sourcePriority(Source src)
 /// Rate counter for per-source throttling (cache-friendly, inline)
 struct RateCounter
 {
-    uint32_t count       = 0;   ///< Orders in current window
-    uint64_t window_start = 0;  ///< Window start timestamp (ms)
-    uint32_t limit       = 0;   ///< Max orders per window (0 = unlimited)
-    uint32_t window_ms   = 1000;///< Window duration in ms
+    uint32_t count = 0;        ///< Orders in current window
+    uint64_t window_start = 0; ///< Window start timestamp (ms)
+    uint32_t limit = 0;        ///< Max orders per window (0 = unlimited)
+    uint32_t window_ms = 1000; ///< Window duration in ms
 
-    __attribute__((always_inline))
-    inline bool check(uint64_t now_ms)
+    __attribute__((always_inline)) inline bool check(uint64_t now_ms)
     {
-        if (limit == 0) return true;
-        if (now_ms - window_start >= window_ms)
-        {
+        if (limit == 0)
+            return true;
+        if (now_ms - window_start >= window_ms) {
             count = 0;
             window_start = now_ms;
         }
         return count < limit;
     }
 
-    __attribute__((always_inline))
-    inline void increment() { ++count; }
+    __attribute__((always_inline)) inline void increment() { ++count; }
 };
 
 /// Active order tracking info (lightweight, uses string_view for code)
 struct ActiveOrderInfo
 {
-    uint32_t    localid   = 0;    ///< Local order ID
-    std::string code;             ///< Standard contract code (owned, for safety)
-    bool        is_buy    = true; ///< Buy/sell direction
-    double      qty       = 0;    ///< Order quantity
-    double      price     = 0;    ///< Order price
-    Source      source    = Source::ARBITRAGE; ///< Order source
-    uint64_t    submit_ts = 0;    ///< Submit timestamp (ms)
+    uint32_t localid = 0;              ///< Local order ID
+    std::string code;                  ///< Standard contract code (owned, for safety)
+    bool is_buy = true;                ///< Buy/sell direction
+    double qty = 0;                    ///< Order quantity
+    double price = 0;                  ///< Order price
+    Source source = Source::ARBITRAGE; ///< Order source
+    uint64_t submit_ts = 0;            ///< Submit timestamp (ms)
     // Track pending cancel state to avoid counting cancelled orders as active
     // in self-trade checks. Without this, cancelAllBySource sends cancel but the order
     // remains in _active_orders until onOrderDone, so self-trade check may block new orders
     // that conflict with a cancelling (but not yet cancelled) order.
-    bool        pending_cancel = false;
+    bool pending_cancel = false;
 };
 
 /// Order submission result
 struct OrderSubmitResult
 {
-    wtp::OrderIDs localids;       ///< Local order IDs from exchange
-    bool          rate_limited = false; ///< True if blocked by rate limit
-    bool          self_trade_blocked = false; ///< True if blocked by self-trade check
-    bool          rejected = false;  ///< True if rejected (e.g. invalid price)
+    wtp::OrderIDs localids;          ///< Local order IDs from exchange
+    bool rate_limited = false;       ///< True if blocked by rate limit
+    bool self_trade_blocked = false; ///< True if blocked by self-trade check
+    bool rejected = false;           ///< True if rejected (e.g. invalid price)
 };
 
 /// Unified Order Router (for non-MM sources only)
@@ -136,38 +135,20 @@ public:
     /// @param src     Order source for priority/rate-limiting
     /// @param flag    Order flag: 0-normal, 1-fak, 2-fok
     /// @return Submit result with localids and blocking info
-    OrderSubmitResult submitBuy(wtp::IUftStraCtx* ctx,
-                                const char* code,
-                                double price,
-                                double qty,
-                                Source src,
-                                int flag = 0);
+    OrderSubmitResult
+    submitBuy(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag = 0);
 
     /// Submit a sell order (enter short) through the router
-    OrderSubmitResult submitSell(wtp::IUftStraCtx* ctx,
-                                 const char* code,
-                                 double price,
-                                 double qty,
-                                 Source src,
-                                 int flag = 0);
+    OrderSubmitResult
+    submitSell(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag = 0);
 
     /// Submit a close-long order (exit long) through the router
-    OrderSubmitResult submitExitLong(wtp::IUftStraCtx* ctx,
-                                      const char* code,
-                                      double price,
-                                      double qty,
-                                      bool isToday,
-                                      Source src,
-                                      int flag = 0);
+    OrderSubmitResult submitExitLong(
+        wtp::IUftStraCtx* ctx, const char* code, double price, double qty, bool isToday, Source src, int flag = 0);
 
     /// Submit a close-short order (exit short) through the router
-    OrderSubmitResult submitExitShort(wtp::IUftStraCtx* ctx,
-                                       const char* code,
-                                       double price,
-                                       double qty,
-                                       bool isToday,
-                                       Source src,
-                                       int flag = 0);
+    OrderSubmitResult submitExitShort(
+        wtp::IUftStraCtx* ctx, const char* code, double price, double qty, bool isToday, Source src, int flag = 0);
 
     /// Cancel a specific order by local ID
     void cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid);
@@ -202,12 +183,14 @@ public:
     {
         RecursiveSpinGuard _g(_lock);
         auto it = _active_orders.find(static_cast<int>(src));
-        if (it == _active_orders.end()) return 0;
+        if (it == _active_orders.end())
+            return 0;
         // 排除 pending_cancel (与 totalActiveOrders/getActiveOrders 口径一致).
         // 否则 closeout 撤单后 ack 未回时计数不归零, inflight guard 卡死.
         uint32_t n = 0;
         for (const auto& info : it->second)
-            if (!info.pending_cancel) ++n;
+            if (!info.pending_cancel)
+                ++n;
         return n;
     }
 
@@ -255,20 +238,21 @@ public:
 
 private:
     /// Internal: check rate limit and record
-    __attribute__((always_inline))
-    inline bool checkRateLimit(Source src, uint64_t now_ms)
+    __attribute__((always_inline)) inline bool checkRateLimit(Source src, uint64_t now_ms)
     {
         auto key = static_cast<int>(src);
         auto it = _rate_counters.find(key);
-        if (it == _rate_counters.end()) return true;
-        if (!it->second.check(now_ms)) return false;
+        if (it == _rate_counters.end())
+            return true;
+        if (!it->second.check(now_ms))
+            return false;
         it->second.increment();
         return true;
     }
 
     /// Internal: record active order
-    void recordActiveOrder(uint32_t localid, const char* code, bool is_buy,
-                           double price, double qty, Source src, uint64_t now_ms);
+    void recordActiveOrder(
+        uint32_t localid, const char* code, bool is_buy, double price, double qty, Source src, uint64_t now_ms);
 
     /// Per-source rate counters (pre-allocated for 3 sources)
     // v7.6 阶段2: 递归自旋锁 — MdSpi(下单/注册) vs TdSpi(onOrderDone) 双线程

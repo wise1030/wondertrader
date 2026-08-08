@@ -24,7 +24,8 @@
 #include <condition_variable>
 #include <chrono>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Lock-Free SPSC Queue
@@ -35,37 +36,34 @@ namespace futu {
  * @tparam T Element type (must be trivially copyable or movable)
  * @tparam Capacity Queue capacity (must be power of 2)
  */
-template<typename T, size_t Capacity>
+template <typename T, size_t Capacity>
 class LockFreeQueue
 {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be power of 2");
     static_assert(Capacity >= 2, "Capacity must be at least 2");
-    
+
 public:
-    LockFreeQueue()
-        : _head(0)
-        , _tail(0)
-    {
-    }
-    
+    LockFreeQueue() : _head(0), _tail(0) {}
+
     // v7.7 C5: 析构时 drain 残留元素 — T 可含非平凡成员 (ArbTickData/
     //   ArbOrderRequest/OrphanLeg 均含 std::string), default 析构泄漏其资源。
     ~LockFreeQueue()
     {
         T item;
-        while (tryPop(item)) {}
+        while (tryPop(item)) {
+        }
     }
-    
+
     // Non-copyable, non-movable
     LockFreeQueue(const LockFreeQueue&) = delete;
     LockFreeQueue& operator=(const LockFreeQueue&) = delete;
     LockFreeQueue(LockFreeQueue&&) = delete;
     LockFreeQueue& operator=(LockFreeQueue&&) = delete;
-    
+
     //==========================================================================
     // Producer Interface (called from producer thread only)
     //==========================================================================
-    
+
     /**
      * @brief Try to push an element to the queue
      * @param item Element to push
@@ -75,22 +73,21 @@ public:
     {
         const size_t current_tail = _tail.load(std::memory_order_relaxed);
         const size_t next_tail = (current_tail + 1) & (Capacity - 1);
-        
+
         // Check if queue is full
-        if (next_tail == _head.load(std::memory_order_acquire))
-        {
+        if (next_tail == _head.load(std::memory_order_acquire)) {
             return false;
         }
-        
+
         // Store item
         new (&_buffer[current_tail * sizeof(T)]) T(item);
-        
+
         // Publish tail
         _tail.store(next_tail, std::memory_order_release);
-        
+
         return true;
     }
-    
+
     /**
      * @brief Try to push an element (move semantics)
      */
@@ -98,23 +95,22 @@ public:
     {
         const size_t current_tail = _tail.load(std::memory_order_relaxed);
         const size_t next_tail = (current_tail + 1) & (Capacity - 1);
-        
-        if (next_tail == _head.load(std::memory_order_acquire))
-        {
+
+        if (next_tail == _head.load(std::memory_order_acquire)) {
             return false;
         }
-        
+
         new (&_buffer[current_tail * sizeof(T)]) T(std::move(item));
-        
+
         _tail.store(next_tail, std::memory_order_release);
-        
+
         return true;
     }
-    
+
     //==========================================================================
     // Consumer Interface (called from consumer thread only)
     //==========================================================================
-    
+
     /**
      * @brief Try to pop an element from the queue
      * @param item Output element
@@ -123,58 +119,52 @@ public:
     bool tryPop(T& item)
     {
         const size_t current_head = _head.load(std::memory_order_relaxed);
-        
+
         // Check if queue is empty
-        if (current_head == _tail.load(std::memory_order_acquire))
-        {
+        if (current_head == _tail.load(std::memory_order_acquire)) {
             return false;
         }
-        
+
         // Load item
         item = std::move(*reinterpret_cast<T*>(&_buffer[current_head * sizeof(T)]));
-        
+
         // Destroy item
         reinterpret_cast<T*>(&_buffer[current_head * sizeof(T)])->~T();
-        
+
         // Publish head
         _head.store((current_head + 1) & (Capacity - 1), std::memory_order_release);
-        
+
         return true;
     }
-    
+
     /**
      * @brief Pop all available elements
      * @param callback Function to call for each element
      * @return Number of elements processed
      */
-    template<typename Callback>
+    template <typename Callback>
     size_t popAll(Callback&& callback)
     {
         size_t count = 0;
         T item;
-        
-        while (tryPop(item))
-        {
+
+        while (tryPop(item)) {
             callback(item);
             ++count;
         }
-        
+
         return count;
     }
-    
+
     //==========================================================================
     // Query Interface (can be called from any thread)
     //==========================================================================
-    
+
     /**
      * @brief Check if queue is empty
      */
-    bool empty() const
-    {
-        return _head.load(std::memory_order_acquire) == 
-               _tail.load(std::memory_order_acquire);
-    }
-    
+    bool empty() const { return _head.load(std::memory_order_acquire) == _tail.load(std::memory_order_acquire); }
+
     /**
      * @brief Check if queue is full
      */
@@ -183,7 +173,7 @@ public:
         const size_t next_tail = (_tail.load(std::memory_order_acquire) + 1) & (Capacity - 1);
         return next_tail == _head.load(std::memory_order_acquire);
     }
-    
+
     /**
      * @brief Get approximate size (may be stale)
      */
@@ -193,20 +183,20 @@ public:
         const size_t head = _head.load(std::memory_order_acquire);
         return (tail - head + Capacity) & (Capacity - 1);
     }
-    
+
     /**
      * @brief Get capacity
      */
     static constexpr size_t capacity()
     {
-        return Capacity - 1;  // One slot is always empty
+        return Capacity - 1; // One slot is always empty
     }
-    
+
 private:
     // Align to cache line to prevent false sharing
     alignas(64) std::atomic<size_t> _head;
     alignas(64) std::atomic<size_t> _tail;
-    
+
     // Buffer storage — 64B 对齐, 避免首元素与 _tail 共享 cache line
     alignas(64) char _buffer[Capacity * sizeof(T)];
 };
@@ -219,86 +209,77 @@ private:
  * @brief MPMC queue with spinlock protection
  * For cases where multiple producers/consumers are needed
  */
-template<typename T, size_t Capacity>
+template <typename T, size_t Capacity>
 class BlockingQueue
 {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be power of 2");
-    
+
 public:
-    BlockingQueue()
-        : _head(0)
-        , _tail(0)
-    {
-    }
-    
+    BlockingQueue() : _head(0), _tail(0) {}
+
     bool tryPush(const T& item)
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        
+
         const size_t current_tail = _tail;
         const size_t next_tail = (current_tail + 1) & (Capacity - 1);
-        
-        if (next_tail == _head)
-        {
+
+        if (next_tail == _head) {
             return false;
         }
-        
+
         _buffer[current_tail] = item;
         _tail = next_tail;
-        
+
         _cv.notify_one();
-        
+
         return true;
     }
-    
+
     bool tryPop(T& item)
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        
-        if (_head == _tail)
-        {
+
+        if (_head == _tail) {
             return false;
         }
-        
+
         item = std::move(_buffer[_head]);
         _head = (_head + 1) & (Capacity - 1);
-        
+
         return true;
     }
-    
+
     bool pop(T& item, uint32_t timeout_ms = 0)
     {
         std::unique_lock<std::mutex> lock(_mutex);
-        
-        if (timeout_ms > 0)
-        {
-            _cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), 
-                         [this] { return _head != _tail; });
+
+        if (timeout_ms > 0) {
+            _cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return _head != _tail; });
         }
-        
-        if (_head == _tail)
-        {
+
+        if (_head == _tail) {
             return false;
         }
-        
+
         item = std::move(_buffer[_head]);
         _head = (_head + 1) & (Capacity - 1);
-        
+
         return true;
     }
-    
+
     bool empty() const
     {
         std::lock_guard<std::mutex> lock(_mutex);
         return _head == _tail;
     }
-    
+
     static constexpr size_t capacity() { return Capacity - 1; }
-    
+
 private:
     mutable std::mutex _mutex;
     std::condition_variable _cv;
-    
+
     size_t _head;
     size_t _tail;
     T _buffer[Capacity];

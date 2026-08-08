@@ -7,11 +7,14 @@
 #include <immintrin.h>
 #endif
 
-namespace futu {
+namespace futu
+{
 
-struct SpinLockGuard {
+struct SpinLockGuard
+{
     std::atomic_flag& flag;
-    SpinLockGuard(std::atomic_flag& f) : flag(f) {
+    SpinLockGuard(std::atomic_flag& f) : flag(f)
+    {
         while (flag.test_and_set(std::memory_order_acquire)) {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
             _mm_pause();
@@ -20,7 +23,8 @@ struct SpinLockGuard {
 #endif
         }
     }
-    ~SpinLockGuard() {
+    ~SpinLockGuard()
+    {
         flag.clear(std::memory_order_release);
     }
 };
@@ -31,7 +35,8 @@ struct SpinLockGuard {
 //   checkAutoCancel → untrackOrder)。owner tid + 计数, 同线程重入
 //   不再抢 flag (无竞争路径 ~2 次原子操作)。
 //==========================================================================
-struct RecursiveSpinLock {
+struct RecursiveSpinLock
+{
     std::atomic_flag flag = ATOMIC_FLAG_INIT;
     std::atomic<std::thread::id> owner{std::thread::id{}};
     // count 非原子 — 正确性依赖不变式: 仅 owner 线程可读写
@@ -39,7 +44,8 @@ struct RecursiveSpinLock {
     // 不得将此锁用于跨线程移交所有权 (如 lock in A / unlock in B)。
     uint32_t count = 0;
 
-    void lock() {
+    void lock()
+    {
         const std::thread::id tid = std::this_thread::get_id();
         if (owner.load(std::memory_order_relaxed) == tid) {
             ++count;
@@ -56,7 +62,8 @@ struct RecursiveSpinLock {
         count = 1;
     }
 
-    void unlock() {
+    void unlock()
+    {
         if (--count == 0) {
             owner.store(std::thread::id{}, std::memory_order_relaxed);
             flag.clear(std::memory_order_release);
@@ -64,7 +71,8 @@ struct RecursiveSpinLock {
     }
 };
 
-struct RecursiveSpinGuard {
+struct RecursiveSpinGuard
+{
     RecursiveSpinLock& lk;
     RecursiveSpinGuard(RecursiveSpinLock& l) : lk(l) { lk.lock(); }
     ~RecursiveSpinGuard() { lk.unlock(); }

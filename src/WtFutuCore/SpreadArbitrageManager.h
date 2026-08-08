@@ -30,7 +30,8 @@ NS_WTP_BEGIN
 class WTSTickData;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 // Forward declaration: SpreadArbMgr uses Portfolio as SSOT for derived positions.
 // Defined in FutuPortfolio.h; we only need the pointer type here.
@@ -43,39 +44,33 @@ class FutuPortfolio;
 struct SpreadArbitrageConfig
 {
     // General settings
-    bool enabled;                   ///< Enable spread arbitrage
-    bool enhance_market_making;     ///< Enable MM enhancement
-    bool use_hybrid_strategy;       ///< Use hybrid strategy combination
+    bool enabled;               ///< Enable spread arbitrage
+    bool enhance_market_making; ///< Enable MM enhancement
+    bool use_hybrid_strategy;   ///< Use hybrid strategy combination
 
     // Strategy selection
     ArbitrageStrategy primary_strategy;
 
     // Portfolio settings
-    double max_total_position;      ///< Maximum total position
-    uint32_t max_pairs;             ///< Maximum number of pairs
+    double max_total_position; ///< Maximum total position
+    uint32_t max_pairs;        ///< Maximum number of pairs
 
     // Signal settings
-    double min_signal_confidence;   ///< Minimum confidence for execution
-    uint32_t signal_cooldown_ms;    ///< Cooldown between signals
+    double min_signal_confidence; ///< Minimum confidence for execution
+    uint32_t signal_cooldown_ms;  ///< Cooldown between signals
 
     // Integration settings
-    double mm_enhancement_weight;   ///< Weight of MM enhancement signals
+    double mm_enhancement_weight; ///< Weight of MM enhancement signals
 
     // A10: 开仓信号最低利润门槛 (ticks), 语义 = 2×(taker_spread+fee) - maker_rebate (见 ARB_SELF_CLOSE_DESIGN §4.4)
     // 经 setMinProfitThreshold 接线到 AsyncArbitrageExecutor (价格调整成本超过此阈值则拒单)
     double min_profit_threshold_ticks;
 
     SpreadArbitrageConfig()
-        : enabled(true)
-        , enhance_market_making(true)
-        , use_hybrid_strategy(false)
-        , primary_strategy(ArbitrageStrategy::MEAN_REVERSION)
-        , max_total_position(50.0)
-        , max_pairs(10)
-        , min_signal_confidence(0.3)
-        , signal_cooldown_ms(1000)
-        , mm_enhancement_weight(0.5)
-        , min_profit_threshold_ticks(1.0)
+        : enabled(true), enhance_market_making(true), use_hybrid_strategy(false),
+          primary_strategy(ArbitrageStrategy::MEAN_REVERSION), max_total_position(50.0), max_pairs(10),
+          min_signal_confidence(0.3), signal_cooldown_ms(1000), mm_enhancement_weight(0.5),
+          min_profit_threshold_ticks(1.0)
     {}
 };
 
@@ -108,8 +103,7 @@ using SpreadSignalCallback = std::function<void(const SpreadSignal&)>;
 using RiskAlertCallback = std::function<void(const RiskAlert&)>;
 
 /// Callback for quoting adjustments
-using QuotingAdjustCallback = std::function<void(const std::string& pair_id,
-                                                   const QuotingAdjustment&)>;
+using QuotingAdjustCallback = std::function<void(const std::string& pair_id, const QuotingAdjustment&)>;
 
 //==============================================================================
 // Spread Arbitrage Manager
@@ -195,9 +189,7 @@ public:
     //==========================================================================
 
     /// Update position for a pair
-    void updatePosition(const std::string& pair_id,
-                        double leg1_pos, double leg2_pos,
-                        double unrealized_pnl);
+    void updatePosition(const std::string& pair_id, double leg1_pos, double leg2_pos, double unrealized_pnl);
 
     /// 从注入的 Portfolio(SSOT) 回填所有 pair 的腿持仓 → spread_position。
     /// 每 tick 调用一次(processSpreadArbitrage), 使策略的退出/止损分支与
@@ -282,9 +274,8 @@ private:
     //==========================================================================
 
     void initializeStrategy(StrategyInstance& instance, const SpreadPairConfig& config);
-    SpreadSignal combineSignals(const std::vector<SpreadSignal>& signals,
-                                 const SpreadState& state,
-                                 uint64_t current_time);
+    SpreadSignal
+    combineSignals(const std::vector<SpreadSignal>& signals, const SpreadState& state, uint64_t current_time);
     void dispatchSignal(const SpreadSignal& signal);
     void checkRiskAlerts();
 
@@ -300,17 +291,17 @@ private:
     // Statistical sub-strategy default parameters (from config file)
     // A9: 作为 pair 级参数的默认值来源 (pair 级未配置时回落), 键名与 spread_arbitrage.yaml 对齐
     uint32_t _default_mr_half_life = 100;
-    double   _default_mr_entry_threshold = 2.0;
-    double   _default_mr_exit_threshold = 0.5;
-    double   _default_mr_stop_loss_z = 4.0;
-    double   _default_mr_add_safety_ratio = 0.75;
+    double _default_mr_entry_threshold = 2.0;
+    double _default_mr_exit_threshold = 0.5;
+    double _default_mr_stop_loss_z = 4.0;
+    double _default_mr_add_safety_ratio = 0.75;
     uint32_t _default_pt_correlation_window = 100;
-    double   _default_pt_min_correlation = 0.7;
+    double _default_pt_min_correlation = 0.7;
     uint32_t _default_pt_spread_window = 50;
-    double   _default_pt_entry_threshold = 2.0;
+    double _default_pt_entry_threshold = 2.0;
     uint32_t _default_tf_ma_period = 20;
-    double   _default_tf_breakout_threshold = 1.5;
-    double   _default_tf_stop_loss_pct = 0.02;
+    double _default_tf_breakout_threshold = 1.5;
+    double _default_tf_stop_loss_pct = 0.02;
     uint32_t _default_tf_max_trend_bars = 50;
 
     //==========================================================================
@@ -332,17 +323,17 @@ private:
     // Position Tracking
     //==========================================================================
 
-    wtp::wt_hashmap<std::string, SpreadState> _pair_states;  ///< Spread state per pair
+    wtp::wt_hashmap<std::string, SpreadState> _pair_states; ///< Spread state per pair
     // alignas(64)+填充: 主/arb 线程高频争用, 隔离缓存行防 false sharing
-    alignas(64) mutable std::atomic_flag _pair_states_spin = ATOMIC_FLAG_INIT;  ///< Protects _pair_states
+    alignas(64) mutable std::atomic_flag _pair_states_spin = ATOMIC_FLAG_INIT; ///< Protects _pair_states
     char _pair_states_spin_pad[64]{};
 
     //==========================================================================
     // Signal State
-     //==========================================================================
+    //==========================================================================
 
-     wtp::wt_hashmap<std::string, uint64_t> _last_signal_time;
-     wtp::wt_hashmap<std::string, SpreadSignal> _last_signals;
+    wtp::wt_hashmap<std::string, uint64_t> _last_signal_time;
+    wtp::wt_hashmap<std::string, SpreadSignal> _last_signals;
 
     //==========================================================================
     // Callbacks
@@ -356,7 +347,7 @@ private:
     // Contract Multipliers
     //==========================================================================
 
-    wtp::wt_hashmap<std::string, double> _contract_multipliers;  ///< Per-contract multiplier lookup
+    wtp::wt_hashmap<std::string, double> _contract_multipliers; ///< Per-contract multiplier lookup
 
     //==========================================================================
     // Scheme B-3: Portfolio-Derived Arb State
@@ -377,9 +368,7 @@ private:
     /// dedup + size adjustment + in-flight check. Returns possibly-modified
     /// signal (type=NONE if suppressed, or with adjusted suggested_size).
     /// Side effects: updates _pair_arb_states (intent, in_flight tracking).
-    SpreadSignal applyB3Gate(const std::string& pair_id,
-                              const SpreadSignal& raw,
-                              uint64_t current_time);
+    SpreadSignal applyB3Gate(const std::string& pair_id, const SpreadSignal& raw, uint64_t current_time);
 
     /// Portfolio SSOT pointer (injected via setPortfolio).
     /// Nullable: if null, B-3 logic falls back to legacy generateSignal path.
@@ -416,11 +405,12 @@ private:
     // B1: ArbIntent 实时通道 (arb 线程写, 主线程读)
     //==========================================================================
 public:
-    struct CloseIntent {
+    struct CloseIntent
+    {
         std::string pair_id;
-        int      direction = 0;   ///< +1 = 平多 spread (卖leg1买leg2), -1 = 平空
-        double   qty = 0;
-        uint64_t set_time = 0;    ///< ms
+        int direction = 0; ///< +1 = 平多 spread (卖leg1买leg2), -1 = 平空
+        double qty = 0;
+        uint64_t set_time = 0; ///< ms
     };
     /// 平仓信号通过 B-3 门时设置 (applyB3Gate 内, arb 线程)
     void setActiveCloseIntent(const std::string& pair_id, int direction, double qty, uint64_t now_ms);
@@ -429,7 +419,7 @@ public:
     /// 该合约是否有活跃平仓 intent (经 1:N 映射, any-match; 主线程读)
     bool hasActiveCloseIntent(const std::string& leg_code) const;
     /// 该合约的平仓方向: 0=无, +1=arb 正在买该 leg, -1=arb 正在卖该 leg (B2 协同用)
-    int  getArbCloseDirection(const std::string& leg_code) const;
+    int getArbCloseDirection(const std::string& leg_code) const;
 
     //==========================================================================
     // B5: 过冲保险丝 (事后兜底)
@@ -479,7 +469,8 @@ public:
     /// Returns true if any pairs were written to out_pairs.
     bool popTimedOutPairs(std::vector<std::string>& out_pairs)
     {
-        while (_pair_arb_spin.test_and_set(std::memory_order_acquire)) {}
+        while (_pair_arb_spin.test_and_set(std::memory_order_acquire)) {
+        }
         if (_timed_out_pairs.empty()) {
             _pair_arb_spin.clear(std::memory_order_release);
             return false;

@@ -10,15 +10,16 @@
 #include "../WTSTools/WTSLogger.h"
 #include "../Share/TimeUtils.hpp"
 
-namespace futu {
+namespace futu
+{
 
 OrderRouter::OrderRouter()
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     // Pre-allocate rate counters for all 3 sources
     _rate_counters[static_cast<int>(Source::ARBITRAGE)] = RateCounter{};
-    _rate_counters[static_cast<int>(Source::HEDGING)]   = RateCounter{};
-    _rate_counters[static_cast<int>(Source::CLOSEOUT)]  = RateCounter{};
+    _rate_counters[static_cast<int>(Source::HEDGING)] = RateCounter{};
+    _rate_counters[static_cast<int>(Source::CLOSEOUT)] = RateCounter{};
 
     // Pre-allocate active order lists with reasonable capacity
     _active_orders[static_cast<int>(Source::ARBITRAGE)].reserve(16);
@@ -28,21 +29,17 @@ RecursiveSpinGuard _g(_lock);
 
 void OrderRouter::setRateLimit(Source src, uint32_t limit, uint32_t window_ms)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto& rc = _rate_counters[key];
     rc.limit = limit;
     rc.window_ms = window_ms;
 }
 
-OrderSubmitResult OrderRouter::submitBuy(wtp::IUftStraCtx* ctx,
-                                          const char* code,
-                                          double price,
-                                          double qty,
-                                          Source src,
-                                          int flag)
+OrderSubmitResult
+OrderRouter::submitBuy(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     // 价格0保护 — 防止无效价格下单
@@ -54,29 +51,25 @@ RecursiveSpinGuard _g(_lock);
 
     // 1. Rate limit check
     uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
-    if (!checkRateLimit(src, now_ms))
-    {
+    if (!checkRateLimit(src, now_ms)) {
         result.rate_limited = true;
         WTSLogger::warn("OrderRouter: BUY {} {}@{} rate limited (src={})", code, qty, price, static_cast<int>(src));
         return result;
     }
 
     // 2. Self-trade prevention
-    if (checkSelfTrade(code, true, price))
-    {
+    if (checkSelfTrade(code, true, price)) {
         result.self_trade_blocked = true;
         WTSLogger::warn("OrderRouter: BUY {} {}@{} blocked by self-trade prevention", code, qty, price);
         return result;
     }
 
     // 3. Execute via ctx API
-    result.localids = orderApiCall([&]{ return ctx->stra_buy(code, price, qty, flag); });
+    result.localids = orderApiCall([&] { return ctx->stra_buy(code, price, qty, flag); });
 
     // 4. Track active order
-    if (!result.localids.empty())
-    {
-        for (uint32_t localid : result.localids)
-        {
+    if (!result.localids.empty()) {
+        for (uint32_t localid : result.localids) {
             recordActiveOrder(localid, code, true, price, qty, src, now_ms);
         }
     }
@@ -84,14 +77,10 @@ RecursiveSpinGuard _g(_lock);
     return result;
 }
 
-OrderSubmitResult OrderRouter::submitSell(wtp::IUftStraCtx* ctx,
-                                           const char* code,
-                                           double price,
-                                           double qty,
-                                           Source src,
-                                           int flag)
+OrderSubmitResult
+OrderRouter::submitSell(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     // 价格0保护 — 防止无效价格下单
@@ -102,26 +91,22 @@ RecursiveSpinGuard _g(_lock);
     }
 
     uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
-    if (!checkRateLimit(src, now_ms))
-    {
+    if (!checkRateLimit(src, now_ms)) {
         result.rate_limited = true;
         WTSLogger::warn("OrderRouter: SELL {} {}@{} rate limited (src={})", code, qty, price, static_cast<int>(src));
         return result;
     }
 
-    if (checkSelfTrade(code, false, price))
-    {
+    if (checkSelfTrade(code, false, price)) {
         result.self_trade_blocked = true;
         WTSLogger::warn("OrderRouter: SELL {} {}@{} blocked by self-trade prevention", code, qty, price);
         return result;
     }
 
-    result.localids = orderApiCall([&]{ return ctx->stra_sell(code, price, qty, flag); });
+    result.localids = orderApiCall([&] { return ctx->stra_sell(code, price, qty, flag); });
 
-    if (!result.localids.empty())
-    {
-        for (uint32_t localid : result.localids)
-        {
+    if (!result.localids.empty()) {
+        for (uint32_t localid : result.localids) {
             recordActiveOrder(localid, code, false, price, qty, src, now_ms);
         }
     }
@@ -129,36 +114,28 @@ RecursiveSpinGuard _g(_lock);
     return result;
 }
 
-OrderSubmitResult OrderRouter::submitExitLong(wtp::IUftStraCtx* ctx,
-                                               const char* code,
-                                               double price,
-                                               double qty,
-                                               bool isToday,
-                                               Source src,
-                                               int flag)
+OrderSubmitResult OrderRouter::submitExitLong(
+    wtp::IUftStraCtx* ctx, const char* code, double price, double qty, bool isToday, Source src, int flag)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
-    if (!checkRateLimit(src, now_ms))
-    {
+    if (!checkRateLimit(src, now_ms)) {
         result.rate_limited = true;
         WTSLogger::warn("OrderRouter: EXIT_LONG {} {}@{} rate limited", code, qty, price);
         return result;
     }
 
     // Self-trade: closing long = selling, check against MM buy orders
-    if (checkSelfTrade(code, false, price))
-    {
+    if (checkSelfTrade(code, false, price)) {
         result.self_trade_blocked = true;
         WTSLogger::warn("OrderRouter: EXIT_LONG {} {}@{} blocked by self-trade prevention", code, qty, price);
         return result;
     }
 
-    uint32_t localid = orderApiCall([&]{ return ctx->stra_exit_long(code, price, qty, isToday, flag); });
-    if (localid != 0)
-    {
+    uint32_t localid = orderApiCall([&] { return ctx->stra_exit_long(code, price, qty, isToday, flag); });
+    if (localid != 0) {
         result.localids.push_back(localid);
         recordActiveOrder(localid, code, false, price, qty, src, now_ms);
     }
@@ -166,36 +143,28 @@ RecursiveSpinGuard _g(_lock);
     return result;
 }
 
-OrderSubmitResult OrderRouter::submitExitShort(wtp::IUftStraCtx* ctx,
-                                                const char* code,
-                                                double price,
-                                                double qty,
-                                                bool isToday,
-                                                Source src,
-                                                int flag)
+OrderSubmitResult OrderRouter::submitExitShort(
+    wtp::IUftStraCtx* ctx, const char* code, double price, double qty, bool isToday, Source src, int flag)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     OrderSubmitResult result;
 
     uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
-    if (!checkRateLimit(src, now_ms))
-    {
+    if (!checkRateLimit(src, now_ms)) {
         result.rate_limited = true;
         WTSLogger::warn("OrderRouter: EXIT_SHORT {} {}@{} rate limited", code, qty, price);
         return result;
     }
 
     // Self-trade: closing short = buying, check against MM sell orders
-    if (checkSelfTrade(code, true, price))
-    {
+    if (checkSelfTrade(code, true, price)) {
         result.self_trade_blocked = true;
         WTSLogger::warn("OrderRouter: EXIT_SHORT {} {}@{} blocked by self-trade prevention", code, qty, price);
         return result;
     }
 
-    uint32_t localid = orderApiCall([&]{ return ctx->stra_exit_short(code, price, qty, isToday, flag); });
-    if (localid != 0)
-    {
+    uint32_t localid = orderApiCall([&] { return ctx->stra_exit_short(code, price, qty, isToday, flag); });
+    if (localid != 0) {
         result.localids.push_back(localid);
         recordActiveOrder(localid, code, true, price, qty, src, now_ms);
     }
@@ -205,79 +174,70 @@ RecursiveSpinGuard _g(_lock);
 
 void OrderRouter::cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     // 标记 pending_cancel (与 cancelAllBySource/cancelByPair 一致),
     // 使 getActiveOrders/totalActiveOrders 在 cancel-ack 窗口内不再视其为活跃.
-    for (auto& kv : _active_orders)
-    {
-        for (auto& info : kv.second)
-        {
-            if (info.localid == localid && !info.pending_cancel)
-            {
+    for (auto& kv : _active_orders) {
+        for (auto& info : kv.second) {
+            if (info.localid == localid && !info.pending_cancel) {
                 info.pending_cancel = true;
                 break;
             }
         }
     }
-    orderApiCall([&]{ return ctx->stra_cancel(localid); });
+    orderApiCall([&] { return ctx->stra_cancel(localid); });
 }
 
 void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto it = _active_orders.find(key);
-    if (it == _active_orders.end()) return;
+    if (it == _active_orders.end())
+        return;
 
     // Mark orders as pending_cancel before sending cancel request.
     // This prevents self-trade check from treating them as active orders
     // during the cancel-acknowledge window.
-    for (auto& info : it->second)
-    {
-        if (!info.pending_cancel)
-        {
+    for (auto& info : it->second) {
+        if (!info.pending_cancel) {
             info.pending_cancel = true;
-            orderApiCall([&]{ return ctx->stra_cancel(info.localid); });
+            orderApiCall([&] { return ctx->stra_cancel(info.localid); });
         }
     }
 }
 
 void OrderRouter::registerPairOrder(uint32_t localid, const std::string& pair_id)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     _oid_to_pair[localid] = pair_id;
 }
 
 size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     // 收集该 pair 全部活跃 localid (含历史加仓组, A7)
     std::vector<uint32_t> ids;
     ids.reserve(4);
-    for (const auto& kv : _oid_to_pair)
-    {
+    for (const auto& kv : _oid_to_pair) {
         if (kv.second == pair_id)
             ids.push_back(kv.first);
     }
-    if (ids.empty()) return 0;
+    if (ids.empty())
+        return 0;
 
     auto key = static_cast<int>(Source::ARBITRAGE);
     auto orders_it = _active_orders.find(key);
 
     size_t n = 0;
-    for (uint32_t oid : ids)
-    {
+    for (uint32_t oid : ids) {
         bool sent = false;
-        if (orders_it != _active_orders.end())
-        {
-            for (auto& info : orders_it->second)
-            {
-                if (info.localid == oid)
-                {
-                    if (!info.pending_cancel)
-                    {
+        if (orders_it != _active_orders.end()) {
+            for (auto& info : orders_it->second) {
+                if (info.localid == oid) {
+                    if (!info.pending_cancel) {
                         info.pending_cancel = true;
-                        orderApiCall([&]{ return ctx->stra_cancel(oid); });
+                        orderApiCall([&] { return ctx->stra_cancel(oid); });
                         ++n;
                     }
                     sent = true;
@@ -288,9 +248,8 @@ RecursiveSpinGuard _g(_lock);
         // 订单不在活跃表 (可能已 finalize 但 tag 未清): 防御性补撤, 幂等.
         // 旧条件额外要求 orders_it==end (ARBITRAGE 桶不存在), 但桶在构造时预创建,
         // 恒不成立 → 防御性补撤不可达. 改为仅判 !sent.
-        if (!sent)
-        {
-            orderApiCall([&]{ return ctx->stra_cancel(oid); });
+        if (!sent) {
+            orderApiCall([&] { return ctx->stra_cancel(oid); });
             ++n;
         }
     }
@@ -299,39 +258,40 @@ RecursiveSpinGuard _g(_lock);
 
 bool OrderRouter::checkSelfTrade(const char* code, bool is_buy, double price) const
 {
-RecursiveSpinGuard _g(_lock);
-    if (!_mm_tracker) return false;
+    RecursiveSpinGuard _g(_lock);
+    if (!_mm_tracker)
+        return false;
 
     // Delegate to UnifiedOrderTracker's existing self-trade check
-    auto result = _mm_tracker->checkSelfTrade(
-        std::string(code), is_buy, price, /*is_market_order=*/false);
-    if (result.has_risk)
-    {
+    auto result = _mm_tracker->checkSelfTrade(std::string(code), is_buy, price, /*is_market_order=*/false);
+    if (result.has_risk) {
         WTSLogger::warn("[ROUTER] Self-trade blocked: {} {}@{} (conflict with active MM order)",
-            code, is_buy ? "BUY" : "SELL", price);
+                        code,
+                        is_buy ? "BUY" : "SELL",
+                        price);
     }
     return result.has_risk;
 }
 
 void OrderRouter::onOrderDone(uint32_t localid)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     auto src_it = _order_source_map.find(localid);
-    if (src_it == _order_source_map.end()) return;
+    if (src_it == _order_source_map.end())
+        return;
 
     Source src = src_it->second;
     _order_source_map.erase(src_it);
-    _oid_to_pair.erase(localid);  // A7: 同步清理 pair 映射
+    _oid_to_pair.erase(localid); // A7: 同步清理 pair 映射
 
     auto key = static_cast<int>(src);
     auto orders_it = _active_orders.find(key);
-    if (orders_it == _active_orders.end()) return;
+    if (orders_it == _active_orders.end())
+        return;
 
     auto& orders = orders_it->second;
-    for (auto it = orders.begin(); it != orders.end(); ++it)
-    {
-        if (it->localid == localid)
-        {
+    for (auto it = orders.begin(); it != orders.end(); ++it) {
+        if (it->localid == localid) {
             // Swap with last and pop (O(1) removal, order doesn't matter)
             *it = std::move(orders.back());
             orders.pop_back();
@@ -342,14 +302,14 @@ RecursiveSpinGuard _g(_lock);
 
 std::vector<ActiveOrderInfo> OrderRouter::getActiveOrders(Source src) const
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto it = _active_orders.find(key);
-    if (it == _active_orders.end()) return {};
+    if (it == _active_orders.end())
+        return {};
     // Filter out pending_cancel orders from the returned list
     std::vector<ActiveOrderInfo> result;
-    for (const auto& info : it->second)
-    {
+    for (const auto& info : it->second) {
         if (!info.pending_cancel)
             result.push_back(info);
     }
@@ -358,20 +318,18 @@ RecursiveSpinGuard _g(_lock);
 
 RateCounter& OrderRouter::getRateCounter(Source src)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     return _rate_counters[key];
 }
 
 size_t OrderRouter::totalActiveOrders() const
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     size_t total = 0;
-    for (const auto& kv : _active_orders)
-    {
+    for (const auto& kv : _active_orders) {
         // Exclude pending_cancel orders from active count
-        for (const auto& info : kv.second)
-        {
+        for (const auto& info : kv.second) {
             if (!info.pending_cancel)
                 ++total;
         }
@@ -379,20 +337,20 @@ RecursiveSpinGuard _g(_lock);
     return total;
 }
 
-void OrderRouter::recordActiveOrder(uint32_t localid, const char* code, bool is_buy,
-                                     double price, double qty, Source src, uint64_t now_ms)
+void OrderRouter::recordActiveOrder(
+    uint32_t localid, const char* code, bool is_buy, double price, double qty, Source src, uint64_t now_ms)
 {
-RecursiveSpinGuard _g(_lock);
+    RecursiveSpinGuard _g(_lock);
     auto key = static_cast<int>(src);
     auto& orders = _active_orders[key];
 
     ActiveOrderInfo info;
-    info.localid   = localid;
-    info.code      = code;
-    info.is_buy    = is_buy;
-    info.price     = price;
-    info.qty       = qty;
-    info.source    = src;
+    info.localid = localid;
+    info.code = code;
+    info.is_buy = is_buy;
+    info.price = price;
+    info.qty = qty;
+    info.source = src;
     info.submit_ts = now_ms;
 
     orders.push_back(std::move(info));

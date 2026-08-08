@@ -19,7 +19,8 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Momentum Signal Source
@@ -30,22 +31,15 @@ class MomentumSignalSource : public ISignalSource
 public:
     struct Config
     {
-        uint32_t window;        ///< Price history window
-        double ema_alpha;       ///< EMA smoothing factor
+        uint32_t window;  ///< Price history window
+        double ema_alpha; ///< EMA smoothing factor
 
-        Config()
-            : window(50)
-            , ema_alpha(0.1)
-        {}
+        Config() : window(50), ema_alpha(0.1) {}
     };
 
     explicit MomentumSignalSource(const Config& cfg = Config())
-        : _cfg(cfg)
-        , _enabled(true)
-        , _last_mid(0)
-        , _ema_momentum(0)
-    {
-    }
+        : _cfg(cfg), _enabled(true), _last_mid(0), _ema_momentum(0)
+    {}
 
     //==========================================================================
     // ISignalSource Interface
@@ -57,18 +51,14 @@ public:
         return n;
     }
 
-    SignalType type() const override
-    {
-        return SignalType::MOMENTUM;
-    }
+    SignalType type() const override { return SignalType::MOMENTUM; }
 
     void update(const MarketDataContext& book) override
     {
         double mid = book.getMidPrice();
         uint64_t ts = book.getTimestamp();
 
-        if (mid <= 0)
-        {
+        if (mid <= 0) {
             _result.valid = false;
             return;
         }
@@ -78,8 +68,7 @@ public:
         // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异, 数学性质:
         //   - 可加性: log(P3/P1) = log(P3/P2) + log(P2/P1)
         //   - 对称性: 涨跌相同幅度, 对数收益率绝对值相同
-        if (_last_mid > 0)
-        {
+        if (_last_mid > 0) {
             double lr = std::log(mid / _last_mid);
             if (_log_returns.full())
                 _log_return_sum -= _log_returns.front();
@@ -89,15 +78,13 @@ public:
         _last_mid = mid;
 
         size_t n = _log_returns.size();
-        if (n >= 9)  // 收益数 = 价格数-1, 等价于原 _price_history.size() >= 10
+        if (n >= 9) // 收益数 = 价格数-1, 等价于原 _price_history.size() >= 10
         {
             calculateMomentum();
             _result.timestamp = ts;
-            _result.valid = true;   // valid=true移到if内部，样本不足时不标记valid
-        }
-        else
-        {
-            _result.valid = false;  // 样本不足，不纳入加权计算
+            _result.valid = true; // valid=true移到if内部，样本不足时不标记valid
+        } else {
+            _result.valid = false; // 样本不足，不纳入加权计算
         }
     }
 
@@ -135,15 +122,16 @@ private:
     bool _enabled;
     AlphaSignalResult _result;
 
-    RingBuffer<double, 128> _log_returns;   ///< 对数收益环形缓冲
-    double _log_return_sum = 0;             ///< 滚动和(满环时扣减最旧)
+    RingBuffer<double, 128> _log_returns; ///< 对数收益环形缓冲
+    double _log_return_sum = 0;           ///< 滚动和(满环时扣减最旧)
     double _last_mid;
     double _ema_momentum;
 
     void calculateMomentum()
     {
         size_t n = _log_returns.size();
-        if (n == 0) return;
+        if (n == 0)
+            return;
 
         // 滚动和直接取均值, 乘以1000作为缩放因子(对数收益率通常很小, 如0.0001级别)
         double raw_momentum = _log_return_sum / static_cast<double>(n) * 1000.0;

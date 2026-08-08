@@ -31,7 +31,8 @@ class WTSOrdDtlData;
 class WTSTransData;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Basic Data Structures
@@ -42,7 +43,7 @@ struct BookLevel
 {
     double price;
     double volume;
-    double orders;  // Number of orders at this level
+    double orders; // Number of orders at this level
 
     BookLevel() : price(0), volume(0), orders(0) {}
 };
@@ -64,25 +65,23 @@ struct OrderBookSnapshot
     double ask_depth;       // Total ask volume
 
     OrderBookSnapshot()
-        : timestamp(0), mid_price(0), spread(0)
-        , imbalance(0), depth_imbalance(0)
-        , bid_depth(0), ask_depth(0)
+        : timestamp(0), mid_price(0), spread(0), imbalance(0), depth_imbalance(0), bid_depth(0), ask_depth(0)
     {}
 };
 
 /// Trade flow analysis
 struct TradeFlowAnalysis
 {
-    double net_flow;          ///< Net trade flow (buy - sell volume)
-    double buy_pressure;      ///< Estimated buy pressure (0-1)
-    double sell_pressure;     ///< Estimated sell pressure (0-1)
-    double avg_trade_size;    ///< Average trade size
-    double large_trade_ratio; ///< Ratio of large trades
+    double net_flow;            ///< Net trade flow (buy - sell volume)
+    double buy_pressure;        ///< Estimated buy pressure (0-1)
+    double sell_pressure;       ///< Estimated sell pressure (0-1)
+    double avg_trade_size;      ///< Average trade size
+    double large_trade_ratio;   ///< Ratio of large trades
     double net_flow_normalized; ///< Statistical significance normalized [-1, 1]
 
     TradeFlowAnalysis()
-        : net_flow(0), buy_pressure(0.5), sell_pressure(0.5)
-        , avg_trade_size(0), large_trade_ratio(0), net_flow_normalized(0)
+        : net_flow(0), buy_pressure(0.5), sell_pressure(0.5), avg_trade_size(0), large_trade_ratio(0),
+          net_flow_normalized(0)
     {}
 };
 
@@ -93,22 +92,20 @@ struct BookAnalysisResult
     double liquidity_score;
     double toxicity_score;
     double spread_estimate;
-    bool   toxic_detected;
-    bool   direction_clear;
+    bool toxic_detected;
+    bool direction_clear;
 
     double weighted_imbalance;
     double pressure_intensity;
-    bool   bid_dominant;
-    bool   ask_dominant;
+    bool bid_dominant;
+    bool ask_dominant;
     double confidence;
     uint64_t timestamp;
 
     BookAnalysisResult()
-        : imbalance_score(0), liquidity_score(0.5), toxicity_score(0)
-        , spread_estimate(0), toxic_detected(false), direction_clear(false)
-        , weighted_imbalance(0), pressure_intensity(0)
-        , bid_dominant(false), ask_dominant(false)
-        , confidence(0), timestamp(0)
+        : imbalance_score(0), liquidity_score(0.5), toxicity_score(0), spread_estimate(0), toxic_detected(false),
+          direction_clear(false), weighted_imbalance(0), pressure_intensity(0), bid_dominant(false),
+          ask_dominant(false), confidence(0), timestamp(0)
     {}
 };
 
@@ -116,7 +113,8 @@ struct BookAnalysisResult
 // Component 1: OrderBookStateTracker (Static OrderBook State)
 //==============================================================================
 
-class OrderBookStateTracker {
+class OrderBookStateTracker
+{
 public:
     OrderBookStateTracker();
 
@@ -126,11 +124,14 @@ public:
     inline const std::string& getCode() const { return _code; }
     inline double getTickSize() const { return _tick_size; }
     inline const OrderBookSnapshot& getSnapshot() const { return _snapshot; }
-    inline double estimateLiquidity() const {
-        if (_snapshot.spread <= 0 || _tick_size <= 0) return 0;
+    inline double estimateLiquidity() const
+    {
+        if (_snapshot.spread <= 0 || _tick_size <= 0)
+            return 0;
 
         double spread_ticks = _snapshot.spread / _tick_size;
-        if (spread_ticks < 1.0) spread_ticks = 1.0;
+        if (spread_ticks < 1.0)
+            spread_ticks = 1.0;
 
         double min_depth = std::min(_snapshot.bid_depth, _snapshot.ask_depth);
         double score = min_depth / (spread_ticks * 10.0);
@@ -155,7 +156,8 @@ private:
 // Component 2: TradeFlowTracker (Dynamic Transaction State)
 //==============================================================================
 
-class TradeFlowTracker {
+class TradeFlowTracker
+{
 public:
     TradeFlowTracker();
 
@@ -170,15 +172,16 @@ private:
     double _large_trade_threshold;
 
     // 滑动窗口: 存储最近 N 个推断记录, 用于衰减 (修复 onTickInference 无衰减 bug)
-    struct InferenceRecord {
-        double signed_flow;   // 正=买, 负=卖
+    struct InferenceRecord
+    {
+        double signed_flow; // 正=买, 负=卖
         double volume;
         bool is_large;
         uint64_t timestamp;
     };
     std::deque<InferenceRecord> _inference_window;
-    uint32_t _window_size;  // 滑窗大小 (tick 数, 默认 100 ≈ 30-50 秒)
-    uint64_t _window_ms;    // 滑窗时间 (毫秒, 默认 5000 = 5秒)
+    uint32_t _window_size; // 滑窗大小 (tick 数, 默认 100 ≈ 30-50 秒)
+    uint64_t _window_ms;   // 滑窗时间 (毫秒, 默认 5000 = 5秒)
 
     std::vector<double> _trade_sizes;
     size_t _trade_sizes_idx;
@@ -201,31 +204,32 @@ public:
     MarketDataContext() {}
     ~MarketDataContext() {}
 
-    void setContract(const std::string& code, double tickSize, uint32_t depthLevels = 5) {
+    void setContract(const std::string& code, double tickSize, uint32_t depthLevels = 5)
+    {
         _state.setContract(code, tickSize, depthLevels);
     }
 
-    void setLargeTradeThreshold(double threshold) {
-        _flow.setConfig(_state.getTickSize(), threshold);
-    }
+    void setLargeTradeThreshold(double threshold) { _flow.setConfig(_state.getTickSize(), threshold); }
 
-    void onTick(wtp::WTSTickData* tick) {
-        if (!tick) return;
+    void onTick(wtp::WTSTickData* tick)
+    {
+        if (!tick)
+            return;
         _state.onTick(tick);
         _flow.onTickInference(tick, _state.getTickSize());
     }
 
-    void onOrderQueue(wtp::WTSOrdQueData* data) {
+    void onOrderQueue(wtp::WTSOrdQueData* data)
+    {
         (void)data; // implementation depends on API
     }
 
-    void onOrderDetail(wtp::WTSOrdDtlData* data) {
+    void onOrderDetail(wtp::WTSOrdDtlData* data)
+    {
         (void)data; // implementation depends on API
     }
 
-    void onTransaction(wtp::WTSTransData* data) {
-        _flow.onTransaction(data);
-    }
+    void onTransaction(wtp::WTSTransData* data) { _flow.onTransaction(data); }
 
     //==========================================================================
     // Inline Forwarding Accessors (Zero-overhead for ISignalSource)
@@ -236,19 +240,24 @@ public:
     inline uint64_t getTimestamp() const { return _state.getSnapshot().timestamp; }
     inline double getMidPrice() const { return _state.getSnapshot().mid_price; }
     inline double getSpread() const { return _state.getSnapshot().spread; }
-    inline double getSpreadTicks() const {
+    inline double getSpreadTicks() const
+    {
         return _state.getTickSize() > 0 ? _state.getSnapshot().spread / _state.getTickSize() : 0;
     }
-    inline double getBidPrice() const {
+    inline double getBidPrice() const
+    {
         return _state.getSnapshot().bids.empty() ? 0 : _state.getSnapshot().bids[0].price;
     }
-    inline double getAskPrice() const {
+    inline double getAskPrice() const
+    {
         return _state.getSnapshot().asks.empty() ? 0 : _state.getSnapshot().asks[0].price;
     }
-    inline double getBidVol() const {
+    inline double getBidVol() const
+    {
         return _state.getSnapshot().bids.empty() ? 0 : _state.getSnapshot().bids[0].volume;
     }
-    inline double getAskVol() const {
+    inline double getAskVol() const
+    {
         return _state.getSnapshot().asks.empty() ? 0 : _state.getSnapshot().asks[0].volume;
     }
     inline double getBidDepth() const { return _state.getSnapshot().bid_depth; }
@@ -259,7 +268,8 @@ public:
     inline TradeFlowAnalysis getTradeFlowAnalysis() const { return _flow.getAnalysis(); }
     inline double estimateLiquidity() const { return _state.estimateLiquidity(); }
 
-    void reset() {
+    void reset()
+    {
         _state.reset();
         _flow.reset();
     }

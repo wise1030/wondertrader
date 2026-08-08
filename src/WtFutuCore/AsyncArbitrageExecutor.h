@@ -33,7 +33,8 @@ NS_WTP_BEGIN
 class IUftStraCtx;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 class SpreadArbitrageManager;
 
@@ -49,8 +50,8 @@ struct ArbTickData
     uint64_t timestamp;
 
     ArbTickData() : price(0), multiplier(1), timestamp(0) {}
-    ArbTickData(const std::string& c, double p, double m, uint64_t t)
-        : code(c), price(p), multiplier(m), timestamp(t) {}
+    ArbTickData(const std::string& c, double p, double m, uint64_t t) : code(c), price(p), multiplier(m), timestamp(t)
+    {}
 };
 
 //==============================================================================
@@ -59,19 +60,17 @@ struct ArbTickData
 
 struct ArbOrderRequest
 {
-    std::string pair_id;            ///< Spread pair ID
-    std::string code;               ///< Contract code
-    bool is_buy;                    ///< Direction
-    double price;                   ///< Order price
-    double qty;                     ///< Order quantity
-    uint64_t timestamp;             ///< Request timestamp
-    uint32_t request_id;            ///< Unique request ID
-    int  order_flag;                ///< OrderFlag: 0=GFD 1=FAK 2=FOK (C0 execution_policy)
-    bool is_close;                  ///< 平仓单标记 (B3 主线程精判 + 对手价替换用)
+    std::string pair_id; ///< Spread pair ID
+    std::string code;    ///< Contract code
+    bool is_buy;         ///< Direction
+    double price;        ///< Order price
+    double qty;          ///< Order quantity
+    uint64_t timestamp;  ///< Request timestamp
+    uint32_t request_id; ///< Unique request ID
+    int order_flag;      ///< OrderFlag: 0=GFD 1=FAK 2=FOK (C0 execution_policy)
+    bool is_close;       ///< 平仓单标记 (B3 主线程精判 + 对手价替换用)
 
-    ArbOrderRequest()
-        : is_buy(true), price(0), qty(0), timestamp(0), request_id(0)
-        , order_flag(0), is_close(false) {}
+    ArbOrderRequest() : is_buy(true), price(0), qty(0), timestamp(0), request_id(0), order_flag(0), is_close(false) {}
 };
 
 //==============================================================================
@@ -82,7 +81,7 @@ struct ArbPositionSync
 {
     std::string pair_id;
     std::string code;
-    double position;                ///< Position after trade
+    double position; ///< Position after trade
     double unrealized_pnl;
     uint64_t timestamp;
 };
@@ -93,29 +92,26 @@ struct ArbPositionSync
 
 struct AsyncArbConfig
 {
-    uint32_t tick_queue_size;       ///< Tick queue size (power of 2)
-    uint32_t order_queue_size;      ///< Order queue size (power of 2)
-    uint32_t signal_interval_us;    ///< Signal generation interval (microseconds)
-    uint32_t max_wait_us;           ///< Max wait time for condition variable (microseconds)
-    uint32_t ticks_per_signal;      ///< Generate signal every N ticks
+    uint32_t tick_queue_size;        ///< Tick queue size (power of 2)
+    uint32_t order_queue_size;       ///< Order queue size (power of 2)
+    uint32_t signal_interval_us;     ///< Signal generation interval (microseconds)
+    uint32_t max_wait_us;            ///< Max wait time for condition variable (microseconds)
+    uint32_t ticks_per_signal;       ///< Generate signal every N ticks
     std::atomic<bool> enabled{true}; ///< atomic — arb线程读, 主线程写(setConfig)
 
     AsyncArbConfig()
-        : tick_queue_size(1024)
-        , order_queue_size(256)
-        , signal_interval_us(5000)      // 5ms 信号检查间隔
-        , max_wait_us(10000)            // 10ms 最大等待
-        , ticks_per_signal(5)           // 每5个tick检查一次信号
+        : tick_queue_size(1024), order_queue_size(256), signal_interval_us(5000) // 5ms 信号检查间隔
+          ,
+          max_wait_us(10000) // 10ms 最大等待
+          ,
+          ticks_per_signal(5) // 每5个tick检查一次信号
     {}
 
     // copy/move需特殊处理atomic字段
     AsyncArbConfig(const AsyncArbConfig& other)
-        : tick_queue_size(other.tick_queue_size)
-        , order_queue_size(other.order_queue_size)
-        , signal_interval_us(other.signal_interval_us)
-        , max_wait_us(other.max_wait_us)
-        , ticks_per_signal(other.ticks_per_signal)
-        , enabled(other.enabled.load())
+        : tick_queue_size(other.tick_queue_size), order_queue_size(other.order_queue_size),
+          signal_interval_us(other.signal_interval_us), max_wait_us(other.max_wait_us),
+          ticks_per_signal(other.ticks_per_signal), enabled(other.enabled.load())
     {}
 
     AsyncArbConfig& operator=(const AsyncArbConfig& other)
@@ -240,11 +236,8 @@ public:
     /// @param price    Hedge price (aggressive: counter-price)
     /// @param qty      Hedge quantity (same as leg1_qty)
     /// @param urgent   True if timeout exceeded → force market order
-    using OrphanHedgeCallback = std::function<void(const std::string& code,
-                                                    bool is_buy,
-                                                    double price,
-                                                    double qty,
-                                                    bool urgent)>;
+    using OrphanHedgeCallback =
+        std::function<void(const std::string& code, bool is_buy, double price, double qty, bool urgent)>;
 
     /// Process orphan legs and generate hedge orders (called from main thread)
     /// @param callback  Called for each orphan leg that needs hedging
@@ -253,9 +246,9 @@ public:
     /// @param current_delta_ratio  Current portfolio delta ratio (abs(delta)/max_delta), 0=no limit
     /// @return Number of orphan legs processed
     size_t processOrphanLegs(OrphanHedgeCallback callback,
-                              uint64_t timeout_ms = 5000,
-                              uint64_t force_ms = 30000,
-                              double current_delta_ratio = 0.0);
+                             uint64_t timeout_ms = 5000,
+                             uint64_t force_ms = 30000,
+                             double current_delta_ratio = 0.0);
 
     //==========================================================================
     // Statistics
@@ -304,7 +297,8 @@ private:
     //==========================================================================
     // Orphan leg tracking for auto-hedge (dual-queue for SPSC safety)
     //==========================================================================
-    struct OrphanLeg {
+    struct OrphanLeg
+    {
         std::string pair_id;
         uint32_t leg1_req_id;
         std::string leg1_code;
@@ -346,14 +340,14 @@ private:
     // P7: 自成交检查只需全局 最高买价/最低卖价 标量 (arb买→min_sell, arb卖→max_buy,
     // 与按 arb_price 过滤等价: 全局 min/max 即为约束边界). updateMMOrders 预计算,
     // executeSignal O(1) 读取, 消除原 O(n) vector 拷贝(锁内) + O(n) 线性扫描(锁内).
-    wtp::wt_hashmap<std::string, double> _mm_max_buy;   ///< code → 最高 MM 买价 (0=无)
-    wtp::wt_hashmap<std::string, double> _mm_min_sell;  ///< code → 最低 MM 卖价 (0=无)
+    wtp::wt_hashmap<std::string, double> _mm_max_buy;  ///< code → 最高 MM 买价 (0=无)
+    wtp::wt_hashmap<std::string, double> _mm_min_sell; ///< code → 最低 MM 卖价 (0=无)
 
     // Tick sizes for price adjustment (using atomic_flag as spinlock)
     alignas(64) std::atomic_flag _tick_size_spin = ATOMIC_FLAG_INIT;
     char _tick_size_spin_pad[64]{};
     wtp::wt_hashmap<std::string, double> _tick_sizes;
-    std::atomic<double> _min_profit_threshold{0.0};  // Minimum profit threshold in ticks (主线程写, arb线程读)
+    std::atomic<double> _min_profit_threshold{0.0}; // Minimum profit threshold in ticks (主线程写, arb线程读)
 
     // Tick counter for signal generation
     std::atomic<uint32_t> _tick_count;

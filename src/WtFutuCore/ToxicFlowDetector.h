@@ -25,7 +25,8 @@
 #include "PredictiveToxicity.h"
 #include "RealizedToxicity.h"
 
-namespace futu {
+namespace futu
+{
 
 // Forward declarations
 struct SyntheticTransactionData;
@@ -33,28 +34,26 @@ struct SyntheticTransactionData;
 /// Legacy toxicity parameters (for backward compatibility)
 struct ToxicityParams
 {
-    double      adverse_threshold;
-    double      alpha_weight;
-    double      book_weight;
-    double      self_trade_weight;
-    double      extreme_signal_weight;  ///< Extreme signal discount weight (default 0.8)
-    double      vpin_threshold;
-    uint32_t    vpin_window;
-    double      vpin_bucket_size;
-    uint32_t    vpin_min_warmup_buckets;  ///< Warmup gate: skip VPIN scoring until N full buckets
+    double adverse_threshold;
+    double alpha_weight;
+    double book_weight;
+    double self_trade_weight;
+    double extreme_signal_weight; ///< Extreme signal discount weight (default 0.8)
+    double vpin_threshold;
+    uint32_t vpin_window;
+    double vpin_bucket_size;
+    uint32_t vpin_min_warmup_buckets; ///< Warmup gate: skip VPIN scoring until N full buckets
 
     ToxicityParams()
-        : adverse_threshold(0.10)
-        , alpha_weight(0.3)
-        , book_weight(0.3)
-        , self_trade_weight(0.4)
-        , extreme_signal_weight(0.8)
-        , vpin_threshold(0.10)  // H2: 统一与 fromVariant 默认一致 (此前构造 0.7 vs fromVariant 0.10, 差 7 倍)
-        , vpin_window(50)
-        , vpin_bucket_size(1000)
-        , vpin_min_warmup_buckets(5) {}
+        : adverse_threshold(0.10), alpha_weight(0.3), book_weight(0.3), self_trade_weight(0.4),
+          extreme_signal_weight(0.8),
+          vpin_threshold(0.10) // H2: 统一与 fromVariant 默认一致 (此前构造 0.7 vs fromVariant 0.10, 差 7 倍)
+          ,
+          vpin_window(50), vpin_bucket_size(1000), vpin_min_warmup_buckets(5)
+    {}
 
-    static ToxicityParams fromVariant(wtp::WTSVariant* v) {
+    static ToxicityParams fromVariant(wtp::WTSVariant* v)
+    {
         ToxicityParams p;
         p.adverse_threshold = FutuConfig::readDouble(v, "adverseThreshold", 0.10);
         p.vpin_threshold = FutuConfig::readDouble(v, "vpinThreshold", 0.10);
@@ -72,19 +71,19 @@ struct ToxicityParams
 /// Toxicity analysis result
 struct ToxicityMetrics
 {
-    double      predictive_toxicity;
-    double      realized_adverse_ratio;
-    double      toxic_score;
-    bool        is_toxic;
-    int         toxic_side;
-    double      avg_adverse_move;
-    uint32_t    total_fills;
-    uint32_t    adverse_fills;
+    double predictive_toxicity;
+    double realized_adverse_ratio;
+    double toxic_score;
+    bool is_toxic;
+    int toxic_side;
+    double avg_adverse_move;
+    uint32_t total_fills;
+    uint32_t adverse_fills;
 
     ToxicityMetrics()
-        : predictive_toxicity(0), realized_adverse_ratio(0), toxic_score(0)
-        , is_toxic(false), toxic_side(0), avg_adverse_move(0)
-        , total_fills(0), adverse_fills(0) {}
+        : predictive_toxicity(0), realized_adverse_ratio(0), toxic_score(0), is_toxic(false), toxic_side(0),
+          avg_adverse_move(0), total_fills(0), adverse_fills(0)
+    {}
 };
 
 /// Toxic Flow Detector (Facade combining Predictive and Realized)
@@ -139,11 +138,9 @@ public:
     const SyntheticSignalFusion& getFusion() const { return _signal_fusion; }
 
     /// Enhanced toxicity detection combining all sources
-    ToxicityMetrics detectEnhancedToxicity(
-        const BookAnalysisResult& book_sig,
-        const CalibrationResult& self_calib,
-        const AlphaResult& alpha
-    );
+    ToxicityMetrics detectEnhancedToxicity(const BookAnalysisResult& book_sig,
+                                           const CalibrationResult& self_calib,
+                                           const AlphaResult& alpha);
 
     //==========================================================================
     // Analysis

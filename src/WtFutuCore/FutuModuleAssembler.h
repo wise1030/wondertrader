@@ -7,11 +7,13 @@
  */
 #pragma once
 
-namespace wtp {
+namespace wtp
+{
 class IUftStraCtx;
 }
 
-namespace futu {
+namespace futu
+{
 
 class UftFutuMmStrategy;
 

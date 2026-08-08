@@ -8,13 +8,10 @@
 #include <algorithm>
 #include <cmath>
 
-namespace futu {
-
-PredictiveToxicity::PredictiveToxicity()
-    : _has_alpha_data(false)
-    , _cache_dirty(true)
+namespace futu
 {
-}
+
+PredictiveToxicity::PredictiveToxicity() : _has_alpha_data(false), _cache_dirty(true) {}
 
 //------------------------------------------------------------------------------
 // Configuration
@@ -43,7 +40,8 @@ void PredictiveToxicity::updateAlpha(const AlphaResult& alpha, const TradeImbala
 
 void PredictiveToxicity::onTrade(double price, double qty, bool isBuy, uint64_t timestamp)
 {
-    if (_bucket_size <= 0) return;
+    if (_bucket_size <= 0)
+        return;
 
     if (isBuy) {
         _current_bucket.buy_volume += qty;
@@ -93,15 +91,18 @@ void PredictiveToxicity::onTrade(double price, double qty, bool isBuy, uint64_t 
 
 void PredictiveToxicity::onTickVolume(const char* stdCode, const wtp::WTSTickData* tick)
 {
-    if (!tick) return;
+    if (!tick)
+        return;
 
     if (_bucket_size <= 0) {
         setBucketSize(_cfg.vpin_bucket_size);
-        if (_bucket_size <= 0) return;
+        if (_bucket_size <= 0)
+            return;
     }
 
     double qty = tick->volume();
-    if (qty <= 0) return;
+    if (qty <= 0)
+        return;
 
     double price = tick->price();
     uint64_t timestamp = tick->actiontime();
@@ -140,7 +141,8 @@ void PredictiveToxicity::onTickVolume(const char* stdCode, const wtp::WTSTickDat
 
 void PredictiveToxicity::updateCache() const
 {
-    if (!_cache_dirty) return;
+    if (!_cache_dirty)
+        return;
 
     _cached_result = PredictiveToxicityResult();
 
@@ -152,23 +154,20 @@ void PredictiveToxicity::updateCache() const
     const bool vpin_ready = (_buckets.size() >= _cfg.min_warmup_buckets);
     _cached_result.vpin = vpin_ready ? _vpin : 0.0;
 
-    if (_has_alpha_data)
-    {
+    if (_has_alpha_data) {
         // OFI toxicity
         _cached_result.ofi_toxicity = std::abs(_latest_alpha.ofi_component);
 
         // Trade imbalance toxicity
-        _cached_result.trade_toxicity = std::abs(_latest_trade_imb.imbalance_ratio) *
-            (0.5 + 0.5 * _latest_trade_imb.large_trade_ratio);
+        _cached_result.trade_toxicity =
+            std::abs(_latest_trade_imb.imbalance_ratio) * (0.5 + 0.5 * _latest_trade_imb.large_trade_ratio);
 
         // Combined alpha toxicity
         _cached_result.alpha_toxicity =
-            _cfg.ofi_weight * _cached_result.ofi_toxicity +
-            _cfg.trade_weight * _cached_result.trade_toxicity;
+            _cfg.ofi_weight * _cached_result.ofi_toxicity + _cfg.trade_weight * _cached_result.trade_toxicity;
 
         // Check for extreme signals (> 0.6, lowered from 0.9 for futures MM)
-        if (_cached_result.ofi_toxicity > 0.6 || _cached_result.trade_toxicity > 0.6)
-        {
+        if (_cached_result.ofi_toxicity > 0.6 || _cached_result.trade_toxicity > 0.6) {
             _cached_result.extreme_signal = std::max(_cached_result.ofi_toxicity, _cached_result.trade_toxicity);
         }
     }
@@ -180,13 +179,11 @@ void PredictiveToxicity::updateCache() const
     // 统一叠加, 避免双重放大(本类内部叠加一次 + 门面再叠加一次).
 
     // Is toxic?
-    _cached_result.is_toxic =
-        _cached_result.combined_score > _cfg.alpha_threshold ||
-        (vpin_ready && _cached_result.vpin > _cfg.vpin_threshold);
+    _cached_result.is_toxic = _cached_result.combined_score > _cfg.alpha_threshold ||
+                              (vpin_ready && _cached_result.vpin > _cfg.vpin_threshold);
 
     // Toxic side
-    if (_cached_result.is_toxic && _has_alpha_data)
-    {
+    if (_cached_result.is_toxic && _has_alpha_data) {
         if (_latest_alpha.ofi_component > 0 && _latest_trade_imb.imbalance_ratio > 0)
             _cached_result.toxic_side = 1;
         else if (_latest_alpha.ofi_component < 0 && _latest_trade_imb.imbalance_ratio < 0)

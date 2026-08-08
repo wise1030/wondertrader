@@ -24,7 +24,8 @@ NS_WTP_BEGIN
 class WTSTickData;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Spread Calculator Configuration
@@ -32,20 +33,15 @@ namespace futu {
 
 struct SpreadCalculatorConfig
 {
-    uint32_t window_size;           ///< Rolling window for statistics
-    uint32_t min_samples;           ///< Minimum samples for valid stats
-    double ema_alpha;               ///< EMA smoothing factor
-    bool use_robust_stats;          ///< Use robust statistics (median-based)
-    double beta_min;                ///< smoothed_beta 截断下限 (默认 0.7, 跨品种 pair 可调宽)
-    double beta_max;                ///< smoothed_beta 截断上限 (默认 1.5)
+    uint32_t window_size;  ///< Rolling window for statistics
+    uint32_t min_samples;  ///< Minimum samples for valid stats
+    double ema_alpha;      ///< EMA smoothing factor
+    bool use_robust_stats; ///< Use robust statistics (median-based)
+    double beta_min;       ///< smoothed_beta 截断下限 (默认 0.7, 跨品种 pair 可调宽)
+    double beta_max;       ///< smoothed_beta 截断上限 (默认 1.5)
 
     SpreadCalculatorConfig()
-        : window_size(200)
-        , min_samples(30)
-        , ema_alpha(0.1)
-        , use_robust_stats(false)
-        , beta_min(0.7)
-        , beta_max(1.5)
+        : window_size(200), min_samples(30), ema_alpha(0.1), use_robust_stats(false), beta_min(0.7), beta_max(1.5)
     {}
 };
 
@@ -155,7 +151,7 @@ private:
 
     void updateStatistics();
     void updateCorrelation();
-    void computeCorrelationAndBeta();  ///< 单次扫描 log-return, 同算 correlation+beta+alpha
+    void computeCorrelationAndBeta(); ///< 单次扫描 log-return, 同算 correlation+beta+alpha
     double calculateRobustStd(const RingBuffer<double, 256>& data) const;
 
     //==========================================================================
@@ -177,15 +173,15 @@ private:
     double _leg2_multiplier;
     uint64_t _last_leg1_update;
     uint64_t _last_leg2_update;
-    bool _leg1_fresh;    // leg1有新数据标记，用于tick同步配对
-    bool _leg2_fresh;    // leg2有新数据标记，用于tick同步配对
+    bool _leg1_fresh; // leg1有新数据标记，用于tick同步配对
+    bool _leg2_fresh; // leg2有新数据标记，用于tick同步配对
 
     //==========================================================================
     // Spread Data
     //==========================================================================
 
     double _current_spread;
-    RingBuffer<double, 256> _spread_history;  // Power of 2 for RingBuffer
+    RingBuffer<double, 256> _spread_history; // Power of 2 for RingBuffer
 
     //==========================================================================
     // Statistics
@@ -201,7 +197,7 @@ private:
     RingBuffer<double, 256> _leg2_history;
     double _correlation;
     double _beta;
-    double _smoothed_beta;      ///< EMA smoothed beta for stable hedge ratio
+    double _smoothed_beta; ///< EMA smoothed beta for stable hedge ratio
     double _half_life;
 
     // log-return 复用缓冲 (computeCorrelationAndBeta 单次扫描填充,
@@ -213,8 +209,8 @@ private:
     // EWMA Decay Statistics (replaces Welford cumulative — adapts to regime shifts)
     //==========================================================================
 
-    double _ewma_var;      ///< EWMA variance (exponentially weighted)
-    uint32_t _welford_n;   ///< Sample count (retained for periodicity/min_samples checks)
+    double _ewma_var;    ///< EWMA variance (exponentially weighted)
+    uint32_t _welford_n; ///< Sample count (retained for periodicity/min_samples checks)
 
     //==========================================================================
     // State

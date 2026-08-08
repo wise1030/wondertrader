@@ -6,11 +6,13 @@
 
 #include <cstdint>
 
-namespace wtp {
+namespace wtp
+{
 class IUftStraCtx;
 }
 
-namespace futu {
+namespace futu
+{
 
 class UftFutuMmStrategy;
 
@@ -18,9 +20,14 @@ class FutuRuntimeOps
 {
 public:
     /// 成交处理 (组合记账/恢复四道闸/arb复活/毒性/统计)
-    static void processTradeFill(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx,
-        uint32_t localid, const char* stdCode, bool isLong, uint32_t offset,
-        double vol, double price);
+    static void processTradeFill(UftFutuMmStrategy& s,
+                                 wtp::IUftStraCtx* ctx,
+                                 uint32_t localid,
+                                 const char* stdCode,
+                                 bool isLong,
+                                 uint32_t offset,
+                                 double vol,
+                                 double price);
 
     /// 通道恢复序列 (持仓同步/风控恢复/AUTO REDUCE)
     static void onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx);
@@ -32,11 +39,20 @@ public:
     static void onSessionEnd(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx, uint32_t uTDate);
 
     /// 报单回执 (错误计数/恢复状态机/双边统计挂单确认)
-    static void onEntrust(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx, uint32_t localid, bool bSuccess, const char* message);
+    static void
+    onEntrust(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx, uint32_t localid, bool bSuccess, const char* message);
 
     /// 订单状态事件 (撤单统计/quoter状态/closeout跟踪/router终结/arb残腿)
-    static void onOrderEvent(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
-        bool isLong, uint32_t offset, double totalQty, double leftQty, double price, bool isCanceled);
+    static void onOrderEvent(UftFutuMmStrategy& s,
+                             wtp::IUftStraCtx* ctx,
+                             uint32_t localid,
+                             const char* stdCode,
+                             bool isLong,
+                             uint32_t offset,
+                             double totalQty,
+                             double leftQty,
+                             double price,
+                             bool isCanceled);
 
     /// 通道断开 (HALT/撤单/停arb/持仓快照)
     static void onChannelLost(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx);

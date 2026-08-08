@@ -27,44 +27,42 @@ NS_WTP_BEGIN
 class WTSTickData;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 /// Predictive toxicity configuration
 struct PredictiveToxicityConfig
 {
-    double      vpin_threshold;         ///< VPIN threshold for toxicity
-    uint32_t    vpin_window;            ///< Number of buckets for VPIN
-    double      vpin_bucket_size;       ///< Target volume per bucket (0=auto)
-    double      alpha_threshold;        ///< Alpha signal threshold
-    double      ofi_weight;             ///< Weight for OFI component
-    double      trade_weight;           ///< Weight for trade imbalance component
-    uint32_t    min_warmup_buckets;     ///< Minimum buckets before VPIN is reliable (warmup gate)
+    double vpin_threshold;       ///< VPIN threshold for toxicity
+    uint32_t vpin_window;        ///< Number of buckets for VPIN
+    double vpin_bucket_size;     ///< Target volume per bucket (0=auto)
+    double alpha_threshold;      ///< Alpha signal threshold
+    double ofi_weight;           ///< Weight for OFI component
+    double trade_weight;         ///< Weight for trade imbalance component
+    uint32_t min_warmup_buckets; ///< Minimum buckets before VPIN is reliable (warmup gate)
 
     PredictiveToxicityConfig()
-        : vpin_threshold(0.85)
-        , vpin_window(50)
-        , vpin_bucket_size(1000)
-        , alpha_threshold(0.7)
-        , ofi_weight(0.5)
-        , trade_weight(0.5)
-        , min_warmup_buckets(5) {}
+        : vpin_threshold(0.85), vpin_window(50), vpin_bucket_size(1000), alpha_threshold(0.7), ofi_weight(0.5),
+          trade_weight(0.5), min_warmup_buckets(5)
+    {}
 };
 
 /// Predictive toxicity result
 struct PredictiveToxicityResult
 {
-    double      vpin;                   ///< Current VPIN value
-    double      ofi_toxicity;           ///< OFI-based toxicity
-    double      trade_toxicity;         ///< Trade imbalance toxicity
-    double      alpha_toxicity;         ///< Combined alpha toxicity
-    double      combined_score;         ///< Weighted combined score
-    bool        is_toxic;               ///< Exceeds threshold
-    int         toxic_side;             ///< 1=buy toxic, -1=sell toxic, 0=none
-    double      extreme_signal;         ///< Maximum extreme signal (> 0.9)
+    double vpin;           ///< Current VPIN value
+    double ofi_toxicity;   ///< OFI-based toxicity
+    double trade_toxicity; ///< Trade imbalance toxicity
+    double alpha_toxicity; ///< Combined alpha toxicity
+    double combined_score; ///< Weighted combined score
+    bool is_toxic;         ///< Exceeds threshold
+    int toxic_side;        ///< 1=buy toxic, -1=sell toxic, 0=none
+    double extreme_signal; ///< Maximum extreme signal (> 0.9)
 
     PredictiveToxicityResult()
-        : vpin(0), ofi_toxicity(0), trade_toxicity(0), alpha_toxicity(0)
-        , combined_score(0), is_toxic(false), toxic_side(0), extreme_signal(0) {}
+        : vpin(0), ofi_toxicity(0), trade_toxicity(0), alpha_toxicity(0), combined_score(0), is_toxic(false),
+          toxic_side(0), extreme_signal(0)
+    {}
 };
 
 /// Predictive Toxicity Detector
@@ -126,7 +124,8 @@ private:
     bool _has_alpha_data = false;
 
     // VPIN state
-    struct VolumeBucket {
+    struct VolumeBucket
+    {
         double buy_volume{0};
         double sell_volume{0};
         double total_volume{0};
@@ -134,7 +133,8 @@ private:
         uint64_t end_time{0};
     };
 
-    struct LastTickInfo {
+    struct LastTickInfo
+    {
         double bid_px{0};
         double ask_px{0};
         double total_volume{0};

@@ -21,12 +21,14 @@
 #include "../Includes/FasterDefs.h"
 #include "SpinLockGuard.h"
 
-namespace wtp {
+namespace wtp
+{
 class IUftStraCtx;
 class WTSTickData;
-}
+} // namespace wtp
 
-namespace futu {
+namespace futu
+{
 
 class AsyncArbitrageExecutor;
 class SpreadArbitrageManager;
@@ -41,7 +43,8 @@ class ArbExecutionBridge
 {
 public:
     /// 依赖注入 (init 时设置一次)
-    struct Deps {
+    struct Deps
+    {
         AsyncArbitrageExecutor* async_arb = nullptr;
         SpreadArbitrageManager* arb_manager = nullptr;
         OrderRouter* order_router = nullptr;
@@ -60,8 +63,8 @@ public:
     void onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick);
 
     /// 成交回报中的套利单处理 (consumePairTag → in_flight 递减 + 残腿对冲)
-    void onTradeFill(wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode,
-                     bool isLong, double vol, double price);
+    void
+    onTradeFill(wtp::IUftStraCtx* ctx, uint32_t localid, const char* stdCode, bool isLong, double vol, double price);
 
     /// A2/A3: 单腿被拒(broker拒单/流控/STP)时标记残腿防护.
     /// order_qty = 预期裸腿上限; 传 0 表示上限未知 (对冲该 pair 所有后续成交, session 末清理).
@@ -84,10 +87,11 @@ private:
     wtp::wt_hashmap<std::string, double> _arb_last_order_price;
     // A3: 残腿对冲状态 (pair_id → 预期上限/已对冲量).
     // 旧实现为 unordered_set<pair_id>, 首笔成交即 erase → 分笔成交时后续裸腿残留.
-    struct CloseHedgeState {
+    struct CloseHedgeState
+    {
         double original_qty = 0;
         double hedged_qty = 0;
-        uint64_t created_time_ms = 0;  ///< B5 fix: for stale entry cleanup
+        uint64_t created_time_ms = 0; ///< B5 fix: for stale entry cleanup
     };
     std::unordered_map<std::string, CloseHedgeState> _arb_hedge_on_fill;
     // MM 订单快照世代号 (增量同步到 arb 执行器)

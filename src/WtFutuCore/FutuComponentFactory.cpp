@@ -3,17 +3,17 @@
 #include "../WTSTools/WTSLogger.h"
 #include <memory>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Market Making Components
 //==============================================================================
 
-std::unique_ptr<SpreadOptimizer> FutuComponentFactory::createSpreadOptimizer(
-    const CoordinatorConfig& config,
-    const std::string& code,
-    double base_spread,
-    double tick_size)
+std::unique_ptr<SpreadOptimizer> FutuComponentFactory::createSpreadOptimizer(const CoordinatorConfig& config,
+                                                                             const std::string& code,
+                                                                             double base_spread,
+                                                                             double tick_size)
 {
     const auto& mp = config.modules;
     wtp::WTSVariant* root = config._raw_variant;
@@ -33,19 +33,20 @@ std::unique_ptr<SpreadOptimizer> FutuComponentFactory::createSpreadOptimizer(
     optimizer->setParams(glft_cfg);
 
     WTSLogger::debug("SpreadOptimizer[{}]: base_spread={}, tick_size={}, phi={}",
-        code, glft_cfg.base_spread, glft_cfg.tick_size, glft_cfg.phi);
+                     code,
+                     glft_cfg.base_spread,
+                     glft_cfg.tick_size,
+                     glft_cfg.phi);
 
     return optimizer;
 }
 
-std::unique_ptr<MarketDataContext> FutuComponentFactory::createMarketDataContext(
-    const CoordinatorConfig& config)
+std::unique_ptr<MarketDataContext> FutuComponentFactory::createMarketDataContext(const CoordinatorConfig& config)
 {
     return std::make_unique<MarketDataContext>();
 }
 
-std::unique_ptr<ToxicFlowDetector> FutuComponentFactory::createToxicFlowDetector(
-    const CoordinatorConfig& config)
+std::unique_ptr<ToxicFlowDetector> FutuComponentFactory::createToxicFlowDetector(const CoordinatorConfig& config)
 {
     auto detector = std::make_unique<ToxicFlowDetector>();
 
@@ -62,8 +63,7 @@ std::unique_ptr<ToxicFlowDetector> FutuComponentFactory::createToxicFlowDetector
     return detector;
 }
 
-std::unique_ptr<SelfTradeCalibrator> FutuComponentFactory::createSelfTradeCalibrator(
-    const CoordinatorConfig& config)
+std::unique_ptr<SelfTradeCalibrator> FutuComponentFactory::createSelfTradeCalibrator(const CoordinatorConfig& config)
 {
     auto calibrator = std::make_unique<SelfTradeCalibrator>();
 
@@ -84,8 +84,7 @@ std::unique_ptr<SelfTradeCalibrator> FutuComponentFactory::createSelfTradeCalibr
 // Adaptive & Performance Components
 //==============================================================================
 
-std::unique_ptr<PerformanceMonitor> FutuComponentFactory::createPerformanceMonitor(
-    const CoordinatorConfig& config)
+std::unique_ptr<PerformanceMonitor> FutuComponentFactory::createPerformanceMonitor(const CoordinatorConfig& config)
 {
     auto monitor = std::make_unique<PerformanceMonitor>();
     monitor->setLatencyThresholdNs(config.perf_monitor_latency_threshold);
@@ -95,8 +94,7 @@ std::unique_ptr<PerformanceMonitor> FutuComponentFactory::createPerformanceMonit
     return monitor;
 }
 
-std::unique_ptr<PerformanceAnalyzer> FutuComponentFactory::createPerformanceAnalyzer(
-    const CoordinatorConfig& config)
+std::unique_ptr<PerformanceAnalyzer> FutuComponentFactory::createPerformanceAnalyzer(const CoordinatorConfig& config)
 {
     auto analyzer = std::make_unique<PerformanceAnalyzer>();
 
@@ -110,9 +108,8 @@ std::unique_ptr<PerformanceAnalyzer> FutuComponentFactory::createPerformanceAnal
 // Arbitrage Components
 //==============================================================================
 
-std::unique_ptr<SelfTradePrevention> FutuComponentFactory::createSelfTradePrevention(
-    const CoordinatorConfig& config,
-    UnifiedOrderTracker* tracker)
+std::unique_ptr<SelfTradePrevention> FutuComponentFactory::createSelfTradePrevention(const CoordinatorConfig& config,
+                                                                                     UnifiedOrderTracker* tracker)
 {
     auto stp = std::make_unique<SelfTradePrevention>();
 
@@ -134,8 +131,8 @@ std::unique_ptr<SelfTradePrevention> FutuComponentFactory::createSelfTradePreven
     return stp;
 }
 
-std::unique_ptr<AsyncArbitrageExecutor> FutuComponentFactory::createAsyncArbitrageExecutor(
-    const CoordinatorConfig& config)
+std::unique_ptr<AsyncArbitrageExecutor>
+FutuComponentFactory::createAsyncArbitrageExecutor(const CoordinatorConfig& config)
 {
     auto executor = std::make_unique<AsyncArbitrageExecutor>();
 

@@ -12,18 +12,14 @@
 #include <algorithm>
 #include <cmath>
 
-namespace futu {
+namespace futu
+{
 
 //------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
 
-ToxicFlowDetector::ToxicFlowDetector()
-    : _calibrator(nullptr)
-    , _has_book_data(false)
-    , _cache_dirty(true)
-{
-}
+ToxicFlowDetector::ToxicFlowDetector() : _calibrator(nullptr), _has_book_data(false), _cache_dirty(true) {}
 
 //------------------------------------------------------------------------------
 // Configuration
@@ -126,7 +122,8 @@ void ToxicFlowDetector::onTickVolume(const char* stdCode, const wtp::WTSTickData
 
 void ToxicFlowDetector::updateCache() const
 {
-    if (!_cache_dirty) return;
+    if (!_cache_dirty)
+        return;
 
     _cached_metrics = ToxicityMetrics();
 
@@ -147,24 +144,22 @@ void ToxicFlowDetector::updateCache() const
     // self_trade_weight controls how much realized adverse ratio contributes
     auto real_result = _realized.analyze();
     _cached_metrics.realized_adverse_ratio = real_result.adverse_ratio;
-    if (real_result.total_fills >= 3)  // Need minimum sample size
+    if (real_result.total_fills >= 3) // Need minimum sample size
     {
         double realized_weight = _params.self_trade_weight;
-        _cached_metrics.toxic_score = (1.0 - realized_weight) * _cached_metrics.toxic_score
-                                    + realized_weight * real_result.decayed_score;
+        _cached_metrics.toxic_score =
+            (1.0 - realized_weight) * _cached_metrics.toxic_score + realized_weight * real_result.decayed_score;
     }
 
     // Apply extreme_signal as independent protection layer AFTER realized weighting
-    if (pred_result.extreme_signal > 0)
-    {
-        _cached_metrics.toxic_score = std::max(_cached_metrics.toxic_score,
-                                               pred_result.extreme_signal * _params.extreme_signal_weight);
+    if (pred_result.extreme_signal > 0) {
+        _cached_metrics.toxic_score =
+            std::max(_cached_metrics.toxic_score, pred_result.extreme_signal * _params.extreme_signal_weight);
     }
 
     _cached_metrics.is_toxic = _cached_metrics.toxic_score > _params.adverse_threshold;
 
-    if (_cached_metrics.is_toxic)
-    {
+    if (_cached_metrics.is_toxic) {
         _cached_metrics.toxic_side = pred_result.toxic_side;
     }
 
@@ -197,10 +192,9 @@ double ToxicFlowDetector::getAvgAdverseMove() const
 // Enhanced Toxicity Detection
 //------------------------------------------------------------------------------
 
-ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(
-    const BookAnalysisResult& book_sig,
-    const CalibrationResult& self_calib,
-    const AlphaResult& alpha)
+ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(const BookAnalysisResult& book_sig,
+                                                          const CalibrationResult& self_calib,
+                                                          const AlphaResult& alpha)
 {
     // Update components
     _predictive.updateAlpha(alpha, TradeImbalanceResult{});
@@ -217,8 +211,7 @@ ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(
 
 void ToxicFlowDetector::feedTickInference(const InferredTransaction& tick_inf)
 {
-    if (_fusion_enabled)
-    {
+    if (_fusion_enabled) {
         _signal_fusion.addTickInference(tick_inf);
         _cache_dirty = true;
     }
@@ -226,8 +219,7 @@ void ToxicFlowDetector::feedTickInference(const InferredTransaction& tick_inf)
 
 void ToxicFlowDetector::feedBookSignal(const DepthImbalanceSignal& book_sig)
 {
-    if (_fusion_enabled)
-    {
+    if (_fusion_enabled) {
         _signal_fusion.addBookSignal(book_sig);
         _cache_dirty = true;
     }
@@ -235,11 +227,13 @@ void ToxicFlowDetector::feedBookSignal(const DepthImbalanceSignal& book_sig)
 
 void ToxicFlowDetector::runFusionCycle()
 {
-    if (!_fusion_enabled) return;
+    if (!_fusion_enabled)
+        return;
 
     // 无任何输入源(feedTickInference/feedBookSignal/addSelfTradeCalibration 均未被调用)时
     // fuse() 输出 direction=0 — 直接回灌会用空 alpha 覆盖 Predictive 的有效通道, 必须跳过.
-    if (!_signal_fusion.hasAnySource()) return;
+    if (!_signal_fusion.hasAnySource())
+        return;
 
     // Fuse all available signals into synthetic transaction data
     SyntheticTransactionData synth = _signal_fusion.fuse();

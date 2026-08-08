@@ -10,31 +10,17 @@
 #include <sstream>
 #include <iomanip>
 
-namespace futu {
+namespace futu
+{
 
 PerformanceAnalyzer::PerformanceAnalyzer()
-    : _quote_count(0)
-    , _total_pnl(0)
-    , _total_spread_captured(0)
-    , _total_adverse_selection(0)
-    , _total_real_adverse(0)
-    , _real_adverse_count(0)
-    , _total_volume(0)
-    , _total_trades(0)
-    , _winning_trades(0)
-    , _peak_pnl(0)
-    , _max_drawdown(0)
-    , _toxicity_events(0)
-    , _alpha_signals(0)
-    , _alpha_correct(0)
-    , _alpha_pnl(0)
-    , _start_time(0)
-    , _last_trade_time(0)
-    , _trading_days(0)
+    : _quote_count(0), _total_pnl(0), _total_spread_captured(0), _total_adverse_selection(0), _total_real_adverse(0),
+      _real_adverse_count(0), _total_volume(0), _total_trades(0), _winning_trades(0), _peak_pnl(0), _max_drawdown(0),
+      _toxicity_events(0), _alpha_signals(0), _alpha_correct(0), _alpha_pnl(0), _start_time(0), _last_trade_time(0),
+      _trading_days(0)
 {
     // Initialize condition performance
-    for (int i = 0; i <= static_cast<int>(MarketCondition::NORMAL); ++i)
-    {
+    for (int i = 0; i <= static_cast<int>(MarketCondition::NORMAL); ++i) {
         ConditionPerformance cp;
         cp.condition = static_cast<MarketCondition>(i);
         _condition_perf[cp.condition] = cp;
@@ -77,14 +63,11 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
         _winning_trades++;
 
     // Track alpha performance
-    if (std::abs(trade.alpha_at_trade) >= _config.strong_alpha_threshold)
-    {
+    if (std::abs(trade.alpha_at_trade) >= _config.strong_alpha_threshold) {
         _alpha_signals++;
         // Alpha is correct if trade direction matches alpha direction
-        bool alpha_correct = (trade.alpha_at_trade > 0 && trade.is_buy) ||
-                            (trade.alpha_at_trade < 0 && !trade.is_buy);
-        if (alpha_correct)
-        {
+        bool alpha_correct = (trade.alpha_at_trade > 0 && trade.is_buy) || (trade.alpha_at_trade < 0 && !trade.is_buy);
+        if (alpha_correct) {
             _alpha_correct++;
             _alpha_pnl += immediate_pnl;
         }
@@ -116,16 +99,17 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
         cp.win_rate = (cp.win_rate * (cp.trade_count - 1) + 1.0) / cp.trade_count;
     else
         cp.win_rate = cp.win_rate * (cp.trade_count - 1) / cp.trade_count;
-    cp.avg_spread_captured = (cp.avg_spread_captured * (cp.trade_count - 1) + spread_cap)
-                              / cp.trade_count;
+    cp.avg_spread_captured = (cp.avg_spread_captured * (cp.trade_count - 1) + spread_cap) / cp.trade_count;
 }
 
 void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint64_t timestamp)
 {
     // 评估 pending adverse: 每个 tick 递减 ticks_remaining, 到 0 时用当前 mid 计算
     for (auto& pa : _pending_adverse) {
-        if (pa.evaluated) continue;
-        if (pa.code != code) continue;  // 只评估同合约的 pending
+        if (pa.evaluated)
+            continue;
+        if (pa.code != code)
+            continue; // 只评估同合约的 pending
 
         pa.ticks_remaining--;
         if (pa.ticks_remaining == 0) {
@@ -137,9 +121,9 @@ void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint
             // 卖出(is_buy=false)后价格上涨 → adverse
             double real_adverse = 0;
             if (pa.is_buy && price_change < 0) {
-                real_adverse = std::abs(price_change) * pa.qty;  // 买入后跌的量
+                real_adverse = std::abs(price_change) * pa.qty; // 买入后跌的量
             } else if (!pa.is_buy && price_change > 0) {
-                real_adverse = price_change * pa.qty;  // 卖出后涨的量
+                real_adverse = price_change * pa.qty; // 卖出后涨的量
             }
 
             _total_real_adverse += real_adverse;
@@ -153,9 +137,10 @@ void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint
     // _pending_adverse 无上限增长 (内存泄漏).
     {
         uint64_t now = timestamp;
-        auto it = std::remove_if(_pending_adverse.begin(), _pending_adverse.end(),
-            [now, this](const PendingAdverse& pa) {
-                if (pa.evaluated) return true;
+        auto it =
+            std::remove_if(_pending_adverse.begin(), _pending_adverse.end(), [now, this](const PendingAdverse& pa) {
+                if (pa.evaluated)
+                    return true;
                 return _adverse_timeout_ms > 0 && now > pa.trade_timestamp &&
                        (now - pa.trade_timestamp) > _adverse_timeout_ms;
             });
@@ -163,16 +148,13 @@ void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint
     }
 }
 
-void PerformanceAnalyzer::recordQuote(const std::string& code,
-                                       double bidPrice, double askPrice,
-                                       double bidQty, double askQty,
-                                       uint64_t timestamp)
+void PerformanceAnalyzer::recordQuote(
+    const std::string& code, double bidPrice, double askPrice, double bidQty, double askQty, uint64_t timestamp)
 {
     _quote_count++;
 }
 
-void PerformanceAnalyzer::updatePosition(const std::string& code,
-                                          double position, double avgCost)
+void PerformanceAnalyzer::updatePosition(const std::string& code, double position, double avgCost)
 {
     PositionState& ps = _positions[code];
     ps.position = position;
@@ -201,21 +183,18 @@ PerformanceMetrics PerformanceAnalyzer::getMetrics() const
     metrics.total_trades = _total_trades;
 
     // Spread metrics
-    if (_total_trades > 0)
-    {
+    if (_total_trades > 0) {
         metrics.avg_spread_captured = _total_spread_captured / _total_trades;
     }
     metrics.spread_capture_rate = metrics.avg_spread_captured;
 
     // Fill metrics
-    if (_quote_count > 0)
-    {
+    if (_quote_count > 0) {
         metrics.fill_rate = static_cast<double>(_total_trades) / _quote_count;
     }
 
     // Win rate
-    if (_total_trades > 0)
-    {
+    if (_total_trades > 0) {
         metrics.win_rate = static_cast<double>(_winning_trades) / _total_trades;
     }
 
@@ -223,57 +202,50 @@ PerformanceMetrics PerformanceAnalyzer::getMetrics() const
     metrics.max_drawdown = _max_drawdown;
 
     // Sharpe ratio (simplified)
-    if (_pnl_history.size() >= 10)
-    {
+    if (_pnl_history.size() >= 10) {
         double mean = 0, variance = 0;
-        for (size_t i = 0; i < _pnl_history.size(); ++i)
-        {
+        for (size_t i = 0; i < _pnl_history.size(); ++i) {
             mean += _pnl_history[i];
         }
         mean /= _pnl_history.size();
 
-        for (size_t i = 0; i < _pnl_history.size(); ++i)
-        {
+        for (size_t i = 0; i < _pnl_history.size(); ++i) {
             double diff = _pnl_history[i] - mean;
             variance += diff * diff;
         }
         variance /= _pnl_history.size();
 
         double std_dev = std::sqrt(variance);
-        if (std_dev > 0)
-        {
+        if (std_dev > 0) {
             // _pnl_history 是 per-trade 收益, 非 per-day. 正确年化因子 = sqrt(每年成交笔数).
             // 每年笔数 ≈ 250 * 平均每日笔数; 旧代码 sqrt(250) 假设每日仅 1 笔,
             // HFT 每日数千笔 → Sharpe 被系统性低估 ~sqrt(笔数) 倍.
             double days = (_trading_days > 0) ? static_cast<double>(_trading_days) : 1.0;
             double trades_per_day = static_cast<double>(_total_trades) / days;
-            if (trades_per_day < 1.0) trades_per_day = 1.0;
+            if (trades_per_day < 1.0)
+                trades_per_day = 1.0;
             metrics.sharpe_ratio = mean / std_dev * std::sqrt(250.0 * trades_per_day);
         }
     }
 
     // Adverse selection
-    if (_total_pnl != 0)
-    {
+    if (_total_pnl != 0) {
         metrics.adverse_ratio = _total_adverse_selection / std::abs(_total_pnl);
     }
     // 真实 adverse (成交后价格逆向 / 成交量) — 独立指标, 不被 PnL 放大
-    if (_total_volume > 0)
-    {
+    if (_total_volume > 0) {
         metrics.real_adverse_per_vol = _total_real_adverse / _total_volume;
     }
     metrics.toxicity_events = _toxicity_events;
 
     // Alpha performance
-    if (_alpha_signals > 0)
-    {
+    if (_alpha_signals > 0) {
         metrics.alpha_accuracy = static_cast<double>(_alpha_correct) / _alpha_signals;
         metrics.alpha_pnl_per_trade = _alpha_pnl / _alpha_signals;
     }
 
     // Time metrics
-    if (_start_time > 0 && _last_trade_time > _start_time)
-    {
+    if (_start_time > 0 && _last_trade_time > _start_time) {
         metrics.trading_time_sec = (_last_trade_time - _start_time) / 1000;
     }
     metrics.trading_days = _trading_days;
@@ -296,21 +268,18 @@ PnLAttribution PerformanceAnalyzer::getPnLAttribution() const
 
     // Inventory PnL: 各合约累计真实成交 PnL (recordTrade 按合约累加)
     double inv_pnl = 0;
-    for (const auto& kv : _positions)
-    {
+    for (const auto& kv : _positions) {
         inv_pnl += kv.second.realized_pnl;
     }
     attr.inventory_pnl = inv_pnl;
 
     // Timing PnL: residual
-    attr.timing_pnl = _total_pnl - attr.spread_pnl - attr.inventory_pnl
-                      - attr.alpha_pnl + attr.adverse_selection;
+    attr.timing_pnl = _total_pnl - attr.spread_pnl - attr.inventory_pnl - attr.alpha_pnl + attr.adverse_selection;
 
     return attr;
 }
 
-std::map<MarketCondition, ConditionPerformance>
-PerformanceAnalyzer::getPerformanceByCondition() const
+std::map<MarketCondition, ConditionPerformance> PerformanceAnalyzer::getPerformanceByCondition() const
 {
     return _condition_perf;
 }
@@ -323,15 +292,13 @@ double PerformanceAnalyzer::calculateAdverseSelection(const TradeRecord& trade) 
     double adverse = 0;
 
     // If we crossed the spread, we paid half spread
-    if (trade.is_crossing)
-    {
+    if (trade.is_crossing) {
         adverse = trade.spread_at_trade / 2 * trade.qty;
     }
 
     // Additional adverse selection based on spread captured
     double spread_cap = trade.spreadCaptured();
-    if (spread_cap < 0)
-    {
+    if (spread_cap < 0) {
         // Negative spread capture indicates adverse selection
         adverse += std::abs(spread_cap) * trade.spread_at_trade * trade.qty;
     }
@@ -416,8 +383,7 @@ void PerformanceAnalyzer::reset()
     _last_trade_time = 0;
     _trading_days = 0;
 
-    for (auto& kv : _condition_perf)
-    {
+    for (auto& kv : _condition_perf) {
         kv.second = ConditionPerformance();
         kv.second.condition = kv.first;
     }
@@ -429,7 +395,7 @@ void PerformanceAnalyzer::resetDaily()
     _trading_days++;
 
     // Reset daily PnL tracking
-    _peak_pnl = _total_pnl;  // Reset peak to current PnL
+    _peak_pnl = _total_pnl; // Reset peak to current PnL
     _max_drawdown = 0;
 }
 

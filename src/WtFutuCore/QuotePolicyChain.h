@@ -29,39 +29,40 @@
 #include "SpreadArbitrageManager.h"
 #include "SelfTradeCalibrator.h"
 
-namespace futu {
+namespace futu
+{
 
 /// 链上传递的可变报价决策
 struct QuoteState
 {
-    double skew        = 0.0;
+    double skew = 0.0;
     double spread_mult = 1.0;
-    double l0_bid      = 0.0;
-    double l0_ask      = 0.0;
-    bool   allow_bid   = true;
-    bool   allow_ask   = true;
+    double l0_bid = 0.0;
+    double l0_ask = 0.0;
+    bool allow_bid = true;
+    bool allow_ask = true;
 };
 
 /// 决策输入 (processQuoting 每 tick 构建)
 struct QuotePolicyContext
 {
     std::string code;
-    double   mid          = 0.0;
-    double   tick_size    = 0.0;
-    double   upper_limit  = 0.0;
-    double   lower_limit  = 0.0;
-    uint64_t timestamp    = 0;
-    bool     cold_start   = false;
+    double mid = 0.0;
+    double tick_size = 0.0;
+    double upper_limit = 0.0;
+    double lower_limit = 0.0;
+    uint64_t timestamp = 0;
+    bool cold_start = false;
 
     // 服务依赖 (可空)
-    const SpreadOptimizer*        spread_opt  = nullptr;  ///< ColdStart 取参数
-    SpreadArbitrageManager*       arb_manager = nullptr;
-    ToxicFlowDetector*            toxicity    = nullptr;
-    SelfTradeCalibrator*          calibrator  = nullptr;
+    const SpreadOptimizer* spread_opt = nullptr; ///< ColdStart 取参数
+    SpreadArbitrageManager* arb_manager = nullptr;
+    ToxicFlowDetector* toxicity = nullptr;
+    SelfTradeCalibrator* calibrator = nullptr;
 
     // 模块配置
-    bool     use_toxicity_detector = false;
-    uint64_t toxicity_cooloff_ms   = 0;
+    bool use_toxicity_detector = false;
+    uint64_t toxicity_cooloff_ms = 0;
 };
 
 class IQuotePolicy
@@ -87,28 +88,29 @@ public:
     //       reset 在 TdSpi (onExternalResumeFromRisk), apply 读在 MdSpi
     void tickSoft(double cur_util, double l1, double l2, bool risk_halted)
     {
-        if (risk_halted) return;
+        if (risk_halted)
+            return;
         double target = (cur_util >= l2) ? 1.5 : (cur_util >= l1) ? 1.2 : 1.0;
         double old = _mult.load(std::memory_order_acquire);
-        if (target != old)
-        {
-            WTSLogger::debug("[RISK] soft WIDEN_SPREAD stateless: spread_mult {:.1f}->{:.1f} (util={:.2f})",
-                old, target, cur_util);
+        if (target != old) {
+            WTSLogger::debug(
+                "[RISK] soft WIDEN_SPREAD stateless: spread_mult {:.1f}->{:.1f} (util={:.2f})", old, target, cur_util);
             _mult.store(target, std::memory_order_release);
         }
     }
 
     void onHardWiden(double cur_util, double l2)
     {
-        double target_mult = (cur_util >= l2) ? 1.5 : 1.2;  // R2.5: L2→×1.5, L1→×1.2
+        double target_mult = (cur_util >= l2) ? 1.5 : 1.2; // R2.5: L2→×1.5, L1→×1.2
         // max 闩锁的 CAS 形式 (并发 reset 下不丢失"至少 target"语义)
         double old = _mult.load(std::memory_order_acquire);
         while (target_mult > old &&
-               !_mult.compare_exchange_weak(old, target_mult,
-                   std::memory_order_acq_rel, std::memory_order_acquire))
-        {}
+               !_mult.compare_exchange_weak(old, target_mult, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
         WTSLogger::warn("[RISK] WIDEN_SPREAD: spread_mult={:.1f} (util={:.2f}, L{})",
-            _mult.load(std::memory_order_acquire), cur_util, cur_util >= l2 ? 2 : 1);
+                        _mult.load(std::memory_order_acquire),
+                        cur_util,
+                        cur_util >= l2 ? 2 : 1);
     }
 
     void reset() { _mult.store(1.0, std::memory_order_release); }
@@ -136,16 +138,14 @@ public:
 
     void apply(const QuotePolicyContext& ctx, QuoteState& st) override
     {
-        if (!ctx.arb_manager) return;
+        if (!ctx.arb_manager)
+            return;
 
         int arb_close_dir = ctx.arb_manager->getArbCloseDirection(ctx.code);
-        if (arb_close_dir > 0)
-        {
+        if (arb_close_dir > 0) {
             st.allow_ask = false;
             WTSLogger::debug("[ARB-SYNC] {} arb buying leg, suppress MM ask", ctx.code);
-        }
-        else if (arb_close_dir < 0)
-        {
+        } else if (arb_close_dir < 0) {
             st.allow_bid = false;
             WTSLogger::debug("[ARB-SYNC] {} arb selling leg, suppress MM bid", ctx.code);
         }
@@ -156,14 +156,18 @@ public:
         if (!s_observe_enhancer.load(std::memory_order_relaxed))
             return;
         double agg_z = ctx.arb_manager->getAggregateZscore(ctx.code);
-        if (std::abs(agg_z) > 0.1)
-        {
+        if (std::abs(agg_z) > 0.1) {
             auto adj = ctx.arb_manager->getQuotingAdjustmentForLeg(ctx.code, ctx.timestamp);
-            if (adj.confidence > 0.0)
-            {
-                WTSLogger::debug("[ARB-ENH] {} agg_z={:.2f} adj[bid={:.3f},ask={:.3f},mult={:.2f},supB={},supA={}] (observe-only)",
-                    ctx.code, agg_z, adj.bid_skew_adjustment, adj.ask_skew_adjustment,
-                    adj.spread_multiplier, adj.suppress_bid, adj.suppress_ask);
+            if (adj.confidence > 0.0) {
+                WTSLogger::debug(
+                    "[ARB-ENH] {} agg_z={:.2f} adj[bid={:.3f},ask={:.3f},mult={:.2f},supB={},supA={}] (observe-only)",
+                    ctx.code,
+                    agg_z,
+                    adj.bid_skew_adjustment,
+                    adj.ask_skew_adjustment,
+                    adj.spread_multiplier,
+                    adj.suppress_bid,
+                    adj.suppress_ask);
             }
         }
     }
@@ -179,44 +183,42 @@ class ToxicityPolicy : public IQuotePolicy
 public:
     // v7.6: _resume_time 原子化 — apply/inCooloff 在 MdSpi,
     //       reset 在 onSessionBegin (RtTicker 线程)
-    bool inCooloff(uint64_t timestamp) const
-    {
-        return timestamp < _resume_time.load(std::memory_order_acquire);
-    }
+    bool inCooloff(uint64_t timestamp) const { return timestamp < _resume_time.load(std::memory_order_acquire); }
 
     void reset() { _resume_time.store(0, std::memory_order_release); }
 
     void apply(const QuotePolicyContext& ctx, QuoteState& st) override
     {
-        if (!ctx.use_toxicity_detector || !ctx.toxicity) return;
+        if (!ctx.use_toxicity_detector || !ctx.toxicity)
+            return;
 
         ToxicityMetrics tox = ctx.toxicity->analyze();
 
         if (tox.is_toxic) {
             // 设置冷却期：即使score短暂回落，也保持保护期
-            _resume_time.store(ctx.timestamp + ctx.toxicity_cooloff_ms,
-                std::memory_order_release);
+            _resume_time.store(ctx.timestamp + ctx.toxicity_cooloff_ms, std::memory_order_release);
 
             if (tox.toxic_side == 1) {
                 st.allow_bid = false;
-                WTSLogger::warn("[TOXIC] {} Buy-side toxic (score={:.2f}), pausing bid quotes",
-                    ctx.code, tox.toxic_score);
+                WTSLogger::warn(
+                    "[TOXIC] {} Buy-side toxic (score={:.2f}), pausing bid quotes", ctx.code, tox.toxic_score);
             } else if (tox.toxic_side == -1) {
                 st.allow_ask = false;
-                WTSLogger::warn("[TOXIC] {} Sell-side toxic (score={:.2f}), pausing ask quotes",
-                    ctx.code, tox.toxic_score);
+                WTSLogger::warn(
+                    "[TOXIC] {} Sell-side toxic (score={:.2f}), pausing ask quotes", ctx.code, tox.toxic_score);
             } else {
                 st.allow_bid = false;
                 st.allow_ask = false;
-                WTSLogger::warn("[TOXIC] {} Both-side toxic (score={:.2f}), pausing all quotes",
-                    ctx.code, tox.toxic_score);
+                WTSLogger::warn(
+                    "[TOXIC] {} Both-side toxic (score={:.2f}), pausing all quotes", ctx.code, tox.toxic_score);
             }
         } else if (ctx.timestamp < _resume_time.load(std::memory_order_acquire)) {
             // 冷却期内：is_toxic已恢复，但仍在保护期
             st.allow_bid = false;
             st.allow_ask = false;
             WTSLogger::debug("[TOXIC] {} in cooloff (resume in {}ms)",
-                ctx.code, _resume_time.load(std::memory_order_acquire) - ctx.timestamp);
+                             ctx.code,
+                             _resume_time.load(std::memory_order_acquire) - ctx.timestamp);
         }
     }
 
@@ -274,11 +276,11 @@ class ColdStartPolicy : public IQuotePolicy
 public:
     void apply(const QuotePolicyContext& ctx, QuoteState& st) override
     {
-        if (!ctx.cold_start || !ctx.spread_opt) return;
+        if (!ctx.cold_start || !ctx.spread_opt)
+            return;
 
         double max_mult = ctx.spread_opt->getParams().max_spread_mult;
-        if (st.spread_mult < max_mult)
-        {
+        if (st.spread_mult < max_mult) {
             st.spread_mult = max_mult;
             double half_spread = ctx.tick_size * ctx.spread_opt->getParams().base_spread * max_mult / 2.0;
             st.l0_bid = ctx.mid - half_spread - st.skew * ctx.tick_size;
@@ -299,7 +301,8 @@ class FillRetreatPolicy : public IQuotePolicy
 public:
     void apply(const QuotePolicyContext& ctx, QuoteState& st) override
     {
-        if (!ctx.calibrator) return;
+        if (!ctx.calibrator)
+            return;
 
         FillRetreat retreat = ctx.calibrator->getFillRetreat(ctx.code, ctx.timestamp);
         if (retreat.bid_retreat_active && st.l0_bid > retreat.bid_retreat_price) {
@@ -317,8 +320,8 @@ public:
 class QuotePolicyChain
 {
 public:
-    RiskWidenPolicy&   riskWiden()   { return _risk_widen; }
-    ToxicityPolicy&    toxicity()    { return _toxicity; }
+    RiskWidenPolicy& riskWiden() { return _risk_widen; }
+    ToxicityPolicy& toxicity() { return _toxicity; }
 
     /// GLFT 之后依次执行: RiskWiden → ArbCloseSync → Toxicity → LimitPrice
     /// → ColdStart → FillRetreat
@@ -333,12 +336,12 @@ public:
     }
 
 private:
-    RiskWidenPolicy    _risk_widen;
+    RiskWidenPolicy _risk_widen;
     ArbCloseSyncPolicy _arb_sync;
-    ToxicityPolicy     _toxicity;
-    LimitPricePolicy   _limit_price;
-    ColdStartPolicy    _cold_start;
-    FillRetreatPolicy  _fill_retreat;
+    ToxicityPolicy _toxicity;
+    LimitPricePolicy _limit_price;
+    ColdStartPolicy _cold_start;
+    FillRetreatPolicy _fill_retreat;
 };
 
 } // namespace futu

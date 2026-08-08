@@ -24,28 +24,29 @@
 
 namespace rj = rapidjson;
 
-namespace futu {
+namespace futu
+{
 
 namespace
 {
-    inline uint64_t steady_ms()
-    {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
-
-    /// 原子写文件: tmp + rename (DataMgr 60s 轮询读, 避免半文件)
-    bool write_file_atomic(const std::string& path, const char* content)
-    {
-        std::string tmp = path + ".tmp";
-        FILE* fp = fopen(tmp.c_str(), "w");
-        if (fp == nullptr)
-            return false;
-        fwrite(content, 1, strlen(content), fp);
-        fclose(fp);
-        return rename(tmp.c_str(), path.c_str()) == 0;
-    }
+inline uint64_t steady_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
+
+/// 原子写文件: tmp + rename (DataMgr 60s 轮询读, 避免半文件)
+bool write_file_atomic(const std::string& path, const char* content)
+{
+    std::string tmp = path + ".tmp";
+    FILE* fp = fopen(tmp.c_str(), "w");
+    if (fp == nullptr)
+        return false;
+    fwrite(content, 1, strlen(content), fp);
+    fclose(fp);
+    return rename(tmp.c_str(), path.c_str()) == 0;
+}
+} // namespace
 
 void MonitorBridge::init(const char* straId, const FutuPortfolio* portfolio, const Config& cfg)
 {
@@ -54,8 +55,7 @@ void MonitorBridge::init(const char* straId, const FutuPortfolio* portfolio, con
     _cfg = cfg;
 
     if (_cfg.enabled)
-        WTSLogger::info("MonitorBridge[{}] enabled, flush interval {}ms",
-                        _stra_id.c_str(), _cfg.flush_interval_ms);
+        WTSLogger::info("MonitorBridge[{}] enabled, flush interval {}ms", _stra_id.c_str(), _cfg.flush_interval_ms);
 }
 
 void MonitorBridge::maybeFlush(wtp::IUftStraCtx* ctx)
@@ -85,8 +85,7 @@ void MonitorBridge::onSessionEnd(wtp::IUftStraCtx* ctx, uint32_t uTDate)
     doFlush(uTDate);
 
     double closeprofit = 0, dynprofit = 0;
-    for (const auto& cs : _portfolio->getAllContractsSnapshot())
-    {
+    for (const auto& cs : _portfolio->getAllContractsSnapshot()) {
         closeprofit += cs.realized_pnl;
         dynprofit += cs.unrealized_pnl;
     }
@@ -103,14 +102,13 @@ void MonitorBridge::doFlush(uint32_t tdate)
 
     // === 持仓 (契约对齐 CtaStraBaseCtx::save_data) ===
     rj::Value jPos(rj::kArrayType);
-    for (const auto& cs : _portfolio->getAllContractsSnapshot())
-    {
+    for (const auto& cs : _portfolio->getAllContractsSnapshot()) {
         total_profit += cs.realized_pnl;
         total_dynprofit += cs.unrealized_pnl;
 
         double volume = std::abs(cs.position);
         if (volume == 0.0)
-            continue;    // GUI 也过滤 volume=0, 直接不写
+            continue; // GUI 也过滤 volume=0, 直接不写
 
         rj::Value pItem(rj::kObjectType);
         pItem.AddMember("code", rj::Value(cs.code.c_str(), allocator), allocator);
@@ -145,7 +143,7 @@ void MonitorBridge::doFlush(uint32_t tdate)
         if (cs.short_qty > 0)
             addDetail(false, cs.short_qty, cs.short_avg);
         if (cs.long_qty <= 0 && cs.short_qty <= 0)
-            addDetail(cs.position > 0, volume, cs.avg_cost);    // 兜底: 净头寸
+            addDetail(cs.position > 0, volume, cs.avg_cost); // 兜底: 净头寸
 
         pItem.AddMember("details", details, allocator);
         jPos.PushBack(pItem, allocator);
@@ -170,8 +168,7 @@ void MonitorBridge::doFlush(uint32_t tdate)
     write_file_atomic(path, sb.GetString());
 }
 
-void MonitorBridge::appendFundsCsv(uint32_t tdate, double closeprofit,
-                                   double dynprofit, double fees)
+void MonitorBridge::appendFundsCsv(uint32_t tdate, double closeprofit, double dynprofit, double fees)
 {
     // 契约对齐 DataMgr.get_funds: date,closeprofit,dynprofit,dynbalance,fee
     std::string dir = WtHelper::getOutputDir();
@@ -182,12 +179,10 @@ void MonitorBridge::appendFundsCsv(uint32_t tdate, double closeprofit,
 
     // 同日重复收盘不重复追加
     FILE* fp = fopen(path.c_str(), "r");
-    if (fp != nullptr)
-    {
-        char line[256] = { 0 };
-        char last[256] = { 0 };
-        while (fgets(line, sizeof(line), fp))
-        {
+    if (fp != nullptr) {
+        char line[256] = {0};
+        char last[256] = {0};
+        while (fgets(line, sizeof(line), fp)) {
             if (strlen(line) > 8)
                 strcpy(last, line);
         }
@@ -198,15 +193,12 @@ void MonitorBridge::appendFundsCsv(uint32_t tdate, double closeprofit,
     }
 
     fp = fopen(path.c_str(), "a");
-    if (fp == nullptr)
-    {
-        WTSLogger::warn("MonitorBridge[{}] open {} for append failed",
-                        _stra_id.c_str(), path.c_str());
+    if (fp == nullptr) {
+        WTSLogger::warn("MonitorBridge[{}] open {} for append failed", _stra_id.c_str(), path.c_str());
         return;
     }
     double dynbalance = closeprofit + dynprofit - fees;
-    fprintf(fp, "%u,%.2f,%.2f,%.2f,%.2f\n",
-            tdate, closeprofit, dynprofit, dynbalance, fees);
+    fprintf(fp, "%u,%.2f,%.2f,%.2f,%.2f\n", tdate, closeprofit, dynprofit, dynbalance, fees);
     fclose(fp);
 }
 

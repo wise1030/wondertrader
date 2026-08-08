@@ -17,7 +17,8 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // OFI Signal Source
@@ -28,26 +29,16 @@ class OFISignalSource : public ISignalSource
 public:
     struct Config
     {
-        uint32_t window;           ///< OFI calculation window
-        double normalization_factor;    ///< Adaptive normalization (computed)
+        uint32_t window;             ///< OFI calculation window
+        double normalization_factor; ///< Adaptive normalization (computed)
 
-        Config()
-            : window(50)
-            , normalization_factor(200.0)
-        {}
+        Config() : window(50), normalization_factor(200.0) {}
     };
 
     explicit OFISignalSource(const Config& cfg = Config())
-        : _cfg(cfg)
-        , _enabled(true)
-        , _prev_bid_price(0)
-        , _prev_ask_price(0)
-        , _prev_bid_vol(0)
-        , _prev_ask_vol(0)
-        , _cumulative_ofi(0)
-        , _last_timestamp(0)
-    {
-    }
+        : _cfg(cfg), _enabled(true), _prev_bid_price(0), _prev_ask_price(0), _prev_bid_vol(0), _prev_ask_vol(0),
+          _cumulative_ofi(0), _last_timestamp(0)
+    {}
 
     //==========================================================================
     // ISignalSource Interface
@@ -59,10 +50,7 @@ public:
         return n;
     }
 
-    SignalType type() const override
-    {
-        return SignalType::OFI;
-    }
+    SignalType type() const override { return SignalType::OFI; }
 
     void update(const MarketDataContext& book) override
     {
@@ -72,44 +60,32 @@ public:
         double ask_vol = book.getAskVol();
         uint64_t timestamp = book.getTimestamp();
 
-        if (bid_px <= 0 || ask_px <= 0)
-        {
+        if (bid_px <= 0 || ask_px <= 0) {
             _result.valid = false;
             return;
         }
 
-        if (_prev_bid_price > 0 && _prev_ask_price > 0)
-        {
+        if (_prev_bid_price > 0 && _prev_ask_price > 0) {
             // Calculate OFI using standard formulation
             // OFI = e_bid - e_ask
             double e_bid = 0, e_ask = 0;
 
             // Bid side
-            if (bid_px > _prev_bid_price)
-            {
-                e_bid = bid_vol;  // New level, new volume
-            }
-            else if (bid_px < _prev_bid_price)
-            {
-                e_bid = -_prev_bid_vol;  // Level removed
-            }
-            else
-            {
-                e_bid = bid_vol - _prev_bid_vol;  // Volume change at same level
+            if (bid_px > _prev_bid_price) {
+                e_bid = bid_vol; // New level, new volume
+            } else if (bid_px < _prev_bid_price) {
+                e_bid = -_prev_bid_vol; // Level removed
+            } else {
+                e_bid = bid_vol - _prev_bid_vol; // Volume change at same level
             }
 
             // Ask side (negative because ask volume increase is bearish)
-            if (ask_px > _prev_ask_price)
-            {
-                e_ask = -_prev_ask_vol;  // Level removed
-            }
-            else if (ask_px < _prev_ask_price)
-            {
-                e_ask = ask_vol;  // New level, new volume
-            }
-            else
-            {
-                e_ask = ask_vol - _prev_ask_vol;  // Volume change at same level
+            if (ask_px > _prev_ask_price) {
+                e_ask = -_prev_ask_vol; // Level removed
+            } else if (ask_px < _prev_ask_price) {
+                e_ask = ask_vol; // New level, new volume
+            } else {
+                e_ask = ask_vol - _prev_ask_vol; // Volume change at same level
             }
 
             // OFI = e_bid - e_ask
@@ -129,8 +105,7 @@ public:
             //   双重衰减则使信号被过度压制(0.999^50 * 弹出 ≈ 信号偏小5%+)。
 
             // Remove old samples (5 second window approximation)
-            while (_ofi_history.size() > _cfg.window)
-            {
+            while (_ofi_history.size() > _cfg.window) {
                 _cumulative_ofi -= _ofi_history.front();
                 _ofi_history.pop();
             }
@@ -144,13 +119,10 @@ public:
 
             // Calculate bid/ask pressure
             double total_pressure = 1.0 + std::abs(_result.ofi);
-            if (_result.ofi > 0)
-            {
+            if (_result.ofi > 0) {
                 _result.bid_pressure = (1.0 + _result.ofi) / (2.0 * total_pressure) * 2.0;
                 _result.ask_pressure = 1.0 - _result.bid_pressure;
-            }
-            else
-            {
+            } else {
                 _result.ask_pressure = (1.0 - _result.ofi) / (2.0 * total_pressure) * 2.0;
                 _result.bid_pressure = 1.0 - _result.ask_pressure;
             }
@@ -220,7 +192,8 @@ private:
     void updateNormalization()
     {
         size_t n = _ofi_history.size();
-        if (n < 10) return;
+        if (n < 10)
+            return;
 
         // 原方法: 用单 tick OFI 的 std_dev 做归一化
         // 问题: EC 盘口薄, 单 tick OFI 量级大手(±5~±20),
@@ -231,8 +204,7 @@ private:
         // 计算 _ofi_history 的 sum 的绝对值作为 cumulative 估计
         double cum_sum = 0;
         double cum_abs_sum = 0;
-        for (size_t i = 0; i < n; ++i)
-        {
+        for (size_t i = 0; i < n; ++i) {
             cum_sum += _ofi_history[i];
             cum_abs_sum += std::abs(_ofi_history[i]);
         }
@@ -242,11 +214,10 @@ private:
         // 或 ≈ avg_abs_ofi × n (同方向累积)
         // 用 avg_abs_ofi × n 作为保守估计 (覆盖同方向累积情况)
         double avg_abs = cum_abs_sum / n;
-        double cum_scale = avg_abs * n * 0.5;  // 0.5 因子: 介于随机游走和同方向之间
+        double cum_scale = avg_abs * n * 0.5; // 0.5 因子: 介于随机游走和同方向之间
 
         // 归一化因子: 使典型 cumulative_ofi 映射到 tanh 的线性区 (0.5-0.8)
-        if (cum_scale > 0.1)
-        {
+        if (cum_scale > 0.1) {
             _cfg.normalization_factor = std::clamp(cum_scale, 5.0, 500.0);
         }
     }

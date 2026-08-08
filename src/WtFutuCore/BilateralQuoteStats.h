@@ -33,7 +33,8 @@
 #include "../Includes/WTSSessionInfo.hpp"
 #include "../WTSTools/WTSLogger.h"
 
-namespace futu {
+namespace futu
+{
 
 /// 有效报价快照（Per-Quoter，由 FutuQuoter::getValidQuoteSnapshot 累计加权计算后填充）
 ///
@@ -44,15 +45,15 @@ namespace futu {
 ///   - ask 侧对称
 struct ValidQuoteSnapshot
 {
-    bool    has_valid_bid;          ///< bid 侧累计深度是否够 min_valid_qty
-    bool    has_valid_ask;          ///< ask 侧累计深度是否够 min_valid_qty
-    double  weighted_bid_price;     ///< bid 侧累计加权价
-    double  weighted_ask_price;     ///< ask 侧累计加权价
-    double  tick_size;              ///< 合约最小变动价位
+    bool has_valid_bid;        ///< bid 侧累计深度是否够 min_valid_qty
+    bool has_valid_ask;        ///< ask 侧累计深度是否够 min_valid_qty
+    double weighted_bid_price; ///< bid 侧累计加权价
+    double weighted_ask_price; ///< ask 侧累计加权价
+    double tick_size;          ///< 合约最小变动价位
 
     ValidQuoteSnapshot()
-        : has_valid_bid(false), has_valid_ask(false)
-        , weighted_bid_price(0), weighted_ask_price(0), tick_size(1.0) {}
+        : has_valid_bid(false), has_valid_ask(false), weighted_bid_price(0), weighted_ask_price(0), tick_size(1.0)
+    {}
 
     /// 计算累计加权 spread（tick 数）
     inline double getSpreadTicks() const
@@ -66,27 +67,27 @@ struct ValidQuoteSnapshot
 /// 双边报价统计配置
 struct BilateralStatsConfig
 {
-    double  min_valid_qty;              ///< 累计深度阈值（手），如 ao=10
-    double  bilateral_stats_max_spread_ticks;      ///< 统计判断的义务宽度上限(tick); 值由 FutuQuoter 从 obligation_max_spread_ticks 注入 (统一: 挂在哪=统计到哪)
+    double min_valid_qty; ///< 累计深度阈值（手），如 ao=10
+    double
+        bilateral_stats_max_spread_ticks; ///< 统计判断的义务宽度上限(tick); 值由 FutuQuoter 从 obligation_max_spread_ticks 注入 (统一: 挂在哪=统计到哪)
 
-    BilateralStatsConfig()
-        : min_valid_qty(10.0), bilateral_stats_max_spread_ticks(50.0) {}
+    BilateralStatsConfig() : min_valid_qty(10.0), bilateral_stats_max_spread_ticks(50.0) {}
 };
 
 /// 双边报价统计结果
 struct BilateralStatsResult
 {
-    uint64_t    total_bilateral_time_sec;   ///< 双边挂单累计时间（秒）
-    uint64_t    total_session_time_sec;     ///< session 全天交易时间（秒）
-    double      bilateral_ratio;            ///< 双边挂单时间占比 [0, 1]
-    double      avg_spread_ticks;           ///< 累计加权 spread 平均（tick）
-    uint64_t    bilateral_sample_count;     ///< 双边样本数
-    uint32_t    bilateral_switch_count;     ///< 双边状态切换次数
+    uint64_t total_bilateral_time_sec; ///< 双边挂单累计时间（秒）
+    uint64_t total_session_time_sec;   ///< session 全天交易时间（秒）
+    double bilateral_ratio;            ///< 双边挂单时间占比 [0, 1]
+    double avg_spread_ticks;           ///< 累计加权 spread 平均（tick）
+    uint64_t bilateral_sample_count;   ///< 双边样本数
+    uint32_t bilateral_switch_count;   ///< 双边状态切换次数
 
     BilateralStatsResult()
-        : total_bilateral_time_sec(0), total_session_time_sec(0)
-        , bilateral_ratio(0), avg_spread_ticks(0)
-        , bilateral_sample_count(0), bilateral_switch_count(0) {}
+        : total_bilateral_time_sec(0), total_session_time_sec(0), bilateral_ratio(0), avg_spread_ticks(0),
+          bilateral_sample_count(0), bilateral_switch_count(0)
+    {}
 };
 
 /// 双边报价统计器（Per-Quoter 独立）
@@ -94,15 +95,11 @@ class BilateralQuoteStats
 {
 public:
     BilateralQuoteStats()
-        : _session_info(nullptr)
-        , _last_minute_units(0)         // minute*1000 + sec_in_min
-        , _bilateral_start_units(0)
-        , _total_bilateral_units(0)
-        , _session_total_secs(0)
-        , _is_bilateral(false)
-        , _bilateral_switch_count(0)
-        , _total_spread_ticks(0)
-        , _spread_sample_count(0) {}
+        : _session_info(nullptr), _last_minute_units(0) // minute*1000 + sec_in_min
+          ,
+          _bilateral_start_units(0), _total_bilateral_units(0), _session_total_secs(0), _is_bilateral(false),
+          _bilateral_switch_count(0), _total_spread_ticks(0), _spread_sample_count(0)
+    {}
 
     /// 设置配置
     void setConfig(const BilateralStatsConfig& cfg) { _cfg = cfg; }
@@ -113,8 +110,7 @@ public:
     bool setSessionInfo(WTSSessionInfo* sessInfo, const char* code_for_log = "")
     {
         _session_info = sessInfo;
-        if (!sessInfo)
-        {
+        if (!sessInfo) {
             WTSLogger::error("[BILATERAL_STATS] {} setSessionInfo: nullptr, statistics DISABLED for this code",
                              code_for_log ? code_for_log : "");
             return false;
@@ -123,22 +119,22 @@ public:
         // 预计算 session 总秒数（所有 trading section 长度求和）
         const auto& sections = sessInfo->getTradingSections();
         uint64_t total_min = 0;
-        for (const auto& sec : sections)
-        {
+        for (const auto& sec : sections) {
             // section.first / section.second 是 HHMM 格式
             uint32_t start_min = (sec.first / 100) * 60 + (sec.first % 100);
-            uint32_t end_min   = (sec.second / 100) * 60 + (sec.second % 100);
+            uint32_t end_min = (sec.second / 100) * 60 + (sec.second % 100);
             if (end_min >= start_min)
                 total_min += (end_min - start_min);
             else
-                total_min += (1440 - start_min + end_min);  // 跨午夜（夜盘）
+                total_min += (1440 - start_min + end_min); // 跨午夜（夜盘）
         }
         _session_total_secs = total_min * 60;
 
         WTSLogger::info("[BILATERAL_STATS] {} sessinfo='{}' total_session={}min ({} sections)",
                         code_for_log ? code_for_log : "",
                         sessInfo->id() ? sessInfo->id() : "",
-                        total_min, sections.size());
+                        total_min,
+                        sections.size());
         return true;
     }
 
@@ -169,13 +165,14 @@ public:
     /// @param sec_in_min 分钟内秒数 [0, 59]
     void onSessionEnd(uint32_t uTime_HHMM, uint32_t sec_in_min)
     {
-        if (!_session_info) return;
+        if (!_session_info)
+            return;
 
         uint64_t now_units = computeMinuteUnits(uTime_HHMM, sec_in_min);
-        if (now_units == INVALID_UNITS) return;  // 非交易时段，不更新
+        if (now_units == INVALID_UNITS)
+            return; // 非交易时段，不更新
 
-        if (_is_bilateral && _bilateral_start_units > 0 && now_units >= _bilateral_start_units)
-        {
+        if (_is_bilateral && _bilateral_start_units > 0 && now_units >= _bilateral_start_units) {
             _total_bilateral_units += (now_units - _bilateral_start_units);
             _bilateral_start_units = 0;
         }
@@ -196,22 +193,28 @@ public:
     /// v7.1 诊断: 非双边原因计数 (formatString 输出, 定位覆盖率失真根因)
     void countInvalidReason(const ValidQuoteSnapshot& snapshot)
     {
-        if (!snapshot.has_valid_bid && !snapshot.has_valid_ask) ++_inv_both_empty;
-        else if (!snapshot.has_valid_bid) ++_inv_no_bid;
-        else if (!snapshot.has_valid_ask) ++_inv_no_ask;
-        else
-        {
+        if (!snapshot.has_valid_bid && !snapshot.has_valid_ask)
+            ++_inv_both_empty;
+        else if (!snapshot.has_valid_bid)
+            ++_inv_no_bid;
+        else if (!snapshot.has_valid_ask)
+            ++_inv_no_ask;
+        else {
             double spread = snapshot.getSpreadTicks();
-            if (spread <= 0) ++_inv_crossed;
-            else if (spread > _cfg.bilateral_stats_max_spread_ticks)
-            {
+            if (spread <= 0)
+                ++_inv_crossed;
+            else if (spread > _cfg.bilateral_stats_max_spread_ticks) {
                 ++_inv_spread_wide;
                 // 限频诊断: 每 5000 次 wide 输出一次实际快照价格
-                if (_inv_spread_wide % 5000 == 1)
-                {
-                    WTSLogger::debug("[BILATERAL_STATS] wide#{} wb={:.2f} wa={:.2f} spread={:.2f}t (max={:.1f}t tick={:.3f})",
-                        _inv_spread_wide, snapshot.weighted_bid_price, snapshot.weighted_ask_price,
-                        spread, _cfg.bilateral_stats_max_spread_ticks, snapshot.tick_size);
+                if (_inv_spread_wide % 5000 == 1) {
+                    WTSLogger::debug(
+                        "[BILATERAL_STATS] wide#{} wb={:.2f} wa={:.2f} spread={:.2f}t (max={:.1f}t tick={:.3f})",
+                        _inv_spread_wide,
+                        snapshot.weighted_bid_price,
+                        snapshot.weighted_ask_price,
+                        spread,
+                        _cfg.bilateral_stats_max_spread_ticks,
+                        snapshot.tick_size);
                 }
             }
         }
@@ -223,25 +226,24 @@ public:
     /// @param sec_in_min 分钟内秒数
     void update(const ValidQuoteSnapshot& snapshot, uint32_t uTime_HHMM, uint32_t sec_in_min)
     {
-        if (!_session_info) return;  // 硬失败:无 sessinfo 不统计
+        if (!_session_info)
+            return; // 硬失败:无 sessinfo 不统计
 
         uint64_t now_units = computeMinuteUnits(uTime_HHMM, sec_in_min);
-        if (now_units == INVALID_UNITS) return;  // 非交易时段，丢弃
+        if (now_units == INVALID_UNITS)
+            return; // 非交易时段，丢弃
 
         bool new_bilateral = checkBilateral(snapshot);
         if (!new_bilateral)
             countInvalidReason(snapshot);
 
         // 状态切换处理：bilateral 进/出
-        if (new_bilateral && !_is_bilateral)
-        {
+        if (new_bilateral && !_is_bilateral) {
             // 进入双边
             _bilateral_start_units = now_units;
             _bilateral_switch_count++;
-        }
-        else if (!new_bilateral && _is_bilateral && _bilateral_start_units > 0
-                 && now_units >= _bilateral_start_units)
-        {
+        } else if (!new_bilateral && _is_bilateral && _bilateral_start_units > 0 &&
+                   now_units >= _bilateral_start_units) {
             // 退出双边：把这段时长计入累计
             _total_bilateral_units += (now_units - _bilateral_start_units);
             _bilateral_start_units = 0;
@@ -252,11 +254,9 @@ public:
         _last_minute_units = now_units;
 
         // Spread 样本（仅在双边时记录）
-        if (new_bilateral)
-        {
+        if (new_bilateral) {
             double spread_ticks = snapshot.getSpreadTicks();
-            if (spread_ticks > 0)
-            {
+            if (spread_ticks > 0) {
                 _total_spread_ticks += spread_ticks;
                 _spread_sample_count++;
             }
@@ -272,11 +272,9 @@ public:
         // 双边累计差值 = 双边时长（秒）
         result.total_bilateral_time_sec = _total_bilateral_units;
         result.total_session_time_sec = _session_total_secs;
-        result.bilateral_ratio = (_session_total_secs > 0)
-            ? (double)_total_bilateral_units / _session_total_secs : 0.0;
+        result.bilateral_ratio = (_session_total_secs > 0) ? (double)_total_bilateral_units / _session_total_secs : 0.0;
 
-        result.avg_spread_ticks = (_spread_sample_count > 0)
-            ? _total_spread_ticks / _spread_sample_count : 0.0;
+        result.avg_spread_ticks = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
         result.bilateral_sample_count = _spread_sample_count;
         result.bilateral_switch_count = _bilateral_switch_count;
         return result;
@@ -295,20 +293,21 @@ public:
     {
         auto r = getResult();
         char buf[512];
-        snprintf(buf, sizeof(buf),
-            "bilateral=%llus session=%llus ratio=%.2f%% avg_spread=%.2fticks switches=%u samples=%llu | "
-            "inv[both=%llu bid=%llu ask=%llu cross=%llu wide=%llu]",
-            (unsigned long long)r.total_bilateral_time_sec,
-            (unsigned long long)r.total_session_time_sec,
-            r.bilateral_ratio * 100.0,
-            r.avg_spread_ticks,
-            r.bilateral_switch_count,
-            (unsigned long long)r.bilateral_sample_count,
-            (unsigned long long)_inv_both_empty,
-            (unsigned long long)_inv_no_bid,
-            (unsigned long long)_inv_no_ask,
-            (unsigned long long)_inv_crossed,
-            (unsigned long long)_inv_spread_wide);
+        snprintf(buf,
+                 sizeof(buf),
+                 "bilateral=%llus session=%llus ratio=%.2f%% avg_spread=%.2fticks switches=%u samples=%llu | "
+                 "inv[both=%llu bid=%llu ask=%llu cross=%llu wide=%llu]",
+                 (unsigned long long)r.total_bilateral_time_sec,
+                 (unsigned long long)r.total_session_time_sec,
+                 r.bilateral_ratio * 100.0,
+                 r.avg_spread_ticks,
+                 r.bilateral_switch_count,
+                 (unsigned long long)r.bilateral_sample_count,
+                 (unsigned long long)_inv_both_empty,
+                 (unsigned long long)_inv_no_bid,
+                 (unsigned long long)_inv_no_ask,
+                 (unsigned long long)_inv_crossed,
+                 (unsigned long long)_inv_spread_wide);
         return std::string(buf);
     }
 
@@ -319,27 +318,29 @@ private:
     /// 非交易时段返回 INVALID_UNITS
     uint64_t computeMinuteUnits(uint32_t uTime_HHMM, uint32_t sec_in_min) const
     {
-        if (!_session_info) return INVALID_UNITS;
+        if (!_session_info)
+            return INVALID_UNITS;
         uint32_t mins = _session_info->timeToMinutes(uTime_HHMM, false);
-        if (mins == INVALID_UINT32) return INVALID_UNITS;
+        if (mins == INVALID_UINT32)
+            return INVALID_UNITS;
         return (uint64_t)mins * 60 + (sec_in_min < 60 ? sec_in_min : 59);
     }
 
 private:
     BilateralStatsConfig _cfg;
-    WTSSessionInfo*      _session_info;          ///< 注入的 session（不持有所有权）
+    WTSSessionInfo* _session_info; ///< 注入的 session（不持有所有权）
 
     // 时间累计（单位：秒）
-    uint64_t _last_minute_units;                 ///< 最近一次 update 的 session-累计秒
-    uint64_t _bilateral_start_units;             ///< 当前双边段的起始 session-累计秒
-    uint64_t _total_bilateral_units;             ///< 双边累计秒
-    uint64_t _session_total_secs;                ///< session 总秒数（trading section 之和）
+    uint64_t _last_minute_units;     ///< 最近一次 update 的 session-累计秒
+    uint64_t _bilateral_start_units; ///< 当前双边段的起始 session-累计秒
+    uint64_t _total_bilateral_units; ///< 双边累计秒
+    uint64_t _session_total_secs;    ///< session 总秒数（trading section 之和）
 
-    bool     _is_bilateral;
+    bool _is_bilateral;
     uint32_t _bilateral_switch_count;
 
     // Spread 样本
-    double   _total_spread_ticks;
+    double _total_spread_ticks;
     uint64_t _spread_sample_count;
 
     // v7.1 诊断: 非双边原因计数

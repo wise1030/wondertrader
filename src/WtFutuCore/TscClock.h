@@ -13,7 +13,8 @@
 #include <thread>
 #include <x86intrin.h>
 
-namespace futu {
+namespace futu
+{
 
 class TscClock
 {
@@ -29,8 +30,7 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         uint64_t t1 = __rdtsc();
         auto c1 = std::chrono::steady_clock::now();
-        double ns = static_cast<double>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(c1 - c0).count());
+        double ns = static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(c1 - c0).count());
         if (t1 > t0)
             _ns_per_tick = ns / static_cast<double>(t1 - t0);
     }
@@ -42,7 +42,7 @@ public:
     }
 
 private:
-    static inline double _ns_per_tick = 0.4;  // 未校准时的保守默认 (~2.5GHz)
+    static inline double _ns_per_tick = 0.4; // 未校准时的保守默认 (~2.5GHz)
 };
 
 } // namespace futu

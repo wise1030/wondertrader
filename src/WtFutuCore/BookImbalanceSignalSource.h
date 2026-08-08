@@ -16,7 +16,8 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Book Imbalance Signal Source
@@ -27,18 +28,12 @@ class BookImbalanceSignalSource : public ISignalSource
 public:
     struct Config
     {
-        double dominant_threshold;    ///< Threshold for dominant flag (default 0.2)
+        double dominant_threshold; ///< Threshold for dominant flag (default 0.2)
 
-        Config()
-            : dominant_threshold(0.2)
-        {}
+        Config() : dominant_threshold(0.2) {}
     };
 
-    explicit BookImbalanceSignalSource(const Config& cfg = Config())
-        : _cfg(cfg)
-        , _enabled(true)
-    {
-    }
+    explicit BookImbalanceSignalSource(const Config& cfg = Config()) : _cfg(cfg), _enabled(true) {}
 
     //==========================================================================
     // ISignalSource Interface
@@ -50,10 +45,7 @@ public:
         return n;
     }
 
-    SignalType type() const override
-    {
-        return SignalType::BOOK_IMBALANCE;
-    }
+    SignalType type() const override { return SignalType::BOOK_IMBALANCE; }
 
     void update(const MarketDataContext& book) override
     {
@@ -85,10 +77,7 @@ public:
     bool enabled() const override { return _enabled; }
     void setEnabled(bool e) override { _enabled = e; }
 
-    void reset() override
-    {
-        _result = BookImbalanceSignalResult();
-    }
+    void reset() override { _result = BookImbalanceSignalResult(); }
 
     //==========================================================================
     // Convenience Methods

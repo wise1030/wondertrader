@@ -18,7 +18,8 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Trade Flow Signal Source
@@ -32,23 +33,13 @@ public:
         uint32_t window;              ///< Trade history window
         double large_trade_threshold; ///< Large trade threshold
 
-        Config()
-            : window(100)
-            , large_trade_threshold(50.0)
-        {}
+        Config() : window(100), large_trade_threshold(50.0) {}
     };
 
     explicit TradeFlowSignalSource(const Config& cfg = Config())
-        : _cfg(cfg)
-        , _enabled(true)
-        , _net_flow(0)
-        , _buy_volume(0)
-        , _sell_volume(0)
-        , _large_volume(0)
-        , _total_volume(0)
-        , _trade_count(0)
-    {
-    }
+        : _cfg(cfg), _enabled(true), _net_flow(0), _buy_volume(0), _sell_volume(0), _large_volume(0), _total_volume(0),
+          _trade_count(0)
+    {}
 
     //==========================================================================
     // ISignalSource Interface
@@ -60,10 +51,7 @@ public:
         return n;
     }
 
-    SignalType type() const override
-    {
-        return SignalType::TRADE_FLOW;
-    }
+    SignalType type() const override { return SignalType::TRADE_FLOW; }
 
     void update(const MarketDataContext& book) override
     {
@@ -134,8 +122,7 @@ public:
         _total_volume += qty;
         _trade_count++;
 
-        if (qty >= _cfg.large_trade_threshold)
-        {
+        if (qty >= _cfg.large_trade_threshold) {
             _large_volume += qty;
         }
 
@@ -148,20 +135,17 @@ public:
 
         // Remove old samples (time-based window ~5 seconds)
         uint64_t cutoff = timestamp - 5000;
-        while (_trade_history.size() > 0 && _trade_history.front().timestamp < cutoff)
-        {
+        while (_trade_history.size() > 0 && _trade_history.front().timestamp < cutoff) {
             const TradeSample& old = _trade_history.front();
             double old_signed = old.is_buy ? old.qty : -old.qty;
             _net_flow -= old_signed;
             _total_volume -= old.qty;
-            if (old.qty >= _cfg.large_trade_threshold)
-            {
+            if (old.qty >= _cfg.large_trade_threshold) {
                 _large_volume -= old.qty;
             }
             // 防止_trade_count下溢 — uint32_t的0-1会回绕到4294967295
             // 改为条件判断保护，仅当_trade_count>0时才递减
-            if (_trade_count > 0)
-            {
+            if (_trade_count > 0) {
                 _trade_count--;
             }
             _trade_history.pop();

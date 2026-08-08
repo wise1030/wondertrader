@@ -4,7 +4,8 @@
 #include "FutuConfig.h"
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 RealizedVolSignalSource::RealizedVolSignalSource()
 {
@@ -18,21 +19,21 @@ void RealizedVolSignalSource::setWindowSize(uint32_t windowSize)
 
 void RealizedVolSignalSource::update(const MarketDataContext& book)
 {
-    if (!_enabled) return;
+    if (!_enabled)
+        return;
 
     double mid = book.getMidPrice();
-    if (mid <= 0) return;
+    if (mid <= 0)
+        return;
 
     _result.timestamp = book.getTimestamp();
 
     // Incremental return calculation
-    if (_last_mid > 0)
-    {
+    if (_last_mid > 0) {
         double ret = (mid - _last_mid) / _last_mid;
 
         // Handle full buffer
-        if (_returns.size() >= _window_size)
-        {
+        if (_returns.size() >= _window_size) {
             double old_ret = _returns.front();
             _running_sum -= old_ret;
             _running_sum_sq -= old_ret * old_ret;
@@ -54,7 +55,8 @@ void RealizedVolSignalSource::update(const MarketDataContext& book)
 void RealizedVolSignalSource::updateVolatility()
 {
     double n = static_cast<double>(_returns.size());
-    if (n < 2) return;
+    if (n < 2)
+        return;
 
     // Variance = E[X^2] - E[X]^2
     double mean = _running_sum / n;

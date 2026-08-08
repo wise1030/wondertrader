@@ -17,39 +17,21 @@
 #include <cmath>
 #include <numeric>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // SpreadCalculator Implementation
 //==============================================================================
 
 SpreadCalculator::SpreadCalculator()
-    : _spread_type(SpreadType::WEIGHTED)
-    , _leg1_ratio(1.0)
-    , _leg2_ratio(1.0)
-    , _leg1_price(0)
-    , _leg2_price(0)
-    , _leg1_multiplier(1.0)
-    , _leg2_multiplier(1.0)
-    , _last_leg1_update(0)
-    , _last_leg2_update(0)
-    , _leg1_fresh(false)
-    , _leg2_fresh(false)
-    , _current_spread(0)
-    , _spread_mean(0)
-    , _spread_std(0)
-    , _zscore(0)
-    , _ema_spread(0)
-    , _correlation(0)
-    , _beta(1.0)
-    , _smoothed_beta(1.0)   // 初始值 1.0，与 beta 同步
-    , _half_life(0)
-    , _last_update(0)
-    , _initialized(false)
-    , _ewma_var(0)
-    , _welford_n(0)
-{
-}
+    : _spread_type(SpreadType::WEIGHTED), _leg1_ratio(1.0), _leg2_ratio(1.0), _leg1_price(0), _leg2_price(0),
+      _leg1_multiplier(1.0), _leg2_multiplier(1.0), _last_leg1_update(0), _last_leg2_update(0), _leg1_fresh(false),
+      _leg2_fresh(false), _current_spread(0), _spread_mean(0), _spread_std(0), _zscore(0), _ema_spread(0),
+      _correlation(0), _beta(1.0), _smoothed_beta(1.0) // 初始值 1.0，与 beta 同步
+      ,
+      _half_life(0), _last_update(0), _initialized(false), _ewma_var(0), _welford_n(0)
+{}
 
 void SpreadCalculator::setLegRatios(double leg1_ratio, double leg2_ratio)
 {
@@ -61,21 +43,20 @@ void SpreadCalculator::onLeg1Tick(double price, uint64_t timestamp)
 {
     _leg1_price = price;
     _last_leg1_update = timestamp;
-    _leg1_fresh = true;  // 标记leg1有新数据
+    _leg1_fresh = true; // 标记leg1有新数据
 
     // 同步tick配对机制
     // 之前每次收到任一合约tick都push，导致另一合约用旧价格
     // 大量log_return=0稀释了beta计算，使同品种跨期beta降到BETA_MIN
     // 现在改为：只在leg2也有新数据（_leg2_fresh=true）时才push
     // push后清除_leg2_fresh标记，避免重复push
-    if (_leg2_price > 0 && _leg2_fresh)
-    {
+    if (_leg2_price > 0 && _leg2_fresh) {
         _current_spread = calculateSpread(_leg1_price, _leg2_price);
         _spread_history.push(_current_spread);
         _leg1_history.push(_leg1_price);
         _leg2_history.push(_leg2_price);
         _last_update = timestamp;
-        _leg2_fresh = false;  // 消费leg2的新鲜标记
+        _leg2_fresh = false; // 消费leg2的新鲜标记
 
         updateStatistics();
     }
@@ -85,18 +66,17 @@ void SpreadCalculator::onLeg2Tick(double price, uint64_t timestamp)
 {
     _leg2_price = price;
     _last_leg2_update = timestamp;
-    _leg2_fresh = true;  // 标记leg2有新数据
+    _leg2_fresh = true; // 标记leg2有新数据
 
     // 对称处理 — leg2新数据到达时标记为fresh
     // 下次leg1 tick到来时检查_leg2_fresh，确保两个合约价格同步
-    if (_leg1_price > 0 && _leg1_fresh)
-    {
+    if (_leg1_price > 0 && _leg1_fresh) {
         _current_spread = calculateSpread(_leg1_price, _leg2_price);
         _spread_history.push(_current_spread);
         _leg1_history.push(_leg1_price);
         _leg2_history.push(_leg2_price);
         _last_update = timestamp;
-        _leg1_fresh = false;  // 消费leg1的新鲜标记
+        _leg1_fresh = false; // 消费leg1的新鲜标记
 
         updateStatistics();
     }
@@ -104,11 +84,12 @@ void SpreadCalculator::onLeg2Tick(double price, uint64_t timestamp)
 
 double SpreadCalculator::calculateSpread(double price1, double price2) const
 {
-    if (price2 <= 0) return 0;
-    if (price1 <= 0) return 0;  // LOG_DIFF/RATIO模式下price1<=0也会产生NaN/Inf
+    if (price2 <= 0)
+        return 0;
+    if (price1 <= 0)
+        return 0; // LOG_DIFF/RATIO模式下price1<=0也会产生NaN/Inf
 
-    switch (_spread_type)
-    {
+    switch (_spread_type) {
     case SpreadType::SIMPLE_DIFF:
         return price1 - price2;
 
@@ -120,11 +101,10 @@ double SpreadCalculator::calculateSpread(double price1, double price2) const
 
     case SpreadType::WEIGHTED:
         // Adjust for contract multipliers and hedge ratios
-        return _leg1_ratio * price1 * _leg1_multiplier
-             - _leg2_ratio * price2 * _leg2_multiplier;
+        return _leg1_ratio * price1 * _leg1_multiplier - _leg2_ratio * price2 * _leg2_multiplier;
 
     case SpreadType::BASIS:
-        return price1 - price2;  // Futures - Spot
+        return price1 - price2; // Futures - Spot
 
     default:
         return price1 - price2;
@@ -138,60 +118,52 @@ void SpreadCalculator::updateStatistics()
     // For stationary spreads (same-variant arb), converges similarly to Welford.
     // For non-stationary spreads (cross-variant), tracks local statistics better.
 
-    if (std::isnan(_current_spread))
-    {
+    if (std::isnan(_current_spread)) {
         return;
     }
 
     _welford_n++;
 
-    constexpr double alpha = 0.005;  // EWMA decay factor (half-life ~138 ticks)
+    constexpr double alpha = 0.005; // EWMA decay factor (half-life ~138 ticks)
 
-    if (!_initialized)
-    {
+    if (!_initialized) {
         _spread_mean = _current_spread;
         _ewma_var = 0;
         _ema_spread = _current_spread;
         _initialized = true;
-    }
-    else
-    {
+    } else {
         double prev_mean = _spread_mean;
         _spread_mean = alpha * _current_spread + (1.0 - alpha) * prev_mean;
         double diff = _current_spread - _spread_mean;
         _ewma_var = alpha * diff * diff + (1.0 - alpha) * _ewma_var;
 
-        _ema_spread = _config.ema_alpha * _current_spread +
-                       (1.0 - _config.ema_alpha) * _ema_spread;
+        _ema_spread = _config.ema_alpha * _current_spread + (1.0 - _config.ema_alpha) * _ema_spread;
     }
 
     _spread_std = std::sqrt(_ewma_var);
 
-    if (_spread_std > 1e-10)
-    {
+    if (_spread_std > 1e-10) {
         _zscore = (_current_spread - _spread_mean) / _spread_std;
-    }
-    else
-    {
+    } else {
         _zscore = 0;
     }
 
     // Update correlation and beta periodically (单次扫描 log-return 同算两者, 消除重复 std::log)
-    if (_welford_n % 10 == 0 && _welford_n >= _config.min_samples)
-    {
+    if (_welford_n % 10 == 0 && _welford_n >= _config.min_samples) {
         computeCorrelationAndBeta();
 
         _smoothed_beta = _config.ema_alpha * _beta + (1 - _config.ema_alpha) * _smoothed_beta;
 
         // beta 截断范围可配 (默认 0.7/1.5 适合同品种跨期; 跨品种 pair 真实 beta 可能
         // 远低于 0.7, 由 CorrelationManager 按 expectedBeta 设带宽, 避免错误截断).
-        if (_smoothed_beta < _config.beta_min) _smoothed_beta = _config.beta_min;
-        if (_smoothed_beta > _config.beta_max) _smoothed_beta = _config.beta_max;
+        if (_smoothed_beta < _config.beta_min)
+            _smoothed_beta = _config.beta_min;
+        if (_smoothed_beta > _config.beta_max)
+            _smoothed_beta = _config.beta_max;
     }
 
     // Estimate half-life periodically
-    if (_welford_n % 50 == 0 && _welford_n >= 50)
-    {
+    if (_welford_n % 50 == 0 && _welford_n >= 50) {
         _half_life = estimateHalfLife();
     }
 }
@@ -199,7 +171,7 @@ void SpreadCalculator::updateStatistics()
 double SpreadCalculator::calculateCorrelation() const
 {
     size_t n = std::min(_leg1_history.size(), _leg2_history.size());
-    if (n < _config.min_samples + 1)  // 需要 n+1 个价格计算 n 个 return
+    if (n < _config.min_samples + 1) // 需要 n+1 个价格计算 n 个 return
         return 0;
 
     // 使用 log return 计算相关性（解决非平稳序列问题）
@@ -209,8 +181,7 @@ double SpreadCalculator::calculateCorrelation() const
     double mean1 = 0, mean2 = 0;
     size_t valid_count = 0;
 
-    for (size_t i = 1; i < n; ++i)
-    {
+    for (size_t i = 1; i < n; ++i) {
         double prev1 = _leg1_history[i - 1];
         double prev2 = _leg2_history[i - 1];
         double curr1 = _leg1_history[i];
@@ -236,8 +207,7 @@ double SpreadCalculator::calculateCorrelation() const
 
     double cov = 0, var1 = 0, var2 = 0;
 
-    for (size_t i = 1; i < n; ++i)
-    {
+    for (size_t i = 1; i < n; ++i) {
         double prev1 = _leg1_history[i - 1];
         double prev2 = _leg2_history[i - 1];
         double curr1 = _leg1_history[i];
@@ -265,7 +235,7 @@ double SpreadCalculator::calculateCorrelation() const
 double SpreadCalculator::calculateBeta() const
 {
     size_t n = std::min(_leg1_history.size(), _leg2_history.size());
-    if (n < _config.min_samples + 1)  // 需要 n+1 个价格计算 n 个 return
+    if (n < _config.min_samples + 1) // 需要 n+1 个价格计算 n 个 return
         return 1.0;
 
     // OLS regression on log returns: ret_Y = alpha + beta * ret_X + epsilon
@@ -280,8 +250,7 @@ double SpreadCalculator::calculateBeta() const
     double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
     size_t valid_count = 0;
 
-    for (size_t i = 1; i < n; ++i)
-    {
+    for (size_t i = 1; i < n; ++i) {
         double prev1 = _leg1_history[i - 1];
         double prev2 = _leg2_history[i - 1];
         double curr1 = _leg1_history[i];
@@ -292,8 +261,8 @@ double SpreadCalculator::calculateBeta() const
             continue;
 
         // Log return
-        double ret_x = std::log(curr2 / prev2);  // leg2 return
-        double ret_y = std::log(curr1 / prev1);  // leg1 return
+        double ret_x = std::log(curr2 / prev2); // leg2 return
+        double ret_y = std::log(curr1 / prev1); // leg1 return
 
         sum_x += ret_x;
         sum_y += ret_y;
@@ -325,7 +294,7 @@ void SpreadCalculator::computeCorrelationAndBeta()
     // 消除原 calculateCorrelation(2 pass) + calculateBeta(1 pass) 共 6 次/元素 的重复 std::log.
     // 数学公式与原两方法完全一致 (valid 过滤/skip 逻辑相同).
     size_t n = std::min(_leg1_history.size(), _leg2_history.size());
-    if (n < _config.min_samples + 1)  // 需要 n+1 个价格计算 n 个 return
+    if (n < _config.min_samples + 1) // 需要 n+1 个价格计算 n 个 return
     {
         _correlation = 0;
         _beta = 1.0;
@@ -336,21 +305,19 @@ void SpreadCalculator::computeCorrelationAndBeta()
     _ret2_buf.clear();
     _ret1_buf.reserve(n - 1);
     _ret2_buf.reserve(n - 1);
-    for (size_t i = 1; i < n; ++i)
-    {
+    for (size_t i = 1; i < n; ++i) {
         double prev1 = _leg1_history[i - 1];
         double prev2 = _leg2_history[i - 1];
         double curr1 = _leg1_history[i];
         double curr2 = _leg2_history[i];
         if (prev1 <= 0 || prev2 <= 0 || curr1 <= 0 || curr2 <= 0)
             continue;
-        _ret1_buf.push_back(std::log(curr1 / prev1));  // leg1 return
-        _ret2_buf.push_back(std::log(curr2 / prev2));  // leg2 return
+        _ret1_buf.push_back(std::log(curr1 / prev1)); // leg1 return
+        _ret2_buf.push_back(std::log(curr2 / prev2)); // leg2 return
     }
 
     size_t valid_count = _ret1_buf.size();
-    if (valid_count < _config.min_samples)
-    {
+    if (valid_count < _config.min_samples) {
         _correlation = 0;
         _beta = 1.0;
         return;
@@ -358,24 +325,26 @@ void SpreadCalculator::computeCorrelationAndBeta()
 
     // Correlation (mean of returns) + Beta 累加项, 单次循环完成
     double mean1 = 0, mean2 = 0;
-    for (size_t i = 0; i < valid_count; ++i) { mean1 += _ret1_buf[i]; mean2 += _ret2_buf[i]; }
+    for (size_t i = 0; i < valid_count; ++i) {
+        mean1 += _ret1_buf[i];
+        mean2 += _ret2_buf[i];
+    }
     mean1 /= valid_count;
     mean2 /= valid_count;
 
     double cov = 0, var1 = 0, var2 = 0;
     double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
-    for (size_t i = 0; i < valid_count; ++i)
-    {
-        double r1 = _ret1_buf[i];   // leg1 return
-        double r2 = _ret2_buf[i];   // leg2 return
+    for (size_t i = 0; i < valid_count; ++i) {
+        double r1 = _ret1_buf[i]; // leg1 return
+        double r2 = _ret2_buf[i]; // leg2 return
         double d1 = r1 - mean1;
         double d2 = r2 - mean2;
-        cov  += d1 * d2;
+        cov += d1 * d2;
         var1 += d1 * d1;
         var2 += d2 * d2;
         // Beta: x=leg2 return, y=leg1 return (与原 calculateBeta 相同)
-        sum_x  += r2;
-        sum_y  += r1;
+        sum_x += r2;
+        sum_y += r1;
         sum_xy += r2 * r1;
         sum_xx += r2 * r2;
     }
@@ -383,12 +352,9 @@ void SpreadCalculator::computeCorrelationAndBeta()
     _correlation = (var1 < 1e-10 || var2 < 1e-10) ? 0.0 : cov / std::sqrt(var1 * var2);
 
     double denom = valid_count * sum_xx - sum_x * sum_x;
-    if (std::abs(denom) < 1e-10)
-    {
+    if (std::abs(denom) < 1e-10) {
         _beta = 1.0;
-    }
-    else
-    {
+    } else {
         _beta = (valid_count * sum_xy - sum_x * sum_y) / denom;
     }
 }
@@ -407,8 +373,7 @@ double SpreadCalculator::estimateHalfLife() const
     double sum_x = 0, sum_dx = 0, sum_xx = 0, sum_x_dx = 0;
     size_t count = 0;
 
-    for (size_t i = 1; i < n; ++i)
-    {
+    for (size_t i = 1; i < n; ++i) {
         double x = _spread_history[i - 1];
         double dx = _spread_history[i] - _spread_history[i - 1];
         sum_x += x;
@@ -425,12 +390,11 @@ double SpreadCalculator::estimateHalfLife() const
     double mean_dx = sum_dx / count;
 
     // Calculate theta (slope)
-    double theta = (sum_x_dx - count * mean_x * mean_dx) /
-                   (sum_xx - count * mean_x * mean_x);
+    double theta = (sum_x_dx - count * mean_x * mean_dx) / (sum_xx - count * mean_x * mean_x);
 
     // theta should be negative for mean-reverting process
     if (theta >= 0)
-        return 0;  // Not mean-reverting
+        return 0; // Not mean-reverting
 
     // Half-life = ln(2) / |theta|
     double half_life = std::log(2.0) / std::abs(theta);
@@ -441,7 +405,7 @@ double SpreadCalculator::estimateHalfLife() const
 bool SpreadCalculator::isMeanReverting() const
 {
     // Simple check: negative theta (from half-life calculation) indicates mean reversion
-    return _half_life > 0 && _half_life < 1000;  // Reasonable half-life range
+    return _half_life > 0 && _half_life < 1000; // Reasonable half-life range
 }
 
 SpreadState SpreadCalculator::getState() const
@@ -489,9 +453,7 @@ void SpreadCalculator::reset()
 // SpreadCalculatorManager Implementation
 //==============================================================================
 
-SpreadCalculatorManager::SpreadCalculatorManager()
-{
-}
+SpreadCalculatorManager::SpreadCalculatorManager() {}
 
 void SpreadCalculatorManager::addSpreadPair(const SpreadPairConfig& pair_config)
 {
@@ -516,8 +478,7 @@ void SpreadCalculatorManager::removeSpreadPair(const std::string& pair_id)
 
     // Get config for this pair
     auto config_it = _pair_configs.find(pair_id);
-    if (config_it != _pair_configs.end())
-    {
+    if (config_it != _pair_configs.end()) {
         const auto& config = config_it->second;
 
         // Remove from contract mappings
@@ -533,15 +494,13 @@ void SpreadCalculatorManager::removeSpreadPair(const std::string& pair_id)
     _calculators.erase(it);
 }
 
-void SpreadCalculatorManager::onTick(const std::string& code, double price,
-                                      double multiplier, uint64_t timestamp)
+void SpreadCalculatorManager::onTick(const std::string& code, double price, double multiplier, uint64_t timestamp)
 {
     auto it = _contract_to_pairs.find(code);
     if (it == _contract_to_pairs.end())
         return;
 
-    for (const auto& pair_id : it->second)
-    {
+    for (const auto& pair_id : it->second) {
         auto calc_it = _calculators.find(pair_id);
         if (calc_it == _calculators.end())
             continue;
@@ -552,12 +511,9 @@ void SpreadCalculatorManager::onTick(const std::string& code, double price,
 
         const auto& config = config_it->second;
 
-        if (code == config.leg1_code)
-        {
+        if (code == config.leg1_code) {
             calc_it->second->onLeg1Tick(price, timestamp);
-        }
-        else if (code == config.leg2_code)
-        {
+        } else if (code == config.leg2_code) {
             calc_it->second->onLeg2Tick(price, timestamp);
         }
     }
@@ -577,8 +533,7 @@ std::vector<SpreadState> SpreadCalculatorManager::getAllStates() const
     std::vector<SpreadState> states;
     states.reserve(_calculators.size());
 
-    for (const auto& kv : _calculators)
-    {
+    for (const auto& kv : _calculators) {
         states.push_back(kv.second->getState());
     }
 
@@ -610,8 +565,7 @@ const std::vector<std::string>& SpreadCalculatorManager::getPairsForContract(con
 
 void SpreadCalculatorManager::reset()
 {
-    for (auto& kv : _calculators)
-    {
+    for (auto& kv : _calculators) {
         kv.second->reset();
     }
 }

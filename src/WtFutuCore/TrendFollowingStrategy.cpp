@@ -6,19 +6,13 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 TrendFollowingStrategy::TrendFollowingStrategy()
-    : _last_update(0)
-    , _fast_ma(0)
-    , _slow_ma(0)
-    , _prev_fast_ma(0)
-    , _prev_slow_ma(0)
-    , _prev_trend_direction(0)
-    , _bars_in_current_trend(0)
-    , _last_signal_time(0)
-{
-}
+    : _last_update(0), _fast_ma(0), _slow_ma(0), _prev_fast_ma(0), _prev_slow_ma(0), _prev_trend_direction(0),
+      _bars_in_current_trend(0), _last_signal_time(0)
+{}
 
 void TrendFollowingStrategy::updateSpread(double spread, uint64_t timestamp)
 {
@@ -44,8 +38,7 @@ void TrendFollowingStrategy::updateTrendState()
     _trend_state.slow_ma = _slow_ma;
     _trend_state.ma_diff = _fast_ma - _slow_ma;
 
-    if (_slow_ma > 1e-10)
-    {
+    if (_slow_ma > 1e-10) {
         _trend_state.ma_diff_pct = _trend_state.ma_diff / _slow_ma;
     }
 
@@ -53,12 +46,9 @@ void TrendFollowingStrategy::updateTrendState()
     int new_direction = detectTrendDirection();
 
     // Track bars in trend
-    if (new_direction == _prev_trend_direction && new_direction != 0)
-    {
+    if (new_direction == _prev_trend_direction && new_direction != 0) {
         _bars_in_current_trend++;
-    }
-    else
-    {
+    } else {
         _bars_in_current_trend = 1;
     }
 
@@ -68,8 +58,7 @@ void TrendFollowingStrategy::updateTrendState()
 
     // Detect reversal
     _trend_state.is_trend_reversal = false;
-    if (_prev_fast_ma > 0 && _prev_slow_ma > 0)
-    {
+    if (_prev_fast_ma > 0 && _prev_slow_ma > 0) {
         // Crossover detection
         bool was_above = _prev_fast_ma > _prev_slow_ma;
         bool is_above = _fast_ma > _slow_ma;
@@ -86,8 +75,7 @@ double TrendFollowingStrategy::calculateMA(const RingBuffer<double, 128>& data, 
         return 0;
 
     double sum = 0;
-    for (size_t i = n - period; i < n; ++i)
-    {
+    for (size_t i = n - period; i < n; ++i) {
         sum += data[i];
     }
     return sum / period;
@@ -104,8 +92,7 @@ double TrendFollowingStrategy::calculateTrendStrength() const
     double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
     size_t start = n - 5;
 
-    for (size_t i = 0; i < 5; ++i)
-    {
+    for (size_t i = 0; i < 5; ++i) {
         double x = static_cast<double>(i);
         double y = _spread_history[start + i];
         sum_x += x;
@@ -121,8 +108,7 @@ double TrendFollowingStrategy::calculateTrendStrength() const
     double slope = (5 * sum_xy - sum_x * sum_y) / denom;
 
     // Normalize by price level
-    if (_slow_ma > 1e-10)
-    {
+    if (_slow_ma > 1e-10) {
         return slope / _slow_ma;
     }
     return slope;
@@ -130,15 +116,12 @@ double TrendFollowingStrategy::calculateTrendStrength() const
 
 int TrendFollowingStrategy::detectTrendDirection() const
 {
-    if (_fast_ma > _slow_ma + _config.entry_threshold)
-    {
-        return 1;  // Uptrend
+    if (_fast_ma > _slow_ma + _config.entry_threshold) {
+        return 1; // Uptrend
+    } else if (_fast_ma < _slow_ma - _config.entry_threshold) {
+        return -1; // Downtrend
     }
-    else if (_fast_ma < _slow_ma - _config.entry_threshold)
-    {
-        return -1;  // Downtrend
-    }
-    return 0;  // Neutral
+    return 0; // Neutral
 }
 
 bool TrendFollowingStrategy::isConfirmedTrend() const
@@ -154,29 +137,23 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
     signal.timestamp = current_time;
 
     size_t n = _spread_history.size();
-    if (n < _config.slow_ma_period)
-    {
+    if (n < _config.slow_ma_period) {
         signal.type = SpreadSignalType::NONE;
         return signal;
     }
 
     // No position - check for entry
-    if (!state.hasPosition())
-    {
+    if (!state.hasPosition()) {
         // Check for trend following entry
-        if (_trend_state.is_strong_trend && isConfirmedTrend())
-        {
-            if (_trend_state.trend_direction > 0)
-            {
+        if (_trend_state.is_strong_trend && isConfirmedTrend()) {
+            if (_trend_state.trend_direction > 0) {
                 // Uptrend - go long spread
                 signal.type = SpreadSignalType::OPEN_LONG_SPREAD;
                 signal.confidence = calculateConfidence(_trend_state);
                 signal.suggested_size = calculatePositionSize(_trend_state);
                 signal.reason = "Uptrend confirmed, following spread expansion";
                 _trend_state.entry_price = state.current_price;
-            }
-            else if (_trend_state.trend_direction < 0)
-            {
+            } else if (_trend_state.trend_direction < 0) {
                 // Downtrend - go short spread
                 signal.type = SpreadSignalType::OPEN_SHORT_SPREAD;
                 signal.confidence = calculateConfidence(_trend_state);
@@ -187,11 +164,9 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
         }
     }
     // Has position - check for exit
-    else
-    {
+    else {
         // Stop loss check (highest priority)
-        if (_trend_state.entry_price > 0 && _config.stop_loss_pct > 0 && state.current_price > 0)
-        {
+        if (_trend_state.entry_price > 0 && _config.stop_loss_pct > 0 && state.current_price > 0) {
             double pnl_pct = (state.current_price - _trend_state.entry_price) / _trend_state.entry_price;
             bool should_stop = false;
             if (state.spread_position > 0 && pnl_pct < -_config.stop_loss_pct)
@@ -199,8 +174,7 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
             else if (state.spread_position < 0 && pnl_pct > _config.stop_loss_pct)
                 should_stop = true;
 
-            if (should_stop)
-            {
+            if (should_stop) {
                 signal.type = SpreadSignalType::STOP_LOSS;
                 signal.confidence = 1.0;
                 signal.suggested_size = std::abs(state.spread_position);
@@ -210,17 +184,13 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
         }
 
         // Exit on trend reversal
-        if (_trend_state.is_trend_reversal)
-        {
-            if (state.spread_position > 0)
-            {
+        if (_trend_state.is_trend_reversal) {
+            if (state.spread_position > 0) {
                 signal.type = SpreadSignalType::CLOSE_LONG_SPREAD;
                 signal.confidence = 0.9;
                 signal.suggested_size = state.spread_position;
                 signal.reason = "Trend reversal detected, closing long spread";
-            }
-            else if (state.spread_position < 0)
-            {
+            } else if (state.spread_position < 0) {
                 signal.type = SpreadSignalType::CLOSE_SHORT_SPREAD;
                 signal.confidence = 0.9;
                 signal.suggested_size = std::abs(state.spread_position);
@@ -228,18 +198,14 @@ SpreadSignal TrendFollowingStrategy::generateSignal(const SpreadState& state, ui
             }
         }
         // Exit on trend exhaustion
-        else if (_trend_state.bars_in_trend > _config.max_trend_bars)
-        {
+        else if (_trend_state.bars_in_trend > _config.max_trend_bars) {
             // Trend may be exhausted
-            if (state.spread_position > 0 && _trend_state.trend_direction <= 0)
-            {
+            if (state.spread_position > 0 && _trend_state.trend_direction <= 0) {
                 signal.type = SpreadSignalType::CLOSE_LONG_SPREAD;
                 signal.confidence = 0.7;
                 signal.suggested_size = state.spread_position;
                 signal.reason = "Trend exhaustion, closing position";
-            }
-            else if (state.spread_position < 0 && _trend_state.trend_direction >= 0)
-            {
+            } else if (state.spread_position < 0 && _trend_state.trend_direction >= 0) {
                 signal.type = SpreadSignalType::CLOSE_SHORT_SPREAD;
                 signal.confidence = 0.7;
                 signal.suggested_size = std::abs(state.spread_position);
@@ -256,7 +222,7 @@ double TrendFollowingStrategy::calculatePositionSize(const TrendState& trend) co
 {
     // Position size scales with trend strength
     double strength_factor = std::abs(trend.trend_strength) / _config.min_trend_strength;
-    strength_factor = std::min(strength_factor, 2.0);  // Cap at 2x
+    strength_factor = std::min(strength_factor, 2.0); // Cap at 2x
 
     double size = _config.base_qty * (0.5 + 0.5 * strength_factor);
     return std::min(size, _config.max_position);

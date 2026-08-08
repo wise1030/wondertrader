@@ -20,7 +20,8 @@
 #include <unordered_map>
 #include <functional>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Spread Strategy Plugin Interface
@@ -68,10 +69,7 @@ public:
         return inst;
     }
 
-    void registerStrategy(const std::string& name, Factory factory)
-    {
-        _factories[name] = std::move(factory);
-    }
+    void registerStrategy(const std::string& name, Factory factory) { _factories[name] = std::move(factory); }
 
     std::unique_ptr<ISpreadStrategy> create(const std::string& name) const
     {
@@ -79,10 +77,7 @@ public:
         return (it != _factories.end()) ? it->second() : nullptr;
     }
 
-    bool has(const std::string& name) const
-    {
-        return _factories.find(name) != _factories.end();
-    }
+    bool has(const std::string& name) const { return _factories.find(name) != _factories.end(); }
 
 private:
     SpreadStrategyRegistry() = default;

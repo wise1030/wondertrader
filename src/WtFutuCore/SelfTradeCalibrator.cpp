@@ -6,15 +6,14 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 //------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
 
-SelfTradeCalibrator::SelfTradeCalibrator()
-{
-}
+SelfTradeCalibrator::SelfTradeCalibrator() {}
 
 //------------------------------------------------------------------------------
 // Reset
@@ -33,8 +32,7 @@ void SelfTradeCalibrator::resetContract(const std::string& code)
 void SelfTradeCalibrator::resetCalibration(const std::string& code)
 {
     auto it = _contract_states.find(code);
-    if (it != _contract_states.end())
-    {
+    if (it != _contract_states.end()) {
         // Clear fill history and reset cache
         it->second.fill_history.clear();
         it->second.cached_result = CalibrationResult();
@@ -63,8 +61,7 @@ void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t cur
     // 注意：这个简单的减法只在同一天内有效
     // 对于跨天的情况，fill 会被自然淘汰（因为 RingBuffer 容量有限）
     uint64_t cutoff_time = 0;
-    if (current_time > decay_window_ms)
-    {
+    if (current_time > decay_window_ms) {
         cutoff_time = current_time - decay_window_ms;
     }
 
@@ -72,27 +69,21 @@ void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t cur
     RingBuffer<SelfFillRecord, 128> recent_fills;
     uint32_t removed_count = 0;
 
-    for (const auto& fill : state.fill_history)
-    {
-        if (fill.fill_time >= cutoff_time)
-        {
+    for (const auto& fill : state.fill_history) {
+        if (fill.fill_time >= cutoff_time) {
             recent_fills.push(fill);
-        }
-        else
-        {
+        } else {
             removed_count++;
         }
     }
 
     // 如果有 fills 被移除，更新状态
-    if (removed_count > 0)
-    {
+    if (removed_count > 0) {
         state.fill_history = recent_fills;
         state.cache_dirty = true;
 
         // 如果所有 fills 都被移除，重置缓存
-        if (state.fill_history.empty())
-        {
+        if (state.fill_history.empty()) {
             state.cached_result = CalibrationResult();
             state.cache_dirty = false;
         }
@@ -104,11 +95,7 @@ void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t cur
 //------------------------------------------------------------------------------
 
 void SelfTradeCalibrator::recordFill(
-    const std::string& code,
-    double price, double qty, bool is_buy,
-    double mid_price, double spread,
-    uint64_t timestamp
-)
+    const std::string& code, double price, double qty, bool is_buy, double mid_price, double spread, uint64_t timestamp)
 {
     SelfFillRecord record;
     record.code = code;
@@ -198,7 +185,7 @@ void SelfTradeCalibrator::analyzeFills(const std::string& code) const
         // Check if enough time has passed for analysis
         uint64_t elapsed = current_time - fill.fill_time;
         if (elapsed < _config.toxicity_window_ms / 2) {
-            continue;  // Not enough time for meaningful analysis
+            continue; // Not enough time for meaningful analysis
         }
 
         total_count++;
@@ -297,34 +284,29 @@ void SelfTradeCalibrator::pruneHistory(const std::string& code, uint64_t current
 
     auto& state = it->second;
 
-    if (_config.toxicity_window_ms <= 0) return;
+    if (_config.toxicity_window_ms <= 0)
+        return;
 
     // Calculate cutoff time: keep fills within 10x the toxicity window
     uint64_t cutoff = 0;
     uint64_t window = static_cast<uint64_t>(_config.toxicity_window_ms) * 10;
-    if (current_time > window)
-    {
+    if (current_time > window) {
         cutoff = current_time - window;
     }
 
     // Remove expired fills from the front of the RingBuffer
     // Since fills are pushed in time order, expired ones are at the front
-    while (!state.fill_history.empty())
-    {
-        if (state.fill_history.front().fill_time < cutoff)
-        {
+    while (!state.fill_history.empty()) {
+        if (state.fill_history.front().fill_time < cutoff) {
             state.fill_history.pop();
             state.cache_dirty = true;
-        }
-        else
-        {
-            break;  // Remaining fills are still within window
+        } else {
+            break; // Remaining fills are still within window
         }
     }
 
     // If all fills were pruned, reset the cached result
-    if (state.fill_history.empty())
-    {
+    if (state.fill_history.empty()) {
         state.cached_result = CalibrationResult();
         state.cache_dirty = false;
     }
@@ -359,7 +341,7 @@ SelfTradeToxicityMetrics SelfTradeCalibrator::getToxicityMetrics(const std::stri
     metrics.realized_toxicity = calib.toxicity_level;
     metrics.toxicity_score = calib.toxicity_level;
     metrics.is_toxic = calib.high_toxicity;
-    metrics.toxic_side = -calib.recommended_side;  // Invert: if recommend buy, avoid sell
+    metrics.toxic_side = -calib.recommended_side; // Invert: if recommend buy, avoid sell
 
     auto it = _contract_states.find(code);
     if (it != _contract_states.end()) {
@@ -433,7 +415,7 @@ FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_
 
     const auto& state = it->second;
     double retreat_price_offset = _config.retreat_ticks * _config.tick_size;
-    uint64_t now_ms = current_time;  // 已是 epoch ms (统一于 recordFill 入口)
+    uint64_t now_ms = current_time; // 已是 epoch ms (统一于 recordFill 入口)
 
     if (state.last_buy_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
         uint64_t fill_ms = state.last_buy_fill_time;

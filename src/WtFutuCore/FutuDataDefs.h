@@ -10,7 +10,8 @@
 // 复用 UFT 框架的数据定义，避免重复
 #include "../WtUftCore/UftDataDefs.h"
 
-namespace futu {
+namespace futu
+{
 
 // 命名空间别名：直接复用 uft 命名空间的类型定义
 // 这样既保持向后兼容，又避免了重复定义

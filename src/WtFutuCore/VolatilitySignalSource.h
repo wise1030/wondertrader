@@ -6,7 +6,8 @@
 #include "../Includes/WTSVariant.hpp"
 #include <cmath>
 
-namespace futu {
+namespace futu
+{
 
 class MarketDataContext;
 
@@ -35,7 +36,8 @@ public:
     void setVpinWeight(double weight) { _vpin_weight = weight; }
 
     /// Set vol tier thresholds (direct realized_vol comparison, no percentile binning)
-    void setVolThresholds(double elevated, double extreme) {
+    void setVolThresholds(double elevated, double extreme)
+    {
         _vol_elevated = elevated;
         _vol_extreme = extreme;
     }
@@ -56,8 +58,8 @@ private:
     double _last_mid = 0;
 
     // Direct vol thresholds for tier classification
-    double _vol_elevated = 0.002;  // >= this -> ELEVATED (widen spread)
-    double _vol_extreme  = 0.004;  // >= this -> EXTREME  (pause quotes)
+    double _vol_elevated = 0.002; // >= this -> ELEVATED (widen spread)
+    double _vol_extreme = 0.004;  // >= this -> EXTREME  (pause quotes)
 
     void updateVolatility();
 };

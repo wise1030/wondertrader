@@ -28,28 +28,24 @@ NS_WTP_BEGIN
 class WTSTickData;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
-class SpreadArbitrageManager;  // B5: 过冲保险丝回调目标 (前向声明)
+class SpreadArbitrageManager; // B5: 过冲保险丝回调目标 (前向声明)
 
 /// Portfolio/inventory parameters
 struct PortfolioParams
 {
-    double      hedge_ratio;        ///< Fraction of delta to hedge (0.0-1.0, used by CloseoutExecutor)
-    double      portfolio_max_delta;  ///< 组合级 Delta 软限制，用于 skew 调制（非硬限制）
+    double hedge_ratio;         ///< Fraction of delta to hedge (0.0-1.0, used by CloseoutExecutor)
+    double portfolio_max_delta; ///< 组合级 Delta 软限制，用于 skew 调制（非硬限制）
 
     //==========================================================================
     // 风控硬限制（由 FutuRiskMonitor 读取，不属于组合管理范畴）
     //==========================================================================
-    double      max_exposure;       ///< Maximum total exposure (硬限制)
-    double      max_loss;           ///< Maximum daily loss tolerance (硬限制)
+    double max_exposure; ///< Maximum total exposure (硬限制)
+    double max_loss;     ///< Maximum daily loss tolerance (硬限制)
 
-    PortfolioParams()
-        : hedge_ratio(1.0)
-        , portfolio_max_delta(50.0)
-        , max_exposure(35000000.0)
-        , max_loss(200000.0)
-    {}
+    PortfolioParams() : hedge_ratio(1.0), portfolio_max_delta(50.0), max_exposure(35000000.0), max_loss(200000.0) {}
 };
 
 /// Per-contract state (unified from InventoryState + ContractState)
@@ -58,62 +54,57 @@ struct ContractState
     // perf#11: 热字段前置 — getTotalDelta/getTotalExposure 扫描只读
     // position/hedge_ratio/multiplier/last_price, 集中首 32 字节 (半 cache line),
     // 避免 code string (32B) 占首行导致每合约扫描拉 3 cache line
-    double      position;       ///< Net position (+ long, - short)
-    double      hedge_ratio;    ///< Hedge ratio relative to anchor contract
-    double      multiplier;     ///< Contract multiplier
-    double      last_price;     ///< Latest mid/last price
+    double position;    ///< Net position (+ long, - short)
+    double hedge_ratio; ///< Hedge ratio relative to anchor contract
+    double multiplier;  ///< Contract multiplier
+    double last_price;  ///< Latest mid/last price
 
-    std::string code;           ///< Standard code (e.g. "CFFEX.IF.2503")
-    double      tick_size;      ///< Minimum tick size
-    bool        hedge_ratio_initialized;  ///< 冷启动初始化标志：false=仍是默认 1.0，需要 on_tick 用纯货值比注入；true=已用货值比或 EMA β 初始化过
+    std::string code; ///< Standard code (e.g. "CFFEX.IF.2503")
+    double tick_size; ///< Minimum tick size
+    bool
+        hedge_ratio_initialized; ///< 冷启动初始化标志：false=仍是默认 1.0，需要 on_tick 用纯货值比注入；true=已用货值比或 EMA β 初始化过
 
     // Position state
-    double      prev_position;  ///< Previous position for trade effect logging
-    double      avg_cost;       ///< Average cost (主导侧均价, 兼容字段)
-    double      unrealized_pnl; ///< Unrealized P&L
-    double      realized_pnl;   ///< Realized P&L (accumulated from closed positions)
+    double prev_position;  ///< Previous position for trade effect logging
+    double avg_cost;       ///< Average cost (主导侧均价, 兼容字段)
+    double unrealized_pnl; ///< Unrealized P&L
+    double realized_pnl;   ///< Realized P&L (accumulated from closed positions)
 
     // v7.1 分向成本簿 (offset 标志驱动记账)
     // 净额均价推断在 MM+arb 共享同合约净头寸时必然失真 (arb 腿的开平
     // 被误判为 MM 的加减仓, avg_cost 被污染 → daily_pnl 假阳性日亏)。
     // 分向簿与交易所/回测引擎口径一致: position = long_qty - short_qty
-    double      long_qty;       ///< 多向持有量
-    double      long_avg;       ///< 多向加权成本
-    double      short_qty;      ///< 空向持有量
-    double      short_avg;      ///< 空向加权成本
+    double long_qty;  ///< 多向持有量
+    double long_avg;  ///< 多向加权成本
+    double short_qty; ///< 空向持有量
+    double short_avg; ///< 空向加权成本
 
     // Market data (last_price 已前置, perf#11)
-    double      bid1;           ///< Best bid
-    double      ask1;           ///< Best ask
+    double bid1; ///< Best bid
+    double ask1; ///< Best ask
 
     // Other
-    double      daily_pnl;      ///< Daily P&L
-    bool        is_active;      ///< Whether actively quoting
-    uint64_t    last_update;    ///< Last update timestamp
+    double daily_pnl;     ///< Daily P&L
+    bool is_active;       ///< Whether actively quoting
+    uint64_t last_update; ///< Last update timestamp
 
     // Per-contract limits (硬限制)
-    double      max_position;   ///< Max position for this contract (0 = no limit)
-    double      target_position;///< Target position for this contract (default 0 = balanced)
+    double max_position;    ///< Max position for this contract (0 = no limit)
+    double target_position; ///< Target position for this contract (default 0 = balanced)
 
     // Per-contract soft indicators (软指标)
-    double      contract_max_delta;  ///< 单合约 delta 软限制，用于单合约 skew 计算 (0 = no limit)
+    double contract_max_delta; ///< 单合约 delta 软限制，用于单合约 skew 计算 (0 = no limit)
 
     ContractState()
-        : position(0), hedge_ratio(1.0), multiplier(1), last_price(0)
-        , code(), tick_size(1), hedge_ratio_initialized(false)
-        , prev_position(0), avg_cost(0), unrealized_pnl(0), realized_pnl(0)
-        , long_qty(0), long_avg(0), short_qty(0), short_avg(0)
-        , bid1(0), ask1(0)
-        , daily_pnl(0), is_active(true), last_update(0)
-        , max_position(0), target_position(0), contract_max_delta(0)
+        : position(0), hedge_ratio(1.0), multiplier(1), last_price(0), code(), tick_size(1),
+          hedge_ratio_initialized(false), prev_position(0), avg_cost(0), unrealized_pnl(0), realized_pnl(0),
+          long_qty(0), long_avg(0), short_qty(0), short_avg(0), bid1(0), ask1(0), daily_pnl(0), is_active(true),
+          last_update(0), max_position(0), target_position(0), contract_max_delta(0)
     {}
 
     /// Compute delta contribution (等效手数)
     /// 风险管理角度：delta 回归最纯粹的手数概念，避免乘数带来的失真
-    inline double delta() const
-    {
-        return position * hedge_ratio;
-    }
+    inline double delta() const { return position * hedge_ratio; }
     /// Compute exposure (Exposure Cash) - 扣除目标持仓后的风险暴露
     /// 风险暴露 = |当前持仓 - 目标持仓| * 合约乘数 * 价格
     /// 目标持仓为 0 时退化为传统的 |position| * multiplier * price
@@ -138,10 +129,7 @@ struct ContractState
 
     /// Check if position limit breached
     /// 注意：position恰好等于max_position时不算breach（合法持仓上限）
-    inline bool isPositionLimitBreached() const
-    {
-        return max_position > 0 && std::abs(position) > max_position;
-    }
+    inline bool isPositionLimitBreached() const { return max_position > 0 && std::abs(position) > max_position; }
 
     /// Check if contract delta is high (软指标，用于单合约 skew 计算)
     /// 注意：这不是风控违规，只是用于判断是否需要增强 skew
@@ -153,7 +141,8 @@ struct ContractState
     /// Get contract delta utilization for skew calculation
     inline double getContractDeltaUtilization() const
     {
-        if (contract_max_delta <= 0) return 0;
+        if (contract_max_delta <= 0)
+            return 0;
         return std::abs(delta()) / contract_max_delta;
     }
 
@@ -162,8 +151,7 @@ struct ContractState
     /// @return true 表示需要减仓
     inline bool needsPositionReduction(double threshold = 0.0) const
     {
-        if (target_position == 0)
-        {
+        if (target_position == 0) {
             // 目标为0，任何持仓偏离都需要减仓
             return std::abs(position) > threshold;
         }
@@ -177,8 +165,7 @@ struct ContractState
     /// @return 需要平仓的数量：正数表示需要卖出，负数表示需要买入
     inline double getPositionReductionQty() const
     {
-        if (target_position == 0)
-        {
+        if (target_position == 0) {
             // 目标为0，返回当前持仓的相反数
             return position; // position>0 返回正数(需卖出)，position<0 返回负数(需买入)
         }
@@ -210,8 +197,13 @@ public:
     //==========================================================================
 
     /// Add a contract to the portfolio (O(1))
-    void addContract(const std::string& code, double multiplier, double tickSize,
-                     double hedgeRatio = 1.0, double maxPosition = 0, double maxDelta = 0, double targetPosition = 0);
+    void addContract(const std::string& code,
+                     double multiplier,
+                     double tickSize,
+                     double hedgeRatio = 1.0,
+                     double maxPosition = 0,
+                     double maxDelta = 0,
+                     double targetPosition = 0);
 
     /// Remove a contract (O(1))
     void removeContract(const std::string& code);
@@ -232,24 +224,35 @@ public:
     }
 
     /// Get all contracts
-    const std::vector<ContractState>& getAllContracts() const { RecursiveSpinGuard _g(_lock); return _contracts; }
-
-    /// v7.6 阶段2: 锁内快照拷贝 — 替代裸指针/容器引用逃逸
-    /// (裸指针 getContract/getAllContracts 仅限内部递归锁内与既有调用方过渡使用)
-    bool getContractSnapshot(const std::string& code, ContractState& out) const {
-        RecursiveSpinGuard _g(_lock);
-        const ContractState* p = getContract(code);
-        if (!p) return false;
-        out = *p;
-        return true;
-    }
-    std::vector<ContractState> getAllContractsSnapshot() const {
+    const std::vector<ContractState>& getAllContracts() const
+    {
         RecursiveSpinGuard _g(_lock);
         return _contracts;
     }
-    bool getPositionBreachedSnapshot(ContractState& out) const {
+
+    /// v7.6 阶段2: 锁内快照拷贝 — 替代裸指针/容器引用逃逸
+    /// (裸指针 getContract/getAllContracts 仅限内部递归锁内与既有调用方过渡使用)
+    bool getContractSnapshot(const std::string& code, ContractState& out) const
+    {
         RecursiveSpinGuard _g(_lock);
-        if (const ContractState* p = getPositionBreachedContract()) { out = *p; return true; }
+        const ContractState* p = getContract(code);
+        if (!p)
+            return false;
+        out = *p;
+        return true;
+    }
+    std::vector<ContractState> getAllContractsSnapshot() const
+    {
+        RecursiveSpinGuard _g(_lock);
+        return _contracts;
+    }
+    bool getPositionBreachedSnapshot(ContractState& out) const
+    {
+        RecursiveSpinGuard _g(_lock);
+        if (const ContractState* p = getPositionBreachedContract()) {
+            out = *p;
+            return true;
+        }
         return false;
     }
     /// v7.1/v7.6: hedge_ratio 平滑更新 (MdSpi 每 tick; 原经裸指针直写, 收编为锁内方法。
@@ -311,7 +314,6 @@ private:
     SpreadArbitrageManager* _arb_manager = nullptr;
 
 public:
-
     //==========================================================================
     // Portfolio Risk Metrics (inline, no allocation)
     //==========================================================================
@@ -415,8 +417,7 @@ public:
     inline bool isAnyContractLimitBreached() const
     {
         RecursiveSpinGuard _g(_lock);
-        for (const auto& c : _contracts)
-        {
+        for (const auto& c : _contracts) {
             if (c.isPositionLimitBreached())
                 return true;
         }
@@ -427,8 +428,7 @@ public:
     inline const ContractState* getPositionBreachedContract() const
     {
         RecursiveSpinGuard _g(_lock);
-        for (const auto& c : _contracts)
-        {
+        for (const auto& c : _contracts) {
             if (c.isPositionLimitBreached())
                 return &c;
         }
@@ -443,7 +443,7 @@ public:
         if (!c.isPositionLimitBreached())
             return 0;
 
-        double pos = c.position;       // 保持 double，不截断
+        double pos = c.position; // 保持 double，不截断
         double max_pos = c.max_position;
 
         if (pos > max_pos) {
@@ -462,16 +462,14 @@ public:
     std::vector<const ContractState*> getContractsNeedingReduction(double threshold = 0.0) const;
 
     /// Check if any hard limit is breached (position, exposure, loss)
-    inline bool isAnyLimitBreached() const
-    {
-        return isAnyContractLimitBreached();
-    }
+    inline bool isAnyLimitBreached() const { return isAnyContractLimitBreached(); }
 
     /// Portfolio delta utilization based on net delta (扣除目标持仓)
     /// 用于组合级 skew 激进度计算
     inline double getPortfolioDeltaUtilization() const
     {
-        if (_params.portfolio_max_delta <= 0) return 0;
+        if (_params.portfolio_max_delta <= 0)
+            return 0;
         return std::abs(getNetDelta()) / _params.portfolio_max_delta;
     }
 
@@ -479,7 +477,8 @@ public:
     /// 用于组合级 skew 计算和对冲决策
     inline double getRawPortfolioDeltaUtilization() const
     {
-        if (_params.portfolio_max_delta <= 0) return 0;
+        if (_params.portfolio_max_delta <= 0)
+            return 0;
         return std::abs(getTotalDelta()) / _params.portfolio_max_delta;
     }
 
@@ -490,49 +489,52 @@ public:
     /// Risk level enumeration for tiered response
     enum class RiskLevel : uint8_t
     {
-        NORMAL = 0,       ///< Normal operations (< 50% utilization)
-        WARNING = 1,    ///< Warning level (50-70% utilization)
-        ELEVATED = 2,    ///< Elevated risk (70-85% utilization)
-        HIGH = 3,        ///< High risk (85-95% utilization)
-        CRITICAL = 4    ///< Critical risk (>= 95% utilization)
+        NORMAL = 0,   ///< Normal operations (< 50% utilization)
+        WARNING = 1,  ///< Warning level (50-70% utilization)
+        ELEVATED = 2, ///< Elevated risk (70-85% utilization)
+        HIGH = 3,     ///< High risk (85-95% utilization)
+        CRITICAL = 4  ///< Critical risk (>= 95% utilization)
     };
 
     /// Get current risk level based on delta utilization
     inline RiskLevel getRiskLevel() const
     {
         double util = getPortfolioDeltaUtilization();
-        if (util < 0.5) return RiskLevel::NORMAL;
-        if (util < 0.7) return RiskLevel::WARNING;
-        if (util < 0.85) return RiskLevel::ELEVATED;
-        if (util < 0.95) return RiskLevel::HIGH;
+        if (util < 0.5)
+            return RiskLevel::NORMAL;
+        if (util < 0.7)
+            return RiskLevel::WARNING;
+        if (util < 0.85)
+            return RiskLevel::ELEVATED;
+        if (util < 0.95)
+            return RiskLevel::HIGH;
         return RiskLevel::CRITICAL;
     }
 
     /// Get quote size multiplier based on risk level
     inline double getQtyMultiplierByRisk() const
     {
-        switch (getRiskLevel())
-        {
-            case RiskLevel::NORMAL:    return 1.0;
-            case RiskLevel::WARNING:   return 0.9;
-            case RiskLevel::ELEVATED: return 0.7;
-            case RiskLevel::HIGH:     return 0.5;
-            case RiskLevel::CRITICAL: return 0.3;
-            default: return 1.0;
+        switch (getRiskLevel()) {
+        case RiskLevel::NORMAL:
+            return 1.0;
+        case RiskLevel::WARNING:
+            return 0.9;
+        case RiskLevel::ELEVATED:
+            return 0.7;
+        case RiskLevel::HIGH:
+            return 0.5;
+        case RiskLevel::CRITICAL:
+            return 0.3;
+        default:
+            return 1.0;
         }
     }
 
     /// Check if should pause quoting based on risk level
-    inline bool shouldPauseQuoting() const
-    {
-        return getRiskLevel() >= RiskLevel::CRITICAL;
-    }
+    inline bool shouldPauseQuoting() const { return getRiskLevel() >= RiskLevel::CRITICAL; }
 
     /// Check if should reduce quoting (partial pause)
-    inline bool shouldReduceQuoting() const
-    {
-        return getRiskLevel() >= RiskLevel::HIGH;
-    }
+    inline bool shouldReduceQuoting() const { return getRiskLevel() >= RiskLevel::HIGH; }
 
     //==========================================================================
     // Hedging
@@ -543,17 +545,14 @@ public:
     // Main thread publishes via publishPnLSnapshot(), arb thread reads via
     // getSnapshot*(). Atomic<double> on x86-64 is lock-free (~10ns).
     //==========================================================================
-    void publishPnLSnapshot() {
+    void publishPnLSnapshot()
+    {
         RecursiveSpinGuard _g(_lock);
         _snapshot_unrealized_pnl.store(getTotalUnrealizedPnL(), std::memory_order_relaxed);
         _snapshot_total_pnl.store(getTotalPnL(), std::memory_order_relaxed);
     }
-    double getSnapshotUnrealizedPnL() const {
-        return _snapshot_unrealized_pnl.load(std::memory_order_relaxed);
-    }
-    double getSnapshotTotalPnL() const {
-        return _snapshot_total_pnl.load(std::memory_order_relaxed);
-    }
+    double getSnapshotUnrealizedPnL() const { return _snapshot_unrealized_pnl.load(std::memory_order_relaxed); }
+    double getSnapshotTotalPnL() const { return _snapshot_total_pnl.load(std::memory_order_relaxed); }
 
 private:
     // v7.6 阶段2: 递归自旋锁 — 公开方法统一守卫 (MdSpi 行情写/TdSpi 成交写;
@@ -591,17 +590,19 @@ private:
 
     inline void refreshAggregates() const
     {
-        if (!_agg_dirty) return;
+        if (!_agg_dirty)
+            return;
         double td = 0, nd = 0, lx = 0, sx = 0, gx = 0, up = 0, tp = 0;
-        for (const auto& c : _contracts)
-        {
+        for (const auto& c : _contracts) {
             td += c.delta();
             double excess_pos = c.position - c.target_position;
             nd += excess_pos * c.hedge_ratio;
             double exp = c.exposure();
             gx += exp;
-            if (excess_pos > 0) lx += exp;
-            else if (excess_pos < 0) sx += exp;
+            if (excess_pos > 0)
+                lx += exp;
+            else if (excess_pos < 0)
+                sx += exp;
             up += c.unrealized_pnl;
             tp += c.daily_pnl;
         }

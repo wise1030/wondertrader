@@ -19,7 +19,8 @@
 #include <memory>
 #include <vector>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Risk Manager Configuration
@@ -28,46 +29,36 @@ namespace futu {
 struct SpreadRiskConfig
 {
     // Position limits
-    double max_total_position;      ///< Maximum total spread position
-    double max_single_pair;         ///< Maximum position per pair
-    double max_leg_exposure;        ///< Maximum exposure per leg
+    double max_total_position; ///< Maximum total spread position
+    double max_single_pair;    ///< Maximum position per pair
+    double max_leg_exposure;   ///< Maximum exposure per leg
 
     // Risk thresholds
-    double max_var_99;              ///< Maximum 99% VaR
-    double max_correlation_break;   ///< Correlation threshold for break
-    double min_correlation;         ///< Minimum acceptable correlation
+    double max_var_99;            ///< Maximum 99% VaR
+    double max_correlation_break; ///< Correlation threshold for break
+    double min_correlation;       ///< Minimum acceptable correlation
 
     // Liquidity
-    double min_liquidity_score;     ///< Minimum liquidity score
-    uint32_t min_daily_volume;      ///< Minimum daily volume
+    double min_liquidity_score; ///< Minimum liquidity score
+    uint32_t min_daily_volume;  ///< Minimum daily volume
 
     // Convergence risk
-    double max_divergence_zscore;   ///< Maximum Z-Score divergence
-    uint32_t max_divergence_time;   ///< Maximum divergence time (seconds)
+    double max_divergence_zscore; ///< Maximum Z-Score divergence
+    uint32_t max_divergence_time; ///< Maximum divergence time (seconds)
 
     // Expiry risk
-    uint32_t min_days_to_expiry;    ///< Minimum days to expiry
-    uint32_t warning_days_to_expiry;///< Warning threshold
+    uint32_t min_days_to_expiry;     ///< Minimum days to expiry
+    uint32_t warning_days_to_expiry; ///< Warning threshold
 
     // Stop loss
-    double portfolio_stop_loss;     ///< Portfolio-level stop loss
-    double pair_stop_loss;          ///< Per-pair stop loss
+    double portfolio_stop_loss; ///< Portfolio-level stop loss
+    double pair_stop_loss;      ///< Per-pair stop loss
 
     SpreadRiskConfig()
-        : max_total_position(50.0)
-        , max_single_pair(20.0)
-        , max_leg_exposure(30.0)
-        , max_var_99(100000.0)
-        , max_correlation_break(0.3)
-        , min_correlation(0.6)
-        , min_liquidity_score(0.5)
-        , min_daily_volume(1000)
-        , max_divergence_zscore(5.0)
-        , max_divergence_time(7200)
-        , min_days_to_expiry(3)
-        , warning_days_to_expiry(7)
-        , portfolio_stop_loss(50000.0)
-        , pair_stop_loss(10000.0)
+        : max_total_position(50.0), max_single_pair(20.0), max_leg_exposure(30.0), max_var_99(100000.0),
+          max_correlation_break(0.3), min_correlation(0.6), min_liquidity_score(0.5), min_daily_volume(1000),
+          max_divergence_zscore(5.0), max_divergence_time(7200), min_days_to_expiry(3), warning_days_to_expiry(7),
+          portfolio_stop_loss(50000.0), pair_stop_loss(10000.0)
     {}
 };
 
@@ -79,39 +70,33 @@ struct RiskAlert
 {
     enum class Level : uint8_t
     {
-        INFO,       ///< Informational
-        WARNING,    ///< Warning - action recommended
-        CRITICAL,   ///< Critical - immediate action required
-        EMERGENCY   ///< Emergency - force close required
+        INFO,     ///< Informational
+        WARNING,  ///< Warning - action recommended
+        CRITICAL, ///< Critical - immediate action required
+        EMERGENCY ///< Emergency - force close required
     };
 
     enum class Type : uint8_t
     {
-        POSITION_LIMIT,     ///< Position limit exceeded
-        VAR_LIMIT,          ///< VaR limit exceeded
-        CORRELATION_BREAK,  ///< Correlation breakdown
-        LIQUIDITY_LOW,      ///< Low liquidity
-        DIVERGENCE,         ///< Spread divergence
-        EXPIRY_WARNING,     ///< Near expiry
-        STOP_LOSS,          ///< Stop loss triggered
-        CONVERGENCE_FAIL    ///< Convergence failure
+        POSITION_LIMIT,    ///< Position limit exceeded
+        VAR_LIMIT,         ///< VaR limit exceeded
+        CORRELATION_BREAK, ///< Correlation breakdown
+        LIQUIDITY_LOW,     ///< Low liquidity
+        DIVERGENCE,        ///< Spread divergence
+        EXPIRY_WARNING,    ///< Near expiry
+        STOP_LOSS,         ///< Stop loss triggered
+        CONVERGENCE_FAIL   ///< Convergence failure
     };
 
-    std::string pair_id;            ///< Affected pair (empty = portfolio-wide)
-    Level level;                    ///< Alert level
-    Type type;                      ///< Alert type
-    std::string message;            ///< Human-readable message
-    double value;                   ///< Alert value
-    double threshold;               ///< Threshold value
-    uint64_t timestamp;             ///< Alert timestamp
+    std::string pair_id; ///< Affected pair (empty = portfolio-wide)
+    Level level;         ///< Alert level
+    Type type;           ///< Alert type
+    std::string message; ///< Human-readable message
+    double value;        ///< Alert value
+    double threshold;    ///< Threshold value
+    uint64_t timestamp;  ///< Alert timestamp
 
-    RiskAlert()
-        : level(Level::INFO)
-        , type(Type::POSITION_LIMIT)
-        , value(0)
-        , threshold(0)
-        , timestamp(0)
-    {}
+    RiskAlert() : level(Level::INFO), type(Type::POSITION_LIMIT), value(0), threshold(0), timestamp(0) {}
 };
 
 //==============================================================================
@@ -120,36 +105,27 @@ struct RiskAlert
 
 struct PortfolioRiskSummary
 {
-    double total_position;          ///< Total spread position
-    double total_exposure;          ///< Total market exposure
-    double var_99;                  ///< Portfolio VaR (99%)
-    double max_drawdown;            ///< Current drawdown
+    double total_position; ///< Total spread position
+    double total_exposure; ///< Total market exposure
+    double var_99;         ///< Portfolio VaR (99%)
+    double max_drawdown;   ///< Current drawdown
 
-    uint32_t active_pairs;          ///< Number of active pairs
-    uint32_t pairs_at_risk;         ///< Pairs with risk warnings
+    uint32_t active_pairs;  ///< Number of active pairs
+    uint32_t pairs_at_risk; ///< Pairs with risk warnings
 
-    double avg_correlation;         ///< Average pair correlation
-    double min_correlation;         ///< Minimum correlation
-    uint32_t correlation_breaks;    ///< Number of correlation breaks
+    double avg_correlation;      ///< Average pair correlation
+    double min_correlation;      ///< Minimum correlation
+    uint32_t correlation_breaks; ///< Number of correlation breaks
 
-    double liquidity_score;         ///< Portfolio liquidity score
+    double liquidity_score; ///< Portfolio liquidity score
 
-    bool has_stop_loss;             ///< Is stop loss triggered
-    bool has_critical_alert;        ///< Is there a critical alert
+    bool has_stop_loss;      ///< Is stop loss triggered
+    bool has_critical_alert; ///< Is there a critical alert
 
     PortfolioRiskSummary()
-        : total_position(0)
-        , total_exposure(0)
-        , var_99(0)
-        , max_drawdown(0)
-        , active_pairs(0)
-        , pairs_at_risk(0)
-        , avg_correlation(0)
-        , min_correlation(0)
-        , correlation_breaks(0)
-        , liquidity_score(1)
-        , has_stop_loss(false)
-        , has_critical_alert(false)
+        : total_position(0), total_exposure(0), var_99(0), max_drawdown(0), active_pairs(0), pairs_at_risk(0),
+          avg_correlation(0), min_correlation(0), correlation_breaks(0), liquidity_score(1), has_stop_loss(false),
+          has_critical_alert(false)
     {}
 };
 
@@ -274,7 +250,7 @@ private:
 
     // Expiry date management
     ExpiryDateCallback _expiry_callback;
-    uint32_t _current_date;         ///< Current trading date (YYYYMMDD)
+    uint32_t _current_date; ///< Current trading date (YYYYMMDD)
 
     //==========================================================================
     // Internal Helper Methods

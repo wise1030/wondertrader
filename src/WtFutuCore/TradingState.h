@@ -44,25 +44,28 @@
 #include <thread>
 #endif
 
-namespace futu {
+namespace futu
+{
 
 //==========================================================================
 // 顶层：业务阶段
 //==========================================================================
-enum class MmPhase : uint8_t {
-    QUOTING,    ///< 做市报价阶段
-    CLOSEOUT,   ///< 收盘平仓对冲阶段
+enum class MmPhase : uint8_t
+{
+    QUOTING,  ///< 做市报价阶段
+    CLOSEOUT, ///< 收盘平仓对冲阶段
 };
 
 //==========================================================================
 // QUOTING 子状态
 //==========================================================================
-enum class QuotingPhase : uint8_t {
-    NORMAL,         ///< 正常报价
-    TOXICITY,       ///< 毒性流暂停（VPIN/OFI 等信号触发，定时恢复）
-    MARKET,         ///< 极端波动暂停（vol tier EXTREME）
-    ERROR,          ///< 下单错误暂停（指数退避恢复）
-    RISK_HALTED,    ///< 风控硬触发（持仓超限/Delta爆炸），需显式 resumeFromRisk
+enum class QuotingPhase : uint8_t
+{
+    NORMAL,      ///< 正常报价
+    TOXICITY,    ///< 毒性流暂停（VPIN/OFI 等信号触发，定时恢复）
+    MARKET,      ///< 极端波动暂停（vol tier EXTREME）
+    ERROR,       ///< 下单错误暂停（指数退避恢复）
+    RISK_HALTED, ///< 风控硬触发（持仓超限/Delta爆炸），需显式 resumeFromRisk
 };
 
 //==========================================================================
@@ -81,9 +84,10 @@ enum class QuotingPhase : uint8_t {
 //   - long_blocked/short_blocked 是方向级软禁，与 phase/qphase 正交。
 //   - 不再需要 syncFromRiskMonitor：各模块管自己的域，strategy 是编排者。
 //
-struct TradingState {
+struct TradingState
+{
     // v7.6: 全字段原子 (MdSpi/TdSpi 双线程读写, 见文件头 THREADING CONTRACT)
-    std::atomic<MmPhase>      phase{MmPhase::QUOTING};
+    std::atomic<MmPhase> phase{MmPhase::QUOTING};
     std::atomic<QuotingPhase> qphase{QuotingPhase::NORMAL};
 
     // 方向级软禁（正交，两阶段都适用）
@@ -95,48 +99,44 @@ struct TradingState {
     //==========================================================================
 
     /// 能否报价（做市阶段 + NORMAL 子状态）
-    bool canQuote() const {
-        return phase.load(std::memory_order_acquire) == MmPhase::QUOTING
-            && qphase.load(std::memory_order_acquire) == QuotingPhase::NORMAL;
+    bool canQuote() const
+    {
+        return phase.load(std::memory_order_acquire) == MmPhase::QUOTING &&
+               qphase.load(std::memory_order_acquire) == QuotingPhase::NORMAL;
     }
 
     /// 能否买入
-    bool canBuy() const {
-        return canQuote() && !long_blocked.load(std::memory_order_acquire);
-    }
+    bool canBuy() const { return canQuote() && !long_blocked.load(std::memory_order_acquire); }
 
     /// 能否卖出
-    bool canSell() const {
-        return canQuote() && !short_blocked.load(std::memory_order_acquire);
-    }
+    bool canSell() const { return canQuote() && !short_blocked.load(std::memory_order_acquire); }
 
     /// 是否活跃（做市阶段 且 非风控暂停）
     /// 语义映射旧 isActive(): NORMAL 或 TOXICITY 时为 true
-    bool isActive() const {
+    bool isActive() const
+    {
         QuotingPhase q = qphase.load(std::memory_order_acquire);
-        return phase.load(std::memory_order_acquire) == MmPhase::QUOTING
-            && q != QuotingPhase::RISK_HALTED
-            && q != QuotingPhase::ERROR
-            && q != QuotingPhase::MARKET;
+        return phase.load(std::memory_order_acquire) == MmPhase::QUOTING && q != QuotingPhase::RISK_HALTED &&
+               q != QuotingPhase::ERROR && q != QuotingPhase::MARKET;
     }
 
     /// 收盘平仓阶段是否激活
-    bool isCloseoutActive() const {
-        return phase.load(std::memory_order_acquire) == MmPhase::CLOSEOUT;
-    }
+    bool isCloseoutActive() const { return phase.load(std::memory_order_acquire) == MmPhase::CLOSEOUT; }
 
     //==========================================================================
     // 顶层转移
     //==========================================================================
 
     /// 进入收盘平仓阶段
-    void enterCloseout() {
+    void enterCloseout()
+    {
         _check_writer_thread();
         phase.store(MmPhase::CLOSEOUT, std::memory_order_release);
     }
 
     /// 退出到做市报价阶段（夜盘平仓完成 / session reset）
-    void exitToQuoting() {
+    void exitToQuoting()
+    {
         _check_writer_thread();
         phase.store(MmPhase::QUOTING, std::memory_order_release);
         qphase.store(QuotingPhase::NORMAL, std::memory_order_release);
@@ -149,7 +149,8 @@ struct TradingState {
     /// QuotingPhase 转移校验
     /// RISK_HALTED → NORMAL 仅允许通过 resumeFromRisk()
     /// 其他状态间自由转移（互相抢占）
-    bool canTransitionQuoting(QuotingPhase next) const {
+    bool canTransitionQuoting(QuotingPhase next) const
+    {
         if (qphase.load(std::memory_order_acquire) == QuotingPhase::RISK_HALTED)
             return next == QuotingPhase::NORMAL;
         return true;
@@ -159,16 +160,17 @@ struct TradingState {
     /// v7.6: read-check-CAS 循环 — canTransition 校验与写入原子化,
     ///       并发 setQuotingPhase 不会绕过 RISK_HALTED 守卫。
     /// @return true=转移成功(含同态幂等) false=被校验拒绝（RISK_HALTED 不可直接抢占）
-    bool setQuotingPhase(QuotingPhase q) {
+    bool setQuotingPhase(QuotingPhase q)
+    {
         _check_writer_thread();
         QuotingPhase cur = qphase.load(std::memory_order_acquire);
         for (;;) {
-            if (cur == q) return true;  // idempotent
+            if (cur == q)
+                return true; // idempotent
             // v7.7 C2: 复用 canTransitionQuoting (单一校验逻辑, 防两处漂移)
             if (cur == QuotingPhase::RISK_HALTED && !canTransitionQuoting(q))
-                return false;  // RISK_HALTED 不可直接抢占
-            if (qphase.compare_exchange_weak(cur, q,
-                    std::memory_order_acq_rel, std::memory_order_acquire))
+                return false; // RISK_HALTED 不可直接抢占
+            if (qphase.compare_exchange_weak(cur, q, std::memory_order_acq_rel, std::memory_order_acquire))
                 return true;
         }
     }
@@ -183,15 +185,17 @@ struct TradingState {
     /// @return true=恢复成功(qphase 已变 NORMAL) false=当前态不匹配,跳过
     ///
     /// 注: H 退出仍走 resumeFromRisk(). 不要用 tryResumeFrom(RISK_HALTED).
-    bool tryResumeFrom(QuotingPhase expected) {
+    bool tryResumeFrom(QuotingPhase expected)
+    {
         _check_writer_thread();
         // v7.6: CAS 天然等价 "qphase == expected 才翻 NORMAL" 的原子判定
-        return qphase.compare_exchange_strong(expected, QuotingPhase::NORMAL,
-            std::memory_order_acq_rel, std::memory_order_acquire);
+        return qphase.compare_exchange_strong(
+            expected, QuotingPhase::NORMAL, std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
     /// 风控恢复（RISK_HALTED → NORMAL 的唯一合法路径）
-    void resumeFromRisk() {
+    void resumeFromRisk()
+    {
         _check_writer_thread();
         qphase.store(QuotingPhase::NORMAL, std::memory_order_release);
     }
@@ -200,7 +204,8 @@ struct TradingState {
     // 全量重置（session begin / 日切）
     //==========================================================================
 
-    void reset() {
+    void reset()
+    {
         _check_writer_thread();
         phase.store(MmPhase::QUOTING, std::memory_order_release);
         qphase.store(QuotingPhase::NORMAL, std::memory_order_release);
@@ -212,24 +217,47 @@ struct TradingState {
     // 方向级软禁
     //==========================================================================
 
-    void blockLong()   { _check_writer_thread(); long_blocked.store(true, std::memory_order_release);  }
-    void unblockLong() { _check_writer_thread(); long_blocked.store(false, std::memory_order_release); }
-    void blockShort()  { _check_writer_thread(); short_blocked.store(true, std::memory_order_release);  }
-    void unblockShort(){ _check_writer_thread(); short_blocked.store(false, std::memory_order_release); }
+    void blockLong()
+    {
+        _check_writer_thread();
+        long_blocked.store(true, std::memory_order_release);
+    }
+    void unblockLong()
+    {
+        _check_writer_thread();
+        long_blocked.store(false, std::memory_order_release);
+    }
+    void blockShort()
+    {
+        _check_writer_thread();
+        short_blocked.store(true, std::memory_order_release);
+    }
+    void unblockShort()
+    {
+        _check_writer_thread();
+        short_blocked.store(false, std::memory_order_release);
+    }
 
     //==========================================================================
     // 日志/调试
     //==========================================================================
 
     /// 当前状态字符串
-    const char* getPhaseStr() const {
-        if (phase.load(std::memory_order_acquire) == MmPhase::CLOSEOUT) return "CLOSEOUT";
+    const char* getPhaseStr() const
+    {
+        if (phase.load(std::memory_order_acquire) == MmPhase::CLOSEOUT)
+            return "CLOSEOUT";
         switch (qphase.load(std::memory_order_acquire)) {
-            case QuotingPhase::NORMAL:       return "NORMAL";
-            case QuotingPhase::TOXICITY:     return "TOXICITY";
-            case QuotingPhase::MARKET:       return "MARKET";
-            case QuotingPhase::ERROR:        return "ERROR";
-            case QuotingPhase::RISK_HALTED:  return "RISK_HALTED";
+        case QuotingPhase::NORMAL:
+            return "NORMAL";
+        case QuotingPhase::TOXICITY:
+            return "TOXICITY";
+        case QuotingPhase::MARKET:
+            return "MARKET";
+        case QuotingPhase::ERROR:
+            return "ERROR";
+        case QuotingPhase::RISK_HALTED:
+            return "RISK_HALTED";
         }
         return "UNKNOWN";
     }
@@ -243,11 +271,18 @@ private:
 #ifndef NDEBUG
     mutable std::thread::id _writer_tid{};
     static inline std::atomic<bool> s_external_locking{false};
+
 public:
-    static void setExternalLocking(bool on) { s_external_locking.store(on); }
+    static void setExternalLocking(bool on)
+    {
+        s_external_locking.store(on);
+    }
+
 private:
-    void _check_writer_thread() const {
-        if (s_external_locking.load(std::memory_order_relaxed)) return;
+    void _check_writer_thread() const
+    {
+        if (s_external_locking.load(std::memory_order_relaxed))
+            return;
         auto cur = std::this_thread::get_id();
         if (_writer_tid == std::thread::id{}) {
             _writer_tid = cur;
@@ -258,6 +293,7 @@ private:
 #else
 public:
     static void setExternalLocking(bool) {}
+
 private:
     void _check_writer_thread() const {}
 #endif

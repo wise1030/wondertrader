@@ -22,7 +22,8 @@
 #include <vector>
 #include <cstdint>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Legacy Types (for API compatibility)
@@ -38,11 +39,11 @@ struct ActiveOrder
     bool is_buy;
     uint64_t timestamp;
 
-    ActiveOrder()
-        : order_id(0), price(0), qty(0), is_buy(true), timestamp(0) {}
+    ActiveOrder() : order_id(0), price(0), qty(0), is_buy(true), timestamp(0) {}
 
     ActiveOrder(const std::string& c, uint32_t id, double p, double q, bool buy, uint64_t ts)
-        : code(c), order_id(id), price(p), qty(q), is_buy(buy), timestamp(ts) {}
+        : code(c), order_id(id), price(p), qty(q), is_buy(buy), timestamp(ts)
+    {}
 };
 
 // Note: ArbitrageOrderRequest and SelfTradeCheckResult are defined in UnifiedOrderTracker.h
@@ -65,13 +66,15 @@ struct StpConfig
     double price_adjust_ticks;
 
     StpConfig()
-        : enabled(true), allow_same_price(false), min_price_gap(1.0),
-          strategy(Strategy::CANCEL_MM), price_adjust_ticks(1.0) {}
+        : enabled(true), allow_same_price(false), min_price_gap(1.0), strategy(Strategy::CANCEL_MM),
+          price_adjust_ticks(1.0)
+    {}
 
-    static StpConfig fromVariant(wtp::WTSVariant* v) {
+    static StpConfig fromVariant(wtp::WTSVariant* v)
+    {
         StpConfig c;
         c.enabled = FutuConfig::readBool(v, "enabled", true);
-        c.min_price_gap = FutuConfig::readDouble(v, "stpMinPriceGap", 1.0);  // H7: 键名与 config.yaml 统一
+        c.min_price_gap = FutuConfig::readDouble(v, "stpMinPriceGap", 1.0); // H7: 键名与 config.yaml 统一
         c.allow_same_price = FutuConfig::readBool(v, "allowSamePrice", false);
         c.price_adjust_ticks = FutuConfig::readDouble(v, "priceAdjustTicks", 1.0);
         return c;
@@ -104,8 +107,8 @@ public:
     //==========================================================================
 
     /// Track a new market making order
-    void trackMMOrder(const std::string& code, uint32_t order_id,
-                      double price, double qty, bool is_buy, uint64_t timestamp);
+    void
+    trackMMOrder(const std::string& code, uint32_t order_id, double price, double qty, bool is_buy, uint64_t timestamp);
 
     /// Untrack an order (filled or canceled)
     void untrackOrder(uint32_t order_id);
@@ -124,8 +127,8 @@ public:
     SelfTradeCheckResult checkArbitrageOrder(const ArbitrageOrderRequest& request) const;
 
     /// Check for a specific contract
-    SelfTradeCheckResult checkOrder(const std::string& code, bool is_buy,
-                                     double price, bool is_market_order = false) const;
+    SelfTradeCheckResult
+    checkOrder(const std::string& code, bool is_buy, double price, bool is_market_order = false) const;
 
     //==========================================================================
     // Query
@@ -155,7 +158,7 @@ public:
 
 private:
     StpConfig _config;
-    UnifiedOrderTracker* _tracker;  ///< Not owned, shared with strategy
+    UnifiedOrderTracker* _tracker; ///< Not owned, shared with strategy
 };
 
 } // namespace futu

@@ -6,42 +6,24 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 //------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
 
 SyntheticSignalFusion::SyntheticSignalFusion()
-    : _volatility(0.5)
-    , _liquidity(0.5)
-    , _last_vol_price(0)
-    , _last_vol_timestamp(0)
-    , _accumulated_buy_vol(0)
-    , _accumulated_sell_vol(0)
-    , _large_volume(0)
-    , _total_volume(0)
-    , _has_tick_inf(false)
-    , _has_book_sig(false)
-    , _has_calibration(false)
-{
-}
+    : _volatility(0.5), _liquidity(0.5), _last_vol_price(0), _last_vol_timestamp(0), _accumulated_buy_vol(0),
+      _accumulated_sell_vol(0), _large_volume(0), _total_volume(0), _has_tick_inf(false), _has_book_sig(false),
+      _has_calibration(false)
+{}
 
 SyntheticSignalFusion::SyntheticSignalFusion(const FusionConfig& config)
-    : _config(config)
-    , _volatility(0.5)
-    , _liquidity(0.5)
-    , _last_vol_price(0)
-    , _last_vol_timestamp(0)
-    , _accumulated_buy_vol(0)
-    , _accumulated_sell_vol(0)
-    , _large_volume(0)
-    , _total_volume(0)
-    , _has_tick_inf(false)
-    , _has_book_sig(false)
-    , _has_calibration(false)
-{
-}
+    : _config(config), _volatility(0.5), _liquidity(0.5), _last_vol_price(0), _last_vol_timestamp(0),
+      _accumulated_buy_vol(0), _accumulated_sell_vol(0), _large_volume(0), _total_volume(0), _has_tick_inf(false),
+      _has_book_sig(false), _has_calibration(false)
+{}
 
 //------------------------------------------------------------------------------
 // Reset
@@ -87,7 +69,7 @@ void SyntheticSignalFusion::addBookAnalysis(const BookAnalysisResult& analysis)
     _latest_book_sig.bid_dominant = analysis.imbalance_score > 0.2;
     _latest_book_sig.ask_dominant = analysis.imbalance_score < -0.2;
     _latest_book_sig.confidence = analysis.direction_clear ? 0.8 : 0.4;
-    _latest_book_sig.timestamp = 0;  // Caller should set if needed
+    _latest_book_sig.timestamp = 0; // Caller should set if needed
     _has_book_sig = true;
 }
 
@@ -115,10 +97,11 @@ void SyntheticSignalFusion::onTick(const std::string& code, double mid_price, ui
 {
     // Update volatility estimate from tick
     // Simple rolling volatility estimate based on price changes
-    (void)code;  // Unused for now
+    (void)code; // Unused for now
 
     // Evaluate previous predictions
-    if (_last_recorded_price > 0 && std::abs(mid_price - _last_recorded_price) >= 0.5) // Adjust minimum move threshold as needed, 0.5 is half a tick typically
+    if (_last_recorded_price > 0 && std::abs(mid_price - _last_recorded_price) >=
+                                        0.5) // Adjust minimum move threshold as needed, 0.5 is half a tick typically
     {
         bool actual_up = (mid_price > _last_recorded_price);
 
@@ -133,9 +116,7 @@ void SyntheticSignalFusion::onTick(const std::string& code, double mid_price, ui
             _self_trade_accuracy.addPrediction(_last_self_trade_direction > 0, actual_up);
         }
         _last_recorded_price = mid_price;
-    }
-    else if (_last_recorded_price <= 0)
-    {
+    } else if (_last_recorded_price <= 0) {
         _last_recorded_price = mid_price;
     }
 
@@ -170,7 +151,7 @@ AdaptiveWeights SyntheticSignalFusion::calculateAdaptiveWeights() const
     // 1. High volatility: reduce tick inference weight (more noise)
     if (_volatility > 0.5) {
         double reduction = _config.volatility_sensitivity * (_volatility - 0.5) * 2.0;
-        reduction = std::min(reduction, 0.5);  // Cap at 50% reduction
+        reduction = std::min(reduction, 0.5); // Cap at 50% reduction
 
         double saved = w.tick * reduction;
         w.tick *= (1.0 - reduction);
@@ -181,7 +162,7 @@ AdaptiveWeights SyntheticSignalFusion::calculateAdaptiveWeights() const
     // 2. Low liquidity: increase book weight (order book is more informative)
     if (_liquidity < 0.3) {
         double boost = (0.3 - _liquidity) * _config.liquidity_sensitivity * 3.0;
-        boost = std::min(boost, 0.5);  // Cap at 50% boost
+        boost = std::min(boost, 0.5); // Cap at 50% boost
 
         w.book *= (1.0 + boost);
         w.tick *= (1.0 - boost * 0.5);
@@ -302,7 +283,7 @@ SyntheticTransactionData SyntheticSignalFusion::fuse()
         // Direction bias indicates which side is more toxic
         // Positive bias = buy side is more toxic (we lose on buys)
         // Negative bias = sell side is more toxic (we lose on sells)
-        double self_dir = -_latest_calibration.direction_bias;  // Invert: avoid toxic side
+        double self_dir = -_latest_calibration.direction_bias; // Invert: avoid toxic side
 
         _last_self_trade_direction = self_dir;
         direction += w.self_trade * self_dir * _latest_calibration.confidence;
@@ -318,7 +299,7 @@ SyntheticTransactionData SyntheticSignalFusion::fuse()
     if (direction > 0.1) {
         result.is_buy_initiated = true;
     } else if (direction < -0.1) {
-        result.is_buy_initiated = false;  // Sell-initiated
+        result.is_buy_initiated = false; // Sell-initiated
     }
 
     // Calculate overall confidence
@@ -328,8 +309,8 @@ SyntheticTransactionData SyntheticSignalFusion::fuse()
     result.confidence = std::min(1.0, result.confidence);
 
     // Determine if strong signal
-    result.is_strong_signal = std::abs(direction) > _config.strong_signal_threshold
-                              && result.confidence > _config.min_confidence;
+    result.is_strong_signal =
+        std::abs(direction) > _config.strong_signal_threshold && result.confidence > _config.min_confidence;
 
     // Update accumulated statistics
     if (result.confidence >= _config.min_confidence) {
@@ -373,7 +354,7 @@ void SyntheticSignalFusion::pruneHistory(uint64_t current_time)
         if (oldest.signed_volume > 0) {
             _accumulated_buy_vol -= oldest.signed_volume;
         } else {
-            _accumulated_sell_vol += oldest.signed_volume;  // Add because it was negative
+            _accumulated_sell_vol += oldest.signed_volume; // Add because it was negative
         }
 
         _fused_history.pop_front();
@@ -412,8 +393,10 @@ FusedTradeImbalance SyntheticSignalFusion::getFusedImbalance() const
 
     // Calculate fusion quality
     result.fusion_quality = 0.0;
-    if (_has_tick_inf) result.fusion_quality += 0.4;
-    if (_has_book_sig) result.fusion_quality += 0.4;
+    if (_has_tick_inf)
+        result.fusion_quality += 0.4;
+    if (_has_book_sig)
+        result.fusion_quality += 0.4;
     if (_has_calibration && _latest_calibration.sample_size >= _config.min_self_trade_samples) {
         result.fusion_quality += 0.2;
     }

@@ -23,7 +23,8 @@
 
 #include <mutex>
 
-namespace futu {
+namespace futu
+{
 
 inline std::recursive_mutex& orderApiMutex()
 {
@@ -32,7 +33,7 @@ inline std::recursive_mutex& orderApiMutex()
 }
 
 /// 锁内执行一次 stra_* 调用
-template<typename F>
+template <typename F>
 inline auto orderApiCall(F&& fn) -> decltype(fn())
 {
     std::lock_guard<std::recursive_mutex> g(orderApiMutex());

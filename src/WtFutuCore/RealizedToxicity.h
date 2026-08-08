@@ -19,35 +19,34 @@
 #include "SelfTradeCalibrator.h"
 #include "MarketDataContext.h"
 
-namespace futu {
+namespace futu
+{
 
 /// Realized toxicity configuration
 struct RealizedToxicityConfig
 {
-    double      weight;                 ///< Weight for realized toxicity in combined score
-    uint32_t    min_samples;            ///< Minimum samples before using realized score
-    double      decay_factor;           ///< Time decay factor (per second)
+    double weight;        ///< Weight for realized toxicity in combined score
+    uint32_t min_samples; ///< Minimum samples before using realized score
+    double decay_factor;  ///< Time decay factor (per second)
 
-    RealizedToxicityConfig()
-        : weight(0.4)
-        , min_samples(3)
-        , decay_factor(0.01) {}
+    RealizedToxicityConfig() : weight(0.4), min_samples(3), decay_factor(0.01) {}
 };
 
 /// Realized toxicity result
 struct RealizedToxicityResult
 {
-    double      adverse_ratio;          ///< Ratio of adverse fills
-    double      avg_adverse_move;       ///< Average adverse price move (ticks)
-    uint32_t    total_fills;            ///< Total fills analyzed
-    uint32_t    adverse_fills;          ///< Fills with adverse selection
-    double      confidence;             ///< Confidence level (based on sample size)
-    double      direction_bias;         ///< Direction bias of adverse fills
-    double      decayed_score;          ///< Time-decayed toxicity score
+    double adverse_ratio;    ///< Ratio of adverse fills
+    double avg_adverse_move; ///< Average adverse price move (ticks)
+    uint32_t total_fills;    ///< Total fills analyzed
+    uint32_t adverse_fills;  ///< Fills with adverse selection
+    double confidence;       ///< Confidence level (based on sample size)
+    double direction_bias;   ///< Direction bias of adverse fills
+    double decayed_score;    ///< Time-decayed toxicity score
 
     RealizedToxicityResult()
-        : adverse_ratio(0), avg_adverse_move(0), total_fills(0), adverse_fills(0)
-        , confidence(0), direction_bias(0), decayed_score(0) {}
+        : adverse_ratio(0), avg_adverse_move(0), total_fills(0), adverse_fills(0), confidence(0), direction_bias(0),
+          decayed_score(0)
+    {}
 };
 
 /// Realized Toxicity Detector

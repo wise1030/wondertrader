@@ -5,7 +5,8 @@
 #pragma once
 #include <stdint.h>
 
-namespace wt_futu {
+namespace wt_futu
+{
 
 // Order flags
 static const int OrderFlag_Normal = 0;

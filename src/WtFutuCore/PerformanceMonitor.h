@@ -21,16 +21,17 @@
 #include "../Share/RingBuffer.hpp"
 #include "../Includes/WTSMarcos.h"
 
-namespace futu {
+namespace futu
+{
 
 /// Latency type for tracking different latency paths
 enum class LatencyType : uint8_t
 {
-    TICK_TO_QUOTE,      ///< Tick arrival to quote placement
-    ORDER_TO_ACK,       ///< Order sent to acknowledgment
-    QUOTE_TO_FILL,      ///< Quote placed to fill
-    CANCEL_TO_ACK,      ///< Cancel sent to acknowledgment
-    SIGNAL_TO_ORDER     ///< Strategy signal to order sent
+    TICK_TO_QUOTE,  ///< Tick arrival to quote placement
+    ORDER_TO_ACK,   ///< Order sent to acknowledgment
+    QUOTE_TO_FILL,  ///< Quote placed to fill
+    CANCEL_TO_ACK,  ///< Cancel sent to acknowledgment
+    SIGNAL_TO_ORDER ///< Strategy signal to order sent
 };
 
 /// Percentile type for latency statistics
@@ -46,21 +47,20 @@ enum class Percentile : uint8_t
 /// Latency statistics
 struct LatencyStats
 {
-    double min_ns;          ///< Minimum latency (nanoseconds)
-    double max_ns;          ///< Maximum latency (nanoseconds)
-    double mean_ns;         ///< Mean latency (nanoseconds)
-    double std_ns;          ///< Standard deviation (nanoseconds)
-    double p50_ns;          ///< 50th percentile
-    double p90_ns;          ///< 90th percentile
-    double p95_ns;          ///< 95th percentile
-    double p99_ns;          ///< 99th percentile
-    uint64_t count;         ///< Sample count
-    uint64_t total_ns;      ///< Total latency for mean calculation
+    double min_ns;     ///< Minimum latency (nanoseconds)
+    double max_ns;     ///< Maximum latency (nanoseconds)
+    double mean_ns;    ///< Mean latency (nanoseconds)
+    double std_ns;     ///< Standard deviation (nanoseconds)
+    double p50_ns;     ///< 50th percentile
+    double p90_ns;     ///< 90th percentile
+    double p95_ns;     ///< 95th percentile
+    double p99_ns;     ///< 99th percentile
+    uint64_t count;    ///< Sample count
+    uint64_t total_ns; ///< Total latency for mean calculation
 
     LatencyStats()
-        : min_ns(1e18), max_ns(0), mean_ns(0), std_ns(0)
-        , p50_ns(0), p90_ns(0), p95_ns(0), p99_ns(0)
-        , count(0), total_ns(0)
+        : min_ns(1e18), max_ns(0), mean_ns(0), std_ns(0), p50_ns(0), p90_ns(0), p95_ns(0), p99_ns(0), count(0),
+          total_ns(0)
     {}
 
     /// Reset statistics
@@ -257,35 +257,31 @@ class ScopedTimer
 {
 public:
     ScopedTimer(PerformanceMonitor& monitor, LatencyType type)
-        : _monitor(monitor)
-        , _type(type)
-        , _start(std::chrono::high_resolution_clock::now())
+        : _monitor(monitor), _type(type), _start(std::chrono::high_resolution_clock::now())
     {}
 
     ~ScopedTimer()
     {
-        if (_monitor.isEnabled())
-        {
+        if (_monitor.isEnabled()) {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - _start);
 
-            switch (_type)
-            {
-                case LatencyType::TICK_TO_QUOTE:
-                    _monitor.recordTickToQuote(duration.count());
-                    break;
-                case LatencyType::ORDER_TO_ACK:
-                    _monitor.recordOrderToAck(duration.count());
-                    break;
-                case LatencyType::QUOTE_TO_FILL:
-                    _monitor.recordQuoteToFill(duration.count());
-                    break;
-                case LatencyType::CANCEL_TO_ACK:
-                    _monitor.recordCancelToAck(duration.count());
-                    break;
-                case LatencyType::SIGNAL_TO_ORDER:
-                    _monitor.recordSignalToOrder(duration.count());
-                    break;
+            switch (_type) {
+            case LatencyType::TICK_TO_QUOTE:
+                _monitor.recordTickToQuote(duration.count());
+                break;
+            case LatencyType::ORDER_TO_ACK:
+                _monitor.recordOrderToAck(duration.count());
+                break;
+            case LatencyType::QUOTE_TO_FILL:
+                _monitor.recordQuoteToFill(duration.count());
+                break;
+            case LatencyType::CANCEL_TO_ACK:
+                _monitor.recordCancelToAck(duration.count());
+                break;
+            case LatencyType::SIGNAL_TO_ORDER:
+                _monitor.recordSignalToOrder(duration.count());
+                break;
             }
         }
     }

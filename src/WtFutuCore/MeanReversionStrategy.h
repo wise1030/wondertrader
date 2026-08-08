@@ -17,7 +17,8 @@
 #include "ISpreadStrategy.h"
 #include <memory>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Mean Reversion Configuration
@@ -25,36 +26,28 @@ namespace futu {
 
 struct MeanReversionConfig
 {
-    double entry_z_threshold;       ///< Z-Score threshold for entry
-    double exit_z_threshold;        ///< Z-Score threshold for exit
-    double stop_loss_z;             ///< Z-Score threshold for stop loss
-    double max_position;            ///< Maximum position size
+    double entry_z_threshold; ///< Z-Score threshold for entry
+    double exit_z_threshold;  ///< Z-Score threshold for exit
+    double stop_loss_z;       ///< Z-Score threshold for stop loss
+    double max_position;      ///< Maximum position size
 
-    uint32_t min_samples;           ///< Minimum samples required
-    uint32_t convergence_timeout;   ///< Timeout for convergence (seconds)
+    uint32_t min_samples;         ///< Minimum samples required
+    uint32_t convergence_timeout; ///< Timeout for convergence (seconds)
 
-    double base_qty;                ///< Base position size
-    double position_scale;          ///< Position scaling factor
+    double base_qty;       ///< Base position size
+    double position_scale; ///< Position scaling factor
 
-    bool use_half_life_filter;      ///< Filter by half-life
-    double max_half_life;           ///< Maximum acceptable half-life
+    bool use_half_life_filter; ///< Filter by half-life
+    double max_half_life;      ///< Maximum acceptable half-life
 
-    double add_safety_ratio;        ///< 加仓安全比率，加仓上限 = stop_loss_z * ratio
-                                    ///< 默认0.75，即加仓区间不超过止损阈值的75%
-                                    ///< 避免在接近止损区域时加仓
+    double add_safety_ratio; ///< 加仓安全比率，加仓上限 = stop_loss_z * ratio
+                             ///< 默认0.75，即加仓区间不超过止损阈值的75%
+                             ///< 避免在接近止损区域时加仓
 
     MeanReversionConfig()
-        : entry_z_threshold(2.0)
-        , exit_z_threshold(0.5)
-        , stop_loss_z(4.0)
-        , max_position(20.0)
-        , min_samples(30)
-        , convergence_timeout(3600)
-        , base_qty(1.0)
-        , position_scale(0.5)
-        , use_half_life_filter(true)
-        , max_half_life(500)
-        , add_safety_ratio(0.75)
+        : entry_z_threshold(2.0), exit_z_threshold(0.5), stop_loss_z(4.0), max_position(20.0), min_samples(30),
+          convergence_timeout(3600), base_qty(1.0), position_scale(0.5), use_half_life_filter(true), max_half_life(500),
+          add_safety_ratio(0.75)
     {}
 };
 

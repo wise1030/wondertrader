@@ -17,7 +17,8 @@
 #include <cstdint>
 #include "../Includes/WTSVariant.hpp"
 
-namespace futu {
+namespace futu
+{
 
 class FutuConfig
 {

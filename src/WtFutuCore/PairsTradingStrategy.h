@@ -18,7 +18,8 @@
 #include "../Share/RingBuffer.hpp"
 #include <memory>
 
-namespace futu {
+namespace futu
+{
 
 //==============================================================================
 // Pairs Trading Configuration
@@ -26,39 +27,29 @@ namespace futu {
 
 struct PairsTradingConfig
 {
-    double entry_z_threshold;       ///< Z-Score entry threshold
-    double exit_z_threshold;        ///< Z-Score exit threshold
-    double stop_loss_z;             ///< Stop loss Z-Score
+    double entry_z_threshold; ///< Z-Score entry threshold
+    double exit_z_threshold;  ///< Z-Score exit threshold
+    double stop_loss_z;       ///< Stop loss Z-Score
 
-    double max_position;            ///< Maximum position size
-    double base_qty;                ///< Base position size
+    double max_position; ///< Maximum position size
+    double base_qty;     ///< Base position size
 
-    uint32_t min_samples;           ///< Minimum samples for cointegration
-    double min_correlation;         ///< Minimum correlation for valid pair
-    double max_spread_std;          ///< Maximum spread standard deviation
+    uint32_t min_samples;   ///< Minimum samples for cointegration
+    double min_correlation; ///< Minimum correlation for valid pair
+    double max_spread_std;  ///< Maximum spread standard deviation
 
-    uint32_t lookback_window;       ///< Rolling window for beta estimation
-    uint32_t rebalance_interval;    ///< Beta rebalance interval (ticks)
+    uint32_t lookback_window;    ///< Rolling window for beta estimation
+    uint32_t rebalance_interval; ///< Beta rebalance interval (ticks)
 
-    bool use_dynamic_beta;          ///< Use dynamic beta adjustment
-    double beta_smoothing;          ///< Beta smoothing factor (EMA)
+    bool use_dynamic_beta; ///< Use dynamic beta adjustment
+    double beta_smoothing; ///< Beta smoothing factor (EMA)
 
-    uint32_t convergence_timeout;   ///< Convergence timeout (seconds)
+    uint32_t convergence_timeout; ///< Convergence timeout (seconds)
 
     PairsTradingConfig()
-        : entry_z_threshold(2.0)
-        , exit_z_threshold(0.5)
-        , stop_loss_z(4.0)
-        , max_position(15.0)
-        , base_qty(1.0)
-        , min_samples(100)
-        , min_correlation(0.7)
-        , max_spread_std(100.0)
-        , lookback_window(200)
-        , rebalance_interval(100)
-        , use_dynamic_beta(true)
-        , beta_smoothing(0.05)
-        , convergence_timeout(7200)
+        : entry_z_threshold(2.0), exit_z_threshold(0.5), stop_loss_z(4.0), max_position(15.0), base_qty(1.0),
+          min_samples(100), min_correlation(0.7), max_spread_std(100.0), lookback_window(200), rebalance_interval(100),
+          use_dynamic_beta(true), beta_smoothing(0.05), convergence_timeout(7200)
     {}
 };
 
@@ -68,23 +59,19 @@ struct PairsTradingConfig
 
 struct CointegrationResult
 {
-    bool is_cointegrated;           ///< Is pair cointegrated
-    double p_value;                 ///< ADF test p-value
-    double test_statistic;          ///< ADF test statistic
-    double critical_value;          ///< Critical value at 5%
+    bool is_cointegrated;  ///< Is pair cointegrated
+    double p_value;        ///< ADF test p-value
+    double test_statistic; ///< ADF test statistic
+    double critical_value; ///< Critical value at 5%
 
-    double beta;                    ///< Cointegration coefficient
-    double alpha;                   ///< Intercept term
-    double residual_std;            ///< Residual standard deviation
+    double beta;         ///< Cointegration coefficient
+    double alpha;        ///< Intercept term
+    double residual_std; ///< Residual standard deviation
 
     CointegrationResult()
-        : is_cointegrated(false)
-        , p_value(1.0)
-        , test_statistic(0)
-        , critical_value(-2.86)  // 5% critical value
-        , beta(1.0)
-        , alpha(0)
-        , residual_std(0)
+        : is_cointegrated(false), p_value(1.0), test_statistic(0), critical_value(-2.86) // 5% critical value
+          ,
+          beta(1.0), alpha(0), residual_std(0)
     {}
 };
 
@@ -196,7 +183,7 @@ private:
     //==========================================================================
 
     bool _is_valid_pair;
-    mutable double _current_correlation;  // updated in const testCointegration()
+    mutable double _current_correlation; // updated in const testCointegration()
 
     //==========================================================================
     // Signal State

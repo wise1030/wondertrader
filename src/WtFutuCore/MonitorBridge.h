@@ -24,7 +24,8 @@ NS_WTP_BEGIN
 class IUftStraCtx;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
 class FutuPortfolio;
 
@@ -33,8 +34,8 @@ class MonitorBridge
 public:
     struct Config
     {
-        bool        enabled;                ///< 总开关 (默认关, 配置显式开)
-        uint32_t    flush_interval_ms;        ///< 落盘节流间隔
+        bool enabled;               ///< 总开关 (默认关, 配置显式开)
+        uint32_t flush_interval_ms; ///< 落盘节流间隔
 
         Config() : enabled(false), flush_interval_ms(1000) {}
     };
@@ -42,25 +43,24 @@ public:
     MonitorBridge() = default;
 
     /// on_init 时调用: 绑定组合数据源
-    void    init(const char* straId, const FutuPortfolio* portfolio, const Config& cfg);
+    void init(const char* straId, const FutuPortfolio* portfolio, const Config& cfg);
 
     /// 热路径调用 (on_tick/on_trade 末尾): 内部节流, 到点才写盘
-    void    maybeFlush(wtp::IUftStraCtx* ctx);
+    void maybeFlush(wtp::IUftStraCtx* ctx);
 
     /// on_session_end 调用: 最终落盘 + 追加 funds.csv 历史资金曲线
-    void    onSessionEnd(wtp::IUftStraCtx* ctx, uint32_t uTDate);
+    void onSessionEnd(wtp::IUftStraCtx* ctx, uint32_t uTDate);
 
 private:
-    void    doFlush(uint32_t tdate);        // 调用方须已持锁
-    void    appendFundsCsv(uint32_t tdate, double closeprofit,
-                           double dynprofit, double fees);
+    void doFlush(uint32_t tdate); // 调用方须已持锁
+    void appendFundsCsv(uint32_t tdate, double closeprofit, double dynprofit, double fees);
 
 private:
-    const FutuPortfolio*    _portfolio = nullptr;
-    std::string        _stra_id;
-    Config            _cfg;
-    uint64_t        _last_flush_ms = 0;
-    std::mutex        _mtx;
+    const FutuPortfolio* _portfolio = nullptr;
+    std::string _stra_id;
+    Config _cfg;
+    uint64_t _last_flush_ms = 0;
+    std::mutex _mtx;
 };
 
 } // namespace futu

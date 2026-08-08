@@ -29,10 +29,11 @@ NS_WTP_BEGIN
 class EventNotifier;
 NS_WTP_END
 
-namespace futu {
+namespace futu
+{
 
-class FutuPortfolio;  // Forward declaration
-class UnifiedOrderTracker;  // Forward declaration
+class FutuPortfolio;       // Forward declaration
+class UnifiedOrderTracker; // Forward declaration
 
 /// Risk limit types
 enum class RiskLimitType
@@ -40,28 +41,28 @@ enum class RiskLimitType
     // B5: POSITION_LONG/SHORT 已删除 — v7.1 连续控制接管仓位风险
     // (skew/qty-decay/obligation/taker), BLOCK_SIDE 硬动作实际等价全停,
     // 方向性违规类型从未被产生, 属 v7.1 前残留死代码
-    POSITION_NET,       ///< Maximum net position
-    DELTA,              ///< Maximum portfolio delta
-    EXPOSURE,           ///< Maximum total exposure
-    DAILY_LOSS,         ///< Maximum daily loss
-    ORDER_RATE,         ///< Maximum orders per second
-    CANCEL_RATE,        ///< Maximum cancels per second
-    TRADE_RATE          ///< Maximum trades per second
+    POSITION_NET, ///< Maximum net position
+    DELTA,        ///< Maximum portfolio delta
+    EXPOSURE,     ///< Maximum total exposure
+    DAILY_LOSS,   ///< Maximum daily loss
+    ORDER_RATE,   ///< Maximum orders per second
+    CANCEL_RATE,  ///< Maximum cancels per second
+    TRADE_RATE    ///< Maximum trades per second
 };
 
 /// Risk violation severity
 enum class RiskSeverity
 {
-    WARNING,            ///< Approaching limit
-    BREACH,             ///< Limit breached
-    CRITICAL            ///< Multiple breaches or severe violation
+    WARNING, ///< Approaching limit
+    BREACH,  ///< Limit breached
+    CRITICAL ///< Multiple breaches or severe violation
 };
 
 /// Risk category for recovery mechanism
 enum class RiskCategory
 {
-    REVERSIBLE,         ///< Reversible: position/exposure/delta limits (auto-recovery)
-    IRREVERSIBLE        ///< Irreversible: daily loss (requires manual intervention)
+    REVERSIBLE,  ///< Reversible: position/exposure/delta limits (auto-recovery)
+    IRREVERSIBLE ///< Irreversible: daily loss (requires manual intervention)
 };
 
 /// Risk violation record
@@ -77,24 +78,22 @@ struct RiskViolation
     std::string message;
 
     RiskViolation()
-        : type(RiskLimitType::POSITION_NET)
-        , severity(RiskSeverity::WARNING)
-        , current_value(0), limit_value(0), utilization(0)
-        , timestamp(0)
+        : type(RiskLimitType::POSITION_NET), severity(RiskSeverity::WARNING), current_value(0), limit_value(0),
+          utilization(0), timestamp(0)
     {}
 };
 
 /// Risk action to take
 enum class RiskAction
 {
-    NONE,               ///< No action
-    WARN,               ///< Log warning
-    WIDEN_SPREAD,       ///< Widen quotes (策略性软响应: util 0.8→×1.5, 0.9→×2.0)
-    BLOCK_SIDE_LONG,    ///< Block opening long positions
-    BLOCK_SIDE_SHORT,   ///< Block opening short positions
-    PAUSE_QUOTING,      ///< v7.3 已退役: 判定数学上不可达, 分支已删 (保留枚举值防序号错位)
-    FLATTEN_POSITION,   ///< v7.3 已退役: breachCount 恒<=1 不可达, 分支已删; 强平由 HALT FORCE FLAT 承担
-    HALT_TRADING        ///< Stop all trading (irreversible, requires manual intervention)
+    NONE,             ///< No action
+    WARN,             ///< Log warning
+    WIDEN_SPREAD,     ///< Widen quotes (策略性软响应: util 0.8→×1.5, 0.9→×2.0)
+    BLOCK_SIDE_LONG,  ///< Block opening long positions
+    BLOCK_SIDE_SHORT, ///< Block opening short positions
+    PAUSE_QUOTING,    ///< v7.3 已退役: 判定数学上不可达, 分支已删 (保留枚举值防序号错位)
+    FLATTEN_POSITION, ///< v7.3 已退役: breachCount 恒<=1 不可达, 分支已删; 强平由 HALT FORCE FLAT 承担
+    HALT_TRADING      ///< Stop all trading (irreversible, requires manual intervention)
 };
 
 /// Rate limits configuration
@@ -108,42 +107,34 @@ struct RateLimits
     uint32_t delta_rate_cooldown_ms;
 
     // 分级响应阈值
-    double position_breach_pause_threshold;  ///< v7.3: 仅作 canRecover 恢复闸 (pos < maxPos×1.2 才允许恢复);
-                                             ///<   PAUSE_QUOTING 入口已删除, 名称保留兼容配置
-    double delta_critical_mult;              ///< Delta critical 倍数 (default 1.5)
+    double position_breach_pause_threshold; ///< v7.3: 仅作 canRecover 恢复闸 (pos < maxPos×1.2 才允许恢复);
+                                            ///<   PAUSE_QUOTING 入口已删除, 名称保留兼容配置
+    double delta_critical_mult;             ///< Delta critical 倍数 (default 1.5)
     double delta_warning_mult;              ///< Delta warning 倍数 (default 0.8)
 
     // R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
-    double position_warning_l1;              ///< util L1 → WIDEN_SPREAD ×1.5 (default 0.8)
-    double position_warning_l2;              ///< util L2 → WIDEN_SPREAD ×2.0 (default 0.9)
-    double position_hard_block_ratio;        ///< 持仓硬止比例 (default 1.0, 仅flexible模式)
+    double position_warning_l1;       ///< util L1 → WIDEN_SPREAD ×1.5 (default 0.8)
+    double position_warning_l2;       ///< util L2 → WIDEN_SPREAD ×2.0 (default 0.9)
+    double position_hard_block_ratio; ///< 持仓硬止比例 (default 1.0, 仅flexible模式)
 
     // 升级响应阈值
-    uint32_t widen_threshold;               ///< breachCount 触发 WIDEN_SPREAD (default 1)
+    uint32_t widen_threshold; ///< breachCount 触发 WIDEN_SPREAD (default 1)
     // v7.3: flatten_threshold 已删除 — FLATTEN_POSITION 不可达分支随 PAUSE 一并清理
 
     RateLimits()
-        : max_orders_per_sec(50)
-        , max_cancels_per_sec(30)
-        , max_trades_per_sec(20)
-    , max_delta_change_per_sec(10.0)
-    , delta_rate_window_sec(5)
-    , delta_rate_cooldown_ms(5000)
-        , position_breach_pause_threshold(1.2)
-        , delta_critical_mult(1.5)
-        , delta_warning_mult(0.8)
-        , position_warning_l1(0.8)
-        , position_warning_l2(0.9)
-        , position_hard_block_ratio(1.0)
-        , widen_threshold(1)
+        : max_orders_per_sec(50), max_cancels_per_sec(30), max_trades_per_sec(20), max_delta_change_per_sec(10.0),
+          delta_rate_window_sec(5), delta_rate_cooldown_ms(5000), position_breach_pause_threshold(1.2),
+          delta_critical_mult(1.5), delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9),
+          position_hard_block_ratio(1.0), widen_threshold(1)
     {}
 
-    static RateLimits fromVariant(wtp::WTSVariant* v) {
+    static RateLimits fromVariant(wtp::WTSVariant* v)
+    {
         RateLimits r;
         r.max_orders_per_sec = FutuConfig::readUInt32(v, "maxOrdersPerSec", 50);
         r.max_cancels_per_sec = FutuConfig::readUInt32(v, "maxCancelsPerSec", 30);
         r.max_trades_per_sec = FutuConfig::readUInt32(v, "maxTradesPerSec", 20);
-        r.max_delta_change_per_sec =        FutuConfig::readDouble(v, "maxDeltaChangePerSec", 10.0);
+        r.max_delta_change_per_sec = FutuConfig::readDouble(v, "maxDeltaChangePerSec", 10.0);
         r.delta_rate_window_sec = FutuConfig::readUInt32(v, "deltaRateWindowSec", 5);
         r.delta_rate_cooldown_ms = FutuConfig::readUInt32(v, "deltaRateCooldownMs", 5000);
         r.position_breach_pause_threshold = FutuConfig::readDouble(v, "positionBreachPauseThreshold", 1.2);
@@ -160,27 +151,24 @@ struct RateLimits
 /// Recovery configuration for reversible risks - P1-3.3 enhanced
 struct RecoveryConfig
 {
-    uint32_t cooldown_ms;           ///< Cooldown period before recovery (milliseconds)
-    uint32_t check_interval_ms;     ///< Interval between recovery checks
-    double   recovery_threshold;    ///< Risk utilization threshold for recovery (< 1.0)
+    uint32_t cooldown_ms;       ///< Cooldown period before recovery (milliseconds)
+    uint32_t check_interval_ms; ///< Interval between recovery checks
+    double recovery_threshold;  ///< Risk utilization threshold for recovery (< 1.0)
 
     // Enhanced recovery limits
-    uint32_t max_recovery_count;    ///< Maximum number of auto-recoveries per session
-    double   pnl_recovery_ratio;    ///< Required PnL recovery ratio (e.g., 0.5 = 50% of loss recovered)
-    double   max_loss_for_recovery; ///< Max absolute loss at halt to allow auto-recovery (0=disabled)
-    bool     auto_clear_irreversible_on_reset; ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
+    uint32_t max_recovery_count;  ///< Maximum number of auto-recoveries per session
+    double pnl_recovery_ratio;    ///< Required PnL recovery ratio (e.g., 0.5 = 50% of loss recovered)
+    double max_loss_for_recovery; ///< Max absolute loss at halt to allow auto-recovery (0=disabled)
+    bool
+        auto_clear_irreversible_on_reset; ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
 
     RecoveryConfig()
-        : cooldown_ms(30000)
-        , check_interval_ms(5000)
-        , recovery_threshold(0.8)
-        , max_recovery_count(3)
-        , pnl_recovery_ratio(0.5)
-        , max_loss_for_recovery(0)
-        , auto_clear_irreversible_on_reset(false)
+        : cooldown_ms(30000), check_interval_ms(5000), recovery_threshold(0.8), max_recovery_count(3),
+          pnl_recovery_ratio(0.5), max_loss_for_recovery(0), auto_clear_irreversible_on_reset(false)
     {}
 
-    static RecoveryConfig fromVariant(wtp::WTSVariant* v) {
+    static RecoveryConfig fromVariant(wtp::WTSVariant* v)
+    {
         RecoveryConfig c;
         c.cooldown_ms = FutuConfig::readUInt32(v, "cooldownMs", 30000);
         c.check_interval_ms = FutuConfig::readUInt32(v, "checkIntervalMs", 5000);
@@ -196,21 +184,18 @@ struct RecoveryConfig
 /// Closeout configuration for session end
 struct CloseoutConfig
 {
-    uint32_t minutes_before;        ///< Minutes before day close to stop quoting (0=disabled)
-    uint32_t max_retries;           ///< Max retries for closeout orders
-    uint32_t retry_interval_ms;     ///< Retry interval in ms
-    uint32_t night_close_time;      ///< Night session close time (HHMM format, 0=no night session)
-    uint32_t night_minutes_before;  ///< Minutes before night close to stop quoting
+    uint32_t minutes_before;       ///< Minutes before day close to stop quoting (0=disabled)
+    uint32_t max_retries;          ///< Max retries for closeout orders
+    uint32_t retry_interval_ms;    ///< Retry interval in ms
+    uint32_t night_close_time;     ///< Night session close time (HHMM format, 0=no night session)
+    uint32_t night_minutes_before; ///< Minutes before night close to stop quoting
 
     CloseoutConfig()
-        : minutes_before(5)
-        , max_retries(10)
-        , retry_interval_ms(2000)
-        , night_close_time(0)
-        , night_minutes_before(5)
+        : minutes_before(5), max_retries(10), retry_interval_ms(2000), night_close_time(0), night_minutes_before(5)
     {}
 
-    static CloseoutConfig fromVariant(wtp::WTSVariant* v) {
+    static CloseoutConfig fromVariant(wtp::WTSVariant* v)
+    {
         CloseoutConfig c;
         c.minutes_before = FutuConfig::readUInt32(v, "minutesBefore", 5);
         c.max_retries = FutuConfig::readUInt32(v, "maxRetries", 10);
@@ -225,14 +210,14 @@ struct CloseoutConfig
 /// Used by both RiskMonitor (SSOT with metadata) and CloseoutExecutor
 enum class CloseoutSub : uint8_t
 {
-    IDLE,           ///< Not triggered, normal trading
-    TRIGGERED,      ///< Triggered, waiting to execute closeout
-    DRAINING,       ///< Executor: waiting for inflight orders to settle
-    ASSESSING,      ///< Executor: reading net delta, computing remaining
-    EXECUTING,      ///< Executor: iterative FAK batches
-    COMPLETED,      ///< Closeout completed
-    FAILED,         ///< Closeout failed (e.g., partial fill, no liquidity)
-    RETRYING        ///< Retrying closeout after failure
+    IDLE,      ///< Not triggered, normal trading
+    TRIGGERED, ///< Triggered, waiting to execute closeout
+    DRAINING,  ///< Executor: waiting for inflight orders to settle
+    ASSESSING, ///< Executor: reading net delta, computing remaining
+    EXECUTING, ///< Executor: iterative FAK batches
+    COMPLETED, ///< Closeout completed
+    FAILED,    ///< Closeout failed (e.g., partial fill, no liquidity)
+    RETRYING   ///< Retrying closeout after failure
 };
 
 /// Closeout sub-state with transition tracking
@@ -250,39 +235,33 @@ struct CloseoutSubInfo
     bool night_closeout_done;   ///< night closeout already executed this session
 
     CloseoutSubInfo()
-        : state(CloseoutSub::IDLE)
-        , trigger_time(0), flatten_start(0), complete_time(0), fail_time(0)
-        , retry_count(0), max_retries(3), retry_interval_ms(5000)
-        , is_night_closeout(false), night_closeout_done(false)
+        : state(CloseoutSub::IDLE), trigger_time(0), flatten_start(0), complete_time(0), fail_time(0), retry_count(0),
+          max_retries(3), retry_interval_ms(5000), is_night_closeout(false), night_closeout_done(false)
     {}
 
     inline bool canTransitionTo(CloseoutSub next) const
     {
-        switch (state)
-        {
-            case CloseoutSub::IDLE:
-                return next == CloseoutSub::TRIGGERED;
-            case CloseoutSub::TRIGGERED:
-                return next == CloseoutSub::DRAINING || next == CloseoutSub::COMPLETED;
-            case CloseoutSub::DRAINING:
-                return next == CloseoutSub::ASSESSING || next == CloseoutSub::COMPLETED
-                    || next == CloseoutSub::FAILED;
-            case CloseoutSub::ASSESSING:
-                return next == CloseoutSub::EXECUTING || next == CloseoutSub::COMPLETED
-                    || next == CloseoutSub::FAILED;
-            case CloseoutSub::EXECUTING:
-                return next == CloseoutSub::DRAINING || next == CloseoutSub::ASSESSING
-                    || next == CloseoutSub::COMPLETED || next == CloseoutSub::FAILED;
-            case CloseoutSub::COMPLETED:
-                // Allow COMPLETED→IDLE for night session reset
-                return next == CloseoutSub::IDLE;
-            case CloseoutSub::FAILED:
-                return next == CloseoutSub::RETRYING || next == CloseoutSub::COMPLETED;
-            case CloseoutSub::RETRYING:
-                return next == CloseoutSub::DRAINING || next == CloseoutSub::FAILED
-                    || next == CloseoutSub::COMPLETED;
-            default:
-                return false;
+        switch (state) {
+        case CloseoutSub::IDLE:
+            return next == CloseoutSub::TRIGGERED;
+        case CloseoutSub::TRIGGERED:
+            return next == CloseoutSub::DRAINING || next == CloseoutSub::COMPLETED;
+        case CloseoutSub::DRAINING:
+            return next == CloseoutSub::ASSESSING || next == CloseoutSub::COMPLETED || next == CloseoutSub::FAILED;
+        case CloseoutSub::ASSESSING:
+            return next == CloseoutSub::EXECUTING || next == CloseoutSub::COMPLETED || next == CloseoutSub::FAILED;
+        case CloseoutSub::EXECUTING:
+            return next == CloseoutSub::DRAINING || next == CloseoutSub::ASSESSING || next == CloseoutSub::COMPLETED ||
+                   next == CloseoutSub::FAILED;
+        case CloseoutSub::COMPLETED:
+            // Allow COMPLETED→IDLE for night session reset
+            return next == CloseoutSub::IDLE;
+        case CloseoutSub::FAILED:
+            return next == CloseoutSub::RETRYING || next == CloseoutSub::COMPLETED;
+        case CloseoutSub::RETRYING:
+            return next == CloseoutSub::DRAINING || next == CloseoutSub::FAILED || next == CloseoutSub::COMPLETED;
+        default:
+            return false;
         }
     }
 };
@@ -305,7 +284,8 @@ public:
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
     const RecoveryConfig& getRecoveryConfig() const { return _recovery_config; }
 
-    void setCloseoutConfig(const CloseoutConfig& config) {
+    void setCloseoutConfig(const CloseoutConfig& config)
+    {
         _closeout_config = config;
         _closeout_state.max_retries = config.max_retries;
         _closeout_state.retry_interval_ms = config.retry_interval_ms;
@@ -347,35 +327,30 @@ public:
     /// v3 软风控：不再硬 BLOCK，返回 utilization 让 Quoter 做 qty 衰减；
     ///           util>=1.0 时设 obligation 标志，强制减仓侧义务报价（≥10手/≤10ticks）
     /// 旧 allow_bid/allow_ask 保留兼容（v3 默认始终 true，仅 Toxicity/TradingState 可关）
-    struct PreTradeResult {
+    struct PreTradeResult
+    {
         bool allow_bid;
         bool allow_ask;
-        bool pending_drain_bid;        ///< pending超限 -> 撤该侧旧单+跳过本轮(obligation也生效)
+        bool pending_drain_bid; ///< pending超限 -> 撤该侧旧单+跳过本轮(obligation也生效)
         bool pending_drain_ask;
-        bool hard_block_bid;           ///< 持仓超限 -> flexible模式qty=0 (obligation靠skew)
+        bool hard_block_bid; ///< 持仓超限 -> flexible模式qty=0 (obligation靠skew)
         bool hard_block_ask;
-        double long_utilization;       ///< projected_long  / max_position，>=1 → ask 义务
-        double short_utilization;      ///< projected_short / max_position，>=1 → bid 义务
-        bool force_ask_obligation;     ///< 多头打满 → ask 必须保持义务报价
-        bool force_bid_obligation;     ///< 空头打满 → bid 必须保持义务报价
+        double long_utilization;   ///< projected_long  / max_position，>=1 → ask 义务
+        double short_utilization;  ///< projected_short / max_position，>=1 → bid 义务
+        bool force_ask_obligation; ///< 多头打满 → ask 必须保持义务报价
+        bool force_bid_obligation; ///< 空头打满 → bid 必须保持义务报价
     };
     PreTradeResult checkPreTradePosition(const std::string& code,
-                                          const FutuPortfolio* portfolio,
-                                          const UnifiedOrderTracker* tracker) const;
+                                         const FutuPortfolio* portfolio,
+                                         const UnifiedOrderTracker* tracker) const;
 
     /// Check rate limits only
     bool checkRateLimits();
 
     /// Get current rate counts (ring buffer size)
-    inline uint32_t getOrdersPerSec() const {
-        return static_cast<uint32_t>(_order_times.size());
-    }
-    inline uint32_t getCancelsPerSec() const {
-        return static_cast<uint32_t>(_cancel_times.size());
-    }
-    inline uint32_t getTradesPerSec() const {
-        return static_cast<uint32_t>(_trade_times.size());
-    }
+    inline uint32_t getOrdersPerSec() const { return static_cast<uint32_t>(_order_times.size()); }
+    inline uint32_t getCancelsPerSec() const { return static_cast<uint32_t>(_cancel_times.size()); }
+    inline uint32_t getTradesPerSec() const { return static_cast<uint32_t>(_trade_times.size()); }
 
     //==========================================================================
     // Actions
@@ -395,25 +370,15 @@ public:
     // State
     //==========================================================================
 
-    inline bool isTradingHalted() const {
-        return _trading_halted.load(std::memory_order_relaxed);
-    }
+    inline bool isTradingHalted() const { return _trading_halted.load(std::memory_order_relaxed); }
 
-    inline bool isLongBlocked() const {
-        return _long_blocked.load(std::memory_order_relaxed);
-    }
+    inline bool isLongBlocked() const { return _long_blocked.load(std::memory_order_relaxed); }
 
-    inline bool isShortBlocked() const {
-        return _short_blocked.load(std::memory_order_relaxed);
-    }
+    inline bool isShortBlocked() const { return _short_blocked.load(std::memory_order_relaxed); }
 
-    inline bool isQuotingPaused() const {
-        return _quoting_paused.load(std::memory_order_relaxed);
-    }
+    inline bool isQuotingPaused() const { return _quoting_paused.load(std::memory_order_relaxed); }
 
-    inline RiskCategory getHaltCategory() const {
-        return _halt_category;
-    }
+    inline RiskCategory getHaltCategory() const { return _halt_category; }
 
     /// Halt trading with category (irreversible risks need manual recovery)
     /// @param category Risk category (reversible/irreversible)
@@ -425,26 +390,24 @@ public:
     bool resumeTrading();
 
     /// Block opening long positions
-    void blockLong() {
+    void blockLong()
+    {
         _long_blocked.store(true, std::memory_order_relaxed);
         broadcastAlert("LONG_BLOCKED", "Opening long positions has been blocked");
     }
 
     /// Block opening short positions
-    void blockShort() {
+    void blockShort()
+    {
         _short_blocked.store(true, std::memory_order_relaxed);
         broadcastAlert("SHORT_BLOCKED", "Opening short positions has been blocked");
     }
 
     /// Unblock long positions
-    void unblockLong() {
-        _long_blocked.store(false, std::memory_order_relaxed);
-    }
+    void unblockLong() { _long_blocked.store(false, std::memory_order_relaxed); }
 
     /// Unblock short positions
-    void unblockShort() {
-        _short_blocked.store(false, std::memory_order_relaxed);
-    }
+    void unblockShort() { _short_blocked.store(false, std::memory_order_relaxed); }
 
     /// Pause quoting (reversible)
     void pauseQuoting();
@@ -463,35 +426,25 @@ public:
     bool checkCloseout(uint32_t currentTime, uint32_t closeTime);
 
     /// Get current closeout state
-    inline CloseoutSub getCloseoutSub() const {
-        return _closeout_state.state;
-    }
+    inline CloseoutSub getCloseoutSub() const { return _closeout_state.state; }
 
     /// Get closeout state info
-    inline const CloseoutSubInfo& getCloseoutSubInfo() const {
-        return _closeout_state;
-    }
+    inline const CloseoutSubInfo& getCloseoutSubInfo() const { return _closeout_state; }
 
     /// Get night session close time (HHMM, 0=no night session) -- Bug A close_time
-    inline uint32_t getNightCloseTime() const {
-        return _closeout_config.night_close_time;
-    }
+    inline uint32_t getNightCloseTime() const { return _closeout_config.night_close_time; }
 
     /// Check if closeout has been triggered
-    inline bool isCloseoutTriggered() const {
-        return _closeout_state.state != CloseoutSub::IDLE;
-    }
+    inline bool isCloseoutTriggered() const { return _closeout_state.state != CloseoutSub::IDLE; }
 
     /// Check if closeout has been completed
-    inline bool isCloseoutCompleted() const {
-        return _closeout_state.state == CloseoutSub::COMPLETED;
-    }
+    inline bool isCloseoutCompleted() const { return _closeout_state.state == CloseoutSub::COMPLETED; }
 
     /// Check if currently in executor-managed active states
-    inline bool isCloseoutFlattening() const {
-        return _closeout_state.state == CloseoutSub::DRAINING
-            || _closeout_state.state == CloseoutSub::ASSESSING
-            || _closeout_state.state == CloseoutSub::EXECUTING;
+    inline bool isCloseoutFlattening() const
+    {
+        return _closeout_state.state == CloseoutSub::DRAINING || _closeout_state.state == CloseoutSub::ASSESSING ||
+               _closeout_state.state == CloseoutSub::EXECUTING;
     }
 
     /// Transition closeout state (with validation)
@@ -568,7 +521,7 @@ public:
 
 private:
     RateLimits _rate_limits;
-    double _max_pending_per_side{0.0};  ///< Per-side max pending qty (from OrderControl, 0=disabled)
+    double _max_pending_per_side{0.0}; ///< Per-side max pending qty (from OrderControl, 0=disabled)
     RecoveryConfig _recovery_config;
 
     // Lock-free atomic counters for rate tracking
@@ -577,7 +530,7 @@ private:
 
     // Timestamp tracking using fixed-size RingBuffer (no dynamic allocation)
     // This prevents memory reallocation and potential data races
-    static constexpr size_t MAX_TIMESTAMPS = 256;  // Enough for 1 second at 200Hz
+    static constexpr size_t MAX_TIMESTAMPS = 256; // Enough for 1 second at 200Hz
     wtp::LockFreeRingBuffer<uint64_t, MAX_TIMESTAMPS> _order_times;
     wtp::LockFreeRingBuffer<uint64_t, MAX_TIMESTAMPS> _cancel_times;
     wtp::LockFreeRingBuffer<uint64_t, MAX_TIMESTAMPS> _trade_times;
@@ -593,21 +546,22 @@ private:
     RiskCategory _halt_category{RiskCategory::REVERSIBLE};
 
     // Recovery timestamps
-    uint64_t _halt_timestamp{0};        ///< When trading was halted
-    uint64_t _pause_timestamp{0};       ///< When quoting was paused
-    uint64_t _last_recovery_check{0};   ///< Last time recovery was checked
+    uint64_t _halt_timestamp{0};      ///< When trading was halted
+    uint64_t _pause_timestamp{0};     ///< When quoting was paused
+    uint64_t _last_recovery_check{0}; ///< Last time recovery was checked
 
     // Recovery tracking
-    mutable uint32_t _recovery_count{0};        ///< Number of auto-recoveries this session
-    mutable double _halt_pnl_snapshot{0};       ///< PnL at halt time (for loss-based halt)
-    mutable bool _was_loss_triggered{false};    ///< Whether halt was triggered by daily loss
+    mutable uint32_t _recovery_count{0};     ///< Number of auto-recoveries this session
+    mutable double _halt_pnl_snapshot{0};    ///< PnL at halt time (for loss-based halt)
+    mutable bool _was_loss_triggered{false}; ///< Whether halt was triggered by daily loss
 
     // Closeout state (收盘前平仓) - State Machine
     CloseoutConfig _closeout_config;
     CloseoutSubInfo _closeout_state;
 
     // Delta rate tracking
-    struct DeltaSnapshot {
+    struct DeltaSnapshot
+    {
         double delta;
         uint64_t timestamp_ms;
         DeltaSnapshot() : delta(0), timestamp_ms(0) {}

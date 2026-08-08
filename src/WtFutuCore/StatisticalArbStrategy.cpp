@@ -6,21 +6,14 @@
 #include <cmath>
 #include <algorithm>
 
-namespace futu {
+namespace futu
+{
 
 StatisticalArbStrategy::StatisticalArbStrategy()
-    : _last_update(0)
-    , _prev_zscore(0)
-    , _prev_correlation(0)
-    , _adaptive_weight_zscore(0.30)
-    , _adaptive_weight_momentum(0.20)
-    , _adaptive_weight_volatility(0.15)
-    , _adaptive_weight_correlation(0.20)
-    , _adaptive_weight_mspread(0.15)
-    , _last_signal_time(0)
-    , _entry_signal(0)
-{
-}
+    : _last_update(0), _prev_zscore(0), _prev_correlation(0), _adaptive_weight_zscore(0.30),
+      _adaptive_weight_momentum(0.20), _adaptive_weight_volatility(0.15), _adaptive_weight_correlation(0.20),
+      _adaptive_weight_mspread(0.15), _last_signal_time(0), _entry_signal(0)
+{}
 
 void StatisticalArbStrategy::updateState(const SpreadState& state, uint64_t timestamp)
 {
@@ -46,8 +39,7 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
 {
     StatisticalFeatures feat;
 
-    if (_zscore_history.size() < _config.min_samples)
-    {
+    if (_zscore_history.size() < _config.min_samples) {
         feat.is_valid = false;
         return feat;
     }
@@ -57,7 +49,10 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
     feat.volatility_ratio = calculateVolatilityFeature(state);
     feat.correlation_trend = calculateCorrelationFeature(state);
     feat.mspread_imbalance = calculateMSpreadFeature(state);
-    feat.volume_imbalance = (state.total_volume > 0) ? std::max(-1.0, std::min(1.0, (state.buy_volume - state.sell_volume) / state.total_volume)) : 0;
+    feat.volume_imbalance =
+        (state.total_volume > 0)
+            ? std::max(-1.0, std::min(1.0, (state.buy_volume - state.sell_volume) / state.total_volume))
+            : 0;
 
     // Calculate composite signal using weights
     double w_z = _config.use_adaptive_weights ? _adaptive_weight_zscore : _config.weight_zscore;
@@ -68,8 +63,7 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
 
     // Normalize weights
     double w_sum = w_z + w_m + w_v + w_c + w_s;
-    if (w_sum > 0)
-    {
+    if (w_sum > 0) {
         w_z /= w_sum;
         w_m /= w_sum;
         w_v /= w_sum;
@@ -78,12 +72,8 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
     }
 
     // Composite signal
-    feat.composite_signal =
-        w_z * feat.zscore +
-        w_m * feat.zscore_momentum +
-        w_v * (feat.volatility_ratio - 1.0) +
-        w_c * feat.correlation_trend +
-        w_s * feat.mspread_imbalance;
+    feat.composite_signal = w_z * feat.zscore + w_m * feat.zscore_momentum + w_v * (feat.volatility_ratio - 1.0) +
+                            w_c * feat.correlation_trend + w_s * feat.mspread_imbalance;
 
     // Clamp to [-1, 1]
     feat.composite_signal = std::max(-1.0, std::min(1.0, feat.composite_signal));
@@ -99,7 +89,7 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
 double StatisticalArbStrategy::calculateZScoreFeature(const SpreadState& state) const
 {
     // Normalize Z-Score to [-1, 1] range
-    double normalized = state.zscore / 3.0;  // 3 sigma covers most of distribution
+    double normalized = state.zscore / 3.0; // 3 sigma covers most of distribution
     return std::max(-1.0, std::min(1.0, normalized));
 }
 
@@ -172,14 +162,14 @@ double StatisticalArbStrategy::calculateCorrelationFeature(const SpreadState& st
 
 double StatisticalArbStrategy::calculateMSpreadFeature(const SpreadState& state) const
 {
-    if (state.mid_price <= 0) return 0;
+    if (state.mid_price <= 0)
+        return 0;
 
     double raw_spread = state.ask_price - state.bid_price;
     double relative_spread = raw_spread / state.mid_price;
 
     double volume_weight = 1.0;
-    if (state.total_volume > 0 && state.average_trade_size > 0)
-    {
+    if (state.total_volume > 0 && state.average_trade_size > 0) {
         double trade_intensity = state.total_volume / state.average_trade_size;
         volume_weight = std::min(1.0 + trade_intensity * 0.01, 2.0);
     }
@@ -199,24 +189,24 @@ void StatisticalArbStrategy::updateAdaptiveWeights()
     const double max_weight = 0.50;
 
     // Increase weight for features that have performed well
-    _adaptive_weight_zscore = std::min(max_weight,
-        _adaptive_weight_zscore + learning_rate * _performance.zscore_return);
+    _adaptive_weight_zscore =
+        std::min(max_weight, _adaptive_weight_zscore + learning_rate * _performance.zscore_return);
     _adaptive_weight_zscore = std::max(min_weight, _adaptive_weight_zscore);
 
-    _adaptive_weight_momentum = std::min(max_weight,
-        _adaptive_weight_momentum + learning_rate * _performance.momentum_return);
+    _adaptive_weight_momentum =
+        std::min(max_weight, _adaptive_weight_momentum + learning_rate * _performance.momentum_return);
     _adaptive_weight_momentum = std::max(min_weight, _adaptive_weight_momentum);
 
-    _adaptive_weight_volatility = std::min(max_weight,
-        _adaptive_weight_volatility + learning_rate * _performance.volatility_return);
+    _adaptive_weight_volatility =
+        std::min(max_weight, _adaptive_weight_volatility + learning_rate * _performance.volatility_return);
     _adaptive_weight_volatility = std::max(min_weight, _adaptive_weight_volatility);
 
-    _adaptive_weight_correlation = std::min(max_weight,
-        _adaptive_weight_correlation + learning_rate * _performance.correlation_return);
+    _adaptive_weight_correlation =
+        std::min(max_weight, _adaptive_weight_correlation + learning_rate * _performance.correlation_return);
     _adaptive_weight_correlation = std::max(min_weight, _adaptive_weight_correlation);
 
-    _adaptive_weight_mspread = std::min(max_weight,
-        _adaptive_weight_mspread + learning_rate * _performance.mspread_return);
+    _adaptive_weight_mspread =
+        std::min(max_weight, _adaptive_weight_mspread + learning_rate * _performance.mspread_return);
     _adaptive_weight_mspread = std::max(min_weight, _adaptive_weight_mspread);
 }
 
@@ -227,16 +217,13 @@ void StatisticalArbStrategy::recordOutcome(double pnl, const StatisticalFeatures
     // instantly saturating weights to max, making adaptive learning ineffective.
     double scaled_pnl = std::tanh(pnl / (_config.base_qty * 10.0 + 1.0));
 
-    _performance.zscore_return = 0.9 * _performance.zscore_return +
-                                  0.1 * scaled_pnl * features.zscore;
-    _performance.momentum_return = 0.9 * _performance.momentum_return +
-                                    0.1 * scaled_pnl * features.zscore_momentum;
-    _performance.volatility_return = 0.9 * _performance.volatility_return +
-                                      0.1 * scaled_pnl * (features.volatility_ratio - 1.0);
-    _performance.correlation_return = 0.9 * _performance.correlation_return +
-                                       0.1 * scaled_pnl * features.correlation_trend;
-    _performance.mspread_return = 0.9 * _performance.mspread_return +
-                                   0.1 * scaled_pnl * features.mspread_imbalance;
+    _performance.zscore_return = 0.9 * _performance.zscore_return + 0.1 * scaled_pnl * features.zscore;
+    _performance.momentum_return = 0.9 * _performance.momentum_return + 0.1 * scaled_pnl * features.zscore_momentum;
+    _performance.volatility_return =
+        0.9 * _performance.volatility_return + 0.1 * scaled_pnl * (features.volatility_ratio - 1.0);
+    _performance.correlation_return =
+        0.9 * _performance.correlation_return + 0.1 * scaled_pnl * features.correlation_trend;
+    _performance.mspread_return = 0.9 * _performance.mspread_return + 0.1 * scaled_pnl * features.mspread_imbalance;
 
     _performance.sample_count++;
 
@@ -251,8 +238,7 @@ SpreadSignal StatisticalArbStrategy::generateSignal(const SpreadState& state, ui
     signal.source = ArbitrageStrategy::STATISTICAL_ARB;
     signal.timestamp = current_time;
 
-    if (!_features.is_valid)
-    {
+    if (!_features.is_valid) {
         signal.type = SpreadSignalType::NONE;
         return signal;
     }
@@ -261,19 +247,15 @@ SpreadSignal StatisticalArbStrategy::generateSignal(const SpreadState& state, ui
     double abs_sig = std::abs(sig);
 
     // No position - check for entry
-    if (!state.hasPosition())
-    {
-        if (sig > _config.entry_threshold)
-        {
+    if (!state.hasPosition()) {
+        if (sig > _config.entry_threshold) {
             signal.type = SpreadSignalType::OPEN_SHORT_SPREAD;
             signal.confidence = calculateConfidence(_features);
             signal.suggested_size = calculatePositionSize(_features);
             signal.entry_zscore = state.zscore;
             signal.reason = "Statistical signal: composite above threshold";
             _entry_signal = sig;
-        }
-        else if (sig < -_config.entry_threshold)
-        {
+        } else if (sig < -_config.entry_threshold) {
             signal.type = SpreadSignalType::OPEN_LONG_SPREAD;
             signal.confidence = calculateConfidence(_features);
             signal.suggested_size = calculatePositionSize(_features);
@@ -283,34 +265,28 @@ SpreadSignal StatisticalArbStrategy::generateSignal(const SpreadState& state, ui
         }
     }
     // Has position - check for exit
-    else
-    {
+    else {
         // Stop loss
-        if (abs_sig > _config.stop_loss_threshold)
-        {
+        if (abs_sig > _config.stop_loss_threshold) {
             signal.type = SpreadSignalType::STOP_LOSS;
             signal.confidence = 1.0;
             signal.suggested_size = std::abs(state.spread_position);
             signal.reason = "Statistical signal extreme, stop loss";
         }
         // Timeout
-        else if (state.positionDuration(current_time) > _config.convergence_timeout)
-        {
+        else if (state.positionDuration(current_time) > _config.convergence_timeout) {
             signal.type = SpreadSignalType::TIMEOUT_EXIT;
             signal.confidence = 0.8;
             signal.suggested_size = std::abs(state.spread_position);
             signal.reason = "Timeout: statistical signal did not converge";
         }
         // Normal exit
-        else if (state.spread_position > 0 && sig > -_config.exit_threshold)
-        {
+        else if (state.spread_position > 0 && sig > -_config.exit_threshold) {
             signal.type = SpreadSignalType::CLOSE_LONG_SPREAD;
             signal.confidence = 0.9;
             signal.suggested_size = state.spread_position;
             signal.reason = "Statistical signal normalized, closing position";
-        }
-        else if (state.spread_position < 0 && sig < _config.exit_threshold)
-        {
+        } else if (state.spread_position < 0 && sig < _config.exit_threshold) {
             signal.type = SpreadSignalType::CLOSE_SHORT_SPREAD;
             signal.confidence = 0.9;
             signal.suggested_size = std::abs(state.spread_position);
