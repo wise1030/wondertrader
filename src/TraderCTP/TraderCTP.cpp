@@ -682,7 +682,7 @@ void TraderCTP::OnRspAuthenticate(CThostFtdcRspAuthenticateField *pRspAuthentica
 	}
 	else
 	{
-		write_log(m_sink, LL_ERROR, "[TraderCTP][{}-{}] Authentiation failed: {}", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorMsg);
+		write_log(m_sink, LL_ERROR, "[TraderCTP][{}-{}] Authentiation failed: [ErrorID={}] {}", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorID, pRspInfo->ErrorMsg);
 		m_wrapperState = WS_LOGINFAILED;
 
 		if (m_sink)
@@ -740,7 +740,7 @@ void TraderCTP::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThos
 	}
 	else
 	{
-		write_log(m_sink, LL_ERROR, "[TraderCTP][{}-{}] Login failed: {}", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorMsg);
+		write_log(m_sink, LL_ERROR, "[TraderCTP][{}-{}] Login failed: [ErrorID={}] {}", m_strBroker.c_str(), m_strUser.c_str(), pRspInfo->ErrorID, pRspInfo->ErrorMsg);
 		m_wrapperState = WS_LOGINFAILED;
 
 		if (m_sink)

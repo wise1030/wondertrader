@@ -193,7 +193,9 @@ bool WtUftRunner::config(const std::string& filename)
 	}
 
 	initUftStrategies();
-	
+
+	initEvtNotifier();
+
 	return true;
 }
 
