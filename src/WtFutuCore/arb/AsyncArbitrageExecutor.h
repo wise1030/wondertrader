@@ -28,6 +28,10 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <cstring>
+#include <string>
+#include <type_traits>
+#include "../../Share/fmtlib.h"
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -35,6 +39,33 @@ NS_WTP_END
 
 namespace futu
 {
+
+//==============================================================================
+// A5: FixedString24 - trivially copyable string wrapper for SPSC queue payloads.
+// Eliminates per-tick std::string construct/destruct in LockFreeQueue push/pop.
+// Provides c_str()/empty()/operator=(string)/operator std::string() so all
+// existing call sites work unchanged. FMT_FORMAT_AS registered below for fmt.
+//==============================================================================
+struct FixedString24
+{
+    char data[24];
+
+    FixedString24() { data[0] = '\0'; }
+    FixedString24(const std::string& s) { *this = s; }
+
+    FixedString24& operator=(const std::string& s)
+    {
+        size_t n = s.size() < 23 ? s.size() : 23;
+        std::memcpy(data, s.data(), n);
+        data[n] = '\0';
+        return *this;
+    }
+
+    operator std::string() const { return std::string(data); }
+    const char* c_str() const { return data; }
+    bool empty() const { return data[0] == '\0'; }
+};
+static_assert(std::is_trivially_copyable_v<FixedString24>, "FixedString24 must be trivially copyable");
 
 class SpreadArbitrageManager;
 
@@ -44,7 +75,7 @@ class SpreadArbitrageManager;
 
 struct ArbTickData
 {
-    std::string code;
+    FixedString24 code;  ///< A5: trivially copyable (was std::string)
     double price;
     double multiplier;
     uint64_t timestamp;
@@ -53,6 +84,7 @@ struct ArbTickData
     ArbTickData(const std::string& c, double p, double m, uint64_t t) : code(c), price(p), multiplier(m), timestamp(t)
     {}
 };
+static_assert(std::is_trivially_copyable_v<ArbTickData>, "ArbTickData must be trivially copyable for SPSC queue");
 
 //==============================================================================
 // Order Request from Arb Thread
@@ -60,8 +92,8 @@ struct ArbTickData
 
 struct ArbOrderRequest
 {
-    std::string pair_id; ///< Spread pair ID
-    std::string code;    ///< Contract code
+    FixedString24 pair_id; ///< A5: trivially copyable (was std::string)
+    FixedString24 code;    ///< A5: trivially copyable (was std::string)
     bool is_buy;         ///< Direction
     double price;        ///< Order price
     double qty;          ///< Order quantity
@@ -72,6 +104,7 @@ struct ArbOrderRequest
 
     ArbOrderRequest() : is_buy(true), price(0), qty(0), timestamp(0), request_id(0), order_flag(0), is_close(false) {}
 };
+static_assert(std::is_trivially_copyable_v<ArbOrderRequest>, "ArbOrderRequest must be trivially copyable for SPSC queue");
 
 //==============================================================================
 // Position Sync Data
@@ -381,3 +414,9 @@ private:
 };
 
 } // namespace futu
+
+// A5: Register FixedString24 with fmt (converts via operator std::string)
+// Must be inside namespace fmt - FMT_FORMAT_AS uses unqualified 'formatter'
+namespace fmt {
+FMT_FORMAT_AS(futu::FixedString24, std::string);
+}  // namespace fmt
