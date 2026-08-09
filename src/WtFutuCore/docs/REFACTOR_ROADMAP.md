@@ -15,7 +15,7 @@
 | P1.1 套利文件归入 `arb/` 子目录 | ✅ 已完成 (commit `7fda800f`) |
 | P1.2 套利双轨合并 | ⚠️ 已修正：不存在双轨，保持现状（见下） |
 | P1.3 StrategyCoordinator 增量拆分 | ⏳ 方案制定中 |
-| P1.4 日志开销 | ⏳ 待动 |
+| P1.4 日志开销 | ✅ 已调查·前提不成立·跳过 |
 | P2.1 持仓同步收敛 / P2.2 头文件瘦身 / P2.3 锁优化 | ⏳ 季度级 |
 | P3.1 include 清理 / P3.2 基线度量 | ⏳ 顺手 |
 
@@ -94,9 +94,16 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 - **验证(D+ 噪声地板标定)**: 改前同二进制 2 次回测 -> 29 风控事件全稳定(零 srand 噪声); 2b 后 2 次回测 29 事件全稳定, 且与改前基线**逐行 IDENTICAL**(零行为变化); TestUnits 20/22(2 既有环境失败)
 - 局限: HALT/FORCE_FLAT/TAKER_REDUCE 分支本场景未触发, D+ 未覆盖(纯搬运纪律 + 编译器保证)
 
-## P1.4 日志开销
-- 靶子：`WTSLogger` 调用 ~293 处（**非** `fmt::format` 18 处--复核已纠偏，fmt 不是优化对象）。
-- 动作：热路径 debug 级日志加 level guard；先在 UFT 环境采 tick-to-trade 延迟基线，改完对比分布，无回归才合入。
+## P1.4 日志开销（已调查·前提不成立·跳过）
+
+**结论：不值得做。** 调查揭示前提（"debug 调用付 fmt::format 代价，需 level guard"）不成立。
+
+- **WTSLogger 已内置 level 短路**：`debug/info/warn/error` 模板先 `if (m_logLevel > LL_xxx) return;` 再 `fmtutil::format_to`。prod（debug 关）下 debug 调用零 format 代价。复核"靶子是 WTSLogger 调用点"方向对，但假设它不短路——错了（同 `_liquidator`/`_toxicity`/双轨合并类前提错误）。
+- **残留开销 = 参数求值**：按函数调用语义，实参在 level 检查**之前**求值，短路只省 format 不省求值。但热路径 debug 仅 4-5 处，参数都是结构体字段/局部变量（非昂贵函数调用），≈ 5 × (字段读 + 预测分支) ≈ **~10ns/tick**，对 μs 预算 UFT 可忽略。
+- **无合规手段加 guard**：`m_logLevel` private、无 public level-check API；加 call-site guard 须改 `WTSLogger.h`（框架文件，AGENTS.md 禁越界）。
+- 热路径 info 调用均事件驱动（config/closeout/section_break/risk_normalized/perf 周期），非每 tick。
+
+**裁决**：框架已优化，热路径日志少且参数廉价，残留 ~10ns/tick 可忽略，guard 冗余或越界。跳过。
 
 ## P2（季度级，需完整回归）
 - **持仓同步收敛**：① `FutuPortfolio` 唯一写入口，收编所有 `onPositionUpdate`/`resyncPosition` 写入；② 读侧加 `PositionBook` 只读门面，新代码强制走门面。
