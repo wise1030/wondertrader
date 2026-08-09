@@ -18,6 +18,7 @@
 #include "TradingState.h"
 #include "FutuRiskMonitor.h"
 #include "RiskLiquidator.h"
+#include "CloseoutTrigger.h"
 #include "SessionPhaseManager.h"
 #include "FutuPortfolio.h"
 #include "QuotePolicyChain.h"
@@ -238,7 +239,7 @@ public:
     /// Get trading state (mutable for direct manipulation by risk/toxicity modules)
     TradingState& tradingStateMut() { return *_trading_state; }
     /// Set shared trading state pointer (owned by UftFutuMmStrategy)
-    void setTradingState(TradingState* state) { _trading_state = state; }
+    void setTradingState(TradingState* state); // P1.3: impl in .cpp (wires _closeout_trigger)
 
     void setQuoters(wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters) { _quoters = quoters; }
     void setSessionInfo(const std::string& code, wtp::WTSSessionInfo* sessInfo)
@@ -267,7 +268,6 @@ public:
                                  uint64_t now_ms = 0,
                                  uint64_t tsc_tick0 = 0);
 
-    bool processCloseout(wtp::IUftStraCtx* ctx, TickContext& tc);
     /// v7.1: session 休息段检查 — 每节收盘前 section_break_minutes_before 分钟
     /// 进入休息段: 撤全部报价+arb在途单, 停报价/套利; 下一节开始自动恢复。
     /// 每日最后一节跳过 (由 closeout 状态机处理).
@@ -333,6 +333,7 @@ private:
     ToxicFlowDetector* _toxicity = nullptr;
     PerformanceMonitor* _perf_monitor = nullptr;
     RiskLiquidator _liquidator; // P0-1 (v7.4): 统一强平原语 (无状态, setDeps 即用)
+    CloseoutTrigger _closeout_trigger; // P1.3 Step1: 收盘触发/状态机 (从 processCloseout 拆出)
     SelfTradeCalibrator* _self_trade_calibrator = nullptr;
     CorrelationManager* _correlation_manager = nullptr;
     AsyncArbitrageExecutor* _arb_executor = nullptr;

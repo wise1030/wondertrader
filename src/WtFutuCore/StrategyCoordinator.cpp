@@ -230,6 +230,19 @@ void StrategyCoordinator::syncPhaseConfig()
     _phase_mgr.configure(pcfg);
 }
 
+void StrategyCoordinator::setTradingState(TradingState* state)
+{
+    _trading_state = state;
+    // P1.3 Step1: wire CloseoutTrigger. trading_state 是 coordinator 最后设置的依赖
+    // (FutuModuleAssembler 顺序: setConfig/setQuoters/setPortfolio/setRiskMonitor 均先于 setTradingState)
+    _closeout_trigger.setDeps({_risk_monitor, _trading_state, _portfolio, &_cfg,
+        [this](wtp::IUftStraCtx* ctx) {
+            if (_quoters) {
+                for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
+            }
+        }});
+}
+
 void StrategyCoordinator::initialize()
 {
     WTSLogger::info("StrategyCoordinator: initialized (perf={})", _cfg.perf_enabled);
@@ -270,7 +283,7 @@ ProcessingResult StrategyCoordinator::processTick(
         tc.cs_valid = _portfolio->getContractSnapshot(tc.code, tc.cs);
 
     // Stage 0: Closeout state machine (always needed)
-    if (processCloseout(ctx, tc)) {
+    if (_closeout_trigger.process(ctx, tc)) {
         result.closeout_executed = true;
         result.processed = true;
         // T2: closeout 窗口不再是风控盲区 — 活跃平仓态下仍跑硬风控 (仅跳报价):
@@ -483,125 +496,6 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
 //==========================================================================
 // Stage 0: Closeout State Machine
 //==========================================================================
-
-bool StrategyCoordinator::processCloseout(wtp::IUftStraCtx* ctx, TickContext& tc)
-{
-    if (!_risk_monitor) {
-        return false;
-    }
-
-    // 至少有一个触发点启用才继续
-    if (_cfg.closeout_minutes_before <= 0 && (_cfg.night_close_time == 0 || _cfg.night_minutes_before <= 0)) {
-        return false;
-    }
-
-    CloseoutSub state = _risk_monitor->getCloseoutSub();
-    uint32_t closeTime = _cfg.close_time;
-
-    switch (state) {
-    case CloseoutSub::IDLE: {
-        bool triggered = _risk_monitor->checkCloseout(tc.time_hms, closeTime);
-        if (triggered) {
-            if (_quoters) {
-                for (auto& [code, quoter] : *_quoters) {
-                    if (quoter)
-                        quoter->cancelAll(ctx);
-                }
-            }
-
-            if (_cfg.closeout_flatten_position && _portfolio) {
-                _risk_monitor->markCloseoutDraining(tc.timestamp);
-            } else {
-                _risk_monitor->markCloseoutCompleted(tc.timestamp);
-            }
-            return true;
-        }
-        return false;
-    }
-
-    case CloseoutSub::FAILED: {
-        uint64_t now_ms = tc.timestamp;
-        if (_risk_monitor->checkCloseoutRetry(now_ms)) {
-            if (_quoters) {
-                for (auto& [code, quoter] : *_quoters) {
-                    if (quoter)
-                        quoter->cancelAll(ctx);
-                }
-            }
-            if (_portfolio) {
-                _risk_monitor->markCloseoutDraining(now_ms);
-            }
-        }
-        return true;
-    }
-
-    case CloseoutSub::TRIGGERED:
-    case CloseoutSub::DRAINING:
-    case CloseoutSub::ASSESSING:
-    case CloseoutSub::EXECUTING:
-    case CloseoutSub::RETRYING:
-        return true;
-
-    case CloseoutSub::COMPLETED: {
-        //======================================================================
-        // 区分夜盘/白盘 closeout 完成
-        //
-        // 夜盘平仓完成后，立即重置状态+恢复做市。
-        // 白盘 closeout 完成后，不再重置（终态，直到日内交易结束）。
-        //
-        // 旧逻辑: 等 currentHour>=6 才 reset → 凌晨完成时 hour=0 不满足
-        //         → 整个白盘都不做市！
-        // 新逻辑: 夜盘 closeout 完成立即 reset + resume，白盘 closeout
-        //         在 minutes_before=15 时才重新触发 (14:45)，期间正常做市。
-        //======================================================================
-        const auto& closeoutInfo = _risk_monitor->getCloseoutSubInfo();
-
-        if (_cfg.night_close_time > 0 && closeoutInfo.is_night_closeout) {
-            // 夜盘 closeout 完成 → 立即 reset，让白盘可以正常做市
-            _risk_monitor->resetCloseout();
-            // Bug C: 不调 exitToQuoting - phase 保持 CLOSEOUT, 报价暂停, 等夜盘收盘恢复.
-            // (旧代码此处 exitToQuoting -> 收盘前 90s 报价器恢复重建仓, 把 anchor 对冲打掉.
-            //  on_session_begin 仅进程启动触发, 常驻系统日盘开盘无 session_begin, 故恢复点
-            //  放 processTick 夜盘收盘检测, 见 MM pipeline 前)
-            WTSLogger::info("[CLOSEOUT] Night session closeout completed, holding quoting paused until night close {}",
-                            _cfg.night_close_time);
-            // 重新检查白盘 closeout (09:00 不会触发，14:45 才触发)
-            bool triggered = _risk_monitor->checkCloseout(tc.time_hms, closeTime);
-            if (triggered) {
-                if (_quoters) {
-                    for (auto& [code, quoter] : *_quoters) {
-                        if (quoter)
-                            quoter->cancelAll(ctx);
-                    }
-                }
-                if (_cfg.closeout_flatten_position && _portfolio) {
-                    _risk_monitor->markCloseoutDraining(tc.timestamp);
-                } else {
-                    _risk_monitor->markCloseoutCompleted(tc.timestamp);
-                }
-                return true;
-            }
-            return false;
-        }
-
-        // 白盘 closeout 完成 → 终态，不做市直到日内交易结束
-        // 只在首次进入 COMPLETED 时打日志+halt，避免每 tick 循环
-        if (_trading_state) {
-            _trading_state->enterCloseout();
-        }
-        if (_quoters) {
-            for (auto& [code, quoter] : *_quoters) {
-                if (quoter)
-                    quoter->cancelAll(ctx);
-            }
-        }
-        return true;
-    }
-
-    default:
-        return false;
-    }
-}
 
 //==========================================================================
 // Stage 1: Pre-check
