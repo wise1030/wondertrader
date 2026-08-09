@@ -17,7 +17,7 @@
 | P1.3 StrategyCoordinator 增量拆分 | ⏳ 方案制定中 |
 | P1.4 日志开销 | ✅ 已调查·前提不成立·跳过 |
 | P2.1 持仓同步收敛 / P2.2 头文件瘦身 / P2.3 锁优化 | ⏳ 季度级 |
-| P3.1 include 清理 / P3.2 基线度量 | ⏳ 顺手 |
+| P3.1 include清理 ⏸受阻(离线) | P3.2 基线度量 ✅已完成 |
 
 ---
 
@@ -122,10 +122,17 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 **解阻第一步是测量（非优化）**：`RecursiveSpinGuard` 加编译开关持有时长统计（`#ifdef WT_LOCK_PROF`），或实盘 perf 采样一次。作为 backlog 登记，不排期。"无数据不动"。
 
 ## P3（顺手）
-- **include 清理**：跑 IWYU 拿真实清单（"~190"是估算），清理后挂 `clang-tidy misc-include-cleaner` 进 CI 防回潮。
-- **基线度量**：改造前记录编译时间/`.so`体积/TestUnits通过率/回测tick延迟，每项改造后对比--无 before/after 的"优化"不算完成。
 
-## 合规（与 AGENTS.md 对齐）
-- 改动限 `src/WtFutuCore/` 内；涉及 `WtUftCore` 框架接口只记为外部限制，不改框架。
-- PR 附 TestUnits 通过 + `dist/WtBtFutu` 回测 `outputs_bt/{trades,funds,positions,closes}.csv` 对比无回归。
-- Conventional Commits：`refactor(StrategyCoordinator): ...`、`chore(arb): ...`、`test(clampReduce): ...`。
+### P3.1 include 清理 - ⏸ 受阻·工具不可用（离线）
+IWYU/clang 未安装，`apt-get install include-what-you-use` 失败（TLS 握手失败，离线）。
+**`compile_commands.json` 已就绪**（CMake 已生成）-> 联网后装 IWYU 即可跑：
+`include-what-you-use -p src/build_all src/WtFutuCore/*.cpp`，按真实清单清理，挂 `clang-tidy misc-include-cleaner` 进 CI 防回潮。
+手动审计不可靠（传递 include 难判），须用 IWYU。defer 到联网环境。
+
+### P3.2 基线度量 - ✅ 已完成
+见 `docs/BASELINE_METRICS.md`。当前（P1+P2 后）基线：
+- WtFutuCore 干净重建 **77.7s** / libWtFutuCore.so **67.8MB** (Debug)
+- TestUnits **20/22**（2 框架层环境失败）
+- 回测 tick-to-quote: **mean 77.42us, p99 1856.90us, max 3219.05us** (n=16384)
+> 回测环境延迟（相对基线），实盘 UFT 延迟须另测。未来改造后重测对比，mean/p99 显著上升则 flag。
+
