@@ -22,6 +22,7 @@
 #include "ToxicFlowDetector.h"
 #include "SignalAggregator.h"
 #include "StrategyCoordinator.h"
+#include "OrderRouter.h"  // B6: cancelByPair + IOrderSink upcast
 #include "AsyncArbitrageExecutor.h"
 #include "RiskLiquidator.h"
 #include "MonitorBridge.h"

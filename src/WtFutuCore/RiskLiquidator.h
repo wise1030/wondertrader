@@ -21,7 +21,7 @@
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
 #include "FutuPortfolio.h"
-#include "OrderRouter.h"
+#include "IOrderSink.h"  // B6: was OrderRouter.h (narrowed)
 
 namespace futu {
 
@@ -44,7 +44,7 @@ class RiskLiquidator
 {
 public:
     struct Deps {
-        OrderRouter*   router    = nullptr;
+        IOrderSink*    router    = nullptr;  // B6: IOrderSink (was OrderRouter*)
         FutuPortfolio* portfolio = nullptr;
     };
 

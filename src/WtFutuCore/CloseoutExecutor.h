@@ -22,7 +22,7 @@
 #include <cstring>
 #include <vector>
 #include "../Includes/FasterDefs.h"
-#include "OrderRouter.h"
+#include "OrderRouter.h"  // B6: stays OrderRouter* (uses getActiveCountBySource)
 #include "FutuRiskMonitor.h" // CloseoutSub enum (P1-1: merged state machine)
 
 NS_WTP_BEGIN
@@ -202,7 +202,7 @@ private:
     //==========================================================================
     // Dependencies
     //==========================================================================
-    OrderRouter* _router = nullptr;
+    OrderRouter* _router = nullptr;  // B6: stays OrderRouter* (getActiveCountBySource)
     UnifiedOrderTracker* _tracker = nullptr;
     FutuPortfolio* _portfolio = nullptr;
     CloseoutExecConfig _cfg;

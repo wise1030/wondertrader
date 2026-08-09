@@ -21,7 +21,7 @@ class AsyncArbitrageExecutor;
 class QuotePolicyChain;
 class SelfTradeCalibrator;
 class FutuPortfolio;
-class OrderRouter;
+class IOrderSink;  // B6: was OrderRouter (narrowed to IOrderSink)
 struct CoordinatorConfig;
 struct TickContext;
 
@@ -31,7 +31,7 @@ public:
     struct Deps
     {
         FutuPortfolio* portfolio = nullptr;
-        OrderRouter* order_router = nullptr;
+        IOrderSink* order_router = nullptr;  // B6: IOrderSink (was OrderRouter*)
         FutuRiskMonitor* risk_monitor = nullptr;
         TradingState* trading_state = nullptr;
         AsyncArbitrageExecutor* arb_executor = nullptr;        // nullable (null-guard)

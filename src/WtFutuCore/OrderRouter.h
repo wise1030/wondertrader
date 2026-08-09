@@ -26,6 +26,8 @@
 #include "../Includes/FasterDefs.h"
 #include "SpinLockGuard.h"
 #include "../Includes/ExecuteDefs.h"
+#include "OrderTypes.h"   // B6: Source, OrderSubmitResult (extracted)
+#include "IOrderSink.h"     // B6: OrderRouter implements IOrderSink
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -35,20 +37,6 @@ namespace futu
 {
 
 class UnifiedOrderTracker;
-
-/// Order source classification for priority routing
-enum class Source : uint8_t
-{
-    ARBITRAGE = 0, ///< 套利下单
-    HEDGING = 1,   ///< 对冲下单
-    CLOSEOUT = 2   ///< 平仓/强平 (highest priority)
-};
-
-/// Get numeric priority for a source (higher = more important)
-inline int sourcePriority(Source src)
-{
-    return static_cast<int>(src);
-}
 
 /// Rate counter for per-source throttling (cache-friendly, inline)
 struct RateCounter
@@ -90,14 +78,6 @@ struct ActiveOrderInfo
 };
 
 /// Order submission result
-struct OrderSubmitResult
-{
-    wtp::OrderIDs localids;          ///< Local order IDs from exchange
-    bool rate_limited = false;       ///< True if blocked by rate limit
-    bool self_trade_blocked = false; ///< True if blocked by self-trade check
-    bool rejected = false;           ///< True if rejected (e.g. invalid price)
-};
-
 /// Unified Order Router (for non-MM sources only)
 ///
 /// Routes orders from arbitrage, hedging, and closeout sources with:
@@ -107,7 +87,7 @@ struct OrderSubmitResult
 ///
 /// Thread safety: NOT thread-safe. Must be called from the main thread only
 /// (same as FutuQuoter and IUftStraCtx).
-class OrderRouter
+class OrderRouter : public IOrderSink
 {
 public:
     OrderRouter();
@@ -136,11 +116,11 @@ public:
     /// @param flag    Order flag: 0-normal, 1-fak, 2-fok
     /// @return Submit result with localids and blocking info
     OrderSubmitResult
-    submitBuy(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag = 0);
+    submitBuy(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag = 0) override;
 
     /// Submit a sell order (enter short) through the router
     OrderSubmitResult
-    submitSell(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag = 0);
+    submitSell(wtp::IUftStraCtx* ctx, const char* code, double price, double qty, Source src, int flag = 0) override;
 
     /// Submit a close-long order (exit long) through the router
     OrderSubmitResult submitExitLong(
@@ -154,7 +134,7 @@ public:
     void cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid);
 
     /// Cancel all orders from a specific source
-    void cancelAllBySource(wtp::IUftStraCtx* ctx, Source src);
+    void cancelAllBySource(wtp::IUftStraCtx* ctx, Source src) override;
 
     //==========================================================================
     // A7: Per-pair cancel (套利 pair 粒度撤单)
@@ -167,7 +147,7 @@ public:
     /// 撤指定 pair 的全部活跃订单 (含历史加仓组).
     /// 替代单腿失败时的 cancelAllBySource(ARBITRAGE) — 避免误撤其它 pair 的在途单.
     /// @return 实际发出撤单请求的数量
-    size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id);
+    size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id) override;
 
     //==========================================================================
     // Active order query (per-source)
