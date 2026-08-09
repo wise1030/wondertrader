@@ -58,8 +58,8 @@ ENDIF()
 SET(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}/build_${PLATFORM}/${CMAKE_BUILD_TYPE}/bin/WtUftRunner/futu)
 
 # Add all source files
-file(GLOB SRCS *.cpp arb/*.cpp)
-file(GLOB HDRS *.h arb/*.h)
+file(GLOB SRCS *.cpp arb/*.cpp signals/*.cpp)
+file(GLOB HDRS *.h arb/*.h signals/*.h)
 
 # ============================================================================
 # Include directories
@@ -73,6 +73,7 @@ INCLUDE_DIRECTORIES(
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSTools
     ${CMAKE_CURRENT_SOURCE_DIR}            # WtFutuCore root (arb files find MM headers)
     ${CMAKE_CURRENT_SOURCE_DIR}/arb        # arb subdir (MM files find arb headers)
+    ${CMAKE_CURRENT_SOURCE_DIR}/signals    # signals subdir (A1: signal cluster)
 )
 
 LINK_DIRECTORIES(${LNKS})

@@ -19,7 +19,7 @@
 #include <array>
 #include <deque>
 #include <unordered_map>
-#include "../WTSTools/WTSLogger.h"
+#include "../../WTSTools/WTSLogger.h"
 
 namespace futu
 {

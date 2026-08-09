@@ -20,8 +20,8 @@
 #include <deque>
 #include <cmath>
 #include <cstdint>
-#include "../Includes/FasterDefs.h"
-#include "../Includes/WTSMarcos.h"
+#include "../../Includes/FasterDefs.h"
+#include "../../Includes/WTSMarcos.h"
 #include "TickTransactionInferer.h"
 
 NS_WTP_BEGIN

@@ -15,7 +15,7 @@
 
 #include "ISignalSource.h"
 #include "MarketDataContext.h"
-#include "../Share/RingBuffer.hpp"
+#include "../../Share/RingBuffer.hpp"
 #include <cmath>
 #include <algorithm>
 

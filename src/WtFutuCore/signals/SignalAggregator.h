@@ -20,7 +20,7 @@
 #include "MomentumSignalSource.h"
 #include "LeadLagSignalSource.h"
 #include "ICWeightTracker.h"
-#include "../WTSTools/WTSLogger.h"
+#include "../../WTSTools/WTSLogger.h"
 
 namespace futu
 {
@@ -266,12 +266,9 @@ public:
     /// predictive signals.
     void updateLeadContract(const std::string& code, double mid, uint64_t timestamp)
     {
-        auto ll_it = _sources.find(SignalType::LEAD_LAG);
-        if (ll_it != _sources.end() && ll_it->second) {
-            auto* ll = dynamic_cast<LeadLagSignalSource*>(ll_it->second.get());
-            if (ll) {
-                ll->updateLeadContract(code, mid, timestamp);
-            }
+        // A1: use cached pointer (was per-anchor-tick find+dynamic_cast)
+        if (_ll_source) {
+            _ll_source->updateLeadContract(code, mid, timestamp);
         }
     }
 
@@ -279,12 +276,9 @@ public:
     /// Must be called before ticks arrive (during initialization).
     void addLeadContract(const std::string& code, double correlation = 1.0)
     {
-        auto ll_it = _sources.find(SignalType::LEAD_LAG);
-        if (ll_it != _sources.end() && ll_it->second) {
-            auto* ll = dynamic_cast<LeadLagSignalSource*>(ll_it->second.get());
-            if (ll) {
-                ll->addLeadContract(code, correlation);
-            }
+        // A1: use cached pointer (was per-init find+dynamic_cast)
+        if (_ll_source) {
+            _ll_source->addLeadContract(code, correlation);
         }
     }
 
@@ -425,6 +419,12 @@ private:
                 [](SignalContext& ctx, double v) { ctx.alpha.lead_lag_component = v; });
             _sources[SignalType::LEAD_LAG] = std::move(src);
         }
+
+        // A1: Cache LeadLag pointer to eliminate per-anchor-tick dynamic_cast
+        auto ll_it = _sources.find(SignalType::LEAD_LAG);
+        _ll_source = (ll_it != _sources.end() && ll_it->second)
+            ? dynamic_cast<LeadLagSignalSource*>(ll_it->second.get())
+            : nullptr;
     }
 
     /// 注册一个加权信号槽位 — 新增信号源只需在 initializeSignalSources 中
@@ -681,6 +681,7 @@ private:
     SignalContext _ctx;
     std::unordered_map<SignalType, std::unique_ptr<ISignalSource>> _sources;
     VolatilitySignalSource* _vol_source = nullptr;
+    LeadLagSignalSource* _ll_source = nullptr; ///< A1: cached to eliminate per-tick dynamic_cast
 
     //==========================================================================
     // 加权信号槽位 (表驱动, 替代 computeAlpha 中的 5 段硬编码分量)

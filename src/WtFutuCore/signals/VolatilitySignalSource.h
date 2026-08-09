@@ -2,8 +2,8 @@
 #pragma once
 
 #include "ISignalSource.h"
-#include "../Share/RingBuffer.hpp"
-#include "../Includes/WTSVariant.hpp"
+#include "../../Share/RingBuffer.hpp"
+#include "../../Includes/WTSVariant.hpp"
 #include <cmath>
 
 namespace futu
