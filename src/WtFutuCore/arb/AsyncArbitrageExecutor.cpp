@@ -550,7 +550,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         }
     }
 
-    WTSLogger::info("AsyncArb signal: pair={}, leg1={} {}@{} ({}), leg2={} {}@{} ({})",
+    WTSLogger::debug("AsyncArb signal: pair={}, leg1={} {}@{} ({}), leg2={} {}@{} ({})",
                     signal.pair_id,
                     leg1_is_buy ? "BUY" : "SELL",
                     signal.leg1_code,

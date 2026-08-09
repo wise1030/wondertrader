@@ -179,14 +179,14 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
             if (router_result.rejected)
                 WTSLogger::warn("AsyncArb BUY {} rejected - invalid price={}", order.code, exe_price);
             else if (!router_result.localids.empty())
-                WTSLogger::info("AsyncArb BUY {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
+                WTSLogger::debug("AsyncArb BUY {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
         } else {
             router_result = _deps.order_router->submitSell(
                 ctx, order.code.c_str(), exe_price, exe_qty, Source::ARBITRAGE, order.order_flag);
             if (router_result.rejected)
                 WTSLogger::warn("AsyncArb SELL {} rejected - invalid price={}", order.code, exe_price);
             else if (!router_result.localids.empty())
-                WTSLogger::info("AsyncArb SELL {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
+                WTSLogger::debug("AsyncArb SELL {} {}@{} via OrderRouter", order.code, exe_qty, exe_price);
         }
 
         // M3: 腿失败兜底 — rejected(价格非法) 或空 localids(引擎下单失败/STP 调价后
