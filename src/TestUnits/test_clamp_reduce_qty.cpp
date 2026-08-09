@@ -36,8 +36,8 @@ TEST(test_clamp_reduce_qty, request_within_position)
 
 TEST(test_clamp_reduce_qty, request_exceeds_position_clamps)
 {
-    // 请求 49(组合净delta), 持仓 36(anchor实际) -> 返回 36 (不开反向仓)
-    // 这正是 00:58 平仓又开仓事故的场景
+    // clampReduceQty 原语: min(req, |pos|) -- 用于纯平仓路径 (forceFlatAll/takerReduce), 不开反向仓.
+    // (注: CloseoutExecutor 不用此原语; 它走 anchor-delta, 截到 |remaining|, 允许 close+open)
     EXPECT_DOUBLE_EQ(clampReduceQty(49.0, 36.0), 36.0);
     EXPECT_DOUBLE_EQ(clampReduceQty(100.0, -25.0), 25.0);
 }
@@ -58,21 +58,17 @@ TEST(test_clamp_reduce_qty, fractional_position)
 // === 四条减仓路径语义一致性验证 ===
 // 用模拟数据验证各路径的截断行为
 
-TEST(test_clamp_reduce_qty, closeout_scenario_no_reverse_open)
+TEST(test_clamp_reduce_qty, closeout_uses_remaining_not_position)
 {
-    // 模拟 00:58 事故场景:
-    // 组合净 delta = 49, anchor(ao2609) 实际净持仓 = 36
-    // 旧 CloseoutExecutor: batch_qty = min(49, |remaining|=49) = 49 -> 卖 49
-    //   -> 平 36 多 + 开 13 空 (平仓又开仓!)
-    // 新: batch_qty = clampReduceQty(49, 36) = 36 -> 只平 36, 不开反向
+    // CloseoutExecutor anchor-delta 设计: batch 截到 |remaining|(=|delta/hedge|), 允许 close+open.
+    // 不截断到 |position| (那会破坏 anchor-delta, 平不干净). overfill 由 _inflight_qty 守卫.
+    // 场景: net_delta=49, anchor 持仓=36, hedge=1 -> 卖 49 (平 36 + 开 13), delta 归 0.
     double portfolio_delta = 49.0;
     double anchor_position = 36.0;
-    double old_batch = std::min(portfolio_delta, std::abs(portfolio_delta));  // 旧逻辑
-    double new_batch = clampReduceQty(old_batch, anchor_position);            // 新逻辑
-
-    EXPECT_DOUBLE_EQ(old_batch, 49.0);   // 旧: 不截断到实际持仓
-    EXPECT_DOUBLE_EQ(new_batch, 36.0);   // 新: 截断, 不开反向仓
-    EXPECT_LT(new_batch, old_batch);      // 新 < 旧 -> 不超卖
+    double remaining = portfolio_delta;                          // hedge_ratio=1
+    double batch = std::min(remaining, std::abs(remaining));     // CloseoutExecutor: min(batch, |remaining|)
+    EXPECT_DOUBLE_EQ(batch, 49.0);            // 不截断到 |position|=36
+    EXPECT_GT(batch, anchor_position);        // 允许 close+open (既开又平, 设计意图)
 }
 
 TEST(test_clamp_reduce_qty, taker_reduce_scenario)

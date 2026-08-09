@@ -10,7 +10,7 @@
 |--------|-----|------|
 | P0.1 删 `_trash/` | ✅ 已完成 (commit `f71e2082`) |
 | P0.2 `write_file_atomic`/`fastPow` | ✅ 复核确认在用，不删（原报告"作废"有误） |
-| P0.3 `clampReduceQty` 统一减仓截断 | ✅ 已完成 (`RiskLiquidator.h:36`，3 路径调用) |
+| P0.3 `clampReduceQty` 统一减仓截断 | ✅ 已完成 (`RiskLiquidator.h:36`，3 路径调用) **⚠️ 更正(③)**: \|position\| clamp 误伤 CloseoutExecutor 的 anchor-delta 设计, 已移除(见 P1.3 后的 ③+②) |
 | P0.4 减仓路径对照测试 | ✅ 已完成 (`TestUnits/test_clamp_reduce_qty.cpp`) |
 | P1.1 套利文件归入 `arb/` 子目录 | ✅ 已完成 (commit `7fda800f`) |
 | P1.2 套利双轨合并 | ⚠️ 已修正：不存在双轨，保持现状（见下） |
@@ -94,6 +94,15 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 - **验证(D+ 噪声地板标定)**: 改前同二进制 2 次回测 -> 29 风控事件全稳定(零 srand 噪声); 2b 后 2 次回测 29 事件全稳定, 且与改前基线**逐行 IDENTICAL**(零行为变化); TestUnits 20/22(2 既有环境失败)
 - 局限: HALT/FORCE_FLAT/TAKER_REDUCE 分支本场景未触发, D+ 未覆盖(纯搬运纪律 + 编译器保证)
 - **路 F（决策逻辑纯函数化）已决：defer/close** — 2b 搬运已 D+ 验证零行为变化，F 对搬运无加成；F 价值在未来风控逻辑改动时锁定决策表，届时随那次改动一起做。
+
+## P1.3+ ③+② closeout anchor-delta 恢复 + 跨源 gate（已落地）
+
+经 00:58 实盘日志复核 + ①取证(Aug1-8 无活跃 overfill, PB-2 守卫有效) 后修正 P0 误判:
+- **③** CloseoutExecutor 移除 \|position\| clamp, 保留 `min(batch,\|remaining\|)` -- 恢复 anchor-delta(交易 anchor 压组合 delta 到 0, \|remaining\|>\|持仓\| 时 close+open 是设计意图). clamp 原语保留给 forceFlatAll/takerReduce(纯平仓路径).
+- **②** RiskCoordinator: closeout 窗口内 HALT IRREVERSIBLE 的 forceFlatAll 让位 closeout -- 关跨源盲区(`_inflight_qty` 守卫只数 CLOSEOUT, forceFlatAll 不同源 -> 双卖超卖).
+- 测试: `closeout_scenario_no_reverse_open`(锁定错误行为) -> `closeout_uses_remaining_not_position`; 修 `request_exceeds_position_clamps` 注释(00:58 非事故).
+- 验证: 构建✅; TestUnits 20/22; D+ ③+② 内部 29/29 稳定; vs 2b 基线 1 处**预期**差异(CLOSEOUT_FAILED->COMPLETED, anchor-delta 恢复, 非回归).
+- **P0 更正**: "平仓又开仓事故"归因错误--00:58 的 49 手(平36+开13)是设计, 非事故; "超卖又买入"是 overfill 死循环(已由 PB-2 修), 与 clamp 无关.
 
 ## P1.4 日志开销（已调查·前提不成立·跳过）
 
