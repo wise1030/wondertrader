@@ -190,8 +190,15 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
             // IRREVERSIBLE → 全组合强平(对手价FAK) — P0-1: 统一 RiskLiquidator 原语;
             //   v7.7 业务#2: forceFlatAnchor(仅anchor×delta手数) → forceFlatAll(逐合约实际持仓)
             if (category == RiskCategory::IRREVERSIBLE && _deps.portfolio && _deps.order_router) {
-                _liquidator.setDeps({_deps.order_router, _deps.portfolio});
-                _liquidator.forceFlatAll(ctx, "HALT IRREVERSIBLE FORCE FLAT");
+                // ② closeout 窗口内禁 forceFlatAll: closeout(anchor-delta) 是指定平仓者,
+                //    forceFlatAll(逐合约) 与之同向卖会超卖(跨源盲区: _inflight_qty 守卫只数 CLOSEOUT).
+                //    让 closeout 处理; forceFlatAll 留给非 closeout 的 HALT 场景.
+                if (_deps.risk_monitor->isCloseoutFlattening() || _deps.risk_monitor->isCloseoutTriggered()) {
+                    WTSLogger::warn("[RISK] HALT IRREVERSIBLE during closeout: forceFlatAll deferred to closeout (avoid cross-source dual-sell)");
+                } else {
+                    _liquidator.setDeps({_deps.order_router, _deps.portfolio});
+                    _liquidator.forceFlatAll(ctx, "HALT IRREVERSIBLE FORCE FLAT");
+                }
             }
 
             if (_deps.arb_executor) {

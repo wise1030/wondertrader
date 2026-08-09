@@ -11,7 +11,6 @@
 #include "FutuPortfolio.h"
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
-#include "RiskLiquidator.h"  // clampReduceQty
 #include <algorithm>
 #include <cmath>
 
@@ -289,15 +288,9 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx, const MarketSnapsh
     // Don't exceed remaining (portfolio net delta)
     batch_qty = std::min(batch_qty, std::abs(_remaining));
 
-    // P0-2: 截断到 anchor 实际净持仓, 不开反向仓(平仓又开仓事故修复)
-    // 旧代码只截断到 |remaining|(=组合净delta), anchor 净持仓 < remaining 时
-    // 超出部分被 stra_sell 开反向仓. 现用 clampReduceQty 统一截断.
-    if (_portfolio)
-    {
-        ContractState cs_buf;
-        if (_portfolio->getContractSnapshot(_code, cs_buf))
-            batch_qty = clampReduceQty(batch_qty, cs_buf.position);
-    }
+    // anchor-delta 设计: 交易 anchor 把组合 delta 压到 0, batch 上限 = |remaining|(=|delta/hedge|).
+    // |remaining| > |anchor 持仓| 时允许 close+open(既开又平) -- 设计意图, 不截断到 |position|.
+    // (旧 P0-2 曾截断到 |position| -> 破坏 anchor-delta, delta 平不干净; 已移除. overfill 由 _inflight_qty 守卫.)
 
     // Absolute safety cap: prevent runaway batch in extreme conditions
     // (e.g. closeout starts with very large netDelta from upstream bugs)
