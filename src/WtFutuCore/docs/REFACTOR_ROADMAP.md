@@ -93,6 +93,7 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 - `_arb_executor` 15 处 null-guard 照抄; setTradingState 扩展注入(9 字段)
 - **验证(D+ 噪声地板标定)**: 改前同二进制 2 次回测 -> 29 风控事件全稳定(零 srand 噪声); 2b 后 2 次回测 29 事件全稳定, 且与改前基线**逐行 IDENTICAL**(零行为变化); TestUnits 20/22(2 既有环境失败)
 - 局限: HALT/FORCE_FLAT/TAKER_REDUCE 分支本场景未触发, D+ 未覆盖(纯搬运纪律 + 编译器保证)
+- **路 F（决策逻辑纯函数化）已决：defer/close** — 2b 搬运已 D+ 验证零行为变化，F 对搬运无加成；F 价值在未来风控逻辑改动时锁定决策表，届时随那次改动一起做。
 
 ## P1.4 日志开销（已调查·前提不成立·跳过）
 
@@ -105,10 +106,20 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 
 **裁决**：框架已优化，热路径日志少且参数廉价，残留 ~10ns/tick 可忽略，guard 冗余或越界。跳过。
 
-## P2（季度级，需完整回归）
-- **持仓同步收敛**：① `FutuPortfolio` 唯一写入口，收编所有 `onPositionUpdate`/`resyncPosition` 写入；② 读侧加 `PositionBook` 只读门面，新代码强制走门面。
-- **头文件瘦身**：只移 4 个大头文件的非平凡实现到 `.cpp`。**禁用 Pimpl 于 `UnifiedOrderTracker`/`FutuPortfolio`**（tick 热路径，间接跳转+堆分配是负优化）；Pimpl 仅适合 Assembler/配置类冷路径。
-- **锁优化**：`RecursiveSpinGuard` 原始提及 130 处。先在实盘采锁竞争/持有时长，确认热点再考虑分片/无锁化。无数据不动。
+## P2（已调研·大部分不需动）
+
+### P2.1 持仓同步收敛 — ✅ 已完成
+`FutuPortfolio` 已是唯一写入口（SSOT 已达成）：外部写入仅 5 处且全部走其 API（`UftFutuMmStrategy.cpp:702` onPositionUpdate、`FutuRuntimeOps.cpp:80/92/383` onTradeFill/resyncPosition/updatePosition、`CloseoutOrchestrator.cpp:146` onPositionUpdate），position 字段直写 13 处全在 `FutuPortfolio.cpp` 内部。原"36 处"为虚高（多含读取/内部实现）。
+**附注（已知第二写入口）**：`FutuRuntimeOps.cpp:97 _arb_bridge.onTradeFill` — 套利执行桥自维护第二本持仓账（设计使然，非违规），登记以免下次审计当新发现重查。读侧 `PositionBook` 门面为可选项，非紧迫。
+
+### P2.2 头文件瘦身 — 可选·仅冷路径·低优先
+4 个大头文件：`UnifiedOrderTracker`(767)/`SignalAggregator`(761)/`FutuPortfolio`(619)/`FutuRiskMonitor`(584)。
+`UnifiedOrderTracker`/`FutuPortfolio` 在 tick 热路径，内联实现移 .cpp = out-of-line 调用 = UFT 负优化（与 Pimpl 同理），**只能移冷路径实现**（resync/validate/resetSession 类）。
+若做：与下次涉及 checkRisk 行为的改动共用一次构建+回测验证窗口，不为它单独付验证成本。
+
+### P2.3 锁优化 — ⏸ 受阻·解阻条件明确
+`RecursiveSpinGuard` 用量：`UnifiedOrderTracker`(42)/`FutuPortfolio`(34)/`FutuQuoter`(22)/`OrderRouter`(17)。全模块无锁竞争/持有时长测量设施；竞争发生在实盘多线程（MdSpi/TdSpi/arb），回测单线程测不到。
+**解阻第一步是测量（非优化）**：`RecursiveSpinGuard` 加编译开关持有时长统计（`#ifdef WT_LOCK_PROF`），或实盘 perf 采样一次。作为 backlog 登记，不排期。"无数据不动"。
 
 ## P3（顺手）
 - **include 清理**：跑 IWYU 拿真实清单（"~190"是估算），清理后挂 `clang-tidy misc-include-cleaner` 进 CI 防回潮。
