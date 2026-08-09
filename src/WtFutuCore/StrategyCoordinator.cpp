@@ -241,6 +241,7 @@ void StrategyCoordinator::setTradingState(TradingState* state)
                 for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
             }
         }});
+    _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, &_cfg});  // P1.3 Step2a: wire RiskCoordinator
 }
 
 void StrategyCoordinator::initialize()
@@ -358,7 +359,7 @@ ProcessingResult StrategyCoordinator::processTick(
             // 旧逻辑 HALT 时跳过 checkTakerReduce 是反的: 恰恰 HALT 时最需要强平减仓
             // (13:50 HALT 后 TAKER_REDUCE 不复燃, 持仓任由 requote 放大). requote 路径
             // 已独立拦截 HALT(见 requoteAfterFill), 此处只管主动减仓.
-            checkTakerReduce(ctx);
+            _risk_coord.checkTakerReduce(ctx, _last_exchange_time_ms);
             result.processed = true;
             return result;
         }
@@ -367,7 +368,7 @@ ProcessingResult StrategyCoordinator::processTick(
         result.order_canceled = processAutoCancel(ctx, tc);
 
         // Stage 5.5: v7.1 taker 紧急减仓 (穿仓主动吃单; 报价不停, 与之并行)
-        checkTakerReduce(ctx);
+        _risk_coord.checkTakerReduce(ctx, _last_exchange_time_ms);
 
         // Stage 6: Process quoting (MM core)
         result.quote_placed = processQuoting(ctx, tc, tick);
@@ -1235,79 +1236,6 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
 //   (|pos| - target×maxPos) 超出部分。应对"大量成交突然穿仓"场景:
 //   被动减仓(skew穿越)回归太慢时主动吃单, 报价永不停(做市义务不受影响)。
 //==========================================================================
-
-bool StrategyCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx)
-{
-    if (!ctx || !_portfolio || !_order_router)
-        return false;
-    if (_cfg.taker_reduce_threshold <= 0.0)
-        return false;
-
-    // v7.1: 限频计时统一用 replay 时钟 (回测可复现); 未注入时回退墙钟
-    uint64_t now_ms = _last_exchange_time_ms > 0 ? _last_exchange_time_ms : TimeUtils::getLocalTimeNow();
-    bool triggered = false;
-
-    for (const auto& c : _portfolio->getAllContractsSnapshot()) {
-        if (c.max_position <= 0 || std::abs(c.position) < 1.0)
-            continue;
-
-        double util = std::abs(c.position) / c.max_position;
-        if (util < _cfg.taker_reduce_threshold)
-            continue;
-
-        // 每合约限频
-        auto it = _last_taker_reduce.find(c.code);
-        if (it != _last_taker_reduce.end() && now_ms - it->second < _cfg.taker_reduce_cooldown_ms) {
-            continue;
-        }
-
-        // 平掉超出 target×maxPos 的部分 (FAK 对手价, 不追价)
-        double target = c.max_position * _cfg.taker_reduce_target_util;
-        double qty = std::floor(std::abs(c.position) - target);
-        qty = clampReduceQty(qty, c.position);  // P0-2: 统一截断, 不开反向仓
-        if (qty < 1.0)
-            continue;
-
-        bool is_long = c.position > 0;
-        double price = is_long ? c.bid1 : c.ask1; // 对手价
-        if (price <= 0)
-            continue;
-
-        WTSLogger::warn("[TAKER_REDUCE] {} util={:.2f} >= {:.2f}: {} {:.0f}@{} (pos={:.0f}/{:.0f} -> target={:.0f})",
-                        c.code,
-                        util,
-                        _cfg.taker_reduce_threshold,
-                        is_long ? "SELL_CLOSE" : "BUY_CLOSE",
-                        qty,
-                        price,
-                        c.position,
-                        c.max_position,
-                        target);
-
-        OrderSubmitResult rr = is_long ? _order_router->submitSell(ctx, c.code.c_str(), price, qty, Source::CLOSEOUT, 1)
-                                       : _order_router->submitBuy(ctx, c.code.c_str(), price, qty, Source::CLOSEOUT, 1);
-
-        if (rr.rate_limited) {
-            WTSLogger::warn("[TAKER_REDUCE] {} rate limited, will retry next cooldown", c.code);
-            continue;
-        }
-        if (rr.self_trade_blocked) {
-            WTSLogger::warn("[TAKER_REDUCE] {} self-trade blocked (MM quotes on the way), will retry", c.code);
-            continue;
-        }
-
-        if (!rr.localids.empty()) {
-            _last_taker_reduce[c.code] = now_ms;
-            if (_risk_monitor)
-                _risk_monitor->recordOrder();
-            triggered = true;
-        } else {
-            WTSLogger::error("[TAKER_REDUCE] {} order FAILED", c.code);
-        }
-    }
-
-    return triggered;
-}
 
 //==========================================================================
 // v7.1: 成交后立即重挂 (做市义务恢复)

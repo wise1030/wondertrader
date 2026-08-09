@@ -19,6 +19,7 @@
 #include "FutuRiskMonitor.h"
 #include "RiskLiquidator.h"
 #include "CloseoutTrigger.h"
+#include "RiskCoordinator.h"
 #include "SessionPhaseManager.h"
 #include "FutuPortfolio.h"
 #include "QuotePolicyChain.h"
@@ -284,7 +285,6 @@ public:
     /// v7.1: taker 紧急减仓 — 合约 util ≥ taker_reduce_threshold 时 FAK 对手价
     /// 平掉 (|pos| - target×maxPos) 超出部分, 每合约 cooldown 限频.
     /// 应对"大量成交突然穿仓"场景: 被动减仓太慢时主动吃单, 报价永不停.
-    bool checkTakerReduce(wtp::IUftStraCtx* ctx);
     /// v7.1: 成交后立即重挂 — 单边成交把挂单深度侵蚀到 min_valid_qty 以下时,
     /// 用最近一个 tick 的报价参数立即撤剩余单+重新挂单, 恢复双边做市义务,
     /// 不再等下一个 tick。requote_after_fill_min_interval_ms 限频防 churn。
@@ -334,6 +334,7 @@ private:
     PerformanceMonitor* _perf_monitor = nullptr;
     RiskLiquidator _liquidator; // P0-1 (v7.4): 统一强平原语 (无状态, setDeps 即用)
     CloseoutTrigger _closeout_trigger; // P1.3 Step1: 收盘触发/状态机 (从 processCloseout 拆出)
+    RiskCoordinator _risk_coord; // P1.3 Step2a: 风控协调器 (checkTakerReduce)
     SelfTradeCalibrator* _self_trade_calibrator = nullptr;
     CorrelationManager* _correlation_manager = nullptr;
     AsyncArbitrageExecutor* _arb_executor = nullptr;
@@ -374,7 +375,6 @@ private:
     QuotePolicyChain _quote_chain;
 
     // v7.1: taker 减仓限频状态 (每合约上次触发时间戳 ms)
-    std::unordered_map<std::string, uint64_t> _last_taker_reduce;
 
     // v7.1: 成交重挂 — 最近一个 tick 的最终报价参数缓存 (processQuoting 末尾写入)
     struct CachedQuote
