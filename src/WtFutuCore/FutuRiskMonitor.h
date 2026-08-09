@@ -33,6 +33,7 @@ namespace futu
 {
 
 class FutuPortfolio;       // Forward declaration
+struct ContractState;       // A3: forward decl for checkPreTradePosition overload
 class UnifiedOrderTracker; // Forward declaration
 
 /// Risk limit types
@@ -343,6 +344,9 @@ public:
     PreTradeResult checkPreTradePosition(const std::string& code,
                                          const FutuPortfolio* portfolio,
                                          const UnifiedOrderTracker* tracker) const;
+    /// A3: 复用 TickContext.cs 快照, 跳过重复 getContractSnapshot (递归锁+ContractState 拷贝)
+    PreTradeResult checkPreTradePosition(const ContractState& cs,
+                                         const UnifiedOrderTracker* tracker) const;
 
     /// Check rate limits only
     bool checkRateLimits();
@@ -522,6 +526,10 @@ public:
 private:
     RateLimits _rate_limits;
     double _max_pending_per_side{0.0}; ///< Per-side max pending qty (from OrderControl, 0=disabled)
+    /// A3: checkPreTradePosition 实现体 (共享逻辑, 两个公开重载委托至此)
+    PreTradeResult checkPreTradePositionImpl(const std::string& code,
+                                             const ContractState* cs,
+                                             const UnifiedOrderTracker* tracker) const;
     RecoveryConfig _recovery_config;
 
     // Lock-free atomic counters for rate tracking

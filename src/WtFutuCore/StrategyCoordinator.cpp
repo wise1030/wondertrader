@@ -817,7 +817,10 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, const TickContex
     bool _v3_hard_block_bid = false;
     bool _v3_hard_block_ask = false;
     if (_risk_monitor) {
-        auto pre_trade = _risk_monitor->checkPreTradePosition(tc.code, _portfolio, _order_tracker);
+        // A3: 优先复用 TickContext.cs (preCheck 入口已快照), 消除重复递归锁+拷贝
+        auto pre_trade = tc.cs_valid
+            ? _risk_monitor->checkPreTradePosition(tc.cs, _order_tracker)
+            : _risk_monitor->checkPreTradePosition(tc.code, _portfolio, _order_tracker);
         _v3_long_util = pre_trade.long_utilization;
         _v3_short_util = pre_trade.short_utilization;
         _v3_force_ask_obligation = pre_trade.force_ask_obligation;

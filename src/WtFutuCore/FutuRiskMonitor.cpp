@@ -1020,15 +1020,34 @@ FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(const std
                                                                        const UnifiedOrderTracker* tracker) const
 {
     // v3 软风控：不再 BLOCK，返回 utilization 让 Quoter 做 qty 衰减
-    PreTradeResult result{true, true, false, false, false, false, 0.0, 0.0, false, false};
-
+    // A3: 委托 checkPreTradePositionImpl, 仅负责 ContractState 快照获取
     if (!portfolio)
-        return result;
+        return PreTradeResult{true, true, false, false, false, false, 0.0, 0.0, false, false};
 
     ContractState cs_buf;
     const ContractState* cs = portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
     if (!cs || cs->max_position <= 0)
-        return result;
+        return PreTradeResult{true, true, false, false, false, false, 0.0, 0.0, false, false};
+
+    return checkPreTradePositionImpl(code, cs, tracker);
+}
+
+FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(const ContractState& cs,
+                                                                       const UnifiedOrderTracker* tracker) const
+{
+    // A3: 复用 TickContext.cs 快照 (processTick 入口 preCheck 已 getContractSnapshot),
+    //     消除每 tick checkPreTradePosition 的重复递归锁+ContractState 拷贝
+    if (cs.max_position <= 0)
+        return PreTradeResult{true, true, false, false, false, false, 0.0, 0.0, false, false};
+
+    return checkPreTradePositionImpl(cs.code, &cs, tracker);
+}
+
+FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePositionImpl(const std::string& code,
+                                                                           const ContractState* cs,
+                                                                           const UnifiedOrderTracker* tracker) const
+{
+    PreTradeResult result{true, true, false, false, false, false, 0.0, 0.0, false, false};
 
     // T4: 全源 pending (MM+arb+closeout 在途), 旧 MM-only 口径下 arb 两腿
     //     在途对 util 投影不可见, 大幅 arb 建仓期间 skew/force/taker 系统性偏低。
