@@ -60,7 +60,7 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 |------|------|----|------|------|
 | Step 1 | `CloseoutTrigger` (processCloseout 触发+状态机) | 122 | 低 | ✅ 已完成 |
 | Step 2a | `RiskCoordinator::checkTakerReduce` | 80 | 低 | ✅ 已完成 |
-| Step 2b | `RiskCoordinator::checkRisk` | 250 | 中(风控中枢) | ⏳ |
+| Step 2b | `RiskCoordinator::checkRisk` | 250 | 中(风控中枢) | ✅ 已完成 |
 | Step 3 | `processQuoting`/`requoteAfterFill` | 335 | - | 不动(热路径) |
 
 **修正后的依赖清单**（复核纠偏）：
@@ -87,9 +87,12 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 - 2 调用点改 `_risk_coord.checkTakerReduce(ctx, _last_exchange_time_ms)`；依赖在 setTradingState 注入
 - 验证：构建通过；TestUnits 20/22（2 失败为框架层环境依赖，无关）
 
-### Step 2b - 抽 checkRisk（⏳ 待做，最高风险）
-`_arb_executor`×10 全 null-guard -> RiskCoordinator 注入可空指针 + 前向声明/.cpp 包含。
-**风控路径改动必须附回测证据；差异即回滚。**
+### Step 2b - 抽 checkRisk（✅ 已完成）
+- in_cooloff 参数化消 `_toxicity`；`_quote_chain*` 保留(3 riskWiden 写,共享)；`_quoters` cancelAll(2处)->回调
+- `_liquidator`/`_last_halt_log_ms`/`_violations_buf` 状态迁入；2 调用点改 `_risk_coord.checkRisk(ctx,tc,in_cooloff)`
+- `_arb_executor` 15 处 null-guard 照抄; setTradingState 扩展注入(9 字段)
+- **验证(D+ 噪声地板标定)**: 改前同二进制 2 次回测 -> 29 风控事件全稳定(零 srand 噪声); 2b 后 2 次回测 29 事件全稳定, 且与改前基线**逐行 IDENTICAL**(零行为变化); TestUnits 20/22(2 既有环境失败)
+- 局限: HALT/FORCE_FLAT/TAKER_REDUCE 分支本场景未触发, D+ 未覆盖(纯搬运纪律 + 编译器保证)
 
 ## P1.4 日志开销
 - 靶子：`WTSLogger` 调用 ~293 处（**非** `fmt::format` 18 处--复核已纠偏，fmt 不是优化对象）。
