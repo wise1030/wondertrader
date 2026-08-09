@@ -59,7 +59,7 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 | 步骤 | 抽出 | 行 | 风险 | 状态 |
 |------|------|----|------|------|
 | Step 1 | `CloseoutTrigger` (processCloseout 触发+状态机) | 122 | 低 | ✅ 已完成 |
-| Step 2a | `RiskCoordinator::checkTakerReduce` | 80 | 低 | ⏳ |
+| Step 2a | `RiskCoordinator::checkTakerReduce` | 80 | 低 | ✅ 已完成 |
 | Step 2b | `RiskCoordinator::checkRisk` | 250 | 中(风控中枢) | ⏳ |
 | Step 3 | `processQuoting`/`requoteAfterFill` | 335 | - | 不动(热路径) |
 
@@ -80,8 +80,12 @@ use_async_arb_thread = false // 回测：不启线程，pushTick 主线程同步
 - 与 `CloseoutOrchestrator`(执行驱动, C3) 互补：本类只管触发/状态。
 - 验证：libWtFutuCore.so 构建通过；TestUnits 20/22(2 失败为框架层环境依赖，无关)。
 
-### Step 2a - 抽 checkTakerReduce（⏳ 待做）
+### Step 2a - 抽 checkTakerReduce（✅ 已完成）
 移入 `RiskCoordinator`（复核§3.2：错位归属）。依赖最少，最自洽。
+- 新增 `RiskCoordinator.{h,cpp}`：`checkTakerReduce(ctx, exchange_time_ms)`
+- `_last_taker_reduce` 限频状态迁入；`_last_exchange_time_ms` 留 coordinator 作参数传入
+- 2 调用点改 `_risk_coord.checkTakerReduce(ctx, _last_exchange_time_ms)`；依赖在 setTradingState 注入
+- 验证：构建通过；TestUnits 20/22（2 失败为框架层环境依赖，无关）
 
 ### Step 2b - 抽 checkRisk（⏳ 待做，最高风险）
 `_arb_executor`×10 全 null-guard -> RiskCoordinator 注入可空指针 + 前向声明/.cpp 包含。
