@@ -246,6 +246,16 @@ public:
         RecursiveSpinGuard _g(_lock);
         return _contracts;
     }
+    /// A2: Iterate contracts without full-vector copy (lock held during callback).
+    /// Use two-phase pattern: collect candidates in callback, act outside lock.
+    template<typename Func>
+    void forEachContractState(Func&& func) const
+    {
+        RecursiveSpinGuard _g(_lock);
+        for (const auto& c : _contracts) {
+            func(c);
+        }
+    }
     bool getPositionBreachedSnapshot(ContractState& out) const
     {
         RecursiveSpinGuard _g(_lock);
