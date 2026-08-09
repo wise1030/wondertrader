@@ -12,7 +12,7 @@
  *       Using SIMD on RingBuffer causes boundary violations and crashes.
  */
 #include "SpreadCalculator.h"
-#include "../WTSTools/WTSLogger.h"
+#include "../../WTSTools/WTSLogger.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>

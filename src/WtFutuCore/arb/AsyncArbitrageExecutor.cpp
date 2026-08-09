@@ -4,7 +4,7 @@
  */
 #include "AsyncArbitrageExecutor.h"
 #include "SpreadArbitrageManager.h"
-#include "../WTSTools/WTSLogger.h"
+#include "../../WTSTools/WTSLogger.h"
 #include "SpinLockGuard.h"
 
 #include <chrono>

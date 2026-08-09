@@ -22,7 +22,7 @@
 #include "LockFreeQueue.hpp"
 #include "SpreadArbitrageTypes.h"
 #include "SelfTradePrevention.h"
-#include "../Includes/FasterDefs.h"
+#include "../../Includes/FasterDefs.h"
 
 #include <thread>
 #include <atomic>

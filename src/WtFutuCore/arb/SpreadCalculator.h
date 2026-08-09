@@ -13,8 +13,8 @@
 #pragma once
 
 #include "SpreadArbitrageTypes.h"
-#include "../Share/RingBuffer.hpp"
-#include "../Includes/FasterDefs.h"
+#include "../../Share/RingBuffer.hpp"
+#include "../../Includes/FasterDefs.h"
 #include <string>
 #include <vector>
 #include <memory>

@@ -14,8 +14,8 @@
 #pragma once
 
 #include "SpreadArbitrageTypes.h"
-#include "../Share/RingBuffer.hpp"
-#include "../Includes/FasterDefs.h"
+#include "../../Share/RingBuffer.hpp"
+#include "../../Includes/FasterDefs.h"
 #include <memory>
 #include <vector>
 

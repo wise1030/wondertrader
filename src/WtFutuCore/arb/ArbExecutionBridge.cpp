@@ -11,10 +11,10 @@
 #include "SelfTradePrevention.h"
 #include "FutuPortfolio.h"
 #include "FutuRiskMonitor.h"
-#include "../Includes/IUftStraCtx.h"
-#include "../Includes/WTSDataDef.hpp"
-#include "../WTSTools/WTSLogger.h"
-#include "../Share/TimeUtils.hpp"
+#include "../../Includes/IUftStraCtx.h"
+#include "../../Includes/WTSDataDef.hpp"
+#include "../../WTSTools/WTSLogger.h"
+#include "../../Share/TimeUtils.hpp"
 
 namespace futu
 {

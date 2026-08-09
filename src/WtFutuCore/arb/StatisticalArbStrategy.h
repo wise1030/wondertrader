@@ -15,7 +15,7 @@
 #include "SpreadArbitrageTypes.h"
 #include "ISpreadStrategy.h"
 #include "SpreadCalculator.h"
-#include "../Share/RingBuffer.hpp"
+#include "../../Share/RingBuffer.hpp"
 #include <memory>
 #include <array>
 

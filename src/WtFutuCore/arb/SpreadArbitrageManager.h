@@ -20,7 +20,7 @@
 #include "PairsTradingStrategy.h"
 #include "StatisticalArbStrategy.h"
 #include "MarketMakingEnhancer.h"
-#include "../Includes/FasterDefs.h"
+#include "../../Includes/FasterDefs.h"
 #include <memory>
 #include <vector>
 #include <functional>
