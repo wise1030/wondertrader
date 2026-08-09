@@ -241,7 +241,13 @@ void StrategyCoordinator::setTradingState(TradingState* state)
                 for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
             }
         }});
-    _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, &_cfg});  // P1.3 Step2a: wire RiskCoordinator
+    _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, _trading_state, _arb_executor,
+        &_quote_chain, _self_trade_calibrator, &_cfg,
+        [this](wtp::IUftStraCtx* ctx) {
+            if (_quoters) {
+                for (auto& [code, q] : *_quoters) { q->cancelAll(ctx); }
+            }
+        }});  // P1.3 Step2a+2b: wire RiskCoordinator
 }
 
 void StrategyCoordinator::initialize()
@@ -295,7 +301,7 @@ ProcessingResult StrategyCoordinator::processTick(
             if (cs == CloseoutSub::DRAINING || cs == CloseoutSub::ASSESSING || cs == CloseoutSub::EXECUTING ||
                 cs == CloseoutSub::RETRYING) {
                 tc.total_delta = _portfolio->getTotalDelta(); // FORCE FLAT qty 需要
-                checkRisk(ctx, tc);
+                _risk_coord.checkRisk(ctx, tc, _toxicity && _quote_chain.toxicity().inCooloff(tc.timestamp));
             }
         }
         return result;
@@ -354,7 +360,7 @@ ProcessingResult StrategyCoordinator::processTick(
         updateSignals(ctx, tc, tick);
 
         // Stage 4: Check risk
-        if (!checkRisk(ctx, tc)) {
+        if (!_risk_coord.checkRisk(ctx, tc, _toxicity && _quote_chain.toxicity().inCooloff(tc.timestamp))) {
             // BLOCK_SIDE / HALT 时仍执行 taker 减仓 - 减仓是恢复正常的关键手段.
             // 旧逻辑 HALT 时跳过 checkTakerReduce 是反的: 恰恰 HALT 时最需要强平减仓
             // (13:50 HALT 后 TAKER_REDUCE 不复燃, 持仓任由 requote 放大). requote 路径
@@ -746,254 +752,6 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
 //==========================================================================
 // Stage 4: Check Risk Limits
 //==========================================================================
-
-bool StrategyCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc)
-{
-    if (!_risk_monitor || !_portfolio)
-        return true;
-
-    // Check if previously halted (hard limit)
-    if (_risk_monitor->isTradingHalted()) {
-        // T2: closeout 窗口内禁止自动恢复 (与 on_trade 路径的 "closeout halt must
-        //     persist until on_session_begin" 语义对齐); 正常路径 processCloseout
-        //     活跃态已提前 return, 此守卫只影响 T2 的 closeout 窗口复跑。
-        if (_risk_monitor->isCloseoutFlattening() || _risk_monitor->isCloseoutTriggered()) {
-            return false;
-        }
-        // 尝试自动恢复(REVERSIBLE halt): checkAndRecover 内部有节流(check_interval_ms)
-        // + cooldown + canRecover 全套校验, IRREVERSIBLE 会被拒绝.
-        if (_risk_monitor->checkAndRecover(_portfolio) && !_risk_monitor->isTradingHalted()) {
-            if (_trading_state) {
-                _trading_state->resumeFromRisk();
-                _trading_state->unblockLong();
-                _trading_state->unblockShort();
-            }
-            if (_arb_executor) {
-                AsyncArbConfig arbCfg = _arb_executor->getConfig();
-                arbCfg.enabled.store(true);
-                _arb_executor->setConfig(arbCfg);
-            }
-            WTSLogger::info("StrategyCoordinator[{}]: Recovered from REVERSIBLE halt, resuming operations", tc.code);
-            // fall through: 恢复成功后继续走正常风控检查
-        } else {
-            if (_trading_state) {
-                _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
-            }
-            // 限频日志：每5秒输出一次，避免刷屏
-            {
-                uint64_t now_ms = TimeUtils::getLocalTimeNow();
-                if (now_ms - _last_halt_log_ms > 5000) {
-                    WTSLogger::error("[RISK] Trading still halted (isTradingHalted=true), skipping risk check");
-                    _last_halt_log_ms = now_ms;
-                }
-            }
-            return false;
-        }
-    }
-
-    if (_risk_monitor->checkDeltaRate()) {
-        // 使用TradingState方法
-        // B3: delta-rate 停机只在此设置; 恢复走下方 violations.empty() 分支的统一
-        // 恢复路径 (以 !checkDeltaRate() 为门, 等 RiskMonitor 15s 冷却清除标志后
-        // 一次性完整恢复). 不要在此加 else 恢复分支 — 它会对违规类 RISK_HALTED
-        // (PAUSE/BLOCK) 误触发, 抢在完整恢复前翻转 qphase, 导致 arb 永久禁用/
-        // 方向 block 残留/spread_mult 不复位.
-        if (_trading_state) {
-            _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
-        }
-        // 业务#3: delta 剧烈异动 = 价格正在快速移动, 黏性/追价机制全部停摆,
-        // 旧价位双边义务单原样留在场上是最危险场景 (最长滞留 5s cooldown)。
-        // 与 PAUSE/HALT 路径对齐: 停机同步撤单。
-        if (_quoters) {
-            for (auto& [code, quoter] : *_quoters) {
-                quoter->cancelAll(ctx);
-            }
-        }
-    }
-
-    // R2.4: 策略性软响应 (delta util 0.8/0.9 → WIDEN_SPREAD, 不产生硬 violation).
-    //   在 hard check 之前执行; soft action 不阻断 hard check (两者可叠加).
-    //   设计: WIDEN_SPREAD 是策略行为 (调整报价), 不是硬风控 (BLOCK/PAUSE/HALT).
-    //   v7.1 无状态化: 每 tick 由当前 util 重算, util 回落即回 1.0,
-    //   消除旧 std::max 闩锁 (util 回落后 spread 仍被永久放大直到完整恢复).
-    //   5A-2: 状态移入 RiskWidenPolicy。
-    {
-        double cur_util = _portfolio ? _portfolio->getPortfolioDeltaUtilization() : 0;
-        double l1 = _risk_monitor->getRateLimits().position_warning_l1;
-        double l2 = _risk_monitor->getRateLimits().position_warning_l2;
-        bool halted = _trading_state && _trading_state->qphase == QuotingPhase::RISK_HALTED;
-        _quote_chain.riskWiden().tickSoft(cur_util, l1, l2, halted);
-    }
-
-    // P0-1.1: Active risk check every tick (复用缓冲, 零堆分配)
-    _risk_monitor->checkRiskLimits(_portfolio, _violations_buf);
-    auto& violations = _violations_buf;
-    if (!violations.empty()) {
-        RiskCategory category;
-        RiskAction action = _risk_monitor->determineActionWithCategory(violations, category);
-
-        switch (action) {
-        case RiskAction::HALT_TRADING:
-            // 使用TradingState方法
-            if (_trading_state) {
-                _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
-            }
-            _risk_monitor->haltTrading(category, _portfolio->getTotalPnL());
-
-            // P0-2: halt 后动作补全 — 撤所有做市单
-            if (_quoters) {
-                for (auto& [code, quoter] : *_quoters) {
-                    quoter->cancelAll(ctx);
-                }
-            }
-            // 撤所有非做市活跃单
-            if (_order_router) {
-                _order_router->cancelAllBySource(ctx, Source::CLOSEOUT);
-                _order_router->cancelAllBySource(ctx, Source::HEDGING);
-                _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
-            }
-
-            // IRREVERSIBLE → 全组合强平(对手价FAK) — P0-1: 统一 RiskLiquidator 原语;
-            //   v7.7 业务#2: forceFlatAnchor(仅anchor×delta手数) → forceFlatAll(逐合约实际持仓)
-            if (category == RiskCategory::IRREVERSIBLE && _portfolio && _order_router) {
-                _liquidator.setDeps({_order_router, _portfolio});
-                _liquidator.forceFlatAll(ctx, "HALT IRREVERSIBLE FORCE FLAT");
-            }
-
-            if (_arb_executor) {
-                AsyncArbConfig arbCfg = _arb_executor->getConfig();
-                arbCfg.enabled.store(false);
-                _arb_executor->setConfig(arbCfg);
-                WTSLogger::error("StrategyCoordinator[{}]: Arbitrage executor disabled due to HALT_TRADING", tc.code);
-            }
-            break;
-
-        case RiskAction::PAUSE_QUOTING:
-            // v7.3: 不可达死分支已删除 — determineActionWithCategory 不再返回 PAUSE_QUOTING
-            //   (原判定 long_breach&&short_breach 数学上不可能同时成立)。
-            //   仓位控制全部由软连续控制链承担 (skew/force/takerReduce), 硬停只有 HALT。
-            break;
-
-        case RiskAction::BLOCK_SIDE_LONG:
-            // R2.7: 进入 RISK_HALTED, 走统一恢复路径 (此前 blockLong 后 qphase 仍 NORMAL,
-            // 恢复分支要求 qphase==RISK_HALTED → block 永久残留, 仅 channel_ready 可清)
-            if (_trading_state) {
-                _trading_state->blockLong();
-                _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
-            }
-            if (_risk_monitor)
-                _risk_monitor->pauseQuoting();
-            // 业务#4: EXPOSURE breach 恰是最该停 arb 的场景 (毛暴露超限, arb 继续开仓
-            // 会进一步放大暴露), 与 HALT/PAUSE 对齐停 executor; 恢复走统一路径复活。
-            if (_arb_executor) {
-                AsyncArbConfig arbCfg = _arb_executor->getConfig();
-                arbCfg.enabled.store(false);
-                _arb_executor->setConfig(arbCfg);
-                WTSLogger::warn("StrategyCoordinator[{}]: Arbitrage executor disabled due to BLOCK_SIDE_LONG", tc.code);
-            }
-            WTSLogger::warn("[RISK] BLOCK_SIDE_LONG: halted until recovery");
-            break;
-
-        case RiskAction::BLOCK_SIDE_SHORT:
-            // R2.7: 同 BLOCK_SIDE_LONG
-            if (_trading_state) {
-                _trading_state->blockShort();
-                _trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
-            }
-            if (_risk_monitor)
-                _risk_monitor->pauseQuoting();
-            // 业务#4: 同 BLOCK_SIDE_LONG
-            if (_arb_executor) {
-                AsyncArbConfig arbCfg = _arb_executor->getConfig();
-                arbCfg.enabled.store(false);
-                _arb_executor->setConfig(arbCfg);
-                WTSLogger::warn("StrategyCoordinator[{}]: Arbitrage executor disabled due to BLOCK_SIDE_SHORT",
-                                tc.code);
-            }
-            WTSLogger::warn("[RISK] BLOCK_SIDE_SHORT: halted until recovery");
-            break;
-
-        case RiskAction::WIDEN_SPREAD:
-            // R2.5: 分级倍数 — L1(util≥0.8)→×1.5, L2(util≥0.9)→×2.0.
-            // (soft check 已在 hard check 之前处理了主要的 WIDEN; 此处处理 WARNING 级别升级路径,
-            //  即 determineActionWithCategory 末尾 breachCount>=widen_threshold 的返回)
-            // 5A-2: 状态移入 RiskWidenPolicy。
-            {
-                double cur_util = _portfolio ? _portfolio->getPortfolioDeltaUtilization() : 0;
-                double l2 = _risk_monitor->getRateLimits().position_warning_l2;
-                _quote_chain.riskWiden().onHardWiden(cur_util, l2);
-            }
-            break;
-
-            // R2.5/D5: REDUCE_SIZE 已删除 — 做市有最低报价数量要求, 不能 reduce qty;
-            //   统一用 WIDEN_SPREAD 分级倍数替代 (加宽 spread 降低成交率, 近似 qty 缩减)
-
-        case RiskAction::FLATTEN_POSITION: {
-            // v7.3: 不可达死分支已删除 — breachCount 恒 <=1 (仅 EXPOSURE 产 BREACH,
-            //   每 tick 至多一条), flatten_threshold=2 永不可达。
-            //   强平职能由 HALT_TRADING 的 IRREVERSIBLE FORCE FLAT 承担。
-            break;
-        }
-
-        default:
-            break;
-        }
-    } else {
-        // Auto-recovery check (仅针对 RISK_HALTED — MARKET/TOXICITY/ERROR 暂停
-        // 有各自的恢复路径, 旧代码 !isActive() 会把 MARKET 暂停误翻 NORMAL 造成状态闪烁)
-        // B3: delta-rate 停机期间 (!checkDeltaRate() 为 false) 禁止恢复 —
-        // 等 RiskMonitor 冷却清除 _delta_rate_breached 后才允许走统一恢复.
-        if (_trading_state && _trading_state->qphase == QuotingPhase::RISK_HALTED) {
-            // v7.8: 区分 delta-rate-only halt 与 hard violation halt
-            // delta-rate breach 是速率问题(瞬时变化太快), 恢复不应被 delta_util 绝对水平阻止,
-            // 否则形成死锁: 高delta阻止恢复 -> 无法报价 -> 无法减仓 -> delta无法降低
-            bool _v78_hard_violation = _risk_monitor->isTradingHalted() || _risk_monitor->isQuotingPaused();
-            bool _v78_delta_cleared = !_risk_monitor->checkDeltaRate();
-            if (_v78_delta_cleared && (!_v78_hard_violation || _risk_monitor->canRecover(_portfolio))) {
-                // P1-1: resumeFromRisk() unconditionally sets qphase=NORMAL
-                // (replaces old 3-call recovery that cleared individual bool flags)
-                _trading_state->resumeFromRisk();
-                _trading_state->unblockLong();
-                _trading_state->unblockShort();
-
-                // P-11 fix: 同步RiskMonitor的atomic状态，保持单一source of truth
-                _risk_monitor->resumeQuoting();
-                _risk_monitor->unblockLong();
-                _risk_monitor->unblockShort();
-
-                // R2: 重置软风控倍数 (WIDEN_SPREAD 分级设置的, 恢复时归 1.0)
-                _quote_chain.riskWiden().reset();
-
-                if (_arb_executor) {
-                    AsyncArbConfig arbCfg = _arb_executor->getConfig();
-                    arbCfg.enabled.store(true);
-                    _arb_executor->setConfig(arbCfg);
-                }
-                WTSLogger::info("StrategyCoordinator[{}]: Risk normalized, resuming operations{}",
-                                tc.code,
-                                _v78_hard_violation ? "" : " (delta-rate halt recovery)");
-            }
-        }
-    }
-
-    // Check toxicity cooldown
-    // 空指针保护 + P0-12: 使用TradingState方法
-    // P1-6/U1: enter 用 setQuotingPhase, exit 用 tryResumeFrom(TOXICITY)
-    // 避免冷却期结束时在 HALT/ERROR/MARKET 期间被误翻 NORMAL.
-    if (_toxicity && _quote_chain.toxicity().inCooloff(tc.timestamp)) {
-        if (_trading_state)
-            _trading_state->setQuotingPhase(QuotingPhase::TOXICITY);
-        if (_self_trade_calibrator) {
-            _self_trade_calibrator->decayCalibration(tc.code, tc.timestamp, _cfg.modules.toxicity_cooloff_ms);
-        }
-    } else {
-        if (_trading_state)
-            _trading_state->tryResumeFrom(QuotingPhase::TOXICITY);
-    }
-
-    // 空指针保护
-    return !_trading_state || _trading_state->qphase != QuotingPhase::RISK_HALTED;
-}
 
 //==========================================================================
 // Stage 5: Process Quoting

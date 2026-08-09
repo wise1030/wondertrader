@@ -279,7 +279,6 @@ public:
     bool preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateMarketData(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateSignals(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
-    bool checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc);
     bool processQuoting(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
     bool processAutoCancel(wtp::IUftStraCtx* ctx, const TickContext& tc);
     /// v7.1: taker 紧急减仓 — 合约 util ≥ taker_reduce_threshold 时 FAK 对手价
@@ -332,7 +331,6 @@ private:
     FutuRiskMonitor* _risk_monitor = nullptr;
     ToxicFlowDetector* _toxicity = nullptr;
     PerformanceMonitor* _perf_monitor = nullptr;
-    RiskLiquidator _liquidator; // P0-1 (v7.4): 统一强平原语 (无状态, setDeps 即用)
     CloseoutTrigger _closeout_trigger; // P1.3 Step1: 收盘触发/状态机 (从 processCloseout 拆出)
     RiskCoordinator _risk_coord; // P1.3 Step2a: 风控协调器 (checkTakerReduce)
     SelfTradeCalibrator* _self_trade_calibrator = nullptr;
@@ -363,11 +361,9 @@ private:
     // 减仓防重复触发 — removed (attemptPositionReduction deleted)
 
     // 日志限频
-    uint64_t _last_halt_log_ms = 0;             // 上次halted日志时间戳(ms)
     uint64_t _last_perf_ms = 0;                 // v7.7 C3: perf 统计节流 (原 static, 跨实例共享)
     uint64_t _last_summary_ms = 0;              // v7.7 C3: 60s 摘要节流 (原 static)
     uint64_t _nan_tick_cnt = 0;                 // v7.7 C3: nan tick 计数 (原 static thread_local)
-    std::vector<RiskViolation> _violations_buf; // 风控违规复用缓冲(热路径零堆分配)
     uint64_t _last_pause_diag_ms = 0;           // 上次shouldPause诊断日志时间戳(ms)
 
     // 5A-2: 报价决策链 (GLFT 后的 6 个调整阶段; 软风控倍数/毒性冷却
