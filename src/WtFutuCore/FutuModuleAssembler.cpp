@@ -337,15 +337,16 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     //------------------------------------------------------------
 
     // Register modules with coordinator
-    _coordinator->setOrderTracker(_order_tracker.get());
-    _coordinator->setQuoters(&_quoters);
-    _coordinator->setSpreadOptimizers(&_spread_optimizers);
-    _coordinator->setOrderBooks(&_market_data);
-    _coordinator->setSignalAggregators(&_signal_aggregators);
+    StrategyCoordinator::CoordinatorDeps deps;  // B7: consolidated dep injection (replaces 15 setters)
+    deps.order_tracker = _order_tracker.get();
+    deps.quoters = &_quoters;
+    deps.spread_opts = &_spread_optimizers;
+    deps.market_data = &_market_data;
+    deps.signal_aggregators = &_signal_aggregators;
 
     // Register modules created before coordinator
-    _coordinator->setPortfolio(_portfolio.get());
-    _coordinator->setCorrelationManager(_correlation_manager.get());
+    deps.portfolio = _portfolio.get();
+    deps.correlation_manager = _correlation_manager.get();
 
     //------------------------------------------------------------
     // 5.6 OrderRouter（统一下单路由器 — 套利/对冲/平仓）
@@ -358,7 +359,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     _order_router->setRateLimit(Source::HEDGING, 30, 1000);
     _order_router->setRateLimit(Source::CLOSEOUT, 0, 1000); // 0 = 不限速
 
-    _coordinator->setOrderRouter(_order_router.get());
+    deps.order_router = _order_router.get();
     WTSLogger::info("OrderRouter: initialized (arb=30/s, hedge=30/s, closeout=unlimited)");
 
     //------------------------------------------------------------
@@ -445,7 +446,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
     // Register with coordinator
     if (_coordinator) {
-        _coordinator->setRiskMonitor(_risk_monitor.get());
+        deps.risk_monitor = _risk_monitor.get();
     }
 
     // CloseoutOrchestrator 依赖注入 (架构重构 C3) — 所有依赖模块至此均已创建
@@ -533,7 +534,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
         // Register with coordinator
         if (_coordinator) {
-            _coordinator->setToxicityDetector(_toxicity_detector.get());
+            deps.toxicity = _toxicity_detector.get();
         }
 
         WTSLogger::info("ToxicFlowDetector: created");
@@ -555,7 +556,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
     // Register with coordinator
     if (_coordinator) {
-        _coordinator->setSelfTradeCalibrator(_self_trade_calibrator.get());
+        deps.self_trade_calibrator = _self_trade_calibrator.get();
     }
 
     {
@@ -578,7 +579,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     if (_config.modules.use_performance_monitor) {
         _performance_monitor = FutuComponentFactory::createPerformanceMonitor(coord_cfg);
         // 接线到 Coordinator — 旧代码漏接, 协调器内 recordTickToQuote 因空指针永不执行
-        _coordinator->setPerformanceMonitor(_performance_monitor.get());
+        deps.perf_monitor = _performance_monitor.get();
         TscClock::calibrate(); // P0: rdtsc→ns 系数一次性校准 (10ms)
         WTSLogger::info("PerformanceMonitor: latencyThreshold={}ns", _config.perf.monitor_latency_threshold);
     } else {
@@ -648,8 +649,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         // A10: 接线利润门槛 (此前 setMinProfitThreshold 无调用者, 价格调整成本检查恒放行)
         _async_arb->setMinProfitThreshold(_spread_arb_manager->getConfig().min_profit_threshold_ticks);
         if (_coordinator) {
-            _coordinator->setArbExecutor(_async_arb.get());
-            _coordinator->setArbManager(_spread_arb_manager.get()); // B2: 平仓 intent 查询通道
+            deps.arb_executor = _async_arb.get();
+            deps.arb_manager = _spread_arb_manager.get(); // B2: 平仓 intent 查询通道
         }
         // B5: 过冲保险丝 — Portfolio sign-flip → arb_manager->onOvershootDetected
         if (_portfolio) {
@@ -685,8 +686,11 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     }
 
     // 共享TradingState（必须在arb if/else块之外，否则Arb=OFF时指针为nullptr导致segfault）
+    // B7: trading_state must be set before wireDeps (was setTradingState call)
+    deps.trading_state = &_trading_state;
     if (_coordinator) {
-        _coordinator->setTradingState(&_trading_state);
+        _coordinator->wireDeps(deps);      // B7: consolidated dep wiring (replaces 15 setters + setTradingState)
+        _coordinator->validateDeps();      // B7: fail-fast validation
     }
 
     // R1: 如果 WtUftRunner 在 init 之前已注入 _event_notifier,

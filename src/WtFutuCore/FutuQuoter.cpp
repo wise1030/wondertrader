@@ -523,26 +523,27 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
     return orders;
 }
 
-uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx,
-                                   double mid,
-                                   double l0_bid_price,
-                                   double l0_ask_price,
-                                   double spread_mult,
-                                   bool allow_bid,
-                                   bool allow_ask,
-                                   uint64_t now,
-                                   double upper_limit,
-                                   double lower_limit,
-                                   double best_bid,
-                                   double best_ask,
-                                   double long_util,
-                                   double short_util,
-                                   bool force_ask_obligation,
-                                   bool force_bid_obligation,
-                                   bool hard_block_bid,
-                                   bool hard_block_ask)
+uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& req)
 {
     RecursiveSpinGuard _g(_lock);
+    // B8: unpack QuoteRequest (function body uses these locals unchanged)
+    double mid = req.mid;
+    double l0_bid_price = req.l0_bid_price;
+    double l0_ask_price = req.l0_ask_price;
+    double spread_mult = req.spread_mult;
+    bool allow_bid = req.allow_bid;
+    bool allow_ask = req.allow_ask;
+    uint64_t now = req.now;
+    double upper_limit = req.upper_limit;
+    double lower_limit = req.lower_limit;
+    double best_bid = req.best_bid;
+    double best_ask = req.best_ask;
+    double long_util = req.long_util;
+    double short_util = req.short_util;
+    bool force_ask_obligation = req.force_ask_obligation;
+    bool force_bid_obligation = req.force_bid_obligation;
+    bool hard_block_bid = req.hard_block_bid;
+    bool hard_block_ask = req.hard_block_ask;
     uint32_t orders_placed = 0;
     _ctx = ctx;
     _allow_bid = allow_bid;

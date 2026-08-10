@@ -250,6 +250,65 @@ void StrategyCoordinator::setTradingState(TradingState* state)
         }});  // P1.3 Step2a+2b: wire RiskCoordinator
 }
 
+void StrategyCoordinator::wireDeps(const CoordinatorDeps& deps)
+{
+    // B7: Set all dependency pointers in one call
+    _portfolio = deps.portfolio;
+    _order_tracker = deps.order_tracker;
+    _risk_monitor = deps.risk_monitor;
+    _order_router = deps.order_router;
+    _trading_state = deps.trading_state;
+    _quoters = deps.quoters;
+    _spread_opts = deps.spread_opts;
+    _market_data = deps.market_data;
+    _signal_aggregators = deps.signal_aggregators;
+    _toxicity = deps.toxicity;
+    _perf_monitor = deps.perf_monitor;
+    _self_trade_calibrator = deps.self_trade_calibrator;
+    _correlation_manager = deps.correlation_manager;
+    _arb_executor = deps.arb_executor;
+    _arb_manager = deps.arb_manager;
+
+    // Wire sub-component deps (was in setTradingState - must be after all members set)
+    _closeout_trigger.setDeps({_risk_monitor, _trading_state, _portfolio, &_cfg,
+        [this](wtp::IUftStraCtx* ctx) {
+            if (_quoters) {
+                for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
+            }
+        }});
+    _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, _trading_state, _arb_executor,
+        &_quote_chain, _self_trade_calibrator, &_cfg,
+        [this](wtp::IUftStraCtx* ctx) {
+            if (_quoters) {
+                for (auto& [code, q] : *_quoters) { q->cancelAll(ctx); }
+            }
+        }});
+}
+
+bool StrategyCoordinator::validateDeps() const
+{
+    uint32_t errors = 0;
+    auto require = [this, &errors](const void* p, const char* name) {
+        if (!p) { WTSLogger::error("[COORDINATOR] B7: required dependency missing: {}", name); errors++; }
+    };
+    require(_portfolio, "portfolio");
+    require(_order_tracker, "order_tracker");
+    require(_risk_monitor, "risk_monitor");
+    require(_order_router, "order_router");
+    require(_trading_state, "trading_state");
+    if (_cfg.use_market_making) {
+        require(_quoters, "quoters (MM enabled)");
+        require(_spread_opts, "spread_opts (MM enabled)");
+        require(_market_data, "market_data (MM enabled)");
+        require(_signal_aggregators, "signal_aggregators (MM enabled)");
+    }
+    if (errors > 0)
+        WTSLogger::error("[COORDINATOR] B7: {} required dependencies MISSING", errors);
+    else
+        WTSLogger::info("[COORDINATOR] B7: dependency check passed (0 missing)");
+    return errors == 0;
+}
+
 void StrategyCoordinator::initialize()
 {
     WTSLogger::info("StrategyCoordinator: initialized (perf={})", _cfg.perf_enabled);
@@ -942,24 +1001,14 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, const TickContex
         cq.valid = true;
     }
 
-    tc.quoter->refreshQuotes(ctx,
-                             tc.mid,
-                             l0_bid,
-                             l0_ask,
-                             spread_mult,
-                             allow_bid,
-                             allow_ask,
-                             tc.timestamp,
-                             tick->upperlimit(),
-                             tick->lowerlimit(),
-                             tick->bidprice(0),
-                             tick->askprice(0),
-                             _v3_long_util,
-                             _v3_short_util,
-                             _v3_force_ask_obligation,
-                             _v3_force_bid_obligation,
-                             _v3_hard_block_bid,
-                             _v3_hard_block_ask);
+    tc.quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
+        tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
+        tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
+        tick->bidprice(0), tick->askprice(0),
+        _v3_long_util, _v3_short_util,
+        _v3_force_ask_obligation, _v3_force_bid_obligation,
+        _v3_hard_block_bid, _v3_hard_block_ask
+    });
 
     return true;
 }
@@ -1111,24 +1160,12 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
                      hard_block_bid,
                      hard_block_ask);
 
-    quoter->refreshQuotes(ctx,
-                          latest_mid,
-                          new_l0_bid,
-                          new_l0_ask,
-                          q.spread_mult,
-                          allow_bid,
-                          allow_ask,
-                          q.timestamp,
-                          q.upper_limit,
-                          q.lower_limit,
-                          q.best_bid,
-                          q.best_ask,
-                          long_util,
-                          short_util,
-                          force_ask_obligation,
-                          force_bid_obligation,
-                          hard_block_bid,
-                          hard_block_ask);
+    quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
+        latest_mid, new_l0_bid, new_l0_ask, q.spread_mult, allow_bid, allow_ask,
+        q.timestamp, q.upper_limit, q.lower_limit, q.best_bid, q.best_ask,
+        long_util, short_util, force_ask_obligation, force_bid_obligation,
+        hard_block_bid, hard_block_ask
+    });
     return true;
 }
 

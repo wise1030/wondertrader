@@ -175,24 +175,29 @@ public:
     /// @param force_ask_obligation  v3: 多头打满，强制 ask 软义务报价 (default false)
     /// @param force_bid_obligation  v3: 空头打满，强制 bid 软义务报价 (default false)
     /// @return       Number of new orders placed (for rate limiting)
-    uint32_t refreshQuotes(wtp::IUftStraCtx* ctx,
-                           double mid,
-                           double l0_bid_price,
-                           double l0_ask_price,
-                           double spread_mult = 1.0,
-                           bool allow_bid = true,
-                           bool allow_ask = true,
-                           uint64_t now = 0,
-                           double upper_limit = 0,
-                           double lower_limit = 0,
-                           double best_bid = 0,
-                           double best_ask = 0,
-                           double long_util = 0.0,
-                           double short_util = 0.0,
-                           bool force_ask_obligation = false,
-                           bool force_bid_obligation = false,
-                           bool hard_block_bid = false,
-                           bool hard_block_ask = false);
+    /// B8: QuoteRequest - replaces 18 individual refreshQuotes parameters
+    struct QuoteRequest
+    {
+        double mid;
+        double l0_bid_price;
+        double l0_ask_price;
+        double spread_mult = 1.0;
+        bool allow_bid = true;
+        bool allow_ask = true;
+        uint64_t now = 0;
+        double upper_limit = 0;
+        double lower_limit = 0;
+        double best_bid = 0;
+        double best_ask = 0;
+        double long_util = 0.0;
+        double short_util = 0.0;
+        bool force_ask_obligation = false;
+        bool force_bid_obligation = false;
+        bool hard_block_bid = false;
+        bool hard_block_ask = false;
+    };
+
+    uint32_t refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& req);
 
     /// Cancel all outstanding quotes (both sides)
     void cancelAll(wtp::IUftStraCtx* ctx);

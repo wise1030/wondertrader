@@ -200,7 +200,41 @@ public:
     StrategyCoordinator();
     ~StrategyCoordinator();
 
-    void setConfig(const CoordinatorConfig& cfg)
+    //==========================================================================
+    // B7: CoordinatorDeps - consolidated dependency injection (replaces 15 setters)
+    //==========================================================================
+    struct CoordinatorDeps
+    {
+        // Core deps (required, non-null after wireDeps)
+        FutuPortfolio* portfolio = nullptr;
+        UnifiedOrderTracker* order_tracker = nullptr;
+        FutuRiskMonitor* risk_monitor = nullptr;
+        OrderRouter* order_router = nullptr;
+        TradingState* trading_state = nullptr;  ///< Shared, owned by UftFutuMmStrategy
+
+        // Borrowed container pointers (lifetime: owned by UftFutuMmStrategy, must outlive coordinator)
+        wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters = nullptr;
+        wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* spread_opts = nullptr;
+        std::unordered_map<std::string, std::unique_ptr<MarketDataContext>>* market_data = nullptr;
+        std::unordered_map<std::string, std::unique_ptr<SignalAggregator>>* signal_aggregators = nullptr;
+
+        // Optional deps (nullable)
+        ToxicFlowDetector* toxicity = nullptr;
+        PerformanceMonitor* perf_monitor = nullptr;
+        SelfTradeCalibrator* self_trade_calibrator = nullptr;
+        CorrelationManager* correlation_manager = nullptr;
+        AsyncArbitrageExecutor* arb_executor = nullptr;  ///< nullable (arb disabled)
+        SpreadArbitrageManager* arb_manager = nullptr;   ///< nullable (arb disabled)
+    };
+
+    /// B7: Wire all dependencies in one call (replaces 15 individual setters).
+    /// Must be called after all deps are created, before first tick.
+    void wireDeps(const CoordinatorDeps& deps);
+
+    /// B7: Fail-fast validation - logs errors and returns false if required deps missing.
+    bool validateDeps() const;
+
+        void setConfig(const CoordinatorConfig& cfg)
     {
         _cfg = cfg;
         syncPhaseConfig();
