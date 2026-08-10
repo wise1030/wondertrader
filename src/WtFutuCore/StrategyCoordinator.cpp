@@ -425,6 +425,8 @@ ProcessingResult StrategyCoordinator::processTick(
                         _cfg.night_close_time);
     }
 
+    _event_dispatcher.dispatch(CoordinatorEvent::TickReceived);  // C10: fire at processTick entry
+
     // ===== Market Making Pipeline =====
     if (_cfg.use_market_making) {
         // Stage 3: Update signals (MM only)
@@ -1071,6 +1073,7 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
 
 bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms)
 {
+    _event_dispatcher.dispatch(CoordinatorEvent::FillReceived);  // C10: fire at fill entry
     if (!ctx || !_quoters)
         return false;
     if (_cfg.requote_after_fill_min_interval_ms == 0)

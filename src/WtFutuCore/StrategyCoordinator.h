@@ -24,6 +24,7 @@
 #include "FutuPortfolio.h"
 #include "QuotePolicyChain.h"
 #include "SpinLockGuard.h"
+#include "EventDispatcher.h"  // C10: synchronous event dispatcher
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -243,6 +244,7 @@ public:
         syncPhaseConfig();
     }
     const CoordinatorConfig& getConfig() const { return _cfg; }
+    EventDispatcher& eventDispatcher() { return _event_dispatcher; }  // C10
     void setAlphaSensitivity(double val) { _cfg.modules.alpha_sensitivity = val; }
     void setPortfolioMaxDelta(double val) { _cfg.modules.portfolio_max_delta = val; }
 
@@ -432,6 +434,8 @@ private:
 
     // v7.1: replay 时钟 (策略每 tick 注入; 节流判定统一时间基准, 0=未注入回退墙钟)
     uint64_t _last_exchange_time_ms = 0;
+
+    EventDispatcher _event_dispatcher;  // C10: synchronous event dispatcher (listeners future)
 
     // v7.1: session 休息段状态
     bool _section_break_active = false;
