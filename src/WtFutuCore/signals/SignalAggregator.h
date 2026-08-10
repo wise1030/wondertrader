@@ -20,6 +20,7 @@
 #include "MomentumSignalSource.h"
 #include "LeadLagSignalSource.h"
 #include "ICWeightTracker.h"
+#include "ISignalCombiner.h"  // B9: combiner + source registries
 #include "../../WTSTools/WTSLogger.h"
 
 namespace futu
@@ -117,8 +118,8 @@ struct SignalAggregatorConfig
         if (model) {
             // type 严格校验
             std::string mtype = FutuConfig::readString(model, "type", "linear");
-            if (mtype != "linear") {
-                WTSLogger::error("SignalAggregator: unsupported model type: {}, only 'linear' is supported", mtype);
+            if (!SignalCombinerRegistry::instance().has(mtype)) {
+                WTSLogger::error("SignalAggregator: unsupported model type: {} (registered: linear)", mtype);
                 c.valid = false;
                 return c;
             }
