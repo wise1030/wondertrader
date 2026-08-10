@@ -231,6 +231,9 @@ public:
     /// Must be called after all deps are created, before first tick.
     void wireDeps(const CoordinatorDeps& deps);
 
+    /// C12: Pre-populate _last_mid from _quoters (call after wireDeps sets _quoters)
+    void initLastMid();
+
     /// B7: Fail-fast validation - logs errors and returns false if required deps missing.
     bool validateDeps() const;
 
@@ -390,7 +393,11 @@ private:
 
     // 5A-1: 会话阶段统一判定 (session 表/休息窗口/closeout 窗口单一事实来源)
     SessionPhaseManager _phase_mgr;
-    wtp::wt_hashmap<std::string, double> _last_mid;
+    // C12: atomic MidSlot (was naked double map - cross-thread R/W without sync)
+    // MdSpi writes (updateMarketData), TdSpi reads (requoteAfterFill).
+    // Map structure immutable after initLastMid() -> unique_ptr avoids moving atomics.
+    struct MidSlot { std::atomic<double> v{0.0}; };
+    wtp::wt_hashmap<std::string, std::unique_ptr<MidSlot>> _last_mid;
 
     // 减仓防重复触发 — removed (attemptPositionReduction deleted)
 

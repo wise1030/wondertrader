@@ -283,6 +283,9 @@ void StrategyCoordinator::wireDeps(const CoordinatorDeps& deps)
                 for (auto& [code, q] : *_quoters) { q->cancelAll(ctx); }
             }
         }});
+
+    // C12: pre-populate atomic _last_mid from _quoters
+    initLastMid();
 }
 
 bool StrategyCoordinator::validateDeps() const
@@ -307,6 +310,15 @@ bool StrategyCoordinator::validateDeps() const
     else
         WTSLogger::info("[COORDINATOR] B7: dependency check passed (0 missing)");
     return errors == 0;
+}
+
+void StrategyCoordinator::initLastMid()
+{
+    if (!_quoters) return;
+    for (auto& [code, quoter] : *_quoters) {
+        _last_mid[code] = std::make_unique<MidSlot>();
+    }
+    WTSLogger::info("[COORDINATOR] C12: _last_mid pre-populated with {} contracts (atomic MidSlot)", _last_mid.size());
 }
 
 void StrategyCoordinator::initialize()
@@ -666,7 +678,9 @@ void StrategyCoordinator::updateMarketData(wtp::IUftStraCtx* ctx, TickContext& t
     // Update portfolio (position and prices)
     if (_portfolio) {
         _portfolio->onTick(tc.code.c_str(), tick);
-        _last_mid[tc.code] = tc.mid;
+        auto mid_it = _last_mid.find(tc.code);
+        if (mid_it != _last_mid.end() && mid_it->second)
+            mid_it->second->v.store(tc.mid, std::memory_order_relaxed);
 
         _global_portfolio_ctx.total_delta = _portfolio->getTotalDelta();
         _global_portfolio_ctx.total_exposure = _portfolio->getTotalExposure();
@@ -1105,8 +1119,11 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     // (1) 最新 mid (行情可能已动, 不用缓存旧 mid); 按 mid 平移重算, 保留原 spread/skew 结构
     double latest_mid = q.mid;
     auto mid_it = _last_mid.find(code);
-    if (mid_it != _last_mid.end() && mid_it->second > 0)
-        latest_mid = mid_it->second;
+    if (mid_it != _last_mid.end() && mid_it->second) {
+        double cached = mid_it->second->v.load(std::memory_order_relaxed);
+        if (cached > 0)
+            latest_mid = cached;
+    }
     double mid_delta = latest_mid - q.mid;
     double new_l0_bid = q.l0_bid + mid_delta;
     double new_l0_ask = q.l0_ask + mid_delta;
@@ -1202,7 +1219,7 @@ void StrategyCoordinator::resetSession()
     }
     _quote_chain.toxicity().reset();
     _tick_count = 0;
-    _last_mid.clear();
+    for (auto& [code, slot] : _last_mid) { if (slot) slot->v.store(0.0, std::memory_order_relaxed); }
 }
 
 void StrategyCoordinator::resetDaily()
