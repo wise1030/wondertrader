@@ -246,10 +246,11 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     // F13: 实盘成交路径最大单笔开销 — fmt(0.5-1μs)+同步文件写(2-20μs)/笔。
     //   逐笔明细降 debug; info 每 50 笔采样一条保留可观测性。
     // C11: defer per-fill debug log to tick path via SPSC (was biggest per-fill cost: fmt+file 2-20us)
-    s._tdspi_log_queue.tryPush(TdSpiLogEvent{
-        0, FixedString24(stdCode), FixedString24(actionStr),
-        vol, price, _portfolio->getTotalDelta(), FixedString24(effectStr), 0
-    });
+    if (!s._tdspi_log_queue.tryPush(TdSpiLogEvent{
+            0, FixedString24(stdCode), FixedString24(actionStr),
+            vol, price, _portfolio->getTotalDelta(), FixedString24(effectStr), 0
+        }))
+        s._tdspi_logs_dropped.fetch_add(1, std::memory_order_relaxed);  // C11: queue full
     static uint64_t trade_log_cnt = 0;
     if ((++trade_log_cnt % 50) == 1) {
         WTSLogger::info("UftFutuMmStrategy[{}] TRADE[sample #{}]: {} {} {}@{} | Delta: {}",

@@ -479,6 +479,9 @@ void UftFutuMmStrategy::handleLeadLagPush(const char* stdCode, WTSTickData* tick
 
 void UftFutuMmStrategy::drainTdSpiLogs()
 {
+    uint64_t dropped = _tdspi_logs_dropped.exchange(0, std::memory_order_relaxed);
+    if (dropped > 0)
+        WTSLogger::warn("TdSpi log queue full: {} entries dropped (deferred debug logs)", dropped);
     _tdspi_log_queue.popAll([](const TdSpiLogEvent& e) {
         if (e.level == 0)
             WTSLogger::debug("UftFutuMmStrategy TRADE(deferred): {} {} {:.0f}@{:.1f} | Delta: {:.0f} {}",

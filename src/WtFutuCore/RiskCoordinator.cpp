@@ -41,6 +41,7 @@ bool RiskCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx, uint64_t exchange_
         double util;
     };
     std::vector<ReduceCandidate> candidates;
+    candidates.reserve(8);  // avoid per-tick heap alloc (typically 0-2 candidates)
 
     _deps.portfolio->forEachContractState([&](const ContractState& c) {
         if (c.max_position <= 0 || std::abs(c.position) < 1.0)

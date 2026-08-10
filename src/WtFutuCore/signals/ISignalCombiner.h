@@ -73,41 +73,4 @@ private:
     std::unordered_map<std::string, Factory> _factories;
 };
 
-//==============================================================================
-// SignalSourceRegistry - string-keyed factory for signal sources (B9)
-//
-// Current signal sources are created via if-blocks in initializeSignalSources.
-// This registry reserves the extension point for future plugin sources.
-//==============================================================================
-class ISignalSource;  // forward decl
-
-class SignalSourceRegistry
-{
-public:
-    using Factory = std::function<std::unique_ptr<ISignalSource>()>;
-
-    static SignalSourceRegistry& instance()
-    {
-        static SignalSourceRegistry inst;
-        return inst;
-    }
-
-    void registerSource(const std::string& name, Factory factory)
-    {
-        _factories[name] = std::move(factory);
-    }
-
-    bool has(const std::string& name) const { return _factories.find(name) != _factories.end(); }
-
-    std::unique_ptr<ISignalSource> create(const std::string& name) const
-    {
-        auto it = _factories.find(name);
-        return (it != _factories.end()) ? it->second() : nullptr;
-    }
-
-private:
-    SignalSourceRegistry() = default;
-    std::unordered_map<std::string, Factory> _factories;
-};
-
 } // namespace futu

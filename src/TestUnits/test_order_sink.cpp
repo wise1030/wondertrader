@@ -142,3 +142,39 @@ TEST(test_order_sink, order_submit_result_fields)
     EXPECT_FALSE(r.rejected);
     EXPECT_EQ(r.localids.size(), 1u);
 }
+
+//==============================================================================
+// B9: SignalCombinerRegistry smoke test (verify extension point is not broken)
+//==============================================================================
+#include "../WtFutuCore/signals/ISignalCombiner.h"
+
+TEST(test_signal_combiner_registry, linear_registered_by_default)
+{
+    // The registry auto-registers "linear" in its constructor
+    EXPECT_TRUE(futu::SignalCombinerRegistry::instance().has("linear"));
+    EXPECT_FALSE(futu::SignalCombinerRegistry::instance().has("nonexistent_model"));
+}
+
+TEST(test_signal_combiner_registry, create_linear_returns_valid_combiner)
+{
+    auto combiner = futu::SignalCombinerRegistry::instance().create("linear");
+    ASSERT_NE(combiner, nullptr);
+    EXPECT_STREQ(combiner->typeName(), "linear");
+}
+
+// Dummy second implementation: proves the registry accepts custom combiners
+class DummyCombiner : public futu::ISignalCombiner
+{
+public:
+    const char* typeName() const override { return "dummy_test"; }
+};
+
+TEST(test_signal_combiner_registry, register_and_lookup_custom_combiner)
+{
+    futu::SignalCombinerRegistry::instance().registerCombiner(
+        "dummy_test", [] { return std::make_unique<DummyCombiner>(); });
+    EXPECT_TRUE(futu::SignalCombinerRegistry::instance().has("dummy_test"));
+    auto c = futu::SignalCombinerRegistry::instance().create("dummy_test");
+    ASSERT_NE(c, nullptr);
+    EXPECT_STREQ(c->typeName(), "dummy_test");
+}

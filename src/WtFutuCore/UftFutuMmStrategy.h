@@ -21,7 +21,8 @@
 #include "FutuRiskMonitor.h"
 #include "FutuHotParamManager.h"
 #include "RiskLiquidator.h"
-#include "TdSpiOffload.h"  // C11: TdSpi log offload queue
+#include "TdSpiOffload.h"
+#include <atomic>  // C11: TdSpi log offload queue
 #include "CloseoutOrchestrator.h"
 #include "ArbExecutionBridge.h"
 #include "MonitorBridge.h"
@@ -474,6 +475,7 @@ private:
 
     // C11: SPSC queue for deferring TdSpi fill-path logs to tick path
     TdSpiLogQueue _tdspi_log_queue;
+    std::atomic<uint64_t> _tdspi_logs_dropped{0};  // C11: queue-full drop counter
     void drainTdSpiLogs();
 
     // 交易时段信息缓存（初始化时一次性缓存，避免每次 tick 重复查询）
