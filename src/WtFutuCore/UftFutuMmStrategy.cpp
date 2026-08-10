@@ -477,8 +477,21 @@ void UftFutuMmStrategy::handleLeadLagPush(const char* stdCode, WTSTickData* tick
     }
 }
 
+void UftFutuMmStrategy::drainTdSpiLogs()
+{
+    _tdspi_log_queue.popAll([](const TdSpiLogEvent& e) {
+        if (e.level == 0)
+            WTSLogger::debug("UftFutuMmStrategy TRADE(deferred): {} {} {:.0f}@{:.1f} | Delta: {:.0f} {}",
+                             e.code.c_str(), e.action.c_str(), e.vol, e.price, e.delta, e.effect.c_str());
+        else
+            WTSLogger::info("UftFutuMmStrategy TRADE(deferred): {} {} {:.0f}@{:.1f} | Delta: {:.0f} {}",
+                            e.code.c_str(), e.action.c_str(), e.vol, e.price, e.delta, e.effect.c_str());
+    });
+}
+
 void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick, uint64_t now_ms)
 {
+    drainTdSpiLogs();  // C11: drain deferred TdSpi logs (moved from fill path to tick path)
     if (!_coordinator || _price_stale) {
         // Fallback: no coordinator (or stale price), trigger fail-safe
         if (!_coordinator) {

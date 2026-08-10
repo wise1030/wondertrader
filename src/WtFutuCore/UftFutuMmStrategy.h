@@ -21,6 +21,7 @@
 #include "FutuRiskMonitor.h"
 #include "FutuHotParamManager.h"
 #include "RiskLiquidator.h"
+#include "TdSpiOffload.h"  // C11: TdSpi log offload queue
 #include "CloseoutOrchestrator.h"
 #include "ArbExecutionBridge.h"
 #include "MonitorBridge.h"
@@ -470,6 +471,10 @@ private:
 
     // P0-1 (v7.4): 统一强平/减仓原语 (无状态, setDeps 即用)
     RiskLiquidator _liquidator;
+
+    // C11: SPSC queue for deferring TdSpi fill-path logs to tick path
+    TdSpiLogQueue _tdspi_log_queue;
+    void drainTdSpiLogs();
 
     // 交易时段信息缓存（初始化时一次性缓存，避免每次 tick 重复查询）
     struct SessionCache
