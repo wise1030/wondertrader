@@ -335,6 +335,20 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 
     WTSLogger::info("UftFutuMmStrategy[{}] hot-update params registered (defaults from coordinator.yaml)", id());
 
+    // 启动时同步共享内存中已存在的热参数值到各模块
+    // 避免重启后丢失上一次热更新结果（sync_param 会保留共享内存旧值，但模块仍按 config 初始化）
+    {
+        FutuHotParamManager::Targets t;
+        t.config = &_config;
+        t.quoters = &_quoters;
+        t.spread_opts = &_spread_optimizers;
+        t.aggregators = &_signal_aggregators;
+        t.coordinator = _coordinator.get();
+        t.portfolio = _portfolio.get();
+        _hot_mgr.applyAll(t, id());
+        WTSLogger::info("UftFutuMmStrategy[{}] initial hot params synced from shared memory", id());
+    }
+
     // 输出初始化日志
     WTSLogger::info("UftFutuMmStrategy[{}] initialized: {} contracts, {} levels",
                     id(),
