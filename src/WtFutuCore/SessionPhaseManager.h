@@ -36,7 +36,7 @@ enum class SessionPhase
 
 struct SessionPhaseConfig
 {
-    uint32_t section_break_minutes_before = 0; ///< 每节收盘前 N 分钟休息 (0=禁用)
+    uint32_t section_break_seconds_before = 10; ///< 每节收盘前 N 秒休息 (0=禁用, 默认10s)
     uint32_t close_time = 150000;              ///< 全天收盘 HHMMSS
     uint32_t closeout_minutes_before = 5;      ///< 白盘收盘前 N 分钟触发 closeout
     uint32_t night_close_time = 0;             ///< 夜盘收盘 HHMM (0=无夜盘)
@@ -79,10 +79,12 @@ public:
         return sess->isInTradingTime(hhmmss);
     }
 
-    /// 中间节休息窗口: 每节收盘前 N 分钟 (最后一节归 closeout, 跳过)
-    bool inSectionBreak(const std::string& code, uint32_t hhmmss) const
+    /// 中间节休息窗口: 每节收盘前 N 秒 (最后一节归 closeout, 跳过)
+    /// @param hhmmss 当前时间 HHMM/HHMMSS (stra_get_time)
+    /// @param secs_in_min 分钟内秒数 0-59 (stra_get_secs/1000)
+    bool inSectionBreak(const std::string& code, uint32_t hhmmss, uint32_t secs_in_min) const
     {
-        if (_cfg.section_break_minutes_before == 0)
+        if (_cfg.section_break_seconds_before == 0)
             return false;
 
         wtp::WTSSessionInfo* sess = getSession(code);
@@ -96,13 +98,20 @@ public:
         uint32_t hour, min;
         if (!parseHhmm(hhmmss, hour, min))
             return false;
-        uint32_t cur_min = hour * 60 + min;
+        // v7.9: 秒级窗口 (默认小节结束前10s撤单停报, 原1分钟过早, 牺牲成交机会)
+        uint32_t cur_sec = hour * 3600 + min * 60 + secs_in_min;
 
         for (size_t i = 0; i + 1 < sections.size(); i++) {
-            uint32_t end_hhmm = sections[i].second;
-            uint32_t end_min = (end_hhmm / 100) * 60 + (end_hhmm % 100);
-            if (end_min >= _cfg.section_break_minutes_before &&
-                cur_min >= end_min - _cfg.section_break_minutes_before && cur_min < end_min)
+            // v7.8 fix: 必须用 second_raw (墙钟原始节尾), 不能用 .second
+            // .second 是 offsetTime(eTime) 按 session offset 偏移后的时间
+            // (FN0100/FD0900 等 offset=300min), 与 stra_get_time 原始墙钟比较
+            // 会把休息窗口整体后移 5 小时, 全部落到非交易时段, SECTION_BREAK 永不触发.
+            // 框架 isInTradingTime 是输入时间先 offsetTime 再比 (两侧同基准);
+            // 本处直接用 raw 对 raw, 与 FutuModuleAssembler 推导 close_time 口径一致.
+            uint32_t end_hhmm = sections[i].second_raw;
+            uint32_t end_sec = (end_hhmm / 100) * 3600 + (end_hhmm % 100) * 60;
+            if (end_sec >= _cfg.section_break_seconds_before &&
+                cur_sec >= end_sec - _cfg.section_break_seconds_before && cur_sec < end_sec)
                 return true;
         }
         return false;
@@ -197,7 +206,7 @@ public:
     }
 
     /// 综合阶段判定: CLOSEOUT_WINDOW > SECTION_BREAK > CONTINUOUS > CLOSED
-    SessionPhase phase(const std::string& code, uint32_t hhmmss) const
+    SessionPhase phase(const std::string& code, uint32_t hhmmss, uint32_t secs_in_min) const
     {
         if (!isTrading(code, hhmmss))
             return SessionPhase::CLOSED;
@@ -207,7 +216,7 @@ public:
         if (night || day)
             return SessionPhase::CLOSEOUT_WINDOW;
 
-        if (inSectionBreak(code, hhmmss))
+        if (inSectionBreak(code, hhmmss, secs_in_min))
             return SessionPhase::SECTION_BREAK;
 
         return SessionPhase::CONTINUOUS;

@@ -207,8 +207,13 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
     _cfg.requote_after_fill_min_interval_ms =
         readUInt32(cfg, "requoteAfterFillMinIntervalMs", _cfg.requote_after_fill_min_interval_ms);
 
-    // v7.1 session 休息段参数
-    _cfg.section_break_minutes_before = readUInt32(cfg, "sectionBreakMinutesBefore", _cfg.section_break_minutes_before);
+    // v7.9 session 休息段参数 (秒级; 新键 sectionBreakSecondsBefore 优先,
+    // 旧键 sectionBreakMinutesBefore 按 min*60 兼容转换)
+    if (cfg->has("sectionBreakSecondsBefore")) {
+        _cfg.section_break_seconds_before = readUInt32(cfg, "sectionBreakSecondsBefore", _cfg.section_break_seconds_before);
+    } else if (cfg->has("sectionBreakMinutesBefore")) {
+        _cfg.section_break_seconds_before = readUInt32(cfg, "sectionBreakMinutesBefore", 0) * 60;
+    }
 
     syncPhaseConfig();
 
@@ -222,7 +227,7 @@ void StrategyCoordinator::syncPhaseConfig()
     // 5A-1: 同步会话阶段判定配置 (closeout 窗口参数与 _cfg 同源;
     //       loadConfig / setConfig 后各调一次, 保持与 processCloseout 判定一致)
     SessionPhaseConfig pcfg;
-    pcfg.section_break_minutes_before = _cfg.section_break_minutes_before;
+    pcfg.section_break_seconds_before = _cfg.section_break_seconds_before;
     pcfg.close_time = _cfg.close_time;
     pcfg.closeout_minutes_before = _cfg.closeout_minutes_before;
     pcfg.night_close_time = _cfg.night_close_time;
@@ -506,7 +511,7 @@ ProcessingResult StrategyCoordinator::processTick(
 
 bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext& tc)
 {
-    if (_cfg.section_break_minutes_before == 0)
+    if (_cfg.section_break_seconds_before == 0)
         return false;
 
     // 5A-1: 窗口判定统一走 SessionPhaseManager; sess 指针取回缓存进 TickContext
@@ -519,16 +524,18 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
     // 当前分钟 (stra_get_time 返回 HHMM(4位), 兼容 HHMMSS)
     uint32_t cur_hhmm = (tc.time_hms >= 10000) ? tc.time_hms / 100 : tc.time_hms;
 
-    bool in_break = _phase_mgr.inSectionBreak(tc.code, tc.time_hms);
+    // v7.9: 秒级窗口 — 当前秒内毫秒 stra_get_secs (ssmmm/1000 = 分钟内秒)
+    uint32_t secs_in_min = ctx->stra_get_secs() / 1000;
+    bool in_break = _phase_mgr.inSectionBreak(tc.code, tc.time_hms, secs_in_min);
 
     if (in_break) {
         if (!_section_break_active) {
             _section_break_active = true;
-            WTSLogger::info("[SECTION_BREAK] {} entering break window at {} ({}min before section end), cancel all + "
+            WTSLogger::info("[SECTION_BREAK] {} entering break window at {} ({}s before section end), cancel all + "
                             "pause quoting/arb",
                             tc.code,
                             cur_hhmm,
-                            _cfg.section_break_minutes_before);
+                            _cfg.section_break_seconds_before);
             // 撤全部做市报价
             if (_quoters) {
                 for (auto& [code, quoter] : *_quoters) {

@@ -178,9 +178,9 @@ struct CoordinatorConfig
     // v7.1 成交后立即重挂 (做市义务: 单边成交侵蚀深度 → 撤剩余单重新挂单)
     uint32_t requote_after_fill_min_interval_ms = 200; ///< 每合约成交重挂最小间隔(ms, 0=禁用)
 
-    // v7.1 session 休息段暂停 (每节收盘前 N 分钟撤单+暂停报价/套利;
-    // 每日最后一节由 closeout 处理, 不在此列). 0=禁用
-    uint32_t section_break_minutes_before = 1;
+    // v7.9 session 休息段暂停 (每节收盘前 N 秒撤单+暂停报价/套利;
+    // 每日最后一节由 closeout 处理, 不在此列). 0=禁用, 默认10s
+    uint32_t section_break_seconds_before = 10;
 
     ModuleParams modules;
     wtp::WTSVariant* _raw_variant = nullptr;
