@@ -5,9 +5,6 @@
 #include "FutuHotParamWatcher.h"
 #include "FutuHotParamManager.h"
 
-#include "../WtUftCore/ShareManager.h"
-#include "../WTSUtils/WTSCfgLoader.h"
-#include "../Includes/WTSVariant.hpp"
 #include "../WTSTools/WTSLogger.h"
 
 #include <boost/filesystem.hpp>
@@ -25,14 +22,17 @@ FutuHotParamWatcher::~FutuHotParamWatcher()
     stop();
 }
 
-bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath, uint32_t interval_ms)
+bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath,
+                                FutuHotParamManager* hot_mgr,
+                                const FutuHotParamManager::Targets& targets,
+                                uint32_t interval_ms)
 {
     if (_running.load())
         return false;
 
-    if (!strategy_id || !filepath || strlen(strategy_id) == 0 || strlen(filepath) == 0)
+    if (!strategy_id || !filepath || !hot_mgr || strlen(strategy_id) == 0 || strlen(filepath) == 0)
     {
-        WTSLogger::error("FutuHotParamWatcher: invalid strategy_id or filepath");
+        WTSLogger::error("FutuHotParamWatcher: invalid arguments");
         return false;
     }
 
@@ -45,6 +45,8 @@ bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath, u
     _strategy_id = strategy_id;
     _filepath = filepath;
     _interval_ms = interval_ms;
+    _hot_mgr = hot_mgr;
+    _targets = targets;
     _last_mtime = 0;
     _stop_flag.store(false);
 
@@ -100,41 +102,10 @@ void FutuHotParamWatcher::watchLoop()
 
 bool FutuHotParamWatcher::syncFileToSharedMemory()
 {
-    WTSVariant* cfg = WTSCfgLoader::load_from_file(_filepath.c_str());
-    if (!cfg)
-    {
-        WTSLogger::error("FutuHotParamWatcher: failed to load {}", _filepath);
+    if (!_hot_mgr)
         return false;
-    }
 
-    const char* const* names = FutuHotParamManager::paramNames();
-    uint32_t updated = 0;
-
-    for (uint32_t i = 0; i < HP_COUNT; i++)
-    {
-        const char* key = names[i];
-        if (!cfg->has(key))
-            continue;
-
-        double val = cfg->getDouble(key);
-        if (ShareManager::self().set_value(_strategy_id.c_str(), key, val))
-        {
-            updated++;
-        }
-        else
-        {
-            WTSLogger::warn("FutuHotParamWatcher: set_value failed for {}", key);
-        }
-    }
-
-    // 提交监听, 触发 on_params_updated
-    if (updated > 0)
-    {
-        ShareManager::self().commit_param_watcher(_strategy_id.c_str());
-        WTSLogger::info("FutuHotParamWatcher: synced {} params from {}", updated, _filepath);
-    }
-
-    cfg->release();
+    uint32_t updated = _hot_mgr->syncFromFile(_filepath.c_str(), _targets, _strategy_id.c_str());
     return updated > 0;
 }
 

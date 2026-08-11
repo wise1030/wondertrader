@@ -352,7 +352,14 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
     // 启动 hotparams.yaml 文件监视器 (修改后自动写入共享内存并触发热更新)
     // 仅在实盘模式启用 (回测无共享内存)
     if (!_is_backtest) {
-        _hot_watcher.start(id(), "hotparams.yaml", 1000);
+        FutuHotParamManager::Targets t;
+        t.config = &_config;
+        t.quoters = &_quoters;
+        t.spread_opts = &_spread_optimizers;
+        t.aggregators = &_signal_aggregators;
+        t.coordinator = _coordinator.get();
+        t.portfolio = _portfolio.get();
+        _hot_watcher.start(id(), "hotparams.yaml", &_hot_mgr, t, 1000);
     }
 
     // 输出初始化日志

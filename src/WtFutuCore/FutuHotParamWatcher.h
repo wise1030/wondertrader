@@ -17,6 +17,8 @@
 #include <string>
 #include <thread>
 
+#include "FutuHotParamManager.h"
+
 namespace futu
 {
 
@@ -29,8 +31,13 @@ public:
     /// 启动监视线程
     /// @param strategy_id 策略ID (共享内存 section 名)
     /// @param filepath    hotparams.yaml 完整路径
+    /// @param hot_mgr     热参数管理器 (用于 syncFromFile)
+    /// @param targets     热参数应用目标模块集合
     /// @param interval_ms 轮询间隔, 默认 1000ms
-    bool start(const char* strategy_id, const char* filepath, uint32_t interval_ms = 1000);
+    bool start(const char* strategy_id, const char* filepath,
+               FutuHotParamManager* hot_mgr,
+               const FutuHotParamManager::Targets& targets,
+               uint32_t interval_ms = 1000);
 
     /// 停止监视线程
     void stop();
@@ -45,6 +52,9 @@ private:
     std::string _strategy_id;
     std::string _filepath;
     uint32_t    _interval_ms;
+
+    FutuHotParamManager* _hot_mgr{nullptr};
+    FutuHotParamManager::Targets _targets{};
 
     std::atomic<bool> _running{false};
     std::atomic<bool> _stop_flag{false};

@@ -102,6 +102,10 @@ public:
     /// 应用全部热参数到各模块 (on_params_updated 委托)
     void applyAll(const Targets& t, const char* strategy_id);
 
+    /// 从文件同步热参数值到共享内存并应用 (供 FutuHotParamWatcher 调用)
+    /// @return 成功解析并更新的参数个数
+    uint32_t syncFromFile(const char* filepath, const Targets& t, const char* strategy_id);
+
     double hotVal(HotParamIndex idx) const
     {
         return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val;

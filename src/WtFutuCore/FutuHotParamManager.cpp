@@ -11,6 +11,8 @@
 #include "FutuPortfolio.h"
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
+#include "../WTSUtils/WTSCfgLoader.h"
+#include "../Includes/WTSVariant.hpp"
 
 namespace futu
 {
@@ -150,6 +152,51 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
         quoter->updateProtectionParams(t.config->quoting.price_protection, new_protect_ticks);
         quoter->updateMaxPriceDeviation(new_max_price_deviation);
     }
+}
+
+} // namespace futu
+
+namespace futu
+{
+
+uint32_t FutuHotParamManager::syncFromFile(const char* filepath, const Targets& t, const char* strategy_id)
+{
+    WTSVariant* cfg = WTSCfgLoader::load_from_file(filepath);
+    if (!cfg)
+    {
+        WTSLogger::error("FutuHotParamManager: failed to load {}", filepath);
+        return 0;
+    }
+
+    const char* const* names = paramNames();
+    uint32_t updated = 0;
+    uint32_t found = 0;
+
+    for (uint32_t i = 0; i < HP_COUNT; i++)
+    {
+        const char* key = names[i];
+        if (!cfg->has(key))
+            continue;
+
+        found++;
+        double val = cfg->getDouble(key);
+        if (_hot_params[i].ptr)
+        {
+            *_hot_params[i].ptr = val;
+            updated++;
+        }
+    }
+
+    cfg->release();
+
+    WTSLogger::info("FutuHotParamManager: syncFromFile {} found={} updated={}", filepath, found, updated);
+
+    if (updated > 0)
+    {
+        applyAll(t, strategy_id);
+    }
+
+    return updated;
 }
 
 } // namespace futu
