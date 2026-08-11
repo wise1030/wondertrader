@@ -116,9 +116,22 @@ public:
     void reset() { _mult.store(1.0, std::memory_order_release); }
     double multiplier() const { return _mult.load(std::memory_order_acquire); }
 
-    void apply(const QuotePolicyContext& /*ctx*/, QuoteState& st) override
+    void apply(const QuotePolicyContext& ctx, QuoteState& st) override
     {
-        st.spread_mult *= _mult.load(std::memory_order_acquire);
+        double mult = _mult.load(std::memory_order_acquire);
+        st.spread_mult *= mult;
+
+        // v7.8 链路修复: FutuQuoter::computeQuotePrices 不消费 spread_mult
+        // (见 FutuQuoter.cpp "(void)spread_mult" — spread 由上游 l0_bid/l0_ask 承载),
+        // 仅写 st.spread_mult 是死写, WIDEN_SPREAD 从未真正生效.
+        // 在此绕 l0 中心对称拉宽: 中心已含 fair_value(alpha)+skew 偏移,
+        // 拉宽只扩大宽度, 不改变 skew 方向语义.
+        if (mult > 1.0 && ctx.tick_size > 0 && st.l0_ask > st.l0_bid) {
+            double center = (st.l0_bid + st.l0_ask) * 0.5;
+            double half_width = (st.l0_ask - st.l0_bid) * 0.5 * mult;
+            st.l0_bid = std::floor((center - half_width) / ctx.tick_size) * ctx.tick_size;
+            st.l0_ask = std::ceil((center + half_width) / ctx.tick_size) * ctx.tick_size;
+        }
     }
 
 private:
@@ -246,6 +259,15 @@ public:
         // L1: 距涨跌停 <= 20 ticks, 加宽 spread
         if (dist_upper <= 20.0 || dist_lower <= 20.0) {
             st.spread_mult *= 2.0;
+
+            // v7.8 链路修复 (与 RiskWidenPolicy 同类): spread_mult 死写 -> l0 实际拉宽
+            // 涨跌停附近流动性风险高, 绕中心拉宽 2x 降低挂单吸引力
+            if (ctx.tick_size > 0 && st.l0_ask > st.l0_bid) {
+                double center = (st.l0_bid + st.l0_ask) * 0.5;
+                double half_width = (st.l0_ask - st.l0_bid); // * 0.5 * 2.0
+                st.l0_bid = std::floor((center - half_width) / ctx.tick_size) * ctx.tick_size;
+                st.l0_ask = std::ceil((center + half_width) / ctx.tick_size) * ctx.tick_size;
+            }
         }
 
         // L2: 距涨停 <= 10 ticks → block 买单(避免吃到涨停)
@@ -283,8 +305,11 @@ public:
         if (st.spread_mult < max_mult) {
             st.spread_mult = max_mult;
             double half_spread = ctx.tick_size * ctx.spread_opt->getParams().base_spread * max_mult / 2.0;
-            st.l0_bid = ctx.mid - half_spread - st.skew * ctx.tick_size;
-            st.l0_ask = ctx.mid + half_spread - st.skew * ctx.tick_size;
+            // v7.8 skew 符号修复: SpreadOptimizer 约定 bid/ask = fair ∓ half_spread + skew_price
+            // (实盘日志验证: mid=2710.50 skew=1.32 half=0.5 -> bid=2711.00, 与 +skew 一致)
+            // 原 "- st.skew" 使冷启动窗口内 skew 方向反转: 多头持仓 bid 反而上移追买
+            st.l0_bid = ctx.mid - half_spread + st.skew * ctx.tick_size;
+            st.l0_ask = ctx.mid + half_spread + st.skew * ctx.tick_size;
             st.l0_bid = std::floor(st.l0_bid / ctx.tick_size) * ctx.tick_size;
             st.l0_ask = std::ceil(st.l0_ask / ctx.tick_size) * ctx.tick_size;
         }
