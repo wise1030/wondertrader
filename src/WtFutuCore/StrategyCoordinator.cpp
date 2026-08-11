@@ -890,30 +890,30 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, const TickContex
     // 2.5 v3/v7.1 软风控前置: 统一仓位利用率口径
     //   (pos+同向pending)/maxPos — skew 归一化注入 + quoter qty衰减/义务 共用
     //==========================================================================
-    double _v3_long_util = 0.0;
-    double _v3_short_util = 0.0;
-    bool _v3_force_ask_obligation = false;
-    bool _v3_force_bid_obligation = false;
-    bool _v3_pending_drain_bid = false;
-    bool _v3_pending_drain_ask = false;
-    bool _v3_hard_block_bid = false;
-    bool _v3_hard_block_ask = false;
+    double long_util = 0.0;
+    double short_util = 0.0;
+    bool force_ask_obligation = false;
+    bool force_bid_obligation = false;
+    bool pending_drain_bid = false;
+    bool pending_drain_ask = false;
+    bool hard_block_bid = false;
+    bool hard_block_ask = false;
     if (_risk_monitor) {
         // A3: 优先复用 TickContext.cs (preCheck 入口已快照), 消除重复递归锁+拷贝
         auto pre_trade = tc.cs_valid
             ? _risk_monitor->checkPreTradePosition(tc.cs, _order_tracker)
             : _risk_monitor->checkPreTradePosition(tc.code, _portfolio, _order_tracker);
-        _v3_long_util = pre_trade.long_utilization;
-        _v3_short_util = pre_trade.short_utilization;
-        _v3_force_ask_obligation = pre_trade.force_ask_obligation;
-        _v3_force_bid_obligation = pre_trade.force_bid_obligation;
-        _v3_pending_drain_bid = pre_trade.pending_drain_bid;
-        _v3_pending_drain_ask = pre_trade.pending_drain_ask;
-        _v3_hard_block_bid = pre_trade.hard_block_bid;
-        _v3_hard_block_ask = pre_trade.hard_block_ask;
+        long_util = pre_trade.long_utilization;
+        short_util = pre_trade.short_utilization;
+        force_ask_obligation = pre_trade.force_ask_obligation;
+        force_bid_obligation = pre_trade.force_bid_obligation;
+        pending_drain_bid = pre_trade.pending_drain_bid;
+        pending_drain_ask = pre_trade.pending_drain_ask;
+        hard_block_bid = pre_trade.hard_block_bid;
+        hard_block_ask = pre_trade.hard_block_ask;
         // v7.1: 带符号仓位利用率注入 skew (正=多 负=空, 取较大侧)
         if (cs && cs->max_position > 0) {
-            p_ctx.contract_pos_util = (_v3_long_util >= _v3_short_util) ? _v3_long_util : -_v3_short_util;
+            p_ctx.contract_pos_util = (long_util >= short_util) ? long_util : -short_util;
             p_ctx.contract_pos_util_valid = true;
         }
     }
@@ -985,19 +985,19 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, const TickContex
     // 4. 执行报价发布
     //==========================================================================
     // Pending drain: per-side pending 超限 -> 撤该侧旧单 + 该侧 allow=false
-    if (_v3_pending_drain_bid || _v3_pending_drain_ask) {
-        if (_v3_pending_drain_bid) {
+    if (pending_drain_bid || pending_drain_ask) {
+        if (pending_drain_bid) {
             tc.quoter->cancelSide(ctx, true);
             allow_bid = false;
         }
-        if (_v3_pending_drain_ask) {
+        if (pending_drain_ask) {
             tc.quoter->cancelSide(ctx, false);
             allow_ask = false;
         }
         WTSLogger::debug("[DRAIN] {} bid_drain={} ask_drain={} -> cancel+skip drained side",
                          tc.code,
-                         _v3_pending_drain_bid,
-                         _v3_pending_drain_ask);
+                         pending_drain_bid,
+                         pending_drain_ask);
     }
 
     // v7.1: 缓存最终报价参数, 供 requoteAfterFill 成交后立即重挂使用
@@ -1010,12 +1010,12 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, const TickContex
         cq.spread_mult = spread_mult;
         cq.allow_bid = allow_bid;
         cq.allow_ask = allow_ask;
-        cq.long_util = _v3_long_util;
-        cq.short_util = _v3_short_util;
-        cq.force_ask_obligation = _v3_force_ask_obligation;
-        cq.force_bid_obligation = _v3_force_bid_obligation;
-        cq.hard_block_bid = _v3_hard_block_bid;
-        cq.hard_block_ask = _v3_hard_block_ask;
+        cq.long_util = long_util;
+        cq.short_util = short_util;
+        cq.force_ask_obligation = force_ask_obligation;
+        cq.force_bid_obligation = force_bid_obligation;
+        cq.hard_block_bid = hard_block_bid;
+        cq.hard_block_ask = hard_block_ask;
         cq.upper_limit = tick->upperlimit();
         cq.lower_limit = tick->lowerlimit();
         cq.best_bid = tick->bidprice(0);
@@ -1028,9 +1028,9 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, const TickContex
         tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
         tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
         tick->bidprice(0), tick->askprice(0),
-        _v3_long_util, _v3_short_util,
-        _v3_force_ask_obligation, _v3_force_bid_obligation,
-        _v3_hard_block_bid, _v3_hard_block_ask
+        long_util, short_util,
+        force_ask_obligation, force_bid_obligation,
+        hard_block_bid, hard_block_ask
     });
 
     return true;

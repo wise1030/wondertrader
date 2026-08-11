@@ -304,9 +304,9 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
             // v7.8: 区分 delta-rate-only halt 与 hard violation halt
             // delta-rate breach 是速率问题(瞬时变化太快), 恢复不应被 delta_util 绝对水平阻止,
             // 否则形成死锁: 高delta阻止恢复 -> 无法报价 -> 无法减仓 -> delta无法降低
-            bool _v78_hard_violation = _deps.risk_monitor->isTradingHalted() || _deps.risk_monitor->isQuotingPaused();
-            bool _v78_delta_cleared = !_deps.risk_monitor->checkDeltaRate();
-            if (_v78_delta_cleared && (!_v78_hard_violation || _deps.risk_monitor->canRecover(_deps.portfolio))) {
+            bool hard_violation = _deps.risk_monitor->isTradingHalted() || _deps.risk_monitor->isQuotingPaused();
+            bool delta_cleared = !_deps.risk_monitor->checkDeltaRate();
+            if (delta_cleared && (!hard_violation || _deps.risk_monitor->canRecover(_deps.portfolio))) {
                 // P1-1: resumeFromRisk() unconditionally sets qphase=NORMAL
                 // (replaces old 3-call recovery that cleared individual bool flags)
                 _deps.trading_state->resumeFromRisk();
@@ -328,7 +328,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
                 }
                 WTSLogger::info("StrategyCoordinator[{}]: Risk normalized, resuming operations{}",
                                 tc.code,
-                                _v78_hard_violation ? "" : " (delta-rate halt recovery)");
+                                hard_violation ? "" : " (delta-rate halt recovery)");
             }
         }
     }
