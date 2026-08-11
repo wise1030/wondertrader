@@ -349,6 +349,12 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
         WTSLogger::info("UftFutuMmStrategy[{}] initial hot params synced from shared memory", id());
     }
 
+    // 启动 hotparams.yaml 文件监视器 (修改后自动写入共享内存并触发热更新)
+    // 仅在实盘模式启用 (回测无共享内存)
+    if (!_is_backtest) {
+        _hot_watcher.start(id(), "hotparams.yaml", 1000);
+    }
+
     // 输出初始化日志
     WTSLogger::info("UftFutuMmStrategy[{}] initialized: {} contracts, {} levels",
                     id(),

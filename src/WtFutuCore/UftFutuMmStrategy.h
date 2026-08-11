@@ -20,6 +20,7 @@
 #include "TradingState.h"
 #include "FutuRiskMonitor.h"
 #include "FutuHotParamManager.h"
+#include "FutuHotParamWatcher.h"
 #include "RiskLiquidator.h"
 #include "TdSpiOffload.h"
 #include <atomic>  // C11: TdSpi log offload queue
@@ -532,6 +533,7 @@ private:
     // 热更新参数 (已拆分至 FutuHotParamManager, 架构重构 C2)
     //==========================================================================
     FutuHotParamManager _hot_mgr;
+    FutuHotParamWatcher _hot_watcher;  // hotparams.yaml → 共享内存同步
 };
 
 } // namespace futu

@@ -108,6 +108,40 @@ public:
     }
     bool isHotChanged(HotParamIndex idx) const { return _hot_params[idx].ptr != nullptr; }
 
+    /// 获取已注册热参数名列表 (供 FutuHotParamWatcher 同步文件用)
+    static const char* const* paramNames()
+    {
+        static const char* names[HP_COUNT] = {
+            "base_spread",
+            "base_qty",
+            "level_qty_multiplier",
+            "level_step",
+            "max_delta",
+            "alpha_sensitivity",
+            "ofi_weight",
+            "trade_weight",
+            "book_imbalance_weight",
+            "momentum_weight",
+            "lead_lag_weight",
+            "strong_threshold",
+            "confidence_weight_min",
+            "confidence_weight_max",
+            "phi",
+            "delta_skew_threshold",
+            "delta_skew_factor",
+            "max_spread_mult",
+            "min_spread_mult",
+            "depth_sensitivity",
+            "toxicity_spread_factor",
+            "low_confidence_spread_factor",
+            "sticky_threshold",
+            "improve_retreat_ratio",
+            "protect_ticks",
+            "max_price_deviation",
+        };
+        return names;
+    }
+
 private:
     HotParamEntry _hot_params[HP_COUNT];
 };
