@@ -9,21 +9,21 @@
 | 语言 | C++17 |
 | 框架 | WonderTrader UFT (Ultra-Fast Trading) |
 | 编译产物 | `libWtFutuCore.so` (动态策略库) |
-| 源文件 | 101 个 .h/.cpp/.hpp (含拆分组件), 约 3.3 万行 |
+| 源文件 | 113 个 .h/.cpp/.hpp (含拆分组件), 约 3.3 万行 |
 | 命名空间 | `futu` |
 | 工厂名 | `FutuStraFact.FutuMM` |
 
-## 架构总览 (v7.6 - 含 V6/V7 深度分析修复 + 批次1-4 修复 + 5A 重构 + 并发精细化)
+## 架构总览 (v7.7 - 含 V6/V7 深度分析修复 + 批次1-4 修复 + 5A 重构 + 并发精细化 + v7.7 诊断复核)
 
 ```
-UftFutuMmStrategy (入口策略壳, 802行: 回调锁+转发+on_tick主循环+初始化编排)
+UftFutuMmStrategy (入口策略壳, 847行: 回调锁+转发+on_tick主循环+初始化编排)
 ├── FutuModuleAssembler     (模块装配+合约信息加载, 5A-3 拆出)
 ├── FutuRuntimeOps          (成交/订单/报单/通道/会话事件处理, 5A-3 拆出)
 ├── FutuConfigLoader        (配置解析+校验, 拆分组件)
 ├── FutuHotParamManager     (26热参数注册+分发, 拆分组件)
 ├── CloseoutOrchestrator    (收盘平仓编排, 拆分组件)
 ├── ArbExecutionBridge      (套利执行桥+残腿防护, 拆分组件)
-├── StrategyCoordinator (做市流水线, 1432行)
+├── StrategyCoordinator (做市流水线, 1228行)
 │   ├── SessionPhaseManager  (会话阶段统一判定: 交易时段/休息窗口/closeout窗口, 5A-1)
 │   ├── QuotePolicyChain     (报价决策链: RiskWiden→ArbCloseSync→Toxicity
 │   │                         →LimitPrice→ColdStart→FillRetreat, 5A-2)
@@ -76,8 +76,10 @@ UftFutuMmStrategy (入口策略壳, 802行: 回调锁+转发+on_tick主循环+�
 ┌───────────── 非做市路径 (限速+审计) ──────────┐
 │  OrderRouter → ctx API (with guards)          │
 │  · 自成交防护 (对抗做市挂单)                   │
-│  · 按源限速: ARBITRAGE=30/s, HEDGING=10/s    │
-│  · 优先级路由: CLOSEOUT > HEDGING > ARBITRAGE │
+│  · 按源独立限速 (各源独立 RateCounter 桶):      │
+│       ARBITRAGE / HEDGING / CLOSEOUT           │
+│  · 无抢占式调度 (各源并行时按调用顺序执行;      │
+│    closeout 在 RateCounter 用尽时仍会被限流)    │
 │  · 延迟预算: < 500ns/order                    │
 └──────────────────────────────────────────────┘
 ```
@@ -155,24 +157,27 @@ Anchor合约Tick到达
 
 ## 做市流水线 (StrategyCoordinator)
 
-每个 tick 的处理流程：
+每个 tick 的处理流程（与 `StrategyCoordinator::processTick` 代码一致）：
 
 ```
 processTick()
-  0. processCloseout()     → closeout 状态机驱动 (SessionPhaseManager 窗口判定)
-  0.5 processSectionBreak() → 每节收盘前 N 分钟撤单+暂停 (SessionPhaseManager)
-  1. preCheck()          → 会话/市场状态/毒性/风控预检
-  2. updateMarketData()  → 更新 MarketDataContext
-  3. updateSignals()     → SignalAggregator + ToxicFlowDetector
-  4. checkRisk()         → FutuRiskMonitor 评估, 执行风控动作
-     └ BLOCK_SIDE 时仍执行 checkTakerReduce (减仓才能恢复)
-  5. processQuoting()    → SpreadOptimizer(GLFT) → QuotePolicyChain
-                           (RiskWiden→ArbCloseSync→Toxicity→LimitPrice→ColdStart→FillRetreat)
-                           → FutuQuoter.refreshQuotes() (B1条件式重挂, v7.2黏性生效)
-  6. processAutoCancel() → 过时/偏价挂单清理
-  7. checkTakerReduce()  → 合约util≥takerReduceThreshold(1.1)时FAK对手价减仓
-  8. updateAdaptiveParams() → 周期性参数微调
+  0   processCloseout()      → closeout 状态机驱动 (SessionPhaseManager 窗口判定)
+  0.5 processSectionBreak()  → 每节收盘前 N 秒撤单+暂停 (SessionPhaseManager)
+  1   preCheck()             → 会话/市场状态/毒性/风控预检
+  (组件指针一次性解析: aggregator/book/quoter/spread_opt, 消除重复哈希查找)
+  2   updateMarketData()     → 更新 MarketDataContext + 组合聚合缓存
+  3   updateSignals()        → SignalAggregator + ToxicFlowDetector (MM only)
+  4   checkRisk()            → RiskCoordinator 评估, 执行风控动作
+       └ BLOCK_SIDE / HALT 时仍执行 checkTakerReduce (减仓才能恢复) 后 return
+  5   processAutoCancel()    → 过时/偏价挂单清理 (先撤旧单, 再报新单)
+  5.5 checkTakerReduce()     → 合约util≥takerReduceThreshold(默认1.1)时FAK对手价减仓
+  6   processQuoting()       → SpreadOptimizer(GLFT) → QuotePolicyChain
+                               (RiskWiden→ArbCloseSync→Toxicity→LimitPrice→ColdStart→FillRetreat)
+                               → FutuQuoter.refreshQuotes() (B1条件式重挂, v7.2黏性生效)
+  8   updateAdaptiveParams() → 周期性参数微调 (当前为占位 no-op, use_adaptive_params 启动时告警)
 ```
+
+> **流水线契约**: Stage 5 (撤旧单) 必须先于 Stage 6 (报新单) — 撤单腾出 RateCounter 配额并避免新旧单同价位竞争。checkTakerReduce 在 Stage 4 风控失败早返回路径与 Stage 5.5 主路径各调一次，靠 `_last_taker_reduce` 冷却去重。
 
 成交回调 (on_trade, FutuRuntimeOps::processTradeFill): 分向簿记账 → arb桥 → scout识别(v7.2: 自由层成交撤同侧义务层)
 → 条件式重挂(回测cancelAll仅深度破坏时 / 生产requoteAfterFill)
@@ -396,172 +401,339 @@ dist/WtRunnerFutu/             # 实盘部署目录
 
 ### config.yaml 关键配置项
 
+> 权威示例见 `src/WtFutuCore/config/config.yaml`。注意: **config.yaml 不承载任何模块开关**(单一权威原则), 策略级/模块级开关统一在 coordinator.yaml。
+
 ```yaml
 # 锚定合约(LeadLag信号的领先合约)
-anchorCode: "CFFEX.IF"
+anchorCode: SHFE.ag.ag2608
+isBacktest: false             # 回测模式 (on_trade 只撤不挂, 避免 _orders 迭代器失效; 生产=false)
 
 # 合约列表
 contracts:
-  - code: "CFFEX.IF"
-    maxPosition: 20
-    maxDelta: 10
+  - code: SHFE.ag.ag2608
+    maxPosition: 30
+    maxDelta: 30
     targetPosition: 0
-  - code: "CFFEX.IC"
-    maxPosition: 10
-    maxDelta: 5
+  - code: SHFE.ag.ag2612
+    maxPosition: 30
+    maxDelta: 30
 
-# 报价参数
+# 报价参数 (FutuQuoter)
 quoting:
-  numLevels: 2          # 报价档位 (2 = L0自由探测层 + L1义务层)
-  obligationLevel: 1    # 义务层档位 (0=L0义务无自由层; 1=scout结构, v7.2)
-  scoutQty: 1.0         # 自由探测层手数 (<义务层; 成交即撤同侧义务层)
-  baseSpread: 2.0       # 基础价差(tick)
-  baseQty: 1            # 基础手数
-  levelQtyMultiplier: 0.7         # 每档衰减 (义务层不适用, 按baseQty计)
-  useBilateralQuote: true
+  numLevels: 2               # 报价档位数 (1-10); 2 = L0自由探测层 + L1义务层
+  obligationLevel: 1         # 义务层所在档位 (1=义务退居次优层, L0 为 scout 自由探测单)
+  scoutQty: 1.0              # 自由探测层手数 (<义务层; 成交即撤同侧义务层)
+  baseSpread: 2.0            # 基础价差 (tick 数, 权威来源)
+  baseQty: 2.0               # 基础手数
+  levelQtyMultiplier: 0.7    # 档位间数量几何衰减
+  levelStep: 1.0             # 每档价格步长 (tick)
+  stickyThreshold: 1.0       # 粘性更新阈值 (tick)
+  improveRetreatRatio: 2.0   # 改进/退让比率
+  maxPriceDeviation: 20.0    # 最大价格偏差 (tick)
+  useBilateralQuote: false   # 是否使用双边报价接口
+  priceProtection: true      # 价格保护开关 (false=完全不钳制)
+  protectTicks: 1.0          # 允许比盘口好的最大 tick 数 (宽盘口合约应 >= obligationMaxSpreadTicks)
+  qtyDecayFactor: 2.0        # 库存敏感的 qty 指数衰减因子
+  obligationMinQty: 10.0     # 做市义务最小手数
+  obligationMaxSpreadTicks: 10
+  obligationOnlyL0: true
+  alwaysObligation: true
 
-# 组合参数
+# 组合参数 (FutuPortfolio)
 portfolio:
-  maxDelta: 30
-  hedgeRatio: 1.0              # 对冲比率 (CloseoutExecutor 用)
+  maxDelta: 30               # 组合最大 Delta (软指标)
+  hedgeRatio: 1.0            # 对冲比率 (CloseoutExecutor 用)
   # hedgeDeltaThreshold/hedgeCooldownMs 已随做市阶段Hedge删除 (v7.2):
   # 仓位风险由连续控制链处理 (WIDEN→skew→takerReduce→PAUSE→HALT)
 
-# 风控参数
+# 风控参数 (FutuRiskMonitor)
 risk:
-  maxExposure: 500000
-  maxDailyLoss: 50000
-  maxOrdersPerSec: 30
-  maxCancelsPerSec: 60
+  maxExposure: 20000000.0    # 最大敞口 (0=禁用)
+  maxDailyLoss: -200000.0    # 日最大亏损 (正负均可, 内部取 abs)
+  frequency:                 # 频率/恢复子节点
+    maxOrdersPerSec: 50
+    maxCancelsPerSec: 30
+    maxTradesPerSec: 20
+    cooldownMs: 30000
+    checkIntervalMs: 5000
+    recoveryThreshold: 0.8
+    maxDeltaChangePerSec: 50.0
+    deltaRateWindowSec: 10
+    deltaRateCooldownMs: 5000
+    maxRecoveryCount: 3
+    pnlRecoveryRatio: 0.5
+    maxLossForRecovery: 0
+    positionBreachPauseThreshold: 1.2
+    positionHardBlockRatio: 1.0
+    deltaCriticalMult: 1.5
+    deltaWarningMult: 0.8
+    positionWarningL1: 0.8   # util≥0.8 → WIDEN_SPREAD ×1.2
+    positionWarningL2: 0.9   # util≥0.9 → WIDEN_SPREAD ×1.5
+    autoClearIrreversibleOnReset: false  # 日界自动清 IRREVERSIBLE (回测用, 生产必须 false)
 
-# 收盘平仓
+# 收盘平仓 (CloseoutOrchestrator + CloseoutExecutor)
 closeout:
-  minutesBefore: 5
+  minutesBefore: 2           # 收盘前 N 分钟触发
   flattenPosition: true
-  closeTime: 151000
+  maxRetries: 10
+  retryIntervalMs: 2000
+  nightMinutesBefore: 2      # 夜盘收盘前 N 分钟
+  drainTimeoutMs: 3000       # CloseoutExecutor 渐进式: 排空超时
+  depthRatioPassive: 0.3     # 被动档深度比例
+  depthRatioMid: 0.5         # 中间档深度比例
+  depthRatioAggressive: 0.8  # 激进档深度比例
+  sweepThresholdMs: 5000     # 扫单触发时间
+  sweepTicks: 3              # 扫单穿透 tick 数
+  useFak: true               # 使用 FAK 订单
 
-# 模块开关
-modules:
-  useMarketMaking: true
-  useSpreadArbitrage: true
-  usePerformanceAnalyzer: true
+# 性能监控
+performance:
+  latencyThreshold: 100000
+  enabled: false
+  logInterval: 1000
+  warnThresholdNs: 10000
+  criticalThresholdNs: 50000
+
+# 下单控制
+orderErrorThreshold: 3
+maxOrders: 32
+maxPendingPerSide: 30
+stpMinPriceGap: 1.0
+useStp: false                # 自成交防护 (useSpreadArbitrage=true 时强制 true)
+
+# MonitorBridge (WtMonSvr GUI 数据桥, 默认关)
+monitor:
+  enabled: true
+  flushIntervalMs: 1000
+
+# 外部配置文件引用 (模块开关在此两文件)
+coordinatorConfig: ./coordinator.yaml
+spreadArbitrageConfig: ./spread_arbitrage.yaml
 ```
+
+> 注: `closeTime` 字段已移除(收盘时间从合约 session 信息推导); `modules` 顶层节点**不存在**(单一权威原则, 模块开关见 coordinator.yaml)。
 
 ### coordinator.yaml 关键配置项
 
+> 权威示例见 `src/WtFutuCore/config/coordinator.yaml`。**所有模块开关唯一权威位置**，全部嵌套在 `coordinator:` 根节点下。
+
 ```yaml
-# 策略模式开关
-useMarketMaking: true
-useSpreadArbitrage: true
-useSignalAggregator: true
-# useHedging/hedgeDeltaThreshold/hedgeCooldownMs 已删除 (v7.2):
-# 做市阶段Hedge移除, 仓位风险由连续控制链 + checkTakerReduce(takerReduceThreshold: 1.1)处理
+coordinator:
+  # === 策略级开关 (根级) ===
+  useMarketMaking: true
+  useSpreadArbitrage: true
+  useAsyncArbThread: false       # 实盘=独立arb线程低延迟, 回测必须 false(主线程同步可复现)
+  usePerformanceMonitor: false
+  usePerformanceAnalyzer: false
+  use_signal_aggregator: true
 
-# 信号聚合器
-signalAggregator:
-  useOfi: true
-  useTradeFlow: true
-  useBookImbalance: true
-  useMomentum: true
-  useLeadLag: true
-  ofiWeight: 0.35
-  tradeWeight: 0.25
-  bookImbalanceWeight: 0.20
-  momentumWeight: 0.15
-  leadLagWeight: 0.05
-  warmupTicks: 50
+  # === v7.1 仓位连续控制链 (PAUSE_QUOTING/FLATTEN_POSITION 死分支已删除) ===
+  takerReduceThreshold: 1.1      # util≥此值触发 FAK 对手价减仓 (0=禁用)
+  takerReduceTargetUtil: 0.8     # 减仓目标利用率
+  takerReduceCooldownMs: 30000   # 每合约限频
+  requoteAfterFillMinIntervalMs: 200   # 成交后立即重挂间隔 (0=禁用)
+  sectionBreakSecondsBefore: 10  # 每节收盘前 N 秒撤单停报 (0=禁用)
 
-# 毒性检测
-toxicityDetector:
-  vpinBucketSize: 50
-  toxicityThreshold: 0.6
-  toxicitySpreadFactor: 1.0
+  # 流水线参数
+  pipeline:
+    paramUpdateInterval: 100
+    alphaSensitivity: 2.0
 
-# GLFT价差优化
-spreadOptimizer:
-  baseSpread: 2.0
-  phi: 0.20
-  deltaSkewThreshold: 0.3
-  deltaSkewFactor: 1.5
-  deltaSkewPower: 1.5
-  maxSpreadMult: 3.0
-  minSpreadMult: 1.0
+  # === 模块级开关 + 模块参数 (modules.<name>) ===
+  modules:
+    # 信号聚合器 (signals/model/volatility 三层分离)
+    signalAggregator:
+      signals:                   # presence = enabled
+        ofi: { window: 50 }
+        trade_flow: { window: 100, largeTradeThreshold: 50.0 }
+        book_imbalance: { threshold: 0.2 }
+        momentum: { window: 50, emaAlpha: 0.1 }
+        lead_lag: { window: 50, lagMs: 50 }
+      model:
+        type: linear             # 仅支持 linear
+        weights:                 # Layer 1 base 权重 (经 regime×IC 三层动态调节)
+          ofi: 0.35
+          trade_flow: 0.25
+          book_imbalance: 0.20
+          momentum: 0.15
+          lead_lag: 0.05
+        strongThreshold: 0.7
+      volatility:                # 辅助信号 (不参与 alpha 加权, 驱动 should_widen/should_pause)
+        window: 100
+        elevatedThreshold: 0.002
+        extremeThreshold: 0.004
+      warmupTicks: 20
 
-# 自成交校准
-selfTradeCalibrator:
-  toxicityWindowMs: 5000
-  adverseThreshold: 0.6
+    # 毒性检测器 (注意: 键名为 adverseThreshold/vpinThreshold, 不是 toxicityThreshold)
+    toxicityDetector:
+      enabled: true
+      adverseThreshold: 0.25     # 综合毒性触发阈值
+      vpinThreshold: 0.30        # VPIN 单独触发阈值
+      window: 20
+      bucketSize: 50
+      minWarmupBuckets: 5
+      cooloffMs: 5000
+      alphaWeight: 0.5
+      bookWeight: 0.3
+      selfTradeWeight: 0.4
+      extremeSignalWeight: 0.8
+
+    # GLFT 价差优化 (注意: baseSpread 不在此处, 从 config.yaml 的 quoting.baseSpread 加载)
+    spreadOptimizer:
+      enabled: true
+      phi: 0.20
+      deltaSkewThreshold: 0.3
+      deltaSkewFactor: 1.5
+      deltaSkewPower: 1.5
+      maxSpreadMult: 3.0
+      minSpreadMult: 1.0
+      inventorySkewGain: 1.0
+      inventorySkewScale: 2.0
+      skewCrossMaxTicks: 3.0     # util≥1.0 时减仓侧可穿 mid 的最大 tick 数
+      portfolioSkewWeight: 0.5
+      contractSkewWeight: 1.0
+
+    selfTradeCalibrator:
+      toxicityWindowMs: 5000
+      adverseThreshold: 0.6
+
+    selfTradePrevention:
+      enabled: true              # useSpreadArbitrage=true 时强制 true
+      stpMinPriceGap: 1.0
+
+    autoCancel:
+      maxAgeMs: 10000
+      priceDeviation: 3.0
+      inventoryLimitCooldownMs: 2000
+
+    correlationManager:
+      windowSize: 100
+      minCorrelation: 0.5
+
+    adaptiveParam:
+      enabled: false             # 占位, 未启用
+      updateInterval: 100
 ```
 
 ### spread_arbitrage.yaml 关键配置项
 
+> 权威示例见 `src/WtFutuCore/config/spread_arbitrage.yaml`。注意键名为 `entryZScore`/`exitZScore`/`stopLossZ`/`risk_limits`(snake_case), 不是 camelCase 的 entryZThreshold/riskLimits。
+
 ```yaml
-pairs:
-  - leg1: "CFFEX.IF"
-    leg2: "CFFEX.IC"
-    ratio: 1.0
-    entryZThreshold: 2.0
-    exitZThreshold: 0.5
-    stopLossPct: 0.02
-    maxTrendBars: 50
-    addSafetyRatio: 0.75
+spread_arbitrage:
+  enabled: true
+  enhanceMarketMaking: true         # 套利信号增强做市
+  primaryStrategy: "mean_reversion" # 主策略: mean_reversion/trend_following/pairs_trading/statistical_arb
+  maxTotalPosition: 20
+  maxPairs: 3
+  minSignalConfidence: 0.3
+  signalCooldownMs: 2000
+  minProfitThresholdTicks: 1.0      # 开仓最低利润门槛 (ticks)
 
-# 套利风控参数 (H4: 已接线, 数据源=全组合 PnL)
-riskLimits:
-  portfolioStopLoss: 50000.0       # 组合峰值回撤止损 (drawdown>此值 → EMERGENCY)
-  maxTotalPosition: 50.0           # 最大总价差持仓
-  maxSinglePair: 20.0              # 单 pair 最大持仓
+  # === C0/C1/C2 分级平仓 (ARB_SELF_CLOSE_DESIGN v2.1; enabled=false 纯 B-3 兼容) ===
+  arb_close:
+    enabled: false
+    allow_signals:
+      close_long: false             # 永不解禁 (B-3 特性)
+      close_short: false
+      timeout_exit: false           # C2 阶段启用
+      stop_loss: false              # C1 阶段启用 (最高优先级)
+    stop_loss_policy: { order_flag: 1, timeout_ms: 1000 }       # FAK
+    timeout_policy: { order_flag: 0, timeout_ms: 30000, upgrade_to_taker: true }  # GFD mid
+    max_close_size_pct: 0.5
+    oversold_protection: true       # B5: 过冲保险丝 (sign-flip 检测)
+    overshoot_cooldown_ms: 3600000  # 触发后 pair 冷却 1h
 
-# 统计套利子策略参数
-statistical:
-  meanReversion:
-    entryZThreshold: 2.0
-    stopLossZ: 3.0
-    addSafetyRatio: 0.75
-  pairsTrading:
-    lookbackWindow: 100
-    entryZThreshold: 2.0
-  trendFollowing:
-    stopLossPct: 0.02
-    maxTrendBars: 50
+  # 价差对配置 (注意: entryZScore/exitZScore/stopLossZ, 不是 ZThreshold)
+  pairs:
+    - id: "ag0812"
+      leg1: "SHFE.ag.ag2608"
+      leg2: "SHFE.ag.ag2612"
+      ratio: 1.0
+      ratio2: 1.0
+      entryZScore: 2.0
+      exitZScore: 0.5
+      stopLossZ: 4.0
+      stopLossPct: 0.02            # 趋势跟踪用
+      maxTrendBars: 50
+      addSafetyRatio: 0.75
+      maxPosition: 20
+      windowSize: 200
+
+  # 套利风控 (SpreadRiskManager, 数据源=全组合 PnL)
+  risk_limits:
+    portfolioStopLoss: 50000.0     # 组合峰值回撤止损 (drawdown>此值 → EMERGENCY)
+    maxTotalPosition: 50.0
+    maxSinglePair: 20.0
+    maxCorrelationBreak: 0.3
+    maxDivergenceZscore: 5.0
+    maxDivergenceTime: 7200
+
+  # 统计子策略默认参数 (全局默认, per-pair 可覆盖)
+  statistical:
+    meanReversion:
+      halfLife: 100
+      entryZThreshold: 2.0
+      exitZThreshold: 0.5
+      stopLossZ: 3.0
+      addSafetyRatio: 0.75
+    pairsTrading:
+      lookbackWindow: 100
+      entryZThreshold: 2.0
+      correlationWindow: 100
+      minCorrelation: 0.7
+    trendFollowing:
+      stopLossPct: 0.02
+      maxTrendBars: 50
+      maPeriod: 20
+      breakoutThreshold: 1.5
 ```
 
 ### hotparams.yaml (运行时热更新)
 
+> 权威示例见 `src/WtFutuCore/config/hotparams.yaml`。**键名必须用 snake_case**(与 `FutuHotParamManager::registerParams` 的 `sync_param` 注册名完全一致), 否则共享内存写入**静默失效**。
+
 ```yaml
-# 基础报价参数
-baseSpread: 2.0
-baseQty: 2.0
-levelQtyMultiplier: 0.7
-levelStep: 1.0
-maxDelta: 30
+# --- 报价基础参数 (穿透到 FutuQuoter 和 Coordinator) ---
+base_spread: 2.0
+base_qty: 2.0
+level_qty_multiplier: 0.7
+level_step: 1.0
 
-# Alpha信号权重
-ofiWeight: 0.35
-tradeWeight: 0.25
-bookImbalanceWeight: 0.20
-momentumWeight: 0.15
-leadLagWeight: 0.05
+# --- 组合参数 ---
+max_delta: 30
 
-# GLFT参数
+# --- Alpha 灵敏度 ---
+alpha_sensitivity: 2.0
+
+# --- 信号权重 (Layer 1 base, 经 regime×IC 三层调节) ---
+ofi_weight: 0.35
+trade_weight: 0.25
+book_imbalance_weight: 0.20
+momentum_weight: 0.15
+lead_lag_weight: 0.05
+strong_threshold: 0.7
+
+# --- GLFT 价差模型参数 ---
+confidence_weight_min: 0.3
+confidence_weight_max: 1.0
 phi: 0.20
-alphaSensitivity: 2.0
-deltaSkewThreshold: 0.3
-deltaSkewFactor: 1.5
+delta_skew_threshold: 0.3
+delta_skew_factor: 1.5
+max_spread_mult: 3.0
+min_spread_mult: 1.0
+depth_sensitivity: 0.5
+toxicity_spread_factor: 1.0
+low_confidence_spread_factor: 2.0
 
-# 价差乘子
-maxSpreadMult: 3.0
-minSpreadMult: 1.0
-toxicitySpreadFactor: 1.0
-
-# 报价粘性/保护
-stickyThreshold: 1.0
-improveRetreatRatio: 2.0
-protectTicks: 1.0
-maxPriceDeviation: 20.0
+# --- 报价粘性/保护参数 ---
+sticky_threshold: 1.0
+improve_retreat_ratio: 2.0
+protect_ticks: 1.0
+max_price_deviation: 20.0
 ```
 
-热更新通过共享内存同步，`on_params_updated()` 回调生效，无需重启策略。26 个参数穿透到 FutuQuoter（报价参数+重算预计算表）、Coordinator（maxDelta+alphaSensitivity）、AdaptiveWeightFramework（信号权重 Layer1）。
+热更新通过共享内存同步，`on_params_updated()` 回调生效，无需重启策略。参数穿透到 FutuQuoter（报价参数+重算预计算表）、Coordinator（maxDelta+alphaSensitivity）、AdaptiveWeightFramework（信号权重 Layer1）。
 
 ### useAsyncArbThread 配置
 
@@ -663,32 +835,38 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 
 ## 热更新参数
 
-运行时可通过修改 `hotparams.yaml` + 共享内存同步更新以下参数，无需重启：
+运行时可通过修改 `hotparams.yaml` + 共享内存同步更新以下参数，无需重启（键名必须 snake_case）：
 
 | 参数 | 说明 |
 |------|------|
-| baseSpread / baseQty / levelQtyMultiplier | 基础报价参数 |
-| maxDelta | 最大Delta |
-| ofiWeight / tradeWeight / ... | Alpha信号权重 |
-| phi / alphaSensitivity | GLFT模型参数 |
-| deltaSkewThreshold / deltaSkewFactor | Delta偏斜参数 |
-| maxSpreadMult / minSpreadMult | 价差乘子范围 |
-| toxicitySpreadFactor | 毒性价差扩大因子 |
-| ewmaDecay | Alpha EWMA衰减因子 |
+| base_spread / base_qty / level_qty_multiplier / level_step | 基础报价参数 |
+| max_delta | 最大Delta |
+| alpha_sensitivity | Alpha 灵敏度 (冷启动保护) |
+| ofi_weight / trade_weight / book_imbalance_weight / momentum_weight / lead_lag_weight | Alpha信号权重 (Layer 1) |
+| strong_threshold | 强信号阈值 |
+| confidence_weight_min / confidence_weight_max | GLFT 置信度权重区间 |
+| phi / delta_skew_threshold / delta_skew_factor | GLFT模型参数 |
+| max_spread_mult / min_spread_mult | 价差乘子范围 |
+| depth_sensitivity / toxicity_spread_factor / low_confidence_spread_factor | 深度/毒性价差因子 |
+| sticky_threshold / improve_retreat_ratio / protect_ticks / max_price_deviation | 报价粘性/保护 |
 
 ## 模块清单
 
 ### 做市核心
 | 模块 | 文件 | 说明 |
 |------|------|------|
-| UftFutuMmStrategy | .h/.cpp | 入口策略壳 (802行), 回调锁+转发+on_tick主循环 |
+| UftFutuMmStrategy | .h/.cpp | 入口策略壳 (847行), 回调锁+转发+on_tick主循环 |
 | FutuModuleAssembler | .h/.cpp | 模块装配+合约信息加载 (5A-3, friend+别名零改动搬迁) |
 | FutuRuntimeOps | .h/.cpp | 成交/订单/报单/通道/会话事件处理 (5A-3) |
 | FutuConfigLoader | .h/.cpp | 配置解析+边界校验 (拆分组件) |
 | FutuHotParamManager | .h/.cpp | 26热参数注册+分发 (拆分组件) |
+| FutuHotParamWatcher | .h/.cpp | hotparams.yaml 文件 mtime 轮询线程 + 共享内存同步 |
 | CloseoutOrchestrator | .h/.cpp | 收盘平仓全生命周期编排 (拆分组件) |
+| CloseoutTrigger | .h/.cpp | 收盘触发判定 + CloseoutSub 子状态机 (P1.3 Step1) |
+| CloseoutExecutor | .h/.cpp | 渐进式收盘执行器 (drain/mid/aggressive/sweep 分档下单) |
 | ArbExecutionBridge | .h/.cpp | 套利执行桥+残腿防护 (拆分组件) |
-| StrategyCoordinator | .h/.cpp | 做市流水线编排 (1432行) |
+| StrategyCoordinator | .h/.cpp | 做市流水线编排 (1228行) |
+| RiskCoordinator | .h/.cpp | coordinator 内风控编排: checkRisk (HALT/TOXICITY 切换+forceFlat+arb 禁用) + checkTakerReduce (P1.3 Step2a) |
 | SessionPhaseManager | .h | 会话阶段统一判定: 交易时段/休息窗口/closeout窗口 (5A-1, 纯函数) |
 | QuotePolicyChain | .h | 报价决策链 6 policy (5A-2): RiskWiden/ArbCloseSync/Toxicity/LimitPrice/ColdStart/FillRetreat |
 | RiskLiquidator | .h | 统一强平/减仓原语 (P0-1): 对手价FAK+三级价格校验+qty clamp |
@@ -696,14 +874,16 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | SpreadOptimizer | .h/.cpp | GLFT价差优化(公允价+偏斜, seqlock 参数读取) |
 | SignalAggregator | .h | 6源信号聚合(SignalSlot表驱动) |
 | ICWeightTracker | .h | 三层权重框架 + RollingScaleTracker + IC追踪 |
-| OrderRouter | .h/.cpp | 非做市统一下单路由 |
+| OrderRouter | .h/.cpp | 非做市统一下单路由 (按源独立限速: ARBITRAGE/HEDGING/CLOSEOUT) |
 | TradingState | .h | 统一交易状态管理 (分层状态机, 外部锁契约) |
 | ISpreadStrategy | .h | 套利策略插件接口 + 注册表 |
+| PreTradeDecision | .h | 盘前决策类型 (verdict 风控闸门 + strategy 策略输入) |
 
 ### 信号源
 | 模块 | 文件 | 说明 |
 |------|------|------|
 | ISignalSource | .h | 信号源插件接口 |
+| ISignalCombiner | .h | 信号组合器接口 (线性/非线性组合) |
 | OFISignalSource | .h | 订单流不平衡 |
 | TradeFlowSignalSource | .h | 交易流分析 |
 | BookImbalanceSignalSource | .h | 订单簿不平衡 |
@@ -742,6 +922,7 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | PairsTradingStrategy | .h/.cpp | 配对交易 |
 | StatisticalArbStrategy | .h/.cpp | 统计套利 |
 | MarketMakingEnhancer | .h/.cpp | 套利信号增强做市 |
+| SpreadArbitrageTypes | .h | 套利类型定义 (RiskAlert / CloseIntent / SpreadCalculator 值对象) |
 
 ### 基础设施
 | 模块 | 文件 | 说明 |
@@ -755,12 +936,17 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | BilateralQuoteStats | .h/.cpp | 双边报价统计 |
 | AlphaTypes | .h | Alpha类型定义 |
 | FutureTypes | .h | 期货类型定义 |
+| FutuDataDefs | .h | 期货数据定义 (PortfolioContext / ContractInfo 等) |
+| OrderTypes | .h | 订单类型定义 (Source 枚举: ARBITRAGE/HEDGING/CLOSEOUT) |
 | SpinLockGuard | .h | 自旋锁RAII |
 | LockFreeQueue | .hpp | SPSC无锁队列(cache line 对齐) |
 | TscClock | .h | rdtsc 时钟+10ms校准 (perf 埋点 ~6ns) |
 | MonitorBridge | .h/.cpp | WtMonSvr GUI 数据桥 (stradata/funds.csv 落盘, 默认关) |
 | SpinLockGuard | .h | 自旋锁RAII + RecursiveSpinLock (owner-tid+计数可重入, v7.6) |
-| OrderApiGuard | .h | 下单 API 互斥 (v7.6): 21 个 stra_* 调用点统一包裹, 锁序单向 |
+| OrderApiGuard | .h | 下单 API 互斥 (v7.6): 29 处 orderApiCall 包裹点统一调用, 锁序单向 |
+| EventDispatcher | .h | 同步事件监听器 (C10: 单写者收敛基础设施, 当前零订阅) |
+| IOrderSink | .h | 订单接收接口 (FutuQuoter 绕过, OrderRouter 走) |
+| TdSpiOffload | .h | TdSpi 成交路径日志 SPSC 队列 (C11: 延后打印避免阻塞下单) |
 
 ## 设计原则
 
@@ -799,6 +985,7 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 | **Phase 9** | **批次1-4: P0 bug/控制链收口/性能/架构 (v7.3-v7.4)** | **✅ 完成** |
 | **Phase 10** | **5A 重构: SessionPhaseManager/策略壳瘦身/QuotePolicyChain (v7.5)** | **✅ 完成** |
 | **Phase 11** | **并发精细化: L0原子/L1结构锁/L2下单互斥 (v7.6)** | **✅ 完成** |
+| **Phase 12** | **v7.7 诊断复核: A1 stra_*包裹/forceFlatAll/TickContext快照复用/装配完备性校验 等 8 项** | **✅ 完成** |
 
 ### Phase 5 关键改造 (详见 docs/DEEP_ANALYSIS_V5.md)
 
@@ -963,8 +1150,8 @@ UftFutuMmStrategy[X] session begin: YYYYMMDD
 - 对拍: SECTION_BREAK 1014/1129, CLOSEOUT_TRIGGERED 5天全部 14:45, 与基线逐点一致
 
 **5A-3 策略壳瘦身** (UftFutuMmStrategy 2271→802行, -65%):
-- FutuModuleAssembler (816行): initBusinessModules 652行装配 + 73行合约信息加载外移
-- FutuRuntimeOps (952行): on_trade 282 / on_channel_ready 159 / on_session_begin+end 135 /
+- FutuModuleAssembler (832行): initBusinessModules 装配 + 合约信息加载外移
+- FutuRuntimeOps (930行): on_trade / on_channel_ready / on_session_begin+end /
   on_entrust 85 / on_order 66 / on_channel_lost 40 / finalizeOrder 40 外移
 - 手法: friend + 引用别名, 函数体逐行零改动搬迁; 锁保留在策略壳
 
@@ -1005,7 +1192,7 @@ closeout 5 COMPLETED/10 TRIGGERED/0 FAILED, 0 segfault, Config validation 0 erro
 **阶段 3 — Quoter + 下单互斥 + 编译开关**:
 - FutuQuoter per-quoter 递归守卫 (17方法, 整方法守卫; 已知残留:
   getBilateralStats 外部引用, 统计对象低危已文档化)
-- OrderApiGuard: 21 个 stra_* 调用点统一包裹 (orderApiMutex),
+- OrderApiGuard: 29 处 orderApiCall 包裹点统一包裹 (orderApiMutex),
   覆盖框架级 UftStraContext 内部容器竞态 (不可越界修框架)
 - 锁序单向: 结构锁 → orderApiMutex 不可逆, orderApiMutex 内不取结构锁
 - FUTU_CALLBACK_LOCK 编译开关: 1=大锁基线(默认)/0=细粒度, 双模式可回退
@@ -1086,5 +1273,5 @@ Phase 5 的 LeadLag + 权重框架已部分覆盖跨期协调。独立 sync_grou
 - **[docs/DEEP_ANALYSIS_V6.md](docs/DEEP_ANALYSIS_V6.md)** - v6 深度分析 (37 项诊断 + 修复方案)
 - **[docs/DEEP_ANALYSIS_V6_REVIEW.md](docs/DEEP_ANALYSIS_V6_REVIEW.md)** - v6 复核报告 (2 误报 + 3 降级 + 35 确认)
 - **[docs/DEEP_ANALYSIS_V5.md](docs/DEEP_ANALYSIS_V5.md)** — v5 深度分析 (35 Bug + 48 Fix + 3 架构方案 + 复核修正)
-- **[docs/ARB_SELF_CLOSE_DESIGN.md](docs/ARB_SELF_CLOSE_DESIGN.md)** — 套利分级平仓设计方案 v2.0 (分级执行: CLOSE 保持 B-3 / STOP_LOSS taker 立即 / TIMEOUT maker 挂单; 含成本模型 fee+spread+slippage; Phase A1-A10 + Phase B/C/D; 状态: 已确认,待实施)
+- **[docs/ARB_SELF_CLOSE_DESIGN.md](docs/ARB_SELF_CLOSE_DESIGN.md)** — 套利分级平仓设计方案 v2.0 (分级执行: CLOSE 保持 B-3 / STOP_LOSS taker 立即 / TIMEOUT maker 挂单; 含成本模型 fee+spread+slippage; Phase A1-A10 + Phase B/C/D; 状态: **部分落地** — spread_arbitrage.yaml 的 `arb_close` 节点(C0/C1/C2 灰度)已接线, enabled=false 默认纯 B-3 兼容)
 - **[OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md)** — v4 优化报告 (19 项已修)
