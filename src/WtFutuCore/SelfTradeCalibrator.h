@@ -133,7 +133,6 @@ struct SelfTradeCalibratorConfig
         c.move_threshold_ticks = FutuConfig::readDouble(v, "moveThresholdTicks", 1.0);
         c.retreat_ticks = FutuConfig::readDouble(v, "retreatTicks", 2.0);
         c.retreat_cooldown_ms = FutuConfig::readUInt32(v, "retreatCooldownMs", 3000);
-        c.tick_size = FutuConfig::readDouble(v, "tickSize", 1.0);
         return c;
     }
 };

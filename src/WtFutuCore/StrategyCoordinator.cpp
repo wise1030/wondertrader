@@ -124,7 +124,7 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
         // Map module names to config flags (market making modules)
         // 注：use_alpha_engine 和 use_market_state 已移除，由 SignalAggregator 内部管理
         _cfg.use_toxicity_detector = readModuleEnabled("toxicityDetector", _cfg.use_toxicity_detector);
-        _cfg.use_spread_optimizer = readModuleEnabled("spreadOptimizer", _cfg.use_spread_optimizer);
+        // spreadOptimizer 是策略核心，恒启用（不再提供 enabled 开关）
         _cfg.use_adaptive_params = readModuleEnabled("adaptiveParam", _cfg.use_adaptive_params);
         _cfg.use_self_trade_prevention = readModuleEnabled("selfTradePrevention", _cfg.use_self_trade_prevention);
 
@@ -927,14 +927,13 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
     //==========================================================================
     double skew = 0.0;
     double spread_mult = 1.0;
-    double fallback_spread = 2.0;
-    if (tc.spread_opt) {
-        fallback_spread = tc.spread_opt->getParams().base_spread;
-    }
+    // spreadOptimizer 恒启用；仅在信号上下文缺失(sig_ctx==null)时退化为对称报价。
+    // 退化价差使用配置 base_spread（来自恒存在的 SpreadOptimizer），不再硬编码 2.0。
+    double fallback_spread = tc.spread_opt ? tc.spread_opt->getParams().base_spread : 2.0;
     double l0_bid = tc.mid - fallback_spread * tc.tick_size;
     double l0_ask = tc.mid + fallback_spread * tc.tick_size;
 
-    if (tc.spread_opt && _cfg.use_spread_optimizer && sig_ctx) {
+    if (tc.spread_opt && sig_ctx) {
         double contractDelta = cs ? cs->delta() : 0.0;
 
         GLFTResult res =

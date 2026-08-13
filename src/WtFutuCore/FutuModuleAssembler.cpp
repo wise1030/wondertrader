@@ -546,6 +546,14 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         _self_trade_calibrator = FutuComponentFactory::createSelfTradeCalibrator(coord_cfg);
     }
 
+    // 校准器 tick_size 从合约基础信息统一获取（不再单独在策略层配置）
+    for (const auto& ci : _contract_infos) {
+        if (ci.code == _config.anchor_code) {
+            _self_trade_calibrator->setTickSize(ci.tick_size);
+            break;
+        }
+    }
+
     // 将校准器设置到毒性检测器（统一使用 SelfTradeCalibrator 管理 Fill 记录）
     if (_toxicity_detector) {
         _toxicity_detector->setSelfTradeCalibrator(_self_trade_calibrator.get());
@@ -812,6 +820,7 @@ void FutuModuleAssembler::loadContractInfos(UftFutuMmStrategy& s, wtp::IUftStraC
                 "UftFutuMmStrategy[{}] contract {} not found in base data, using defaults", s.id(), ci.code);
         }
     }
+
 }
 
 } // namespace futu

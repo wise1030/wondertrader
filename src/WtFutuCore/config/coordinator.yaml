@@ -107,7 +107,6 @@ coordinator:
     # 注意: baseSpread 不在此配置 - 它从 config.yaml 的 quoting.baseSpread 加载
     #       (FutuComponentFactory::createSpreadOptimizer 用参数传入 GLFTParams, 不读本节点)
     spreadOptimizer:
-      enabled: true                # 模块级开关 (唯一位置)
       phi: 0.20                    # 库存厌恶系数
       deltaSkewThreshold: 0.3      # Delta 偏斜触发
       deltaSkewFactor: 1.5         # 偏斜强度
@@ -143,7 +142,6 @@ coordinator:
       moveThresholdTicks: 1.0      # 价格移动阈值 (ticks)
       retreatTicks: 3              # 退让 ticks（成交后按最后一笔成交价 ± N tick 重挂）
       retreatCooldownMs: 5000      # 退让冷却 (ms)，到期清除最近成交记录
-      tickSize: 0.5                # 合约真实 tick (ao 系列 = 0.5)
 
     # --- 自成交防护 ---
     selfTradePrevention:
