@@ -147,8 +147,8 @@ coordinator:
 
     # --- 自成交防护 ---
     selfTradePrevention:
-      enabled: true                # 模块级开关 (useSpreadArbitrage=true 时强制 true)
-      stpMinPriceGap: 1.0          # 最小价差 (ticks)
+      enabled: true                # 模块级开关（STP 唯一权威来源; useSpreadArbitrage=true 时强制 true）
+      stpMinPriceGap: 1.0          # 最小价差 (ticks, STP 唯一权威来源)
       allowSamePrice: false        # 是否允许同价
       priceAdjustTicks: 1.0        # 价格调整 ticks
 

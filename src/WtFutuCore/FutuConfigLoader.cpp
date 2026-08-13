@@ -106,8 +106,6 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     _config.order_control.order_error_threshold = readUInt32(cfg, "orderErrorThreshold", 10);
     _config.order_control.max_orders = readUInt32(cfg, "maxOrders", 32);
     _config.order_control.max_pending_per_side = readDouble(cfg, "maxPendingPerSide", 30.0);
-    _config.order_control.stp_min_price_gap = readDouble(cfg, "stpMinPriceGap", 1.0);
-    _config.order_control.use_stp = readBool(cfg, "useStp", false);
 
     // 收盘前平仓参数（嵌套在 closeout 节点下）
     WTSVariant* cfgCloseout = cfg->get("closeout");

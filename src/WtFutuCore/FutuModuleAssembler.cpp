@@ -146,6 +146,16 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         _config.modules.use_async_arb_thread = coordBool("useAsyncArbThread", true);
         _config.modules.use_performance_monitor = coordBool("usePerformanceMonitor", false);
         _config.modules.use_performance_analyzer = coordBool("usePerformanceAnalyzer", false);
+        // STP 唯一权威: coordinator.yaml modules.selfTradePrevention
+        {
+            wtp::WTSVariant* modules = raw ? raw->get("modules") : nullptr;
+            wtp::WTSVariant* stp_v = modules ? modules->get("selfTradePrevention") : nullptr;
+            StpConfig stp_cfg;
+            if (stp_v)
+                stp_cfg = StpConfig::fromVariant(stp_v);
+            _config.modules.use_self_trade_prevention = stp_cfg.enabled;
+            _config.modules.stp_min_price_gap = stp_cfg.min_price_gap;
+        }
     }
 
     WTSLogger::info("Strategy mode: MM={}, Arb={}",
@@ -290,15 +300,16 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         tracker_cfg.price_deviation = mp.auto_cancel_price_deviation;
         tracker_cfg.sticky_threshold = _config.quoting.sticky_threshold;
         tracker_cfg.inv_limit_cooldown_ms = mp.auto_cancel_inventory_cooldown_ms;
-        // STP decoupled from arb (default false), but FORCED true when arb is enabled.
+        // STP 唯一权威: coordinator.yaml modules.selfTradePrevention。
+        // arb 启用时强制开启, 防止 arb 对手价单打到自己 MM 盘口。
         // Reason: arb sends marketable orders via OrderRouter that can cross own MM quotes.
         // Without STP, arb would self-trade with its own MM book.
-        bool stp_effective = _config.order_control.use_stp || _config.modules.use_spread_arbitrage;
-        if (_config.modules.use_spread_arbitrage && !_config.order_control.use_stp) {
+        bool stp_effective = _config.modules.use_self_trade_prevention || _config.modules.use_spread_arbitrage;
+        if (_config.modules.use_spread_arbitrage && !_config.modules.use_self_trade_prevention) {
             WTSLogger::info("STP forced ON because use_spread_arbitrage=true (prevents arb→MM self-trade)");
         }
         tracker_cfg.stp_enabled = stp_effective;
-        tracker_cfg.stp_min_price_gap = _config.order_control.stp_min_price_gap;
+        tracker_cfg.stp_min_price_gap = _config.modules.stp_min_price_gap;
         _order_tracker->setConfig(tracker_cfg);
     }
 
@@ -606,22 +617,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     //------------------------------------------------------------
     // 15. SelfTradePrevention（自成交防护模块）
     //------------------------------------------------------------
-    if (_config.modules.use_spread_arbitrage) {
+    if (_config.modules.use_self_trade_prevention || _config.modules.use_spread_arbitrage) {
         _stp = FutuComponentFactory::createSelfTradePrevention(coord_cfg, _order_tracker.get());
-
-        // H7: 统一 min_price_gap — config.yaml 的 stpMinPriceGap 是权威来源
-        // (coordinator.yaml 的 minPriceGap 被 override, 避免双路径不一致)
-        {
-            auto stp_cfg = _stp->getConfig();
-            if (std::abs(stp_cfg.min_price_gap - _config.order_control.stp_min_price_gap) > 1e-9) {
-                WTSLogger::warn("STP min_price_gap synced to config.yaml stpMinPriceGap={:.1f} (coordinator.yaml "
-                                "minPriceGap overridden)",
-                                _config.order_control.stp_min_price_gap);
-            }
-            stp_cfg.min_price_gap = _config.order_control.stp_min_price_gap;
-            _stp->setConfig(stp_cfg);
-        }
-
         WTSLogger::info("SelfTradePrevention: enabled, strategy=CANCEL_MM, using UnifiedOrderTracker");
     }
 

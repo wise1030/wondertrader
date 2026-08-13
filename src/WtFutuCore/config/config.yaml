@@ -106,8 +106,8 @@ strategies:
           qtyDecayFactor: 2.0        # 库存敏感的 qty 指数衰减因子 (util 越高 qty 越小)
           obligationMinQty: 10.0     # 做市义务最小手数
           obligationMaxSpreadTicks: 10
-          obligationOnlyL0: true     # 义务报价仅 L0
-          alwaysObligation: true     # 始终履行义务
+          # 注: 义务层由 obligationLevel 决定 (当前=1, L0 为自由探测层);
+          #     旧的 obligationOnlyL0/alwaysObligation 已从代码移除.
 
         # ========================================================
         # 组合管理参数 (FutuPortfolio)
@@ -142,6 +142,7 @@ strategies:
             # R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
             positionWarningL1: 0.8   # util≥0.8 → WIDEN_SPREAD ×1.2 (soft check, breach 前预警)
             positionWarningL2: 0.9   # util≥0.9 → WIDEN_SPREAD ×1.5
+            widenThreshold: 1         # breachCount 触发 WIDEN_SPREAD
             # 同侧连续成交熔断 (风控硬闸门, 按合约独立计数):
             # 某合约同侧连续成交达阈值 -> 撤该合约全部报价 + 暂停报价, 到期自动恢复
             maxConsecutiveSameSide: 3    # 同侧连续成交触发阈值 (0=禁用)
@@ -184,8 +185,6 @@ strategies:
         orderErrorThreshold: 3        # 下单错误熔断阈值
         maxOrders: 32                # 最大同时挂单数
         maxPendingPerSide: 30        # 单侧最大挂单量 (pending超限->撤该侧旧单+跳过本轮; OrderFilter风控)
-        stpMinPriceGap: 1.0          # 自成交防护最小价差
-        useStp: false                # 自成交防护开关 (独立于套利; useSpreadArbitrage=true 时强制 true)
 
         # ========================================================
         # MonitorBridge — WtMonSvr GUI 数据桥 (可选, 默认关)

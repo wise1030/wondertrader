@@ -208,10 +208,13 @@ struct FutuMmConfig
         bool use_market_making;
         bool use_spread_arbitrage;
         bool use_async_arb_thread; // true=启动独立arb线程(实盘), false=主线程同步执行(回测)
+        bool use_self_trade_prevention; ///< 自成交防护开关（唯一权威: coordinator.yaml modules.selfTradePrevention.enabled）
+        double stp_min_price_gap;       ///< 自成交防护最小价差（唯一权威: coordinator.yaml modules.selfTradePrevention.stpMinPriceGap）
         Modules()
             : use_spread_optimizer(true), use_toxicity_detector(true), use_adaptive_param(false),
               use_performance_monitor(false), use_performance_analyzer(false), use_market_making(true),
-              use_spread_arbitrage(false), use_async_arb_thread(true)
+              use_spread_arbitrage(false), use_async_arb_thread(true), use_self_trade_prevention(true),
+              stp_min_price_gap(1.0)
         {}
     } modules;
 
@@ -220,13 +223,8 @@ struct FutuMmConfig
         uint32_t order_error_threshold;
         uint32_t max_orders;
         double max_pending_per_side; ///< Per-side max pending qty (0=disabled). When exceeded, drain that side.
-        double stp_min_price_gap;
-        bool use_stp; ///< Self-Trade Prevention switch (independent of arb).
-                      ///< Default false; FORCED true when use_spread_arbitrage=true
-                      ///< (arb sends marketable orders that can hit own quotes).
         OrderControl()
-            : order_error_threshold(10), max_orders(32), max_pending_per_side(30.0), stp_min_price_gap(1.0),
-              use_stp(false)
+            : order_error_threshold(10), max_orders(32), max_pending_per_side(30.0)
         {}
     } order_control;
 
