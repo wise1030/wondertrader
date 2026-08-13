@@ -21,8 +21,12 @@
 #include <cmath>
 #include <mutex>
 #include <array>
+#include <unordered_map>
 #include "../Includes/FasterDefs.h"
 #include "FutuConfig.h"
+#include "PreTradeDecision.h"
+#include "SideFillBreaker.h"
+#include "RiskLimitsConfig.h"
 #include "../Share/LockFreeRingBuffer.hpp"
 
 NS_WTP_BEGIN
@@ -97,57 +101,8 @@ enum class RiskAction
     HALT_TRADING      ///< Stop all trading (irreversible, requires manual intervention)
 };
 
-/// Rate limits configuration
-struct RateLimits
-{
-    uint32_t max_orders_per_sec;
-    uint32_t max_cancels_per_sec;
-    uint32_t max_trades_per_sec;
-    double max_delta_change_per_sec;
-    uint32_t delta_rate_window_sec;
-    uint32_t delta_rate_cooldown_ms;
-
-    // 分级响应阈值
-    double position_breach_pause_threshold; ///< v7.3: 仅作 canRecover 恢复闸 (pos < maxPos×1.2 才允许恢复);
-                                            ///<   PAUSE_QUOTING 入口已删除, 名称保留兼容配置
-    double delta_critical_mult;             ///< Delta critical 倍数 (default 1.5)
-    double delta_warning_mult;              ///< Delta warning 倍数 (default 0.8)
-
-    // R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
-    double position_warning_l1;       ///< util L1 → WIDEN_SPREAD ×1.5 (default 0.8)
-    double position_warning_l2;       ///< util L2 → WIDEN_SPREAD ×2.0 (default 0.9)
-    double position_hard_block_ratio; ///< 持仓硬止比例 (default 1.0, 仅flexible模式)
-
-    // 升级响应阈值
-    uint32_t widen_threshold; ///< breachCount 触发 WIDEN_SPREAD (default 1)
-    // v7.3: flatten_threshold 已删除 — FLATTEN_POSITION 不可达分支随 PAUSE 一并清理
-
-    RateLimits()
-        : max_orders_per_sec(50), max_cancels_per_sec(30), max_trades_per_sec(20), max_delta_change_per_sec(10.0),
-          delta_rate_window_sec(5), delta_rate_cooldown_ms(5000), position_breach_pause_threshold(1.2),
-          delta_critical_mult(1.5), delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9),
-          position_hard_block_ratio(1.0), widen_threshold(1)
-    {}
-
-    static RateLimits fromVariant(wtp::WTSVariant* v)
-    {
-        RateLimits r;
-        r.max_orders_per_sec = FutuConfig::readUInt32(v, "maxOrdersPerSec", 50);
-        r.max_cancels_per_sec = FutuConfig::readUInt32(v, "maxCancelsPerSec", 30);
-        r.max_trades_per_sec = FutuConfig::readUInt32(v, "maxTradesPerSec", 20);
-        r.max_delta_change_per_sec = FutuConfig::readDouble(v, "maxDeltaChangePerSec", 10.0);
-        r.delta_rate_window_sec = FutuConfig::readUInt32(v, "deltaRateWindowSec", 5);
-        r.delta_rate_cooldown_ms = FutuConfig::readUInt32(v, "deltaRateCooldownMs", 5000);
-        r.position_breach_pause_threshold = FutuConfig::readDouble(v, "positionBreachPauseThreshold", 1.2);
-        r.delta_critical_mult = FutuConfig::readDouble(v, "deltaCriticalMult", 1.5);
-        r.delta_warning_mult = FutuConfig::readDouble(v, "deltaWarningMult", 0.8);
-        r.position_warning_l1 = FutuConfig::readDouble(v, "positionWarningL1", 0.8);
-        r.position_warning_l2 = FutuConfig::readDouble(v, "positionWarningL2", 0.9);
-        r.position_hard_block_ratio = FutuConfig::readDouble(v, "positionHardBlockRatio", 1.0);
-        r.widen_threshold = FutuConfig::readUInt32(v, "widenThreshold", 1);
-        return r;
-    }
-};
+/// Rate limits configuration (single source of truth, see RiskLimitsConfig.h)
+using RateLimits = RiskRateLimits;
 
 /// Recovery configuration for reversible risks - P1-3.3 enhanced
 struct RecoveryConfig
@@ -278,7 +233,15 @@ public:
     // Configuration
     //==========================================================================
 
-    void setRateLimits(const RateLimits& limits) { _rate_limits = limits; }
+    void setRateLimits(const RateLimits& limits)
+    {
+        _rate_limits = limits;
+        SideFillBreakerConfig breaker_cfg;
+        breaker_cfg.max_consecutive_same_side = limits.max_consecutive_same_side;
+        breaker_cfg.window_ms = limits.same_side_window_ms;
+        breaker_cfg.pause_ms = limits.same_side_pause_ms;
+        _side_fill_breaker.setConfig(breaker_cfg);
+    }
     const RateLimits& getRateLimits() const { return _rate_limits; }
     void setMaxPendingPerSide(double v) { _max_pending_per_side = v; }
 
@@ -306,6 +269,23 @@ public:
     void recordCancel();
     void recordTrade();
 
+    /// 同侧连续成交熔断（按合约独立计数）: 记录一笔成交,
+    /// 返回 true 表示本次触发了熔断（调用方应立即撤该合约全部报价）。
+    /// 暂停到期自动恢复；CLOSEOUT 阶段由调用方豁免（不调用本方法）。
+    bool onSideFill(const std::string& code, bool is_buy, uint64_t now_ms)
+    {
+        return _side_fill_breaker.onFill(code, is_buy, now_ms);
+    }
+
+    /// 查询该合约该侧是否处于熔断暂停期（报价路径每 tick 调用）
+    bool isSidePaused(const std::string& code, bool is_buy, uint64_t now_ms) const
+    {
+        return _side_fill_breaker.isSidePaused(code, is_buy, now_ms);
+    }
+
+    /// 清空熔断状态（策略重启/交易日切换时调用）
+    void resetSideBreaker() { _side_fill_breaker.clear(); }
+
     /// 读侧剔除过期样本 — 旧实现只在 record 时推进窗口,
     /// 停止报单后旧时间戳永不过期 → RATE 误报持续存在.
     void pruneRateWindows(uint64_t now);
@@ -324,29 +304,18 @@ public:
     /// 由 Coordinator 在 checkRiskLimits 之前调用, soft action 不阻断 hard check
     RiskAction checkSoftLimits(const FutuPortfolio* portfolio) const;
 
-    /// Pre-trade position limit check: can we place bid/ask for this contract?
-    /// v3 软风控：不再硬 BLOCK，返回 utilization 让 Quoter 做 qty 衰减；
-    ///           util>=1.0 时设 obligation 标志，强制减仓侧义务报价（≥10手/≤10ticks）
-    /// 旧 allow_bid/allow_ask 保留兼容（v3 默认始终 true，仅 Toxicity/TradingState 可关）
-    struct PreTradeResult
-    {
-        bool allow_bid;
-        bool allow_ask;
-        bool pending_drain_bid; ///< pending超限 -> 撤该侧旧单+跳过本轮(obligation也生效)
-        bool pending_drain_ask;
-        bool hard_block_bid; ///< 持仓超限 -> flexible模式qty=0 (obligation靠skew)
-        bool hard_block_ask;
-        double long_utilization;   ///< projected_long  / max_position，>=1 → ask 义务
-        double short_utilization;  ///< projected_short / max_position，>=1 → bid 义务
-        bool force_ask_obligation; ///< 多头打满 → ask 必须保持义务报价
-        bool force_bid_obligation; ///< 空头打满 → bid 必须保持义务报价
-    };
-    PreTradeResult checkPreTradePosition(const std::string& code,
+    /// Pre-trade check: returns PreTradeDecision = RiskVerdict (风控闸门) + StrategyInputs (策略输入).
+    /// 分层: 风控(halt_quoting/drain)基于净头寸 vs maxPosition;
+    ///       策略(util/obligation/block_add)基于 projected utilization.
+    /// See PreTradeDecision.h for field documentation.
+    PreTradeDecision checkPreTradePosition(const std::string& code,
                                          const FutuPortfolio* portfolio,
-                                         const UnifiedOrderTracker* tracker) const;
+                                         const UnifiedOrderTracker* tracker,
+                                         uint64_t now_ms = 0) const;
     /// A3: 复用 TickContext.cs 快照, 跳过重复 getContractSnapshot (递归锁+ContractState 拷贝)
-    PreTradeResult checkPreTradePosition(const ContractState& cs,
-                                         const UnifiedOrderTracker* tracker) const;
+    PreTradeDecision checkPreTradePosition(const ContractState& cs,
+                                         const UnifiedOrderTracker* tracker,
+                                         uint64_t now_ms = 0) const;
 
     /// Check rate limits only
     bool checkRateLimits();
@@ -527,9 +496,10 @@ private:
     RateLimits _rate_limits;
     double _max_pending_per_side{0.0}; ///< Per-side max pending qty (from OrderControl, 0=disabled)
     /// A3: checkPreTradePosition 实现体 (共享逻辑, 两个公开重载委托至此)
-    PreTradeResult checkPreTradePositionImpl(const std::string& code,
+    PreTradeDecision checkPreTradePositionImpl(const std::string& code,
                                              const ContractState* cs,
-                                             const UnifiedOrderTracker* tracker) const;
+                                             const UnifiedOrderTracker* tracker,
+                                             uint64_t now_ms) const;
     RecoveryConfig _recovery_config;
 
     // Lock-free atomic counters for rate tracking
@@ -581,6 +551,18 @@ private:
     size_t _delta_snapshot_head;
     std::atomic<bool> _delta_rate_breached{false};
     uint64_t _delta_rate_breach_time{0};
+
+    // 同侧连续成交熔断器（按合约独立计数，跨线程安全）
+    SideFillBreaker _side_fill_breaker;
+
+    // 热路径告警限频（避免持续超限时每 tick 刷屏/写盘，线上曾单日 100MB+）:
+    // 同一条告警按时间节流，仅每 1s 最多输出一次。跨线程仅用于日志节流，
+    // 偶发重复输出可接受，故 per-contract map 采用与 _halt_quoting_state 一致的
+    // 宽松竞争模型；portfolio 级用原子时间戳。
+    static constexpr uint64_t WARN_THROTTLE_MS = 1000;
+    mutable std::atomic<uint64_t> _last_delta_warn_ms{0};
+    mutable std::atomic<uint64_t> _last_pos_breach_warn_ms{0};
+    mutable std::unordered_map<std::string, uint64_t> _last_soft_warn_ms;
 
     // Event notifier (optional)
     wtp::EventNotifier* _event_notifier = nullptr;

@@ -113,13 +113,14 @@ void SelfTradeCalibrator::recordFill(
     // Add to history (RingBuffer auto-manages size)
     state.fill_history.push(record);
 
-    // Update last fill price for retreat mechanism
+    // Update last fill price for retreat mechanism (atomic, 跨线程)
+    auto& rs = _retreat_states[code];
     if (is_buy) {
-        state.last_buy_fill_price = price;
-        state.last_buy_fill_time = timestamp;
+        rs.buy_price.store(price, std::memory_order_relaxed);
+        rs.buy_time.store(timestamp, std::memory_order_relaxed);
     } else {
-        state.last_sell_fill_price = price;
-        state.last_sell_fill_time = timestamp;
+        rs.sell_price.store(price, std::memory_order_relaxed);
+        rs.sell_time.store(timestamp, std::memory_order_relaxed);
     }
 
     // Mark cache as dirty
@@ -404,34 +405,49 @@ uint32_t SelfTradeCalibrator::getSampleCount(const std::string& code) const
 // Fill Retreat
 //------------------------------------------------------------------------------
 
-FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_t current_time) const
+FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_t current_time)
 {
     FillRetreat retreat;
 
-    auto it = _contract_states.find(code);
-    if (it == _contract_states.end()) {
+    auto it = _retreat_states.find(code);
+    if (it == _retreat_states.end()) {
         return retreat;
     }
 
-    const auto& state = it->second;
+    auto& rs = it->second;
     double retreat_price_offset = _config.retreat_ticks * _config.tick_size;
     uint64_t now_ms = current_time; // 已是 epoch ms (统一于 recordFill 入口)
 
-    if (state.last_buy_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
-        uint64_t fill_ms = state.last_buy_fill_time;
-        uint64_t elapsed_ms = now_ms - fill_ms;
-        if (elapsed_ms < _config.retreat_cooldown_ms) {
-            retreat.bid_retreat_price = state.last_buy_fill_price - retreat_price_offset;
-            retreat.bid_retreat_active = true;
+    double last_buy_price = rs.buy_price.load(std::memory_order_relaxed);
+    uint64_t last_buy_time = rs.buy_time.load(std::memory_order_relaxed);
+    if (last_buy_price > 0 && _config.retreat_cooldown_ms > 0) {
+        uint64_t fill_ms = last_buy_time;
+        if (now_ms >= fill_ms) {
+            uint64_t elapsed_ms = now_ms - fill_ms;
+            if (elapsed_ms < _config.retreat_cooldown_ms) {
+                retreat.bid_retreat_price = last_buy_price - retreat_price_offset;
+                retreat.bid_retreat_active = true;
+            } else {
+                // 冷却期到期: 显式清除最近成交记录（下一次成交重新起算）
+                rs.buy_price.store(0.0, std::memory_order_relaxed);
+                rs.buy_time.store(0, std::memory_order_relaxed);
+            }
         }
     }
 
-    if (state.last_sell_fill_price > 0 && _config.retreat_cooldown_ms > 0) {
-        uint64_t fill_ms = state.last_sell_fill_time;
-        uint64_t elapsed_ms = now_ms - fill_ms;
-        if (elapsed_ms < _config.retreat_cooldown_ms) {
-            retreat.ask_retreat_price = state.last_sell_fill_price + retreat_price_offset;
-            retreat.ask_retreat_active = true;
+    double last_sell_price = rs.sell_price.load(std::memory_order_relaxed);
+    uint64_t last_sell_time = rs.sell_time.load(std::memory_order_relaxed);
+    if (last_sell_price > 0 && _config.retreat_cooldown_ms > 0) {
+        uint64_t fill_ms = last_sell_time;
+        if (now_ms >= fill_ms) {
+            uint64_t elapsed_ms = now_ms - fill_ms;
+            if (elapsed_ms < _config.retreat_cooldown_ms) {
+                retreat.ask_retreat_price = last_sell_price + retreat_price_offset;
+                retreat.ask_retreat_active = true;
+            } else {
+                rs.sell_price.store(0.0, std::memory_order_relaxed);
+                rs.sell_time.store(0, std::memory_order_relaxed);
+            }
         }
     }
 

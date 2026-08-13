@@ -24,6 +24,8 @@ std::unique_ptr<SpreadOptimizer> FutuComponentFactory::createSpreadOptimizer(con
     if (spread) {
         glft_cfg = GLFTParams::fromVariant(spread, base_spread, tick_size, mp.portfolio_max_delta);
     } else {
+        WTSLogger::warn("FutuComponentFactory: modules.spreadOptimizer missing in coordinator.yaml, "
+                        "using default GLFT params (config drift)");
         glft_cfg.base_spread = base_spread;
         glft_cfg.tick_size = tick_size;
         glft_cfg.portfolio_max_delta = mp.portfolio_max_delta;
@@ -57,6 +59,9 @@ std::unique_ptr<ToxicFlowDetector> FutuComponentFactory::createToxicFlowDetector
     ToxicityParams params;
     if (tox) {
         params = ToxicityParams::fromVariant(tox);
+    } else {
+        WTSLogger::warn("FutuComponentFactory: modules.toxicityDetector missing in coordinator.yaml, "
+                        "using default toxicity params (config drift)");
     }
 
     detector->setParams(params);
@@ -74,6 +79,9 @@ std::unique_ptr<SelfTradeCalibrator> FutuComponentFactory::createSelfTradeCalibr
     SelfTradeCalibratorConfig cfg;
     if (cal) {
         cfg = SelfTradeCalibratorConfig::fromVariant(cal);
+    } else {
+        WTSLogger::warn("FutuComponentFactory: modules.selfTradeCalibrator missing in coordinator.yaml, "
+                        "using default retreat params (config drift)");
     }
 
     calibrator->setConfig(cfg);
@@ -120,6 +128,9 @@ std::unique_ptr<SelfTradePrevention> FutuComponentFactory::createSelfTradePreven
     StpConfig stp_cfg;
     if (stp_v) {
         stp_cfg = StpConfig::fromVariant(stp_v);
+    } else {
+        WTSLogger::warn("FutuComponentFactory: modules.selfTradePrevention missing in coordinator.yaml, "
+                        "using default STP params (config drift)");
     }
 
     stp->setConfig(stp_cfg);

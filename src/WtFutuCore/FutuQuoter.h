@@ -26,6 +26,7 @@
 #include "../Includes/FasterDefs.h"
 #include "SpinLockGuard.h"
 #include "BilateralQuoteStats.h"
+#include "PreTradeDecision.h"
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -86,8 +87,6 @@ struct QuoterConfig
     double obligation_min_qty; ///< 软 obligation 报价最小手数 (default: 10)
     double
         obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10) — 同时用于报价生成和双边统计判断 (统一, 挂在哪=统计到哪)
-    bool obligation_only_l0;         ///< 软 obligation 是否仅 obligation_level 层 (default: true)
-    bool always_obligation;          ///< 是否始终履行做市义务(双边报单) (default: true)
     // v7.2 scout 多层结构: 自由探测层(level<obligation_level)居最优价小qty,
     //   义务层退居 obligation_level 档; scout 成交即撤同侧义务层防大单逆向成交
     uint32_t obligation_level; ///< 义务层所在档位 (default: 0=最优价层, 向后兼容)
@@ -97,8 +96,7 @@ struct QuoterConfig
         : num_levels(1), base_spread(2.0), level_step(1.0), base_qty(5.0), level_qty_multiplier(0.7), tick_size(1.0),
           sticky_threshold(1.0), improve_retreat_ratio(2.0), max_price_deviation(20.0), price_protection(true),
           protect_ticks(1.0), use_bilateral_quote(false), min_valid_qty(1.0), qty_decay_factor(2.0),
-          obligation_min_qty(10.0), obligation_max_spread_ticks(10.0), obligation_only_l0(true),
-          always_obligation(true), obligation_level(0), scout_qty(1.0)
+          obligation_min_qty(10.0), obligation_max_spread_ticks(10.0), obligation_level(0), scout_qty(1.0)
     {}
 };
 
@@ -161,20 +159,8 @@ public:
 
     /// Refresh all quote levels based on current market data
     /// @param ctx     Strategy context for placing/cancelling orders
-    /// @param mid     Current mid-price or fair value
-    /// @param skew    Price skew from portfolio risk in TICKS (shifts all levels)
-    /// @param allow_bid   Whether bidding is allowed
-    /// @param allow_ask   Whether asking is allowed
-    /// @param now     Current timestamp (ms) for order tracking
-    /// @param upper_limit  Upper price limit (涨停价), 0 = no limit
-    /// @param lower_limit  Lower price limit (跌停价), 0 = no limit
-    /// @param best_bid    Market best bid price (for price protection), 0 = no protection
-    /// @param best_ask    Market best ask price (for price protection), 0 = no protection
-    /// @param long_util   v3: 多头利用率 proj_long/max_position (default 0 = 兼容旧调用)
-    /// @param short_util  v3: 空头利用率 proj_short/max_position (default 0 = 兼容旧调用)
-    /// @param force_ask_obligation  v3: 多头打满，强制 ask 软义务报价 (default false)
-    /// @param force_bid_obligation  v3: 空头打满，强制 bid 软义务报价 (default false)
-    /// @return       Number of new orders placed (for rate limiting)
+    /// @param req     Quote request bundling mid/skew/prices, risk verdict and strategy inputs
+    /// @return        Number of new orders placed (for rate limiting)
     /// B8: QuoteRequest - replaces 18 individual refreshQuotes parameters
     struct QuoteRequest
     {
@@ -189,12 +175,8 @@ public:
         double lower_limit = 0;
         double best_bid = 0;
         double best_ask = 0;
-        double long_util = 0.0;
-        double short_util = 0.0;
-        bool force_ask_obligation = false;
-        bool force_bid_obligation = false;
-        bool hard_block_bid = false;
-        bool hard_block_ask = false;
+        RiskVerdict verdict;      ///< 风控闸门 (halt/drain) - 决定能不能做
+        StrategyInputs strategy;  ///< 策略输入 (util/obligation/block_add) - 决定怎么做
     };
 
     uint32_t refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& req);
@@ -383,8 +365,8 @@ private:
     // refreshQuotes 子函数 (重构: 报单控制分离)
     //==========================================================================
 
-    /// 统一定价计算 (skew + spread_mult + obligation + qty decay)
-    /// 输出: bidPrice, askPrice, bidQty, askQty, is_obligation_bid, is_obligation_ask
+    /// Quote level pricing result (obligation or flexible path).
+    /// Output: bidPrice, askPrice, bidQty, askQty, is_obligation_bid, is_obligation_ask.
     struct QuoteResult
     {
         double bidPrice;
@@ -394,42 +376,50 @@ private:
         bool is_obligation_bid;
         bool is_obligation_ask;
     };
-    QuoteResult computeQuotePrices(uint32_t level,
-                                   double mid,
-                                   double l0_bid_price,
-                                   double l0_ask_price,
-                                   double spread_mult,
-                                   bool allow_bid,
-                                   bool allow_ask,
-                                   double upper_limit,
-                                   double lower_limit,
-                                   double best_bid,
-                                   double best_ask,
-                                   double long_util,
-                                   double short_util,
-                                   bool force_ask_obligation,
-                                   bool force_bid_obligation,
-                                   bool is_obligation_mode,
-                                   // F8: 预计算 qty 衰减 (refreshQuotes 入口每 tick 1 次 exp;
-                                   //   <=0 时内部按 util 自算, 兼容旧调用)
-                                   double long_decay = 0.0,
-                                   double short_decay = 0.0,
-                                   bool hard_block_bid = false,
-                                   bool hard_block_ask = false);
+    /// Obligation pricing: bilateral, never blocked by hard_block.
+    /// Adding side at passive price (mid +/- obligation_max_spread_ticks).
+    /// Reducing side at aggressive price (close to mid, within obligation band).
+    QuoteResult computeObligationPrices(uint32_t level,
+                                        double mid,
+                                        double l0_bid_price,
+                                        double l0_ask_price,
+                                        bool allow_bid,
+                                        bool allow_ask,
+                                        double upper_limit,
+                                        double lower_limit,
+                                        double best_bid,
+                                        double best_ask,
+                                        const StrategyInputs& strategy,
+                                        double long_decay,
+                                        double short_decay);
+
+    /// Flexible pricing: can be unilateral, can be blocked by block_add (inventory management).
+    /// Qty decay based on utilization. Sticky pricing to reduce churn.
+    QuoteResult computeFlexiblePrices(uint32_t level,
+                                      double mid,
+                                      double l0_bid_price,
+                                      double l0_ask_price,
+                                      bool allow_bid,
+                                      bool allow_ask,
+                                      double upper_limit,
+                                      double lower_limit,
+                                      double best_bid,
+                                      double best_ask,
+                                      const StrategyInputs& strategy,
+                                      double long_decay,
+                                      double short_decay);
+
+    /// Common price protection and limit validation (shared by both paths).
+    /// Applied AFTER obligation/flexible-specific pricing.
+    void applyPriceProtection(QuoteResult& qr, double mid,
+                              double upper_limit, double lower_limit,
+                              double best_bid, double best_ask) const;
 
     /// 判断当前 level 是否需要履行做市义务(双边报单)
-    bool needObligation(uint32_t level, bool force_ask_obligation, bool force_bid_obligation) const
+    bool needObligation(uint32_t level) const
     {
-        // v7.2: 非义务层永不转义务 — 旧逻辑 force 时全层转义务, 会把 scout 层(L0 最优价)
-        //   拖进义务模式: qty 抬到 baseQty 且加仓侧不被 band 钳制 → 打满时最优价
-        //   挂 baseQty 激进加仓单, 主动送逆向成交. force 期间自由层由自由分支置零.
-        if (level != _cfg.obligation_level)
-            return false;
-        if (force_ask_obligation || force_bid_obligation)
-            return true;
-        if (_cfg.always_obligation)
-            return true;
-        return false;
+        // Phase 4: obligation level is always obligation (always_obligation removed).
+        return level == _cfg.obligation_level;
     }
 
     /// 路径A: 做市双边接口 (stra_quote, 顶单自动撤旧)

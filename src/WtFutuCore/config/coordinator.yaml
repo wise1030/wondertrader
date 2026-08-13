@@ -141,8 +141,9 @@ coordinator:
       adverseThreshold: 0.6
       minSamples: 5                # 最小样本数
       moveThresholdTicks: 1.0      # 价格移动阈值 (ticks)
-      retreatTicks: 2.0            # 退让 ticks
-      retreatCooldownMs: 3000      # 退让冷却 (ms)
+      retreatTicks: 3              # 退让 ticks（成交后按最后一笔成交价 ± N tick 重挂）
+      retreatCooldownMs: 5000      # 退让冷却 (ms)，到期清除最近成交记录
+      tickSize: 0.5                # 合约真实 tick (ao 系列 = 0.5)
 
     # --- 自成交防护 ---
     selfTradePrevention:

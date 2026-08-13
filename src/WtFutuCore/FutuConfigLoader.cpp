@@ -88,8 +88,6 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
         _config.quoting.qty_decay_factor = readDouble(cfgQuoting, "qtyDecayFactor", 2.0);
         _config.quoting.obligation_min_qty = readDouble(cfgQuoting, "obligationMinQty", 10.0);
         _config.quoting.obligation_max_spread_ticks = readDouble(cfgQuoting, "obligationMaxSpreadTicks", 10.0);
-        _config.quoting.obligation_only_l0 = readBool(cfgQuoting, "obligationOnlyL0", true);
-        _config.quoting.always_obligation = readBool(cfgQuoting, "alwaysObligation", true);
         // v7.2 scout 多层结构
         _config.quoting.obligation_level = readUInt32(cfgQuoting, "obligationLevel", 0);
         _config.quoting.scout_qty = readDouble(cfgQuoting, "scoutQty", 1.0);
@@ -148,26 +146,14 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     if (cfgRisk) {
         WTSVariant* cfgFrequency = cfgRisk->get("frequency");
         if (cfgFrequency) {
-            _config.risk.max_orders_per_sec = readUInt32(cfgFrequency, "maxOrdersPerSec", 50);
-            _config.risk.max_cancels_per_sec = readUInt32(cfgFrequency, "maxCancelsPerSec", 30);
-            _config.risk.max_trades_per_sec = readUInt32(cfgFrequency, "maxTradesPerSec", 20);
+            // 频率/速率/仓位/delta 阈值: 单一来源 (RiskRateLimits, 见 RiskLimitsConfig.h)
+            _config.risk.rate_limits = RiskRateLimits::fromVariant(cfgFrequency);
             _config.risk.cooldown_ms = readUInt32(cfgFrequency, "cooldownMs", 30000);
             _config.risk.check_interval_ms = readUInt32(cfgFrequency, "checkIntervalMs", 5000);
             _config.risk.recovery_threshold = readDouble(cfgFrequency, "recoveryThreshold", 0.8);
-            _config.risk.max_delta_change_per_sec = readDouble(cfgFrequency, "maxDeltaChangePerSec", 3.0);
-            _config.risk.delta_rate_window_sec = readUInt32(cfgFrequency, "deltaRateWindowSec", 2);
-            _config.risk.delta_rate_cooldown_ms = readUInt32(cfgFrequency, "deltaRateCooldownMs", 15000);
             _config.risk.max_recovery_count = readUInt32(cfgFrequency, "maxRecoveryCount", 3);
             _config.risk.pnl_recovery_ratio = readDouble(cfgFrequency, "pnlRecoveryRatio", 0.5);
             _config.risk.max_loss_for_recovery = readDouble(cfgFrequency, "maxLossForRecovery", 0);
-            _config.risk.position_breach_pause_threshold =
-                readDouble(cfgFrequency, "positionBreachPauseThreshold", 1.2);
-            _config.risk.delta_critical_mult = readDouble(cfgFrequency, "deltaCriticalMult", 1.5);
-            _config.risk.delta_warning_mult = readDouble(cfgFrequency, "deltaWarningMult", 0.8);
-            _config.risk.position_warning_l1 = readDouble(cfgFrequency, "positionWarningL1", 0.8);
-            _config.risk.position_warning_l2 = readDouble(cfgFrequency, "positionWarningL2", 0.9);
-            _config.risk.widen_threshold = readUInt32(cfgFrequency, "widenThreshold", 1);
-            _config.risk.position_hard_block_ratio = readDouble(cfgFrequency, "positionHardBlockRatio", 1.0);
             _config.risk.auto_clear_irreversible_on_reset =
                 readBool(cfgFrequency, "autoClearIrreversibleOnReset", false);
         }
@@ -283,10 +269,10 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
         // 注意：SpreadArbitrage 参数校验已移至 spread_arbitrage.yaml 加载时
 
         // 流控参数校验
-        if (_config.risk.max_orders_per_sec == 0 || _config.risk.max_orders_per_sec > 500) {
+        if (_config.risk.rate_limits.max_orders_per_sec == 0 || _config.risk.rate_limits.max_orders_per_sec > 500) {
             WTSLogger::error("UftFutuMmStrategy[{}] invalid maxOrdersPerSec: {}, expected [1, 500]",
                              id,
-                             _config.risk.max_orders_per_sec);
+                             _config.risk.rate_limits.max_orders_per_sec);
             return false;
         }
 

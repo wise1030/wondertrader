@@ -14,6 +14,8 @@
 
 #include <string>
 #include <cstdint>
+#include <atomic>
+#include <map>
 #include "FutuConfig.h"
 #include "../Includes/FasterDefs.h"
 #include "../Share/RingBuffer.hpp"
@@ -131,6 +133,7 @@ struct SelfTradeCalibratorConfig
         c.move_threshold_ticks = FutuConfig::readDouble(v, "moveThresholdTicks", 1.0);
         c.retreat_ticks = FutuConfig::readDouble(v, "retreatTicks", 2.0);
         c.retreat_cooldown_ms = FutuConfig::readUInt32(v, "retreatCooldownMs", 3000);
+        c.tick_size = FutuConfig::readDouble(v, "tickSize", 1.0);
         return c;
     }
 };
@@ -209,7 +212,8 @@ public:
     /// @param code 合约代码
     /// @param current_time 当前时间戳
     /// @return 后退结果，包含 bid/ask 价格限制
-    FillRetreat getFillRetreat(const std::string& code, uint64_t current_time) const;
+    /// 冷却期到期时顺带清除最近成交记录（方案要求: 冷却后清空 last_buy/sell_fill）
+    FillRetreat getFillRetreat(const std::string& code, uint64_t current_time);
 
     //==========================================================================
     // Statistics
@@ -247,17 +251,24 @@ private:
         mutable CalibrationResult cached_result;
         mutable bool cache_dirty;
 
-        double last_buy_fill_price;   ///< 最近买单成交价
-        uint64_t last_buy_fill_time;  ///< 最近买单成交时间
-        double last_sell_fill_price;  ///< 最近卖单成交价
-        uint64_t last_sell_fill_time; ///< 最近卖单成交时间
-
         ContractFillState()
-            : mid_price(0), timestamp(0), cache_dirty(true), last_buy_fill_price(0), last_buy_fill_time(0),
-              last_sell_fill_price(0), last_sell_fill_time(0)
+            : mid_price(0), timestamp(0), cache_dirty(true)
         {}
     };
     wtp::wt_hashmap<std::string, ContractFillState> _contract_states;
+
+    /// 成交后退状态（跨线程独立容器）:
+    /// recordFill (TdSpi) 写, getFillRetreat (MdSpi) 读/清。
+    /// 单字段用 atomic 保证无锁读写; (price,time) 成对读写存在极小撕裂窗口,
+    /// 仅影响 retreat 软控制, 可接受。std::map 为节点容器, 支持不可移动的 atomic 值。
+    struct RetreatState
+    {
+        std::atomic<double> buy_price{0.0};
+        std::atomic<uint64_t> buy_time{0};
+        std::atomic<double> sell_price{0.0};
+        std::atomic<uint64_t> sell_time{0};
+    };
+    std::map<std::string, RetreatState> _retreat_states;
 
     //==========================================================================
     // Internal Methods

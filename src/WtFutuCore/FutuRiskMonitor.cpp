@@ -129,17 +129,24 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
     if (params.portfolio_max_delta > 0) {
         double delta_utilization = absDelta / params.portfolio_max_delta;
 
+        // 热路径告警限频：持续超限时每 tick 刷屏（线上曾单日 100MB+），
+        // 同一类 delta 告警按时间节流，最多每 1s 输出一次。
+        uint64_t last_delta_warn = _last_delta_warn_ms.load(std::memory_order_relaxed);
+        bool log_delta = (ts < last_delta_warn || ts - last_delta_warn >= WARN_THROTTLE_MS);
+        if (log_delta)
+            _last_delta_warn_ms.store(ts, std::memory_order_relaxed);
+
         // 高利用率警告（>= 80%）
-        if (delta_utilization >= _rate_limits.delta_warning_mult) {
-            WTSLogger::warn("[RISK] Delta utilization high: {:.1f}% ({:.2f} / {:.2f}) - skew will adjust quotes",
+        if (delta_utilization >= _rate_limits.delta_warning_mult && log_delta) {
+            WTSLogger::warn("[STRATEGY] Delta utilization high: {:.1f}% ({:.2f} / {:.2f}) - skew will adjust quotes",
                             delta_utilization * 100,
                             absDelta,
                             params.portfolio_max_delta);
         }
 
         // 超限警告（>= 100%），但不作为违规
-        if (delta_utilization >= 1.0) {
-            WTSLogger::warn("[RISK] Delta limit exceeded: {:.2f} > {:.2f} (soft limit, skew handling)",
+        if (delta_utilization >= 1.0 && log_delta) {
+            WTSLogger::warn("[STRATEGY] Delta limit exceeded: {:.2f} > {:.2f} (soft limit, skew handling)",
                             absDelta,
                             params.portfolio_max_delta);
         }
@@ -147,9 +154,9 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
         // 软指标：超过 delta_critical_mult 倍时输出严重警告
         // max_delta 是软风控，仅用于调节 skew 和对冲决策，不触发硬风控动作
         // 真正的硬限制由 Exposure 和 Daily Loss 承担
-        if (absDelta > params.portfolio_max_delta * _rate_limits.delta_critical_mult) {
-            WTSLogger::error(
-                "[RISK] Delta critically high: {:.2f} > {:.2f} (portfolio_max_delta * {:.1f}, skew/hedge handling)",
+        if (absDelta > params.portfolio_max_delta * _rate_limits.delta_critical_mult && log_delta) {
+            WTSLogger::warn(
+                "[STRATEGY] Delta critically high: {:.2f} > {:.2f} (portfolio_max_delta * {:.1f}, skew/hedge handling)",
                 absDelta,
                 params.portfolio_max_delta * _rate_limits.delta_critical_mult,
                 _rate_limits.delta_critical_mult);
@@ -264,7 +271,13 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
                                 pos_breached->max_position);
         violations.push_back(v);
 
-        broadcastAlert("POSITION_BREACH", v.message);
+        // 热路径告警限频：POSITION_BREACH 在持仓持续超限时每 tick 广播/写盘，
+        // 按时间节流至最多每 1s 一次。
+        uint64_t last_pos_warn = _last_pos_breach_warn_ms.load(std::memory_order_relaxed);
+        if (ts < last_pos_warn || ts - last_pos_warn >= WARN_THROTTLE_MS) {
+            _last_pos_breach_warn_ms.store(ts, std::memory_order_relaxed);
+            broadcastAlert("POSITION_BREACH", v.message);
+        }
     }
 
     // 注意：单合约 Delta 是软指标，不产生 violation
@@ -1015,39 +1028,50 @@ void FutuRiskMonitor::resetCloseout(bool force)
     }
 }
 
-FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(const std::string& code,
+PreTradeDecision FutuRiskMonitor::checkPreTradePosition(const std::string& code,
                                                                        const FutuPortfolio* portfolio,
-                                                                       const UnifiedOrderTracker* tracker) const
+                                                                       const UnifiedOrderTracker* tracker,
+                                                                       uint64_t now_ms) const
 {
     // v3 软风控：不再 BLOCK，返回 utilization 让 Quoter 做 qty 衰减
     // A3: 委托 checkPreTradePositionImpl, 仅负责 ContractState 快照获取
     if (!portfolio)
-        return PreTradeResult{true, true, false, false, false, false, 0.0, 0.0, false, false};
+        return PreTradeDecision{};
 
     ContractState cs_buf;
     const ContractState* cs = portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
     if (!cs || cs->max_position <= 0)
-        return PreTradeResult{true, true, false, false, false, false, 0.0, 0.0, false, false};
+        return PreTradeDecision{};
 
-    return checkPreTradePositionImpl(code, cs, tracker);
+    return checkPreTradePositionImpl(code, cs, tracker, now_ms);
 }
 
-FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePosition(const ContractState& cs,
-                                                                       const UnifiedOrderTracker* tracker) const
+PreTradeDecision FutuRiskMonitor::checkPreTradePosition(const ContractState& cs,
+                                                                       const UnifiedOrderTracker* tracker,
+                                                                       uint64_t now_ms) const
 {
     // A3: 复用 TickContext.cs 快照 (processTick 入口 preCheck 已 getContractSnapshot),
     //     消除每 tick checkPreTradePosition 的重复递归锁+ContractState 拷贝
     if (cs.max_position <= 0)
-        return PreTradeResult{true, true, false, false, false, false, 0.0, 0.0, false, false};
+        return PreTradeDecision{};
 
-    return checkPreTradePositionImpl(cs.code, &cs, tracker);
+    return checkPreTradePositionImpl(cs.code, &cs, tracker, now_ms);
 }
 
-FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePositionImpl(const std::string& code,
+PreTradeDecision FutuRiskMonitor::checkPreTradePositionImpl(const std::string& code,
                                                                            const ContractState* cs,
-                                                                           const UnifiedOrderTracker* tracker) const
+                                                                           const UnifiedOrderTracker* tracker,
+                                                                           uint64_t now_ms) const
 {
-    PreTradeResult result{true, true, false, false, false, false, 0.0, 0.0, false, false};
+    PreTradeDecision result{};
+
+    // 同侧连续成交熔断（风控层硬闸门，按合约独立计数）:
+    // 该合约该侧处于暂停期 -> 禁止报价（cancelAll + 不挂新单），到期自动恢复。
+    // now_ms 为交易所时钟 (replay 基准, 与 onSideFill 写入一致), 0 = 不启用查询。
+    if (now_ms > 0) {
+        result.risk.side_pause_bid = _side_fill_breaker.isSidePaused(code, true, now_ms);
+        result.risk.side_pause_ask = _side_fill_breaker.isSidePaused(code, false, now_ms);
+    }
 
     // T4: 全源 pending (MM+arb+closeout 在途), 旧 MM-only 口径下 arb 两腿
     //     在途对 util 投影不可见, 大幅 arb 建仓期间 skew/force/taker 系统性偏低。
@@ -1056,71 +1080,96 @@ FutuRiskMonitor::PreTradeResult FutuRiskMonitor::checkPreTradePositionImpl(const
     double projected_long = (cs->position > 0 ? cs->position : 0) + pending_buy;
     double projected_short = (cs->position < 0 ? std::abs(cs->position) : 0) + pending_sell;
 
-    result.long_utilization = projected_long / cs->max_position;
-    result.short_utilization = projected_short / cs->max_position;
+    result.strategy.long_util = projected_long / cs->max_position;
+    result.strategy.short_util = projected_short / cs->max_position;
+
+    // 热路径告警限频：per-contract 软告警 (cap/pending_drain/block_add)
+    // 在持续超限时每 tick 刷屏，按时间节流至最多每 1s 一次。
+    const uint64_t soft_now = _current_time.load(std::memory_order_relaxed);
+    uint64_t& last_soft = _last_soft_warn_ms[code];
+    const bool log_soft = (soft_now < last_soft || soft_now - last_soft >= WARN_THROTTLE_MS);
+    if (log_soft)
+        last_soft = soft_now;
 
     // v3: util >= 1.0 时只设 obligation 标志，不阻断；Quoter 负责
     //     (A) 加仓侧 qty 指数衰减 (util接近1时qty→0)
     //     (B) 减仓侧强制义务报价 (≥10手/≤10ticks)
-    if (result.long_utilization >= 1.0) {
-        result.force_ask_obligation = true;
-        WTSLogger::warn("[RISK_V3] {} LONG cap reached: pos={:.0f} pending_buy={:.0f} proj_long={:.0f}/{:.0f} "
-                        "(util={:.2f}) → ASK obligation",
-                        code,
-                        cs->position,
-                        pending_buy,
-                        projected_long,
-                        cs->max_position,
-                        result.long_utilization);
+    if (result.strategy.long_util >= 1.0) {
+        result.strategy.force_ask_obligation = true;
+        if (log_soft)
+            WTSLogger::warn("[RISK] {} LONG cap reached: pos={:.0f} pending_buy={:.0f} proj_long={:.0f}/{:.0f} "
+                            "(util={:.2f}) → ASK obligation",
+                            code,
+                            cs->position,
+                            pending_buy,
+                            projected_long,
+                            cs->max_position,
+                            result.strategy.long_util);
     }
-    if (result.short_utilization >= 1.0) {
-        result.force_bid_obligation = true;
-        WTSLogger::warn("[RISK_V3] {} SHORT cap reached: pos={:.0f} pending_sell={:.0f} proj_short={:.0f}/{:.0f} "
-                        "(util={:.2f}) → BID obligation",
-                        code,
-                        cs->position,
-                        pending_sell,
-                        projected_short,
-                        cs->max_position,
-                        result.short_utilization);
+    if (result.strategy.short_util >= 1.0) {
+        result.strategy.force_bid_obligation = true;
+        if (log_soft)
+            WTSLogger::warn("[RISK] {} SHORT cap reached: pos={:.0f} pending_sell={:.0f} proj_short={:.0f}/{:.0f} "
+                            "(util={:.2f}) → BID obligation",
+                            code,
+                            cs->position,
+                            pending_sell,
+                            projected_short,
+                            cs->max_position,
+                            result.strategy.short_util);
     }
 
     // === Pending OrderFilter: per-side pending qty drain ===
     if (_max_pending_per_side > 0) {
         if (pending_buy > _max_pending_per_side) {
-            result.pending_drain_bid = true;
-            WTSLogger::warn("[RISK_V3] {} PENDING_DRAIN: pending_buy={:.0f} > {:.0f} -> drain bid",
-                            code,
-                            pending_buy,
-                            _max_pending_per_side);
+            result.risk.pending_drain_bid = true;
+            if (log_soft)
+                WTSLogger::warn("[RISK] {} PENDING_DRAIN: pending_buy={:.0f} > {:.0f} -> drain bid",
+                                code,
+                                pending_buy,
+                                _max_pending_per_side);
         }
         if (pending_sell > _max_pending_per_side) {
-            result.pending_drain_ask = true;
-            WTSLogger::warn("[RISK_V3] {} PENDING_DRAIN: pending_sell={:.0f} > {:.0f} -> drain ask",
-                            code,
-                            pending_sell,
-                            _max_pending_per_side);
+            result.risk.pending_drain_ask = true;
+            if (log_soft)
+                WTSLogger::warn("[RISK] {} PENDING_DRAIN: pending_sell={:.0f} > {:.0f} -> drain ask",
+                                code,
+                                pending_sell,
+                                _max_pending_per_side);
         }
     }
 
-    // === hard_block: flexible-only (obligation靠skew保护) ===
+    // === block_add: 策略库存管理 (仅 flexible 加仓侧, 非风控措施) ===
+    // obligation 加仓侧由被动价承担 (obligation_max_spread_ticks), 不在此阻断
     if (_rate_limits.position_hard_block_ratio > 0) {
         double abs_pos = std::abs(cs->position);
         double hard_threshold = cs->max_position * _rate_limits.position_hard_block_ratio;
         if (abs_pos >= hard_threshold) {
             if (cs->position > 0) {
-                result.hard_block_bid = true;
+                result.strategy.block_add_long = true;
             } else {
-                result.hard_block_ask = true;
+                result.strategy.block_add_short = true;
             }
-            WTSLogger::warn("[RISK_V3] {} HARD_BLOCK: pos={:.0f} >= {:.0f}*{:.2f} -> block {} (flexible only)",
-                            code,
-                            cs->position,
-                            cs->max_position,
-                            _rate_limits.position_hard_block_ratio,
-                            cs->position > 0 ? "bid" : "ask");
+            if (log_soft)
+                WTSLogger::warn("[STRATEGY] {} BLOCK_ADD: pos={:.0f} >= {:.0f}*{:.2f} -> flexible stop adding {} (inventory management)",
+                                code,
+                                cs->position,
+                                cs->max_position,
+                                _rate_limits.position_hard_block_ratio,
+                                cs->position > 0 ? "long(bid)" : "short(ask)");
         }
     }
+
+    // === halt_quoting: 风控措施 (净头寸硬停止) ===
+    // 触发依据: 净头寸 (cs->position 为 strategy book net) 严格超过 maxPosition.
+    // 动作: 暂停该合约全部报单 (Quoter 入口 cancelAll + 不再挂新单).
+    // 语义: 策略层 (skew/衰减/obligation被动价/flexible block_add) 全部失效时的最后防线.
+    // 恢复: 每 tick 重估, 净头寸回落到 maxPosition 以内自动恢复; 减仓依赖 closeout 或人工介入.
+    // 日志: StrategyCoordinator 仅在状态转移时输出一次 enter/exit, 避免每 tick 刷屏.
+    if (cs->max_position > 0 && std::abs(cs->position) > cs->max_position) {
+        result.risk.halt_quoting = true;
+    }
+
     return result;
 }
 

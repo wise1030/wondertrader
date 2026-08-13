@@ -125,8 +125,6 @@ struct FutuMmConfig
         double qty_decay_factor;
         double obligation_min_qty;
         double obligation_max_spread_ticks;
-        bool obligation_only_l0;
-        bool always_obligation;
         // v7.2 scout 多层结构: 自由探测层(level<obligationLevel)居最优价小qty,
         //   义务层退居 obligationLevel 档大qty; scout 成交即撤同侧义务层
         uint32_t obligation_level;
@@ -135,7 +133,7 @@ struct FutuMmConfig
             : num_levels(1), base_spread(2.0), base_qty(5.0), level_qty_multiplier(0.7), level_step(1.0),
               sticky_threshold(1.0), improve_retreat_ratio(2.0), max_price_deviation(20.0), price_protection(true),
               protect_ticks(1.0), use_bilateral_quote(false), qty_decay_factor(2.0), obligation_min_qty(10.0),
-              obligation_max_spread_ticks(10.0), obligation_only_l0(true), always_obligation(true), obligation_level(0),
+              obligation_max_spread_ticks(10.0), obligation_level(0),
               scout_qty(1.0)
         {}
     } quoting;
@@ -144,36 +142,22 @@ struct FutuMmConfig
     {
         double max_exposure;
         double max_daily_loss;
-        uint32_t max_orders_per_sec;
-        uint32_t max_cancels_per_sec;
-        uint32_t max_trades_per_sec;
         uint32_t cooldown_ms;
         uint32_t check_interval_ms;
         double recovery_threshold;
-        double max_delta_change_per_sec;
         uint32_t max_recovery_count;
         double pnl_recovery_ratio;
         double max_loss_for_recovery;
-        double position_breach_pause_threshold;
-        double delta_critical_mult;
-        double delta_warning_mult;
-        double position_warning_l1; ///< R2.2: util L1 → WIDEN_SPREAD ×1.5
-        double position_warning_l2; ///< R2.2: util L2 → WIDEN_SPREAD ×2.0
-        uint32_t widen_threshold;
-        double position_hard_block_ratio; ///< P1b: 持仓硬止比例 (flexible模式qty=0; obligation靠skew)
-        // H3: pause_threshold 已删除 (死参数)
-        // v7.3: flatten_threshold 已删除 (FLATTEN_POSITION 不可达分支清理)
-        uint32_t delta_rate_window_sec;
-        uint32_t delta_rate_cooldown_ms;
+
+        /// 频率/速率/仓位/delta 阈值 — 单一来源 (与 FutuRiskMonitor::RateLimits 共用)
+        RiskRateLimits rate_limits;
+
         bool
             auto_clear_irreversible_on_reset; ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
         Risk()
-            : max_exposure(35000000.0), max_daily_loss(-200000.0), max_orders_per_sec(50), max_cancels_per_sec(30),
-              max_trades_per_sec(20), cooldown_ms(30000), check_interval_ms(5000), recovery_threshold(0.8),
-              max_delta_change_per_sec(3.0), max_recovery_count(3), pnl_recovery_ratio(0.5), max_loss_for_recovery(0),
-              position_breach_pause_threshold(1.2), delta_critical_mult(1.5), delta_warning_mult(0.8),
-              position_warning_l1(0.8), position_warning_l2(0.9), widen_threshold(1), position_hard_block_ratio(1.0),
-              delta_rate_window_sec(2), delta_rate_cooldown_ms(15000), auto_clear_irreversible_on_reset(false)
+            : max_exposure(35000000.0), max_daily_loss(-200000.0), cooldown_ms(30000), check_interval_ms(5000),
+              recovery_threshold(0.8), max_recovery_count(3), pnl_recovery_ratio(0.5), max_loss_for_recovery(0),
+              auto_clear_irreversible_on_reset(false)
         {}
     } risk;
 

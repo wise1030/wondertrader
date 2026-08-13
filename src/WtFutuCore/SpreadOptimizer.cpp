@@ -71,12 +71,13 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     //     当无毒性事件且 raw spread_mult==1.0 时，加速向 1.0 衰减 (mean-reversion)
     constexpr double spread_mult_ema_alpha = 0.30;   // 0.15→0.30: 更快响应
     constexpr double spread_mult_decay_alpha = 0.50; // 无风险时加速衰减
+    constexpr double mean_reversion_alpha = 0.05;    // 每 tick 向 1.0 额外拉回 5%
     if (spread_mult <= 1.0 && !toxic_active) {
         // 无风险事件: 加速向 1.0 收敛
         _smoothed_spread_mult =
             spread_mult_decay_alpha * spread_mult + (1.0 - spread_mult_decay_alpha) * _smoothed_spread_mult;
         // 额外 mean-reversion: 每tick向1.0拉回5%
-        _smoothed_spread_mult += 0.05 * (1.0 - _smoothed_spread_mult);
+        _smoothed_spread_mult += mean_reversion_alpha * (1.0 - _smoothed_spread_mult);
     } else {
         _smoothed_spread_mult =
             spread_mult_ema_alpha * spread_mult + (1.0 - spread_mult_ema_alpha) * _smoothed_spread_mult;

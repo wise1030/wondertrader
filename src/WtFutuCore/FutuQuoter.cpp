@@ -39,42 +39,29 @@ void FutuQuoter::init(const QuoterConfig& cfg)
     }
 }
 
-FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(uint32_t level,
-                                                       double mid,
-                                                       double l0_bid_price,
-                                                       double l0_ask_price,
-                                                       double spread_mult,
-                                                       bool allow_bid,
-                                                       bool allow_ask,
-                                                       double upper_limit,
-                                                       double lower_limit,
-                                                       double best_bid,
-                                                       double best_ask,
-                                                       double long_util,
-                                                       double short_util,
-                                                       bool force_ask_obligation,
-                                                       bool force_bid_obligation,
-                                                       bool is_obligation_mode,
-                                                       double long_decay,
-                                                       double short_decay,
-                                                       bool hard_block_bid,
-                                                       bool hard_block_ask)
+FutuQuoter::QuoteResult FutuQuoter::computeObligationPrices(uint32_t level,
+                                                                double mid,
+                                                                double l0_bid_price,
+                                                                double l0_ask_price,
+                                                                bool allow_bid,
+                                                                bool allow_ask,
+                                                                double upper_limit,
+                                                                double lower_limit,
+                                                                double best_bid,
+                                                                double best_ask,
+                                                                const StrategyInputs& strategy,
+                                                                double long_decay,
+                                                                double short_decay)
 {
     RecursiveSpinGuard _g(_lock);
     QuoteResult qr{};
     qr.is_obligation_bid = false;
     qr.is_obligation_ask = false;
 
-    // F8: 调用方未预计算时按 util 自算 (兼容 requoteAfterFill 等旧路径)
     if (long_decay <= 0.0)
-        long_decay = (long_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * long_util) : 1.0;
+        long_decay = (strategy.long_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * strategy.long_util) : 1.0;
     if (short_decay <= 0.0)
-        short_decay = (short_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * short_util) : 1.0;
-
-    // 注意: spread_mult 与 _cfg.base_spread 不在此使用 — spread 由上游
-    // (StrategyCoordinator → SpreadOptimizer::computeOptimalQuote) 计入 l0_bid/l0_ask 价格,
-    // Quoter 只负责按 level_step 逐档外扩。在此再次应用 spread 会导致双重计宽。
-    (void)spread_mult;
+        short_decay = (strategy.short_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * strategy.short_util) : 1.0;
 
     double level_offset = level * _cfg.level_step * _cfg.tick_size;
     qr.bidPrice = floor((l0_bid_price - level_offset) / _cfg.tick_size) * _cfg.tick_size;
@@ -82,128 +69,126 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(uint32_t level,
     qr.bidQty = computeQty(level);
     qr.askQty = computeQty(level);
 
-    const bool apply_obligation = (!_cfg.obligation_only_l0 || level == _cfg.obligation_level);
+    // Obligation band (exchange max spread requirement)
+    // 注: 本函数仅被 obligation level 调用 (needObligation 保证 level==obligation_level),
+    //     原 apply_obligation 检查恒 true, 已删除
+    double ask_cap =
+        ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
+    double bid_floor =
+        floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
 
-    if (is_obligation_mode) {
-        // 义务带宽 (统计口径=报价口径: 挂在带宽内才算义务报价)
-        double ask_cap =
-            ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-        double bid_floor =
-            floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-        // v7.1 T4: 减仓侧 clamp 不覆写 — skew 攻击性价格(贴mid/穿mid, ≤cap)被保留,
-        //          义务带宽只作上限; 旧覆写把 ask 钉死在 mid+10ticks(被动),
-        //          最需要减仓时减仓侧反而最不积极
-        if (force_ask_obligation && apply_obligation) {
-            qr.askPrice = std::min(qr.askPrice, ask_cap);
-            qr.askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
-            qr.is_obligation_ask = true;
-            // 加仓侧(bid): 带宽下限, 既满足双边义务又最被动
-            if (qr.bidQty > 0)
-                qr.bidPrice = std::max(qr.bidPrice, bid_floor);
-        }
-        if (force_bid_obligation && apply_obligation) {
+    if (strategy.force_ask_obligation) {
+        qr.askPrice = std::min(qr.askPrice, ask_cap);
+        qr.askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
+        qr.is_obligation_ask = true;
+        if (qr.bidQty > 0)
             qr.bidPrice = std::max(qr.bidPrice, bid_floor);
-            qr.bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
-            qr.is_obligation_bid = true;
-            // 加仓侧(ask): 带宽上限
-            if (qr.askQty > 0)
-                qr.askPrice = std::min(qr.askPrice, ask_cap);
-        }
-        // 义务模式: allow 不阻断，手数按 base_qty 计 (义务层可不在 L0, 档位衰减不适用)
-        qr.bidQty = std::max(qr.bidQty, computeQty(0));
-        qr.askQty = std::max(qr.askQty, computeQty(0));
+    }
+    if (strategy.force_bid_obligation) {
+        qr.bidPrice = std::max(qr.bidPrice, bid_floor);
+        qr.bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
+        qr.is_obligation_bid = true;
+        if (qr.askQty > 0)
+            qr.askPrice = std::min(qr.askPrice, ask_cap);
+    }
+    // Obligation: hard_block does NOT block (Phase 2). Adding side at passive price.
+    qr.bidQty = std::max(qr.bidQty, computeQty(0));
+    qr.askQty = std::max(qr.askQty, computeQty(0));
 
-        // hard_block (持仓超限): 加仓侧清零 - 安全>义务.
-        // 旧实现义务模式豁免 hard_block (靠 skew 保护价格), 但 LONG cap 下 bid 仍以
-        // qty>=min 挂出持续加仓 -> 持仓爆到 669/955. 现加仓侧 hard_block 时清零.
-        if (hard_block_bid) {
-            qr.bidQty = 0;
-            qr.is_obligation_bid = false;
-        }
-        if (hard_block_ask) {
-            qr.askQty = 0;
-            qr.is_obligation_ask = false;
-        }
-
-        // pending drain 覆盖义务 (drain 时 allow=false, 需在此拦截)
-        if (!allow_bid) {
-            qr.bidQty = 0;
-            qr.is_obligation_bid = false;
-        }
-        if (!allow_ask) {
-            qr.askQty = 0;
-            qr.is_obligation_ask = false;
-        }
-    } else {
-        // v7.2: force 义务期间(util≥1.0)自由层全撤 — 只留义务层做强制报价,
-        //   scout 在最优价, 打满时挂加仓探测单 = 主动送逆向成交;
-        //   同时避免 scout 成交触发撤义务层, 在减仓关键期制造义务空窗
-        if (force_ask_obligation || force_bid_obligation) {
-            qr.bidQty = 0;
-            qr.askQty = 0;
-        }
-        // v7.2 scout 内层自由单 (level < obligation_level): 小 qty 探测单,
-        //   成交即信号触发撤同侧义务层; min() 语义, 下方 qty 衰减只会更小
-        else if (level < _cfg.obligation_level) {
-            qr.bidQty = std::min(qr.bidQty, _cfg.scout_qty);
-            qr.askQty = std::min(qr.askQty, _cfg.scout_qty);
-        }
-        // 自由模式: qty 衰减 (F8: 用入口预计算值, 不再每 level exp)
-        if (long_util > 0.0) {
-            qr.bidQty = std::max(0.0, std::round(qr.bidQty * long_decay));
-        }
-        if (short_util > 0.0) {
-            qr.askQty = std::max(0.0, std::round(qr.askQty * short_decay));
-        }
-        // hard_block (持仓超限): 直接 qty=0, 跳过 obligation override (安全>义务)
-        if (hard_block_bid) {
-            qr.bidQty = 0;
-        }
-        if (hard_block_ask) {
-            qr.askQty = 0;
-        }
-        // allow 阻断 + 做市义务加宽 (soft block, 仅 non-hard_block 时生效)
-        // 被block的一边:如果有做市义务需求(always_obligation 且 level==obligation_level),
-        //   用 maxObligationSpread 加宽报价(降低成交概率,但满足义务)
-        //   否则直接 qty=0
-        if (!allow_bid && !hard_block_bid) {
-            if (_cfg.always_obligation && level == _cfg.obligation_level) {
-                qr.bidPrice =
-                    floor((mid - _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-                qr.bidQty = std::max(1.0, _cfg.obligation_min_qty);
-                qr.is_obligation_bid = true;
-            } else {
-                qr.bidQty = 0;
-            }
-        }
-        if (!allow_ask && !hard_block_ask) {
-            if (_cfg.always_obligation && level == _cfg.obligation_level) {
-                qr.askPrice =
-                    ceil((mid + _cfg.obligation_max_spread_ticks * _cfg.tick_size) / _cfg.tick_size) * _cfg.tick_size;
-                qr.askQty = std::max(1.0, _cfg.obligation_min_qty);
-                qr.is_obligation_ask = true;
-            } else {
-                qr.askQty = 0;
-            }
-        }
+    // Pending drain overrides obligation (flow control)
+    if (!allow_bid) {
+        qr.bidQty = 0;
+        qr.is_obligation_bid = false;
+    }
+    if (!allow_ask) {
+        qr.askQty = 0;
+        qr.is_obligation_ask = false;
     }
 
-    // 硬约束: 防穿盘口 (对所有层含义务, 不受 price_protection 开关影响) —
-    //   bid 不穿 best_ask, ask 不穿 best_bid。修复旧义务单完全豁免价格保护、
-    //   skew 穿 mid 时理论上可穿盘/自成交的缺陷。宽盘口下基本不触发
-    //   (skewCrossMaxTicks < 半spread), 窄盘口仅把 skew 限制在贴盘 (不越价, 仍被动)。
+    applyPriceProtection(qr, mid, upper_limit, lower_limit, best_bid, best_ask);
+    return qr;
+}
+
+FutuQuoter::QuoteResult FutuQuoter::computeFlexiblePrices(uint32_t level,
+                                                           double mid,
+                                                           double l0_bid_price,
+                                                           double l0_ask_price,
+                                                           bool allow_bid,
+                                                           bool allow_ask,
+                                                           double upper_limit,
+                                                           double lower_limit,
+                                                           double best_bid,
+                                                           double best_ask,
+                                                           const StrategyInputs& strategy,
+                                                           double long_decay,
+                                                           double short_decay)
+{
+    RecursiveSpinGuard _g(_lock);
+    QuoteResult qr{};
+    qr.is_obligation_bid = false;
+    qr.is_obligation_ask = false;
+
+    if (long_decay <= 0.0)
+        long_decay = (strategy.long_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * strategy.long_util) : 1.0;
+    if (short_decay <= 0.0)
+        short_decay = (strategy.short_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * strategy.short_util) : 1.0;
+
+    double level_offset = level * _cfg.level_step * _cfg.tick_size;
+    qr.bidPrice = floor((l0_bid_price - level_offset) / _cfg.tick_size) * _cfg.tick_size;
+    qr.askPrice = ceil((l0_ask_price + level_offset) / _cfg.tick_size) * _cfg.tick_size;
+    qr.bidQty = computeQty(level);
+    qr.askQty = computeQty(level);
+
+    // Flexible: withdraw during obligation period (only obligation layer quotes)
+    if (strategy.force_ask_obligation || strategy.force_bid_obligation) {
+        qr.bidQty = 0;
+        qr.askQty = 0;
+    } else if (level < _cfg.obligation_level) {
+        qr.bidQty = std::min(qr.bidQty, _cfg.scout_qty);
+        qr.askQty = std::min(qr.askQty, _cfg.scout_qty);
+    }
+
+    // Qty decay based on utilization
+    if (strategy.long_util > 0.0) {
+        qr.bidQty = std::max(0.0, std::round(qr.bidQty * long_decay));
+    }
+    if (strategy.short_util > 0.0) {
+        qr.askQty = std::max(0.0, std::round(qr.askQty * short_decay));
+    }
+
+    // block_add: 策略库存管理 (非风控), flexible 加仓侧 qty=0
+    if (strategy.block_add_long) {
+        qr.bidQty = 0;
+    }
+    if (strategy.block_add_short) {
+        qr.askQty = 0;
+    }
+
+    // Soft block (allow=false): flexible 直接 qty=0
+    // (原"obligation level 加宽保义务"分支已删除: obligation level 永远走 computeObligationPrices,
+    //  flexible 单绝不获得 is_obligation 标记/价格保护豁免)
+    if (!allow_bid && !strategy.block_add_long) {
+        qr.bidQty = 0;
+    }
+    if (!allow_ask && !strategy.block_add_short) {
+        qr.askQty = 0;
+    }
+
+    applyPriceProtection(qr, mid, upper_limit, lower_limit, best_bid, best_ask);
+    return qr;
+}
+
+void FutuQuoter::applyPriceProtection(QuoteResult& qr, double mid,
+                                       double upper_limit, double lower_limit,
+                                       double best_bid, double best_ask) const
+{
+    // Hard constraint: prevent crossing market (applies to all levels including obligation)
     if (qr.bidQty > 0 && best_ask > 0)
         qr.bidPrice = std::min(qr.bidPrice, best_ask - _cfg.tick_size);
     if (qr.askQty > 0 && best_bid > 0)
         qr.askPrice = std::max(qr.askPrice, best_bid + _cfg.tick_size);
 
-    // 价格保护 (软约束, 仅非义务层: 控制排队激进度, 防穿+排队保护)
-    // protectTicks 语义: 允许比盘口好的最大 tick 数。
-    //   窄盘口(1-2t): 常规防穿, 不改变报价行为。
-    //   宽盘口(远月/低流动性, 11-34t): protectTicks 过小会把报价钳在盘口边缘,
-    //   双边价差超出 obligationMaxSpreadTicks → 做市义务违约 (ec2609 实测 8%)。
-    //   此类合约应将 protectTicks 调至 ≥ obligationMaxSpreadTicks,
-    //   或 priceProtection: false 完全关闭钳制。
+    // Soft constraint: price protection (non-obligation only)
     if (_cfg.price_protection) {
         if (qr.bidQty > 0 && !qr.is_obligation_bid && best_bid > 0)
             qr.bidPrice = std::min(qr.bidPrice, best_bid + _cfg.protect_ticks * _cfg.tick_size);
@@ -211,10 +196,7 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(uint32_t level,
             qr.askPrice = std::max(qr.askPrice, best_ask - _cfg.protect_ticks * _cfg.tick_size);
     }
 
-    // 价格边界验证 (涨跌停)
-    // B4 fix: 义务单越限 clamp 到涨跌停内而非置零 — 保住做市义务存在性
-    // (越限价提交交易所必拒, clamp 后合规且义务不失); NaN/Inf/负价仍置零
-    // (计算错误硬防御); deviation 检查对义务单豁免 (已被 obligation_max_spread 约束).
+    // Price boundary validation (limit up/down)
     if (qr.bidQty > 0) {
         if (qr.is_obligation_bid) {
             if (std::isnan(qr.bidPrice) || std::isinf(qr.bidPrice) || qr.bidPrice <= 0)
@@ -243,8 +225,6 @@ FutuQuoter::QuoteResult FutuQuoter::computeQuotePrices(uint32_t level,
             qr.askQty = 0;
         }
     }
-
-    return qr;
 }
 
 uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr, double mid, uint64_t now)
@@ -359,10 +339,15 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
         return checkStickyUpdate(newPrice, cur, is_bid);
     };
 
-    // 义务模式 qr.bidQty/askQty 恒 >= 1 (computeQuotePrices line90-91 保底)
+    // 义务模式 qr.bidQty/askQty 通常 >= 1 (computeObligationPrices 保底);
+    // 但 allow 阻断 (drain/TradingState) 会清零 -> 此时须主动撤存量单,
+    // sideNeed 只比较价格/深度不知道 qty 被清零, 需要显式 cancel-only 路径
+    // (与 handleFlexibleQuote 的 qty==0 撤单行为对齐, 消除两条执行路径的不对称)
     bool bid_need = sideNeed(bid_level, qr.bidPrice, true);
     bool ask_need = sideNeed(ask_level, qr.askPrice, false);
-    if (!bid_need && !ask_need) {
+    bool bid_cancel_only = (qr.bidQty == 0) && bid_level.hasOrders();
+    bool ask_cancel_only = (qr.askQty == 0) && ask_level.hasOrders();
+    if (!bid_need && !ask_need && !bid_cancel_only && !ask_cancel_only) {
         WTSLogger::debug("[STICKY] {} skip requote (bid={} ask={} within threshold, depth ok)",
                          _cfg.code,
                          bid_level.price,
@@ -371,6 +356,24 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     }
 
     uint32_t orders = 0;
+
+    // qty=0 侧: 仅撤存量单 (allow 阻断), 不挂新单
+    if (bid_cancel_only) {
+        for (uint32_t id : bid_level.order_ids) {
+            orderApiCall([&] { return _ctx->stra_cancel(id); });
+            if (_tracker)
+                _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
+        }
+        bid_level.order_ids.clear();
+    }
+    if (ask_cancel_only) {
+        for (uint32_t id : ask_level.order_ids) {
+            orderApiCall([&] { return _ctx->stra_cancel(id); });
+            if (_tracker)
+                _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
+        }
+        ask_level.order_ids.clear();
+    }
 
     // 仅 need 侧: 撤残留 + 重挂 (stra_buy/sell 可能返回多个子单 ID, 全部跟踪)
     if (bid_need && qr.bidQty > 0) {
@@ -530,7 +533,6 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& re
     double mid = req.mid;
     double l0_bid_price = req.l0_bid_price;
     double l0_ask_price = req.l0_ask_price;
-    double spread_mult = req.spread_mult;
     bool allow_bid = req.allow_bid;
     bool allow_ask = req.allow_ask;
     uint64_t now = req.now;
@@ -538,12 +540,6 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& re
     double lower_limit = req.lower_limit;
     double best_bid = req.best_bid;
     double best_ask = req.best_ask;
-    double long_util = req.long_util;
-    double short_util = req.short_util;
-    bool force_ask_obligation = req.force_ask_obligation;
-    bool force_bid_obligation = req.force_bid_obligation;
-    bool hard_block_bid = req.hard_block_bid;
-    bool hard_block_ask = req.hard_block_ask;
     uint32_t orders_placed = 0;
     _ctx = ctx;
     _allow_bid = allow_bid;
@@ -551,36 +547,44 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& re
     if (!ctx)
         return 0;
 
+    // 风控闸门: 净头寸超过 maxPosition → 暂停该合约全部报单 (cancelAll + 不再挂新单)
+    // cancelAll 内部获取 _lock (RecursiveSpinLock), 与本函数顶部 _g 同线程递归安全.
+    if (req.verdict.halt_quoting) {
+        cancelAll(ctx);
+        return 0;
+    }
+
+    // 风控闸门: 同侧连续成交熔断（按合约独立计数）→ 撤该合约全部报价 + 本轮不挂新单。
+    // 暂停期过后 verdict 自动失效, 报价随下一 tick 恢复（无需手动清除状态）。
+    if (req.verdict.side_pause_bid || req.verdict.side_pause_ask) {
+        cancelAll(ctx);
+        return 0;
+    }
+
     // F8: qty 衰减 exp 与 level 无关, 提升到入口每 tick 各算 1 次
     //   (原每 level 各 2 次 std::exp ~25-40ns/次, num_levels=3 时 6 次)
-    const double long_decay = (long_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * long_util) : 1.0;
-    const double short_decay = (short_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * short_util) : 1.0;
+    const double long_decay = (req.strategy.long_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * req.strategy.long_util) : 1.0;
+    const double short_decay = (req.strategy.short_util > 0.0) ? std::exp(-_cfg.qty_decay_factor * req.strategy.short_util) : 1.0;
 
     for (uint32_t i = 0; i < _cfg.num_levels; i++) {
         // 判断是否需要履行做市义务(双边报单)
-        bool is_obligation = needObligation(i, force_ask_obligation, force_bid_obligation);
+        bool is_obligation = needObligation(i);
 
-        // 统一定价
-        QuoteResult qr = computeQuotePrices(i,
-                                            mid,
-                                            l0_bid_price,
-                                            l0_ask_price,
-                                            spread_mult,
-                                            allow_bid,
-                                            allow_ask,
-                                            upper_limit,
-                                            lower_limit,
-                                            best_bid,
-                                            best_ask,
-                                            long_util,
-                                            short_util,
-                                            force_ask_obligation,
-                                            force_bid_obligation,
-                                            is_obligation,
-                                            long_decay,
-                                            short_decay,
-                                            hard_block_bid,
-                                            hard_block_ask);
+        // Pricing: obligation vs flexible (Phase 3: separated for clarity)
+        QuoteResult qr;
+        if (is_obligation) {
+            qr = computeObligationPrices(i, mid, l0_bid_price, l0_ask_price,
+                                          allow_bid, allow_ask,
+                                          upper_limit, lower_limit,
+                                          best_bid, best_ask,
+                                          req.strategy, long_decay, short_decay);
+        } else {
+            qr = computeFlexiblePrices(i, mid, l0_bid_price, l0_ask_price,
+                                        allow_bid, allow_ask,
+                                        upper_limit, lower_limit,
+                                        best_bid, best_ask,
+                                        req.strategy, long_decay, short_decay);
+        }
 
         // 路径选择
         if (_cfg.use_bilateral_quote && i == 0) {

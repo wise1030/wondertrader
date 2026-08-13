@@ -66,7 +66,6 @@ struct TickContext
     bool is_trading_session;
     bool market_state_paused;
     bool toxicity_paused;
-    bool risk_halted;
     double tick_size;
     double upper_limit; ///< P0-2: 涨停价
     double lower_limit; ///< P0-2: 跌停价
@@ -96,7 +95,7 @@ struct TickContext
 
     TickContext()
         : bid_px(0), ask_px(0), mid(0), timestamp(0), time_hms(0), date(0), is_trading_session(false),
-          market_state_paused(false), toxicity_paused(false), risk_halted(false), tick_size(0), upper_limit(0),
+          market_state_paused(false), toxicity_paused(false), tick_size(0), upper_limit(0),
           lower_limit(0)
     {}
 };
@@ -107,14 +106,13 @@ struct ProcessingResult
     bool processed;
     bool quote_placed;
     bool order_canceled;
-    bool reduce_triggered; // (deprecated: position reduction now via skew)
     bool params_updated;
     bool closeout_executed;
     bool market_state_cancelled;
     uint64_t processing_time_ns;
 
     ProcessingResult()
-        : processed(false), quote_placed(false), order_canceled(false), reduce_triggered(false), params_updated(false),
+        : processed(false), quote_placed(false), order_canceled(false), params_updated(false),
           closeout_executed(false), market_state_cancelled(false), processing_time_ns(0)
     {}
 };
@@ -318,7 +316,7 @@ public:
     bool preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateMarketData(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateSignals(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
-    bool processQuoting(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
+    bool processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     bool processAutoCancel(wtp::IUftStraCtx* ctx, const TickContext& tc);
     /// v7.1: taker 紧急减仓 — 合约 util ≥ taker_reduce_threshold 时 FAK 对手价
     /// 平掉 (|pos| - target×maxPos) 超出部分, 每合约 cooldown 限频.
@@ -420,15 +418,14 @@ private:
     {
         double mid = 0, l0_bid = 0, l0_ask = 0, spread_mult = 1.0;
         bool allow_bid = true, allow_ask = true;
-        double long_util = 0, short_util = 0;
-        bool force_ask_obligation = false, force_bid_obligation = false;
-        bool hard_block_bid = false, hard_block_ask = false;
+        PreTradeDecision decision;  ///< verdict(风控闸门) + strategy(策略输入)
         double upper_limit = 0, lower_limit = 0, best_bid = 0, best_ask = 0;
         uint64_t timestamp = 0;
         bool valid = false;
     };
     // v7.6 阶段2: 小锁 — processQuoting(MdSpi) 写 / requoteAfterFill(TdSpi) 读
     mutable RecursiveSpinLock _last_quote_lock;
+    std::unordered_map<std::string, bool> _halt_quoting_state; ///< per-contract HALT_QUOTING state for rate-limited logging
     std::unordered_map<std::string, CachedQuote> _last_quote_params;
     std::unordered_map<std::string, uint64_t> _last_requote_ms;
 

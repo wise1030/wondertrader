@@ -68,6 +68,21 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     if (_risk_monitor)
         _risk_monitor->recordTrade();
 
+    // 风控: 同侧连续成交熔断（按合约独立计数, 与报价路径经 PreTradeDecision 联动）。
+    // 某合约同侧连续成交达阈值 -> 立即撤该合约全部报价, 暂停期内 refreshQuotes/
+    // requoteAfterFill 均不再挂单, 到期自动恢复。CLOSEOUT 阶段豁免
+    // （收盘减仓由 CloseoutExecutor 自行限速, 避免暂停循环）。
+    if (_risk_monitor && !_trading_state.isCloseoutActive() &&
+        _risk_monitor->onSideFill(stdCode, isLong, _exchange_time_ms)) {
+        auto qit = _quoters.find(stdCode);
+        if (qit != _quoters.end() && qit->second)
+            qit->second->cancelAll(ctx);
+        WTSLogger::warn("[RISK] {} SIDE_FILL_BREAKER: {} consecutive same-side {} fills -> cancel all + pause quoting",
+                        stdCode,
+                        _risk_monitor->getRateLimits().max_consecutive_same_side,
+                        isLong ? "buy" : "sell");
+    }
+
     // 使用策略本地持仓（而不是账户持仓）
     // 注意：一个账户可能有多个策略，每个策略只管理自己的持仓
     // stra_get_local_position 返回的是本策略的净头寸
@@ -191,7 +206,8 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         //     retreat 永不激活 (实盘+回测均失效)。改用与读取侧同基准的 _exchange_time_ms。
         uint64_t timestamp = _exchange_time_ms;
         double mid_at_fill = price;
-        double spread_at_fill = 0.2; // default spread
+        constexpr double DEFAULT_FILL_SPREAD = 0.2; // 无盘口快照时的默认价差
+        double spread_at_fill = DEFAULT_FILL_SPREAD;
         auto mid_it = _last_mid.find(stdCode);
         if (mid_it != _last_mid.end()) {
             mid_at_fill = mid_it->second->v.load(std::memory_order_acquire);
@@ -252,7 +268,8 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         }))
         s._tdspi_logs_dropped.fetch_add(1, std::memory_order_relaxed);  // C11: queue full
     static uint64_t trade_log_cnt = 0;
-    if ((++trade_log_cnt % 50) == 1) {
+    constexpr uint64_t TRADE_SAMPLE_INTERVAL = 50; // info 级成交采样间隔
+    if ((++trade_log_cnt % TRADE_SAMPLE_INTERVAL) == 1) {
         WTSLogger::info("UftFutuMmStrategy[{}] TRADE[sample #{}]: {} {} {}@{} | Delta: {}",
                         s.id(),
                         trade_log_cnt,

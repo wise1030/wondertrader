@@ -239,8 +239,6 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
             qcfg.qty_decay_factor = _config.quoting.qty_decay_factor;
             qcfg.obligation_min_qty = _config.quoting.obligation_min_qty;
             qcfg.obligation_max_spread_ticks = _config.quoting.obligation_max_spread_ticks;
-            qcfg.obligation_only_l0 = _config.quoting.obligation_only_l0;
-            qcfg.always_obligation = _config.quoting.always_obligation;
             qcfg.obligation_level = _config.quoting.obligation_level;
             qcfg.scout_qty = _config.quoting.scout_qty;
 
@@ -400,20 +398,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     //------------------------------------------------------------
     _risk_monitor = std::make_unique<FutuRiskMonitor>();
 
-    RateLimits rate_limits;
-    rate_limits.max_orders_per_sec = _config.risk.max_orders_per_sec;
-    rate_limits.max_cancels_per_sec = _config.risk.max_cancels_per_sec;
-    rate_limits.max_trades_per_sec = _config.risk.max_trades_per_sec;
-    rate_limits.max_delta_change_per_sec = _config.risk.max_delta_change_per_sec;
-    rate_limits.delta_rate_window_sec = _config.risk.delta_rate_window_sec;
-    rate_limits.delta_rate_cooldown_ms = _config.risk.delta_rate_cooldown_ms;
-    rate_limits.position_breach_pause_threshold = _config.risk.position_breach_pause_threshold;
-    rate_limits.delta_critical_mult = _config.risk.delta_critical_mult;
-    rate_limits.delta_warning_mult = _config.risk.delta_warning_mult;
-    rate_limits.position_warning_l1 = _config.risk.position_warning_l1;
-    rate_limits.position_warning_l2 = _config.risk.position_warning_l2;
-    rate_limits.widen_threshold = _config.risk.widen_threshold;
-    rate_limits.position_hard_block_ratio = _config.risk.position_hard_block_ratio;
+    // 频率/速率/仓位/delta 阈值: 单一来源, 直接整体拷贝 (消除逐字段手工搬运)
+    RateLimits rate_limits = _config.risk.rate_limits;
     _risk_monitor->setRateLimits(rate_limits);
     _risk_monitor->setMaxPendingPerSide(_config.order_control.max_pending_per_side);
 
@@ -438,11 +424,11 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
     WTSLogger::info("FutuRiskMonitor: maxOrdersPerSec={}, maxCancelsPerSec={}, cooldownMs={}, recoveryThreshold={}, "
                     "maxDeltaChangePerSec={}",
-                    _config.risk.max_orders_per_sec,
-                    _config.risk.max_cancels_per_sec,
+                    _config.risk.rate_limits.max_orders_per_sec,
+                    _config.risk.rate_limits.max_cancels_per_sec,
                     _config.risk.cooldown_ms,
                     _config.risk.recovery_threshold,
-                    _config.risk.max_delta_change_per_sec);
+                    _config.risk.rate_limits.max_delta_change_per_sec);
 
     // Register with coordinator
     if (_coordinator) {

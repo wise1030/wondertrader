@@ -142,6 +142,11 @@ strategies:
             # R2.2: 策略性软响应阈值 (WIDEN_SPREAD 分级; 做市最低报价数量要求 → 无 REDUCE_SIZE)
             positionWarningL1: 0.8   # util≥0.8 → WIDEN_SPREAD ×1.2 (soft check, breach 前预警)
             positionWarningL2: 0.9   # util≥0.9 → WIDEN_SPREAD ×1.5
+            # 同侧连续成交熔断 (风控硬闸门, 按合约独立计数):
+            # 某合约同侧连续成交达阈值 -> 撤该合约全部报价 + 暂停报价, 到期自动恢复
+            maxConsecutiveSameSide: 3    # 同侧连续成交触发阈值 (0=禁用)
+            sameSideWindowMs: 3000       # 连续计数窗口 (ms)
+            sameSidePauseMs: 5000        # 触发后暂停报价时长 (ms)
             # v7.1: 日界自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产必须 false)
             autoClearIrreversibleOnReset: false
 
