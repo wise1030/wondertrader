@@ -1161,10 +1161,14 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     // (3) 作用 retreat: 与新算报价比较, 取更保守价
     //     买单成交 -> bid <= 成交价-retreat_ticks; 卖单成交 -> ask >= 成交价+retreat_ticks
     //     (getFillRetreat 返回价已 on-tick: 内部 retreat_ticks*tick_size)
+    bool retreat_bid_active = false;
+    bool retreat_ask_active = false;
     bool retreat_bid_applied = false;
     bool retreat_ask_applied = false;
     if (_self_trade_calibrator) {
         FillRetreat retreat = _self_trade_calibrator->getFillRetreat(code, now_ms);
+        retreat_bid_active = retreat.bid_retreat_active;
+        retreat_ask_active = retreat.ask_retreat_active;
         if (retreat.bid_retreat_active && new_l0_bid > retreat.bid_retreat_price) {
             new_l0_bid = retreat.bid_retreat_price;
             retreat_bid_applied = true;
@@ -1177,7 +1181,7 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
 
     WTSLogger::debug("[REQUOTE] {} fill eroded obligation depth (bid_valid={} ask_valid={}), "
                      "re-quoting: fresh mid={:.2f} (cached={:.2f}) delta={:.2f} -> bid={:.2f} ask={:.2f}, "
-                     "retreat bid={}/ask={}, "
+                     "retreat bidActive={}/bidApplied={} askActive={}/askApplied={}, "
                      "util L={:.2f}/S={:.2f} hardB={}/hardA={}",
                      code,
                      snap.has_valid_bid,
@@ -1187,7 +1191,9 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
                      mid_delta,
                      new_l0_bid,
                      new_l0_ask,
+                     retreat_bid_active,
                      retreat_bid_applied,
+                     retreat_ask_active,
                      retreat_ask_applied,
                      decision.strategy.long_util,
                      decision.strategy.short_util,

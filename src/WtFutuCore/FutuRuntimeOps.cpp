@@ -64,6 +64,13 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     auto& _async_arb = s._async_arb;
     auto& _mon_bridge = s._mon_bridge;
 
+    // 方向归一化: 框架 on_trade 的 isLong 表示"多头/空头"仓位方向 (非买/卖方向)。
+    //   OPEN_LONG(买)/CLOSE_SHORT(买) => is_buy=true;
+    //   CLOSE_LONG(卖)/OPEN_SHORT(卖) => is_buy=false.
+    // retreat / 同侧成交熔断 / 绩效统计需要的是买/卖方向, 而非仓位方向。
+    const bool isOpen = (offset == 0); // WOT: 0=OPEN, 1=CLOSE, 2=CLOSETODAY
+    const bool is_buy = (isLong == isOpen);
+
     // 更新频率统计
     if (_risk_monitor)
         _risk_monitor->recordTrade();
@@ -73,7 +80,7 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     // requoteAfterFill 均不再挂单, 到期自动恢复。CLOSEOUT 阶段豁免
     // （收盘减仓由 CloseoutExecutor 自行限速, 避免暂停循环）。
     if (_risk_monitor && !_trading_state.isCloseoutActive() &&
-        _risk_monitor->onSideFill(stdCode, isLong, _exchange_time_ms)) {
+        _risk_monitor->onSideFill(stdCode, is_buy, _exchange_time_ms)) {
         auto qit = _quoters.find(stdCode);
         if (qit != _quoters.end() && qit->second)
             qit->second->cancelAll(ctx);
@@ -169,7 +176,7 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     if (_perf_analyzer) {
         TradeRecord trade;
         trade.code = stdCode;
-        trade.is_buy = isLong;
+        trade.is_buy = is_buy;
         trade.qty = vol;
         trade.price = price;
         trade.timestamp = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
@@ -219,7 +226,7 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         if (cs)
             spread_at_fill = cs->tick_size * 2;
 
-        _self_trade_calibrator->recordFill(stdCode, price, vol, isLong, mid_at_fill, spread_at_fill, timestamp);
+        _self_trade_calibrator->recordFill(stdCode, price, vol, is_buy, mid_at_fill, spread_at_fill, timestamp);
 
         // 将校准结果传递给毒性检测器
         if (_config.modules.use_toxicity_detector && _toxicity_detector) {
@@ -233,7 +240,6 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     // !isLong + OPEN -> 开空, !isLong + CLOSE -> 平空
     // 注意: TraderAdapter::on_trade 将 WOT 枚举转换为数值: 0=OPEN, 1=CLOSE, 2=CLOSETODAY
     // 不能用 offset == '0' (ASCII 48)，因为传入的是数值0而非字符'0'
-    bool isOpen = (offset == 0); // 数值0 = WOT_OPEN
     const char* actionStr = "";
     if (isLong) {
         actionStr = isOpen ? "OPEN_LONG" : "CLOSE_LONG";
