@@ -277,10 +277,10 @@ public:
         return _side_fill_breaker.onFill(code, is_buy, now_ms);
     }
 
-    /// 查询该合约该侧是否处于熔断暂停期（报价路径每 tick 调用）
-    bool isSidePaused(const std::string& code, bool is_buy, uint64_t now_ms) const
+    /// 查询该合约是否处于熔断暂停期（合约级双边暂停，报价路径每 tick 调用）
+    bool isPaused(const std::string& code, uint64_t now_ms) const
     {
-        return _side_fill_breaker.isSidePaused(code, is_buy, now_ms);
+        return _side_fill_breaker.isPaused(code, now_ms);
     }
 
     /// 清空熔断状态（策略重启/交易日切换时调用）

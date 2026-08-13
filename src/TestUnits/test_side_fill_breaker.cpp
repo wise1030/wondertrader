@@ -35,7 +35,7 @@ TEST(SideFillBreakerTest, TriggersAtThreshold)
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0));
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 300));
     EXPECT_TRUE(b.onFill("SHFE.ao2610", true, t0 + 600)); // 第 3 笔触发
-    EXPECT_TRUE(b.isSidePaused("SHFE.ao2610", true, t0 + 700));
+    EXPECT_TRUE(b.isPaused("SHFE.ao2610", t0 + 700));
 }
 
 TEST(SideFillBreakerTest, PerContractIsolation)
@@ -48,11 +48,11 @@ TEST(SideFillBreakerTest, PerContractIsolation)
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 200));  // ao2610 buy 1
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 300));  // ao2610 buy 2
     EXPECT_TRUE(b.onFill("SHFE.ao2610", true, t0 + 400));   // ao2610 buy 3 -> 触发 ao2610
-    EXPECT_TRUE(b.isSidePaused("SHFE.ao2610", true, t0 + 500));
-    EXPECT_FALSE(b.isSidePaused("SHFE.ao2609", true, t0 + 500)); // ao2609 未被暂停
+    EXPECT_TRUE(b.isPaused("SHFE.ao2610", t0 + 500));
+    EXPECT_FALSE(b.isPaused("SHFE.ao2609", t0 + 500)); // ao2609 未被暂停
     // ao2609 独立计数: 补到第 3 笔才触发自身熔断
     EXPECT_TRUE(b.onFill("SHFE.ao2609", true, t0 + 600));   // ao2609 buy 3 -> 触发 ao2609
-    EXPECT_TRUE(b.isSidePaused("SHFE.ao2609", true, t0 + 700));
+    EXPECT_TRUE(b.isPaused("SHFE.ao2609", t0 + 700));
 }
 
 TEST(SideFillBreakerTest, OppositeSideResetsStreak)
@@ -86,13 +86,13 @@ TEST(SideFillBreakerTest, PauseExpiresAndDoesNotAccumulate)
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0));
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 100));
     EXPECT_TRUE(b.onFill("SHFE.ao2610", true, t0 + 200)); // 触发
-    EXPECT_TRUE(b.isSidePaused("SHFE.ao2610", true, t0 + 300));
+    EXPECT_TRUE(b.isPaused("SHFE.ao2610", t0 + 300));
     // 暂停期内成交不累计、不重复触发
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 400));
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 500));
     // 暂停到期自动恢复
     const uint64_t t_after = t0 + 200 + 5000 + 100;
-    EXPECT_FALSE(b.isSidePaused("SHFE.ao2610", true, t_after));
+    EXPECT_FALSE(b.isPaused("SHFE.ao2610", t_after));
     // 恢复后重新计数
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t_after));
     EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t_after + 100));
@@ -105,5 +105,5 @@ TEST(SideFillBreakerTest, DisabledWhenThresholdZero)
     const uint64_t t0 = 1000000;
     for (int i = 0; i < 10; ++i)
         EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + i * 100));
-    EXPECT_FALSE(b.isSidePaused("SHFE.ao2610", true, t0 + 1000));
+    EXPECT_FALSE(b.isPaused("SHFE.ao2610", t0 + 1000));
 }

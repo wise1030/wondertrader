@@ -79,6 +79,8 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     // 某合约同侧连续成交达阈值 -> 立即撤该合约全部报价, 暂停期内 refreshQuotes/
     // requoteAfterFill 均不再挂单, 到期自动恢复。CLOSEOUT 阶段豁免
     // （收盘减仓由 CloseoutExecutor 自行限速, 避免暂停循环）。
+    // 作用域: 仅暂停 MM 报价（FutuQuoter）。OrderRouter 的 closeout/taker/arb
+    // 减仓对冲单不受影响——这些是风控减仓动作，暂停期间仍应允许执行。
     if (_risk_monitor && !_trading_state.isCloseoutActive() &&
         _risk_monitor->onSideFill(stdCode, is_buy, _exchange_time_ms)) {
         auto qit = _quoters.find(stdCode);

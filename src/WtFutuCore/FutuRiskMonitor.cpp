@@ -1069,8 +1069,9 @@ PreTradeDecision FutuRiskMonitor::checkPreTradePositionImpl(const std::string& c
     // 该合约该侧处于暂停期 -> 禁止报价（cancelAll + 不挂新单），到期自动恢复。
     // now_ms 为交易所时钟 (replay 基准, 与 onSideFill 写入一致), 0 = 不启用查询。
     if (now_ms > 0) {
-        result.risk.side_pause_bid = _side_fill_breaker.isSidePaused(code, true, now_ms);
-        result.risk.side_pause_ask = _side_fill_breaker.isSidePaused(code, false, now_ms);
+        // 当前为合约级双边暂停: 买卖两侧统一为同一暂停状态
+        result.risk.side_pause_bid = _side_fill_breaker.isPaused(code, now_ms);
+        result.risk.side_pause_ask = result.risk.side_pause_bid;
     }
 
     // T4: 全源 pending (MM+arb+closeout 在途), 旧 MM-only 口径下 arb 两腿

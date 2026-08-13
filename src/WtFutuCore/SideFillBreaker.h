@@ -15,7 +15,7 @@
  *   - 触发后计数清零，暂停 pauseMs，到期自动恢复（“过后再恢复”）;
  *   - 暂停期内不累计计数，避免恢复后立即再触发。
  *
- * 线程安全: onFill（TD 成交回调线程）与 isSidePaused（MD 报价线程）跨线程调用，
+ * 线程安全: onFill（TD 成交回调线程）与 isPaused（MD 报价线程）跨线程调用，
  * 内部用互斥锁保护状态表。
  */
 #pragma once
@@ -100,8 +100,8 @@ public:
         return false;
     }
 
-    /// 该合约该侧当前是否处于暂停（到期自动恢复）
-    bool isSidePaused(const std::string& code, bool is_buy, uint64_t now_ms) const
+    /// 该合约当前是否处于熔断暂停（合约级双边暂停，到期自动恢复）
+    bool isPaused(const std::string& code, uint64_t now_ms) const
     {
         SpinLockGuard _g(_flag);
         auto it = _states.find(code);
