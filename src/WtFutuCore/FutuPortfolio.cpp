@@ -204,6 +204,7 @@ void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
     // 记录前一个position用于成交效果日志
     cs->prev_position = cs->position;
     cs->position = newPos;
+    syncDirectionalFromNet(cs, newPos, 0); // 分向簿与净持仓同步，避免首次成交重建偏差
 
     checkOvershootSignFlip(stdCode, cs->prev_position, newPos); // B5
 }
@@ -220,6 +221,7 @@ void FutuPortfolio::updatePosition(const std::string& code, double position, dou
     cs->position = position;
     if (avgCost > 0)
         cs->avg_cost = avgCost;
+    syncDirectionalFromNet(cs, position, avgCost); // 分向簿与净持仓同步
 
     checkOvershootSignFlip(code.c_str(), prev, position); // B5
 }
@@ -282,28 +284,33 @@ void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
         return;
 
     cs->prev_position = cs->position;
-    if (engine_net > 0.01) {
-        cs->long_qty = engine_net;
+    cs->position = engine_net;
+    syncDirectionalFromNet(cs, engine_net, 0);
+    checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position); // B5
+    updateDailyPnL(code);
+}
+
+void FutuPortfolio::syncDirectionalFromNet(ContractState* cs, double net, double avgCost)
+{
+    if (net > 0.01) {
+        cs->long_qty = net;
         cs->short_qty = 0;
         cs->short_avg = 0;
         if (cs->long_avg <= 0)
-            cs->long_avg = cs->last_price;
+            cs->long_avg = (avgCost > 0) ? avgCost : cs->last_price;
         cs->avg_cost = cs->long_avg;
-    } else if (engine_net < -0.01) {
-        cs->short_qty = -engine_net;
+    } else if (net < -0.01) {
+        cs->short_qty = -net;
         cs->long_qty = 0;
         cs->long_avg = 0;
         if (cs->short_avg <= 0)
-            cs->short_avg = cs->last_price;
+            cs->short_avg = (avgCost > 0) ? avgCost : cs->last_price;
         cs->avg_cost = cs->short_avg;
     } else {
         cs->long_qty = cs->short_qty = 0;
         cs->long_avg = cs->short_avg = 0;
         cs->avg_cost = 0;
     }
-    cs->position = engine_net;
-    checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position); // B5
-    updateDailyPnL(code);
 }
 
 void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double now)

@@ -321,6 +321,10 @@ public:
 private:
     /// sign-flip 检测 (onPositionUpdate / updatePosition 两入口共用, .cpp 实现)
     void checkOvershootSignFlip(const char* code, double prev, double now);
+    /// 净持仓 -> 分向簿同步 (onPositionUpdate/updatePosition/resyncPosition 统一口径)
+    /// net>0: 多头侧持有; net<0: 空头侧持有; net==0: 清零。
+    /// 主导侧均价缺失时用 avgCost(>0) 或 last_price 兜底锚定。
+    void syncDirectionalFromNet(ContractState* cs, double net, double avgCost);
     SpreadArbitrageManager* _arb_manager = nullptr;
 
 public:
