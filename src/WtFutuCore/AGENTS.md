@@ -45,6 +45,9 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner -c <config.y
   → 同配置两次运行成交拆分序列不同，策略轨迹有随机性（幅度随交易频率放大）。
   评估策略表现需接受该噪声或多次运行取均值。
 - `AsyncArbitrageExecutor` orphan leg 超时用 `steady_clock`（罕见路径，同理不可复现）。
+- `WtUftEngine::on_session_end` 生产不触发（WtUftTicker.cpp:183）。双边统计不能依赖
+  框架 session_end 做收盘 flush；策略侧已绕开：section-break + closeout TRIGGERED
+  定点 flush + 周期 live 输出 + 当日文件 seed 重启续算。
 
 ## 框架层已打补丁（越界修改记录，2026-08-03，GUI 监控接入需要）
 

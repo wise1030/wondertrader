@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cmath>
 #include <string>
+#include <cstring>
 #include "../Includes/WTSSessionInfo.hpp"
 #include "../WTSTools/WTSLogger.h"
 
@@ -110,6 +111,7 @@ public:
     bool setSessionInfo(WTSSessionInfo* sessInfo, const char* code_for_log = "")
     {
         _session_info = sessInfo;
+        _code = code_for_log ? code_for_log : "";
         if (!sessInfo) {
             WTSLogger::error("[BILATERAL_STATS] {} setSessionInfo: nullptr, statistics DISABLED for this code",
                              code_for_log ? code_for_log : "");
@@ -145,7 +147,7 @@ public:
     void onSessionStart(uint32_t uTime_HHMM)
     {
         _last_minute_units = 0;
-        _bilateral_start_units = 0;
+        _bilateral_start_units = INVALID_UNITS;
         _total_bilateral_units = 0;
         _is_bilateral = false;
         _bilateral_switch_count = 0;
@@ -172,9 +174,9 @@ public:
         if (now_units == INVALID_UNITS)
             return; // 非交易时段，不更新
 
-        if (_is_bilateral && _bilateral_start_units > 0 && now_units >= _bilateral_start_units) {
+        if (_is_bilateral && _bilateral_start_units != INVALID_UNITS && now_units >= _bilateral_start_units) {
             _total_bilateral_units += (now_units - _bilateral_start_units);
-            _bilateral_start_units = 0;
+            _bilateral_start_units = INVALID_UNITS;
         }
         _is_bilateral = false;
     }
@@ -242,11 +244,11 @@ public:
             // 进入双边
             _bilateral_start_units = now_units;
             _bilateral_switch_count++;
-        } else if (!new_bilateral && _is_bilateral && _bilateral_start_units > 0 &&
+        } else if (!new_bilateral && _is_bilateral && _bilateral_start_units != INVALID_UNITS &&
                    now_units >= _bilateral_start_units) {
             // 退出双边：把这段时长计入累计
             _total_bilateral_units += (now_units - _bilateral_start_units);
-            _bilateral_start_units = 0;
+            _bilateral_start_units = INVALID_UNITS;
         }
         // else: 持续双边或持续非双边，不做时间累加（onSessionEnd 时 flush 残余双边段）
 
@@ -307,12 +309,170 @@ public:
                  (unsigned long long)_inv_no_bid,
                  (unsigned long long)_inv_no_ask,
                  (unsigned long long)_inv_crossed,
-                 (unsigned long long)_inv_spread_wide);
+                                 (unsigned long long)_inv_spread_wide);
         return std::string(buf);
+    }
+
+    /// 实时口径：包含当前尚未落盘的进行中双边段。
+    /// 非交易时段或 sessinfo 缺失时返回空串。
+    std::string formatLiveString(uint32_t uTime_HHMM, uint32_t sec_in_min) const
+    {
+        if (!_session_info)
+            return std::string();
+
+        uint64_t now_units = computeMinuteUnits(uTime_HHMM, sec_in_min);
+        if (now_units == INVALID_UNITS)
+            return std::string();
+
+        uint64_t bil = _total_bilateral_units;
+        if (_is_bilateral && _bilateral_start_units != INVALID_UNITS && now_units >= _bilateral_start_units)
+            bil += (now_units - _bilateral_start_units);
+
+        double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
+        double ratio = (_session_total_secs > 0) ? (double)bil / _session_total_secs : 0.0;
+        return makeSnapshotString("live",
+                                  uTime_HHMM,
+                                  sec_in_min,
+                                  bil,
+                                  _session_total_secs,
+                                  ratio,
+                                  avg,
+                                  _spread_sample_count,
+                                  _bilateral_switch_count);
+    }
+
+    /// 段终点 flush：将当前进行中的双边段计入累计，生成段内自包含字符串，随后清零段计数器。
+    /// 不清 _session_total_secs。
+    std::string flushSection(uint32_t uTime_HHMM, uint32_t sec_in_min)
+    {
+        if (!_session_info)
+            return std::string();
+
+        uint64_t now_units = computeMinuteUnits(uTime_HHMM, sec_in_min);
+        if (now_units == INVALID_UNITS)
+            return std::string();
+
+        if (_is_bilateral && _bilateral_start_units != INVALID_UNITS && now_units >= _bilateral_start_units) {
+            _total_bilateral_units += (now_units - _bilateral_start_units);
+        }
+
+        double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
+        double ratio = (_session_total_secs > 0) ? (double)_total_bilateral_units / _session_total_secs : 0.0;
+        std::string line = makeSnapshotString("section",
+                                              uTime_HHMM,
+                                              sec_in_min,
+                                              _total_bilateral_units,
+                                              _session_total_secs,
+                                              ratio,
+                                              avg,
+                                              _spread_sample_count,
+                                              _bilateral_switch_count);
+
+        // 段内自包含口径：清零
+        _last_minute_units = 0;
+        _bilateral_start_units = INVALID_UNITS;
+        _total_bilateral_units = 0;
+        _is_bilateral = false;
+        _bilateral_switch_count = 0;
+        _total_spread_ticks = 0;
+        _spread_sample_count = 0;
+        _inv_both_empty = 0;
+        _inv_no_bid = 0;
+        _inv_no_ask = 0;
+        _inv_crossed = 0;
+        _inv_spread_wide = 0;
+        return line;
+    }
+
+    /// 重启续算注入。ses > 0 时才覆盖 _session_total_secs，避免无历史文件时破坏 SessionInfo 分母。
+    void seedFrom(uint64_t bil,
+                  uint64_t ses,
+                  double avg,
+                  uint64_t smp,
+                  uint32_t sw,
+                  const uint64_t inv[5])
+    {
+        if (ses > 0)
+            _session_total_secs = ses;
+
+        _last_minute_units = 0;
+        _bilateral_start_units = INVALID_UNITS;
+        _total_bilateral_units = bil;
+        _is_bilateral = false;
+        _bilateral_switch_count = sw;
+        _total_spread_ticks = avg * static_cast<double>(smp);
+        _spread_sample_count = smp;
+        _inv_both_empty = inv[0];
+        _inv_no_bid = inv[1];
+        _inv_no_ask = inv[2];
+        _inv_crossed = inv[3];
+        _inv_spread_wide = inv[4];
+    }
+
+    /// 通用快照序列化（type=live|section）
+    std::string serializeSnapshot(const char* type, uint32_t uTime_HHMM, uint32_t sec_in_min) const
+    {
+        if (strcmp(type, "live") == 0)
+            return formatLiveString(uTime_HHMM, sec_in_min);
+
+        if (!_session_info)
+            return std::string();
+
+        uint64_t now_units = computeMinuteUnits(uTime_HHMM, sec_in_min);
+        if (now_units == INVALID_UNITS)
+            return std::string();
+
+        uint64_t bil = _total_bilateral_units;
+        if (_is_bilateral && _bilateral_start_units != INVALID_UNITS && now_units >= _bilateral_start_units)
+            bil += (now_units - _bilateral_start_units);
+
+        double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
+        double ratio = (_session_total_secs > 0) ? (double)bil / _session_total_secs : 0.0;
+        return makeSnapshotString(type,
+                                  uTime_HHMM,
+                                  sec_in_min,
+                                  bil,
+                                  _session_total_secs,
+                                  ratio,
+                                  avg,
+                                  _spread_sample_count,
+                                  _bilateral_switch_count);
     }
 
 private:
     static constexpr uint64_t INVALID_UNITS = (uint64_t)-1;
+
+    std::string makeSnapshotString(const char* type,
+                                   uint32_t uTime_HHMM,
+                                   uint32_t sec_in_min,
+                                   uint64_t bil,
+                                   uint64_t ses,
+                                   double ratio,
+                                   double avg,
+                                   uint64_t smp,
+                                   uint32_t sw) const
+    {
+        char buf[512];
+        snprintf(buf,
+                 sizeof(buf),
+                 "ts=%04u:%02u type=%s code=%s bil=%llu ses=%llu ratio=%.6f avg=%.4f smp=%llu sw=%u inv=%llu,%llu,%llu,%llu,%llu",
+                 uTime_HHMM,
+                 sec_in_min,
+                 type,
+                 _code.c_str(),
+                 (unsigned long long)bil,
+                 (unsigned long long)ses,
+                 ratio,
+                 avg,
+                 (unsigned long long)smp,
+                 sw,
+                 (unsigned long long)_inv_both_empty,
+                 (unsigned long long)_inv_no_bid,
+                 (unsigned long long)_inv_no_ask,
+                 (unsigned long long)_inv_crossed,
+                 (unsigned long long)_inv_spread_wide);
+        return std::string(buf);
+    }
 
     /// 把 (HHMM, sec) 映射到 session 累计秒数（单调）
     /// 非交易时段返回 INVALID_UNITS
@@ -329,6 +489,7 @@ private:
 private:
     BilateralStatsConfig _cfg;
     WTSSessionInfo* _session_info; ///< 注入的 session（不持有所有权）
+    std::string _code;              ///< 合约代码（序列化用）
 
     // 时间累计（单位：秒）
     uint64_t _last_minute_units;     ///< 最近一次 update 的 session-累计秒

@@ -33,9 +33,128 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace futu
 {
+
+namespace
+{
+struct BilateralSeed
+{
+    uint64_t bil = 0;
+    uint64_t ses = 0;
+    uint64_t smp = 0;
+    uint32_t sw = 0;
+    double avg = 0.0;
+    uint64_t inv[5] = {0, 0, 0, 0, 0};
+    bool valid = false;
+};
+
+std::string makeBilateralFilePath(const std::string& dir, uint32_t tdate)
+{
+    return dir + "/bilateral_stats_" + std::to_string(tdate) + ".log";
+}
+
+uint32_t tradingDateOf(uint32_t wallDate, uint32_t hhmm)
+{
+    if (wallDate == 0)
+        return 0;
+    // 夜盘 21:00-23:59 归属次一交易日；00:00 后 wall 日期已天然等于交易日期
+    return (hhmm >= 2100) ? TimeUtils::getNextDate(wallDate) : wallDate;
+}
+
+void ensureBilateralDir(const std::string& dir)
+{
+    if (dir.empty())
+        return;
+    ::mkdir(dir.c_str(), 0755);
+}
+
+void appendBilateralLine(const std::string& dir, uint32_t tdate, const std::string& line)
+{
+    if (line.empty() || tdate == 0)
+        return;
+
+    ensureBilateralDir(dir);
+    std::string path = makeBilateralFilePath(dir, tdate);
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0)
+        return;
+
+    std::string out = line;
+    out.push_back('\n');
+    ssize_t n = ::write(fd, out.data(), out.size());
+    (void)n;
+    ::close(fd);
+}
+
+std::unordered_map<std::string, std::string> loadLastBilateralLines(const std::string& dir, uint32_t tdate)
+{
+    std::unordered_map<std::string, std::string> result;
+    if (tdate == 0)
+        return result;
+
+    std::ifstream in(makeBilateralFilePath(dir, tdate));
+    if (!in.is_open())
+        return result;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty())
+            continue;
+        auto code_pos = line.find(" code=");
+        if (code_pos == std::string::npos)
+            continue;
+        size_t start = code_pos + 6;
+        size_t end = line.find(' ', start);
+        if (end == std::string::npos)
+            end = line.size();
+        result[line.substr(start, end - start)] = line;
+    }
+    return result;
+}
+
+BilateralSeed parseBilateralLine(const std::string& line)
+{
+    BilateralSeed seed;
+    unsigned long long bil = 0, ses = 0, smp = 0;
+    unsigned long long inv0 = 0, inv1 = 0, inv2 = 0, inv3 = 0, inv4 = 0;
+    unsigned int sw = 0;
+    double avg = 0.0;
+    int n = std::sscanf(line.c_str(),
+                        "ts=%*u:%*u type=%*s code=%*s bil=%llu ses=%llu ratio=%*f avg=%lf smp=%llu sw=%u inv=%llu,%llu,%llu,%llu,%llu",
+                        &bil,
+                        &ses,
+                        &avg,
+                        &smp,
+                        &sw,
+                        &inv0,
+                        &inv1,
+                        &inv2,
+                        &inv3,
+                        &inv4);
+    seed.bil = bil;
+    seed.ses = ses;
+    seed.smp = smp;
+    seed.sw = sw;
+    seed.avg = avg;
+    seed.inv[0] = inv0;
+    seed.inv[1] = inv1;
+    seed.inv[2] = inv2;
+    seed.inv[3] = inv3;
+    seed.inv[4] = inv4;
+    seed.valid = (n == 10);
+    return seed;
+}
+} // namespace
 
 StrategyCoordinator::StrategyCoordinator() : _channel_ready(true), _tick_count(0), _portfolio_ctx_dirty(true) {}
 
@@ -100,6 +219,12 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
             return defVal;
         wtp::WTSVariant* node = v->get(key);
         return node ? node->asDouble() : defVal;
+    };
+    auto readString = [](wtp::WTSVariant* v, const char* key, const char* defVal) -> std::string {
+        if (!v)
+            return defVal ? defVal : "";
+        wtp::WTSVariant* node = v->get(key);
+        return node ? node->asCString() : (defVal ? defVal : "");
     };
 
     // =====================================================================
@@ -213,6 +338,12 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
         _cfg.section_break_seconds_before = readUInt32(cfg, "sectionBreakMinutesBefore", 0) * 60;
     }
 
+    // 双边统计输出链路
+    _cfg.bilateral_stats_log_interval_sec =
+        readUInt32(cfg, "bilateralStatsLogIntervalSec", _cfg.bilateral_stats_log_interval_sec);
+    _cfg.bilateral_stats_log_dir =
+        readString(cfg, "bilateralStatsLogDir", _cfg.bilateral_stats_log_dir.c_str());
+
     syncPhaseConfig();
 
     WTSLogger::info("StrategyCoordinator: loaded config from variant (toxicity={}, perf={})",
@@ -243,6 +374,9 @@ void StrategyCoordinator::setTradingState(TradingState* state)
             if (_quoters) {
                 for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
             }
+        },
+        [this](wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs) {
+            flushBilateralStats(ctx, hhmm, secs);
         }});
     _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, _trading_state, _arb_executor,
         &_quote_chain, _self_trade_calibrator, &_cfg,
@@ -278,6 +412,9 @@ void StrategyCoordinator::wireDeps(const CoordinatorDeps& deps)
             if (_quoters) {
                 for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
             }
+        },
+        [this](wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs) {
+            flushBilateralStats(ctx, hhmm, secs);
         }});
     _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, _trading_state, _arb_executor,
         &_quote_chain, _self_trade_calibrator, &_cfg,
@@ -380,6 +517,9 @@ ProcessingResult StrategyCoordinator::processTick(
         }
         return result;
     }
+
+    if (_cfg.use_market_making && _cfg.bilateral_stats_log_interval_sec > 0)
+        logBilateralStatsPeriodic(ctx, tc);
 
     // Stage 0.5: v7.1 session 休息段 (每节收盘前 N 分钟暂停; 最后一节归 closeout)
     if (processSectionBreak(ctx, tc)) {
@@ -541,6 +681,7 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
                         quoter->cancelAll(ctx);
                 }
             }
+            flushBilateralStats(ctx, cur_hhmm, secs_in_min);
             // 撤 arb/hedge 在途单 + 停 arb 信号执行
             if (_order_router) {
                 _order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
@@ -1242,6 +1383,85 @@ void StrategyCoordinator::resetDaily()
     resetSession();
     if (_risk_monitor) {
         _risk_monitor->resetDaily();
+    }
+}
+
+void StrategyCoordinator::flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs)
+{
+    if (!ctx || !_quoters)
+        return;
+
+    // 白盘/夜盘统一 flush：夜盘 closeout(00:55) 与 section-break(00:59:50) 双行
+    // 增量≈0 互为确认，无过滤需求
+    uint32_t tdate = tradingDateOf(ctx->stra_get_date(), hhmm);
+    if (tdate == 0)
+        return;
+
+    for (auto& [code, quoter] : *_quoters) {
+        if (!quoter)
+            continue;
+        auto& stats = quoter->getBilateralStats();
+        if (!stats.hasSessionInfo())
+            continue;
+
+        std::string line = stats.flushSection(hhmm, secs);
+        if (!line.empty()) {
+            WTSLogger::info("[BILATERAL_STATS] {}", line);
+            appendBilateralLine(_cfg.bilateral_stats_log_dir, tdate, line);
+        }
+    }
+}
+
+void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const TickContext& tc)
+{
+    if (!ctx || !_quoters || _cfg.bilateral_stats_log_interval_sec == 0)
+        return;
+
+    auto qit = _quoters->find(tc.code);
+    if (qit == _quoters->end() || !qit->second)
+        return;
+
+    auto& stats = qit->second->getBilateralStats();
+    if (!stats.hasSessionInfo())
+        return;
+
+    uint64_t now_ms = tc.timestamp > 0 ? tc.timestamp : TimeUtils::getLocalTimeNow();
+    uint64_t& last = _last_bilateral_log_ms[tc.code];
+    uint64_t interval_ms = static_cast<uint64_t>(_cfg.bilateral_stats_log_interval_sec) * 1000;
+    if (last > 0 && now_ms > last && now_ms - last < interval_ms)
+        return;
+
+    uint32_t cur_hhmm = (tc.time_hms >= 10000) ? tc.time_hms / 100 : tc.time_hms;
+    uint32_t secs_in_min = ctx->stra_get_secs() / 1000;
+    std::string line = stats.formatLiveString(cur_hhmm, secs_in_min);
+    if (line.empty())
+        return;
+
+    last = now_ms;
+    WTSLogger::info("[BILATERAL_STATS] {}", line);
+    appendBilateralLine(_cfg.bilateral_stats_log_dir, tradingDateOf(tc.date, cur_hhmm), line);
+}
+
+void StrategyCoordinator::seedBilateralStatsFromFile(uint32_t tdate)
+{
+    if (!_quoters || tdate == 0)
+        return;
+
+    auto last_lines = loadLastBilateralLines(_cfg.bilateral_stats_log_dir, tdate);
+    if (last_lines.empty())
+        return;
+
+    for (auto& [code, quoter] : *_quoters) {
+        if (!quoter)
+            continue;
+        auto it = last_lines.find(code);
+        if (it == last_lines.end())
+            continue;
+
+        BilateralSeed seed = parseBilateralLine(it->second);
+        if (!seed.valid)
+            continue;
+        quoter->getBilateralStats().seedFrom(seed.bil, seed.ses, seed.avg, seed.smp, seed.sw, seed.inv);
     }
 }
 

@@ -29,6 +29,11 @@ bool CloseoutTrigger::process(wtp::IUftStraCtx* ctx, TickContext& tc)
         bool triggered = _deps.risk_monitor->checkCloseout(tc.time_hms, closeTime);
         if (triggered) {
             if (_deps.cancel_all_quotes) _deps.cancel_all_quotes(ctx);
+            if (_deps.flush_bilateral_stats) {
+                uint32_t cur_hhmm = (tc.time_hms >= 10000) ? tc.time_hms / 100 : tc.time_hms;
+                uint32_t secs = ctx->stra_get_secs() / 1000;
+                _deps.flush_bilateral_stats(ctx, cur_hhmm, secs);
+            }
 
             if (_deps.cfg->closeout_flatten_position && _deps.portfolio) {
                 _deps.risk_monitor->markCloseoutDraining(tc.timestamp);

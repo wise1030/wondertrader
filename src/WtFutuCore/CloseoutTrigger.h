@@ -14,6 +14,7 @@
  */
 #pragma once
 #include <functional>
+#include <cstdint>
 namespace wtp { class IUftStraCtx; }
 namespace futu {
 class FutuRiskMonitor;
@@ -33,6 +34,8 @@ public:
         const CoordinatorConfig* cfg = nullptr;
         /// 取消所有合约报价 (原 coordinator _quoters 循环 cancelAll)
         std::function<void(wtp::IUftStraCtx*)> cancel_all_quotes;
+        /// 定点 flush 双边统计 (日终 closeout 触发点)
+        std::function<void(wtp::IUftStraCtx*, uint32_t hhmm, uint32_t secs)> flush_bilateral_stats;
     };
 
     void setDeps(const Deps& deps) { _deps = deps; }

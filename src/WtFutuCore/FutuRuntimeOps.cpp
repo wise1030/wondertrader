@@ -594,6 +594,13 @@ void FutuRuntimeOps::onSessionBegin(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx,
             if (stats.hasSessionInfo())
                 stats.onSessionStart(uTime_HHMM);
         }
+        if (s._coordinator) {
+            uint32_t now_hhmm = ctx->stra_get_time();
+            if (now_hhmm >= 10000)
+                now_hhmm /= 100;
+            uint32_t seed_tdate = StrategyCoordinator::tradingDateOf(ctx->stra_get_date(), now_hhmm);
+            s._coordinator->seedBilateralStatsFromFile(seed_tdate);
+        }
     }
 
     WTSLogger::info("UftFutuMmStrategy[{}] session begin: {}", s.id(), uTDate);
@@ -632,7 +639,7 @@ void FutuRuntimeOps::onSessionEnd(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx, u
     // R3 v2: BilateralStats Per-Quoter,逐合约 onSessionEnd + formatString 输出
     {
         uint32_t uTime_HHMM = ctx->stra_get_time();
-        uint32_t sec_in_min = ctx->stra_get_secs();
+        uint32_t sec_in_min = ctx->stra_get_secs() / 1000;
         for (auto& [code, quoter] : _quoters) {
             auto& stats = quoter->getBilateralStats();
             if (!stats.hasSessionInfo())

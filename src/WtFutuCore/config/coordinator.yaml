@@ -38,6 +38,10 @@ coordinator:
   # --- v7.1 session 休息段 (每节收盘前 N 分钟撤单+暂停报价/套利; 最后一节归 closeout) ---
   sectionBreakSecondsBefore: 10        # 每节收盘前 N 秒撤单停报 (0=禁用, 默认10s); EC(FD0900) 作用于 10:15/11:30
 
+  # --- 双边统计输出链路 ---
+  bilateralStatsLogIntervalSec: 300     # 周期 live 输出间隔(秒); 0=禁用
+  bilateralStatsLogDir: ./Logs          # 统计持久化目录(相对运行 CWD)
+
   # --- 流水线参数 ---
   pipeline:
     paramUpdateInterval: 100      # 自适应参数更新间隔(tick), 不可配 0

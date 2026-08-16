@@ -179,6 +179,10 @@ struct CoordinatorConfig
     // 每日最后一节由 closeout 处理, 不在此列). 0=禁用, 默认10s
     uint32_t section_break_seconds_before = 10;
 
+    // 双边统计输出链路：周期输出间隔(秒，0=禁用) 与持久化目录
+    uint32_t bilateral_stats_log_interval_sec = 300;
+    std::string bilateral_stats_log_dir = "./Logs";
+
     ModuleParams modules;
     wtp::WTSVariant* _raw_variant = nullptr;
 
@@ -188,7 +192,8 @@ struct CoordinatorConfig
           use_adaptive_params(false), param_update_interval(100), closeout_minutes_before(5), close_time(150000),
           closeout_flatten_position(true), night_close_time(0), night_minutes_before(5), perf_enabled(true),
           perf_log_interval(1000), perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000),
-          perf_monitor_latency_threshold(100000)
+          perf_monitor_latency_threshold(100000), bilateral_stats_log_interval_sec(300),
+          bilateral_stats_log_dir("./Logs")
     {}
 };
 
@@ -257,6 +262,8 @@ public:
 private:
     /// 5A-1: _cfg → _phase_mgr 配置同步 (loadConfig/setConfig 后调用)
     void syncPhaseConfig();
+    void flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs);
+    void logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const TickContext& tc);
 
 public:
     void setPortfolio(FutuPortfolio* portfolio) { _portfolio = portfolio; }
@@ -312,6 +319,10 @@ public:
                              TickContext& tc); // v7.7 A4: 非 const (F7 session 缓存写入, 消除 const_cast)
     /// 当前是否处于 session 休息段 (供策略层门控 arb tick 喂入)
     bool isSectionBreakActive() const { return _section_break_active; }
+    /// 从当日持久化文件恢复各 quoter 的双边统计（重启续算）
+    void seedBilateralStatsFromFile(uint32_t tdate);
+    /// wall 日期 → trading date：HHMM >= 2100 时归属次一交易日（夜盘），否则当日
+    static uint32_t tradingDateOf(uint32_t wallDate, uint32_t hhmm);
     bool preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateMarketData(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick);
     void updateSignals(wtp::IUftStraCtx* ctx, const TickContext& tc, wtp::WTSTickData* tick);
@@ -427,6 +438,7 @@ private:
     std::unordered_map<std::string, bool> _halt_quoting_state; ///< per-contract HALT_QUOTING state for rate-limited logging
     std::unordered_map<std::string, CachedQuote> _last_quote_params;
     std::unordered_map<std::string, uint64_t> _last_requote_ms;
+    std::unordered_map<std::string, uint64_t> _last_bilateral_log_ms;
 
     // v7.1: replay 时钟 (策略每 tick 注入; 节流判定统一时间基准, 0=未注入回退墙钟)
     uint64_t _last_exchange_time_ms = 0;
