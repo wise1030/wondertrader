@@ -10,7 +10,7 @@
 
 # --- 报价基础参数 ---
 base_spread: 2.0
-base_qty: 2.0
+base_qty: 10.0
 level_qty_multiplier: 0.7
 level_step: 1.0
 

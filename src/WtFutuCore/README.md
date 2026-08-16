@@ -424,7 +424,7 @@ quoting:
   obligationLevel: 1         # 义务层所在档位 (1=义务退居次优层, L0 为 scout 自由探测单)
   scoutQty: 1.0              # 自由探测层手数 (<义务层; 成交即撤同侧义务层)
   baseSpread: 2.0            # 基础价差 (tick 数, 权威来源)
-  baseQty: 2.0               # 基础手数
+  baseQty: 10.0              # 义务层挂单手数
   levelQtyMultiplier: 0.7    # 档位间数量几何衰减
   levelStep: 1.0             # 每档价格步长 (tick)
   stickyThreshold: 1.0       # 粘性更新阈值 (tick)
@@ -434,7 +434,7 @@ quoting:
   priceProtection: true      # 价格保护开关 (false=完全不钳制)
   protectTicks: 1.0          # 允许比盘口好的最大 tick 数 (宽盘口合约应 >= obligationMaxSpreadTicks)
   qtyDecayFactor: 2.0        # 库存敏感的 qty 指数衰减因子
-  obligationMinQty: 10.0     # 做市义务最小手数
+  obligationMinQty: 10.0     # 全侧总深度义务阈值
   obligationMaxSpreadTicks: 10
   obligationOnlyL0: true
   alwaysObligation: true

@@ -243,7 +243,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
             // 双边报价参数
             qcfg.use_bilateral_quote = _config.quoting.use_bilateral_quote;
-            qcfg.min_valid_qty = _config.quoting.base_qty; // 有效挂单最小数量 = 基础挂单量
+            // 统计/重挂的深度口径 = 全侧总深度义务阈值；obligationMinQty 只做阈值，不参与报单量
+            qcfg.min_valid_qty = _config.quoting.obligation_min_qty;
 
             // v3 软风控参数透传
             qcfg.qty_decay_factor = _config.quoting.qty_decay_factor;

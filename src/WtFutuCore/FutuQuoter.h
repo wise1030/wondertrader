@@ -61,7 +61,7 @@ struct QuoterConfig
     uint32_t num_levels; ///< Number of price levels per side (e.g., 3 = 3 bids + 3 asks)
     double base_spread;  ///< Base spread in ticks (per side, from mid)
     double level_step;   ///< Additional tick step between levels
-    double base_qty;     ///< Base quantity per level
+    double base_qty;     ///< 义务层挂单手数；scout/flexible 层由 scoutQty/levelQtyMultiplier 派生
     double
         level_qty_multiplier; ///< M2: 档位间数量几何衰减系数 (e.g. 0.7 = 每档 ×0.7; 此前叫 qty_decay 易与 qty_decay_factor 混淆)
     double tick_size; ///< Minimum price increment
@@ -80,17 +80,17 @@ struct QuoterConfig
 
     // 双边报价配置
     bool use_bilateral_quote; ///< 是否使用双边报价接口 stra_quote() (default: false)
-    double min_valid_qty;     ///< 有效挂单最小数量，用于统计 (default: 1.0)
+    double min_valid_qty;     ///< 全侧总深度有效阈值，用于统计/重挂 (default: 1.0)
 
     // v3 软风控参数（use_bilateral_quote=false 路径专用，bilateral 路径不受影响）
     double qty_decay_factor;   ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_util)
-    double obligation_min_qty; ///< 软 obligation 报价最小手数 (default: 10)
+    double obligation_min_qty; ///< 全侧总深度义务阈值 (default: 10); 不直接决定单档报单量
     double
         obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10) — 同时用于报价生成和双边统计判断 (统一, 挂在哪=统计到哪)
     // v7.2 scout 多层结构: 自由探测层(level<obligation_level)居最优价小qty,
     //   义务层退居 obligation_level 档; scout 成交即撤同侧义务层防大单逆向成交
     uint32_t obligation_level; ///< 义务层所在档位 (default: 0=最优价层, 向后兼容)
-    double scout_qty;          ///< 自由探测层手数 (default: 1.0, 应<义务层)
+    double scout_qty;          ///< scout/自由探测层手数 (default: 1.0, 应小于义务总深度)
 
     QuoterConfig()
         : num_levels(1), base_spread(2.0), level_step(1.0), base_qty(5.0), level_qty_multiplier(0.7), tick_size(1.0),
@@ -123,11 +123,6 @@ public:
         _cfg.base_qty = base_qty;
         _cfg.level_qty_multiplier = level_qty_multiplier;
         _cfg.level_step = level_step;
-        // T3: min_valid_qty 与 base_qty 同语义 (init: UftFutuMmStrategy.cpp
-        //   qcfg.min_valid_qty = base_qty)。热调小 baseQty 后若滞留旧值,
-        //   义务层 qty(新)<min_valid_qty(旧) -> sideNeed 恒真每 tick 撤挂
-        //   + 快照恒 invalid -> requoteAfterFill 风暴。
-        _cfg.min_valid_qty = base_qty;
         // 重算预计算数量表 — init() 中 _level_qtys 由 base_qty*level_qty_multiplier^i 预计算,
         // 旧代码只改 _cfg 不刷表, 热更新对实际下单量无效.
         for (uint32_t i = 0; i < _level_qtys.size(); i++) {

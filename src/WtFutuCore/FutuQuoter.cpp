@@ -66,8 +66,9 @@ FutuQuoter::QuoteResult FutuQuoter::computeObligationPrices(uint32_t level,
     double level_offset = level * _cfg.level_step * _cfg.tick_size;
     qr.bidPrice = floor((l0_bid_price - level_offset) / _cfg.tick_size) * _cfg.tick_size;
     qr.askPrice = ceil((l0_ask_price + level_offset) / _cfg.tick_size) * _cfg.tick_size;
-    qr.bidQty = computeQty(level);
-    qr.askQty = computeQty(level);
+    // 义务层实际挂单手数 = baseQty；obligationMinQty 只作为全侧总深度阈值，不参与报单量。
+    qr.bidQty = _cfg.base_qty;
+    qr.askQty = _cfg.base_qty;
 
     // Obligation band (exchange max spread requirement)
     // 注: 本函数仅被 obligation level 调用 (needObligation 保证 level==obligation_level),
@@ -79,21 +80,16 @@ FutuQuoter::QuoteResult FutuQuoter::computeObligationPrices(uint32_t level,
 
     if (strategy.force_ask_obligation) {
         qr.askPrice = std::min(qr.askPrice, ask_cap);
-        qr.askQty = std::max(computeQty(0), _cfg.obligation_min_qty);
         qr.is_obligation_ask = true;
         if (qr.bidQty > 0)
             qr.bidPrice = std::max(qr.bidPrice, bid_floor);
     }
     if (strategy.force_bid_obligation) {
         qr.bidPrice = std::max(qr.bidPrice, bid_floor);
-        qr.bidQty = std::max(computeQty(0), _cfg.obligation_min_qty);
         qr.is_obligation_bid = true;
         if (qr.askQty > 0)
             qr.askPrice = std::min(qr.askPrice, ask_cap);
     }
-    // Obligation: hard_block does NOT block (Phase 2). Adding side at passive price.
-    qr.bidQty = std::max(qr.bidQty, computeQty(0));
-    qr.askQty = std::max(qr.askQty, computeQty(0));
 
     // Pending drain overrides obligation (flow control)
     if (!allow_bid) {
@@ -320,13 +316,22 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     QuoteLevel& ask_level = _ask_levels[level];
 
     // 义务模式: 必须双边。v7.1 条件式重挂 (黏性+深度), 替代旧"每tick无脑全撤重挂":
-    //   各侧 need = 无单 || 深度<min_valid_qty || 价格超黏性阈值; 仅 need 侧撤+重挂,
-    //   双侧都不 need 则零撤单零报单 (减少信息流, 与 requoteAfterFill 深度语义一致)。
+    //   各侧 need = 无单 || 全侧总深度<obligationMinQty || 价格超黏性阈值;
+    //   仅 need 侧撤+重挂, 双侧都不 need 则零撤单零报单。
+    auto sideDepthEnough = [&](bool is_bid) -> bool {
+        const auto& levels = is_bid ? _bid_levels : _ask_levels;
+        double total = 0;
+        for (const auto& lv : levels) {
+            if (lv.hasOrders() && lv.qty > 0)
+                total += lv.qty;
+        }
+        return total >= _cfg.obligation_min_qty - 1e-9;
+    };
     auto sideNeed = [&](QuoteLevel& lv, double newPrice, bool is_bid) -> bool {
         if (!lv.hasOrders())
             return true;
-        if (lv.qty < _cfg.min_valid_qty)
-            return true; // 深度被部分成交侵蚀至义务以下
+        if (!sideDepthEnough(is_bid))
+            return true; // 全侧总深度被部分成交侵蚀至义务阈值以下
         double cur = lv.price;
         if (_tracker && !lv.order_ids.empty()) {
             UnifiedOrderInfo lv_oi;

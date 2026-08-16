@@ -91,7 +91,7 @@ strategies:
           obligationLevel: 1         # 义务层所在档位 (1=义务退居次优层, L0 为自由探测单)
           scoutQty: 1.0              # 自由探测层手数 (<义务层; 成交即撤同侧义务层防大单逆向成交)
           baseSpread: 2.0            # 基础价差 (tick 数, 权威来源; 同时用于 SpreadOptimizer 定价核心 + FutuQuoter fallback)
-          baseQty: 2.0               # 基础手数
+          baseQty: 10.0              # 义务层挂单手数（scout/flexible 层由此派生）
           levelQtyMultiplier: 0.7      # 档位间数量几何衰减 (0.1-1.0, 每档 ×此值)
           levelStep: 1.0             # 每档价格步长 (tick 数)
           stickyThreshold: 1.0       # 粘性更新阈值 (tick)
@@ -104,7 +104,7 @@ strategies:
                                      # 否则报价被钳在盘口边缘, 双边价差超义务带宽 (ec2609 实测覆盖率 8%)
           # v3 软风控报价参数
           qtyDecayFactor: 2.0        # 库存敏感的 qty 指数衰减因子 (util 越高 qty 越小)
-          obligationMinQty: 10.0     # 做市义务最小手数
+          obligationMinQty: 10.0     # 全侧总深度义务阈值（不直接决定单档报单量）
           obligationMaxSpreadTicks: 10
           # 注: 义务层由 obligationLevel 决定 (当前=1, L0 为自由探测层);
           #     旧的 obligationOnlyL0/alwaysObligation 已从代码移除.

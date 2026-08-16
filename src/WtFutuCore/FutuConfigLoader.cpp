@@ -239,6 +239,44 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
                 "UftFutuMmStrategy[{}] invalid baseQty: {}, expected (0, 100]", id, _config.quoting.base_qty);
             return false;
         }
+        if (_config.quoting.obligation_min_qty <= 0) {
+            WTSLogger::error("UftFutuMmStrategy[{}] invalid obligationMinQty: {}, expected > 0",
+                             id,
+                             _config.quoting.obligation_min_qty);
+            return false;
+        }
+        if (_config.quoting.obligation_min_qty < _config.quoting.scout_qty) {
+            WTSLogger::warn("UftFutuMmStrategy[{}] obligationMinQty={} < scoutQty={}: 义务总深度不应小于 scout 单量",
+                            id,
+                            _config.quoting.obligation_min_qty,
+                            _config.quoting.scout_qty);
+        }
+
+        // 全侧满挂总深度校验：level<obligationLevel 为 scout 层，obligationLevel 为义务层，
+        // 之后为 flexible 层（按 levelQtyMultiplier 衰减）。
+        double full_side_depth = 0;
+        for (uint32_t l = 0; l < _config.quoting.num_levels; ++l) {
+            if (l < _config.quoting.obligation_level) {
+                full_side_depth += _config.quoting.scout_qty;
+            } else if (l == _config.quoting.obligation_level) {
+                full_side_depth += _config.quoting.base_qty;
+            } else {
+                double qty = _config.quoting.base_qty;
+                for (uint32_t k = 0; k < l; ++k)
+                    qty *= _config.quoting.level_qty_multiplier;
+                if (qty < 1.0)
+                    qty = 1.0;
+                full_side_depth += qty;
+            }
+        }
+        if (full_side_depth + 1e-9 < _config.quoting.obligation_min_qty) {
+            WTSLogger::warn("UftFutuMmStrategy[{}] full-side depth {:.2f} < obligationMinQty {:.2f}: "
+                            "当前挂单结构可能无法满足交易所总深度义务",
+                            id,
+                            full_side_depth,
+                            _config.quoting.obligation_min_qty);
+        }
+
         if (_config.quoting.level_qty_multiplier < 0.1 || _config.quoting.level_qty_multiplier > 1.0) {
             WTSLogger::warn("UftFutuMmStrategy[{}] levelQtyMultiplier={} out of typical range [0.1, 1.0]",
                             id,
