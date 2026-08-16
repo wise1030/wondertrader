@@ -500,6 +500,17 @@ private:
                                              const ContractState* cs,
                                              const UnifiedOrderTracker* tracker,
                                              uint64_t now_ms) const;
+    /// 风控层实现：position 硬闸门、同侧成交熔断、pending drain
+    RiskVerdict checkHardPositionRisk(const std::string& code,
+                                     const ContractState* cs,
+                                     double pending_buy,
+                                     double pending_sell,
+                                     uint64_t now_ms) const;
+    /// 策略层实现：util、义务报价、flexible block_add
+    StrategyInputs computeInventoryStrategyInputs(const std::string& code,
+                                                 const ContractState* cs,
+                                                 double pending_buy,
+                                                 double pending_sell) const;
     RecoveryConfig _recovery_config;
 
     // Lock-free atomic counters for rate tracking

@@ -357,9 +357,7 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(const std:
                                                                       uint64_t currentTime,
                                                                       double currentMid,
                                                                       double tickSize,
-                                                                      bool stateChanged,
-                                                                      bool inventoryLimitHit,
-                                                                      double current_risk_delta)
+                                                                      bool stateChanged)
 {
     RecursiveSpinGuard _g(_lock);
     // 复用成员缓冲 (主线程单线程调用), 消除每 tick 3 次 vector 堆分配
@@ -410,37 +408,8 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(const std:
         CancelAction action;
         action.order_id = order.order_id;
 
-        // Priority 1: Inventory limit
-        if (inventoryLimitHit && _cfg.inv_limit_cooldown_ms > 0) {
-            // Only cancel orders that push the portfolio further into the limit breach direction
-            // current_risk_delta > 0 -> excessively long -> cancel BUYS (isBid())
-            // current_risk_delta < 0 -> excessively short -> cancel SELLS (!isBid())
-            bool is_breach_direction = false;
-            if (current_risk_delta >= 0 && order.isBid())
-                is_breach_direction = true;
-            else if (current_risk_delta < 0 && !order.isBid())
-                is_breach_direction = true;
-
-            if (is_breach_direction) {
-                bool withinCooldown = false;
-                if (order.last_inv_cancel_check > 0) {
-                    uint64_t diff = currentTime - order.last_inv_cancel_check;
-                    if (diff < _cfg.inv_limit_cooldown_ms)
-                        withinCooldown = true;
-                }
-                if (!withinCooldown) {
-                    order.last_inv_cancel_check = currentTime;
-                    action.reason = CancelReason::INVENTORY_LIMIT;
-                    _actions_buf.push_back(action);
-                    addPendingQty(order.code, order.isBid(), -order.qty);
-                    order.setPendingCancel(CancelReason::INVENTORY_LIMIT);
-                    continue;
-                }
-            }
-        }
-
         // ============================================================
-        // Priority 2: STALE - 订单过期
+        // Priority 1: STALE - 订单过期
         // 价格偏离检查已移至 FutuQuoter.refreshQuotes 的粘性报价逻辑
         // FutuQuoter 比较 newPrice vs placePrice，更准确感知 skew/spread 变化
         //

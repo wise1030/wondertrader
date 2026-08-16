@@ -427,17 +427,6 @@ public:
         return _params.portfolio_max_delta > 0 && std::abs(getTotalDelta()) > _params.portfolio_max_delta;
     }
 
-    /// Check if any single contract limit is breached (硬指标)
-    inline bool isAnyContractLimitBreached() const
-    {
-        RecursiveSpinGuard _g(_lock);
-        for (const auto& c : _contracts) {
-            if (c.isPositionLimitBreached())
-                return true;
-        }
-        return false;
-    }
-
     /// Get the first contract that breached its POSITION limit (持仓手数限制，硬指标)
     inline const ContractState* getPositionBreachedContract() const
     {
@@ -474,9 +463,6 @@ public:
     /// @param threshold 超过目标持仓的比例阈值
     /// @return 需要减仓的合约列表
     std::vector<const ContractState*> getContractsNeedingReduction(double threshold = 0.0) const;
-
-    /// Check if any hard limit is breached (position, exposure, loss)
-    inline bool isAnyLimitBreached() const { return isAnyContractLimitBreached(); }
 
     /// Portfolio delta utilization based on net delta (扣除目标持仓)
     /// 用于组合级 skew 激进度计算

@@ -299,7 +299,6 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         tracker_cfg.max_age_ms = mp.auto_cancel_max_age_ms;
         tracker_cfg.price_deviation = mp.auto_cancel_price_deviation;
         tracker_cfg.sticky_threshold = _config.quoting.sticky_threshold;
-        tracker_cfg.inv_limit_cooldown_ms = mp.auto_cancel_inventory_cooldown_ms;
         // STP 唯一权威: coordinator.yaml modules.selfTradePrevention。
         // arb 启用时强制开启, 防止 arb 对手价单打到自己 MM 盘口。
         // Reason: arb sends marketable orders via OrderRouter that can cross own MM quotes.

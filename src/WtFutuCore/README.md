@@ -604,7 +604,6 @@ coordinator:
     autoCancel:
       maxAgeMs: 10000
       priceDeviation: 3.0
-      inventoryLimitCooldownMs: 2000
 
     correlationManager:
       windowSize: 100

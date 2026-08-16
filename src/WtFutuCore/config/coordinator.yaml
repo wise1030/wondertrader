@@ -154,7 +154,6 @@ coordinator:
     autoCancel:
       maxAgeMs: 10000              # 订单最大存活时间 (ms)
       priceDeviation: 3.0          # 价格偏离阈值 (ticks)
-      inventoryLimitCooldownMs: 2000  # 库存限制冷却 (ms)
 
     # --- 相关性管理器 ---
     correlationManager:

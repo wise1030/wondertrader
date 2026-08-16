@@ -173,7 +173,6 @@ struct UnifiedTrackerConfig
     uint32_t max_age_ms;
     double price_deviation;
     double sticky_threshold;
-    uint32_t inv_limit_cooldown_ms;
     uint32_t max_cancel_rate;
     uint32_t pending_cancel_timeout_ms; ///< 撤单 ack 超时, 超时强制 untrack (默认 5000)
 
@@ -183,9 +182,8 @@ struct UnifiedTrackerConfig
     double stp_min_price_gap;
 
     UnifiedTrackerConfig()
-        : max_orders(20), max_age_ms(10000), price_deviation(3.0), sticky_threshold(2.0), inv_limit_cooldown_ms(2000),
-          max_cancel_rate(10), pending_cancel_timeout_ms(5000), stp_enabled(true), stp_allow_same_price(false),
-          stp_min_price_gap(1.0)
+        : max_orders(20), max_age_ms(10000), price_deviation(3.0), sticky_threshold(2.0), max_cancel_rate(10),
+          pending_cancel_timeout_ms(5000), stp_enabled(true), stp_allow_same_price(false), stp_min_price_gap(1.0)
     {}
 };
 
@@ -586,9 +584,7 @@ public:
                                                      uint64_t currentTime,
                                                      double currentMid,
                                                      double tickSize,
-                                                     bool stateChanged,
-                                                     bool inventoryLimitHit,
-                                                     double current_risk_delta);
+                                                     bool stateChanged);
 
     //==========================================================================
     // Self-Trade Prevention

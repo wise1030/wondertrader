@@ -178,8 +178,6 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
                 readUInt32(autoCancel, "maxAgeMs", _cfg.modules.auto_cancel_max_age_ms);
             _cfg.modules.auto_cancel_price_deviation =
                 readDouble(autoCancel, "priceDeviation", _cfg.modules.auto_cancel_price_deviation);
-            _cfg.modules.auto_cancel_inventory_cooldown_ms =
-                readUInt32(autoCancel, "inventoryLimitCooldownMs", _cfg.modules.auto_cancel_inventory_cooldown_ms);
         }
 
         // SelfTradePrevention: 已迁移到 StpConfig::fromVariant
@@ -1042,12 +1040,8 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
 
     double tick_size = tc.tick_size > 0 ? tc.tick_size : 1.0;
 
-    // Check auto-cancel on the tracker directly
-    bool inventory_hit = _portfolio ? _portfolio->isAnyLimitBreached() : false;
-    double current_risk_delta = tc.total_delta; // perf#4: Stage 2 缓存值 (本 tick 持仓未变)
-
     const auto& actions = _order_tracker->checkAutoCancel(
-        tc.code, tc.timestamp, tc.mid, tick_size, false, inventory_hit, current_risk_delta);
+        tc.code, tc.timestamp, tc.mid, tick_size, false);
 
     if (!actions.empty()) {
         for (const auto& action : actions) {

@@ -129,7 +129,6 @@ struct ModuleParams
     // AutoCancel (仍需保留)
     uint32_t auto_cancel_max_age_ms = 10000;
     double auto_cancel_price_deviation = 3.0;
-    uint32_t auto_cancel_inventory_cooldown_ms = 2000;
 
     // AdaptiveParam (仍需保留)
     uint32_t adaptive_update_interval = 100;
