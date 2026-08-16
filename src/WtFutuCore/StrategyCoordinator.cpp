@@ -63,14 +63,6 @@ std::string makeBilateralFilePath(const std::string& dir, uint32_t tdate)
     return dir + "/bilateral_stats_" + std::to_string(tdate) + ".log";
 }
 
-uint32_t tradingDateOf(uint32_t wallDate, uint32_t hhmm)
-{
-    if (wallDate == 0)
-        return 0;
-    // 夜盘 21:00-23:59 归属次一交易日；00:00 后 wall 日期已天然等于交易日期
-    return (hhmm >= 2100) ? TimeUtils::getNextDate(wallDate) : wallDate;
-}
-
 void ensureBilateralDir(const std::string& dir)
 {
     if (dir.empty())
@@ -1384,6 +1376,14 @@ void StrategyCoordinator::resetDaily()
     if (_risk_monitor) {
         _risk_monitor->resetDaily();
     }
+}
+
+uint32_t StrategyCoordinator::tradingDateOf(uint32_t wallDate, uint32_t hhmm)
+{
+    if (wallDate == 0)
+        return 0;
+    // 夜盘 21:00-23:59 归属次一交易日；00:00 后 wall 日期已天然等于交易日期
+    return (hhmm >= 2100) ? TimeUtils::getNextDate(wallDate) : wallDate;
 }
 
 void StrategyCoordinator::flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs)
