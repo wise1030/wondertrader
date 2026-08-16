@@ -283,21 +283,27 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
     if (bidId != 0) {
         bid_level.order_ids = {bidId};
         bid_level.price = qr.bidPrice;
-        bid_level.qty = qr.bidQty;
         _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
         if (_tracker && now > 0)
             _tracker->trackMMOrder(
                 bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
+        if (_tracker && now > 0)
+            recomputeLevelQty(bid_level);
+        else
+            bid_level.qty = qr.bidQty;
         ++placed;
     }
     if (askId != 0) {
         ask_level.order_ids = {askId};
         ask_level.price = qr.askPrice;
-        ask_level.qty = qr.askQty;
         _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
         if (_tracker && now > 0)
             _tracker->trackMMOrder(
                 askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
+        if (_tracker && now > 0)
+            recomputeLevelQty(ask_level);
+        else
+            ask_level.qty = qr.askQty;
         ++placed;
     }
     if (placed == 1) {
@@ -407,7 +413,10 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
         }
         if (!bid_level.order_ids.empty()) {
             bid_level.price = qr.bidPrice;
-            bid_level.qty = qr.bidQty;
+            if (_tracker && now > 0)
+                recomputeLevelQty(bid_level);
+            else
+                bid_level.qty = qr.bidQty;
         }
     }
 
@@ -433,7 +442,10 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
         }
         if (!ask_level.order_ids.empty()) {
             ask_level.price = qr.askPrice;
-            ask_level.qty = qr.askQty;
+            if (_tracker && now > 0)
+                recomputeLevelQty(ask_level);
+            else
+                ask_level.qty = qr.askQty;
         }
     }
 
@@ -491,7 +503,10 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
             }
             if (!bid_level.order_ids.empty()) {
                 bid_level.price = qr.bidPrice;
-                bid_level.qty = qr.bidQty;
+                if (_tracker && now > 0)
+                    recomputeLevelQty(bid_level);
+                else
+                    bid_level.qty = qr.bidQty;
             }
         }
     }
@@ -539,7 +554,10 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
             }
             if (!ask_level.order_ids.empty()) {
                 ask_level.price = qr.askPrice;
-                ask_level.qty = qr.askQty;
+                if (_tracker && now > 0)
+                    recomputeLevelQty(ask_level);
+                else
+                    ask_level.qty = qr.askQty;
             }
         }
     }
@@ -761,10 +779,11 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint
             if (_tracker)
                 _tracker->untrackOrder(localid);
             _order_id_to_level.erase(localid);
+            recomputeLevelQty(*level);
         } else {
-            level->qty = leftQty;
             if (_tracker)
                 _tracker->updateOrderQty(localid, leftQty);
+            recomputeLevelQty(*level);
 
             if (_tracker) {
                 UnifiedOrderInfo orderInfoBuf;
@@ -846,6 +865,21 @@ double FutuQuoter::totalAskQty() const
         if (level.hasOrders())
             total += level.qty;
     return total;
+}
+
+void FutuQuoter::recomputeLevelQty(QuoteLevel& level) const
+{
+    RecursiveSpinGuard _g(_lock);
+    if (!_tracker)
+        return; // 无 tracker 时保留调用方设置的 qty（兼容回测/无 tracker 路径）
+
+    double total = 0;
+    for (uint32_t id : level.order_ids) {
+        UnifiedOrderInfo oi;
+        if (_tracker->getOrderInfoCopy(id, oi) && oi.isActive() && !oi.isPendingCancel())
+            total += oi.qty;
+    }
+    level.qty = total;
 }
 
 bool FutuQuoter::isMyOrder(uint32_t localid) const

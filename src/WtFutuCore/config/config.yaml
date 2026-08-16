@@ -75,11 +75,11 @@ strategies:
 
         contracts:
           - code: SHFE.ag.ag2608
-            maxPosition: 30
+            maxPosition: 50
             maxDelta: 30
             targetPosition: 0
           - code: SHFE.ag.ag2612
-            maxPosition: 30
+            maxPosition: 50
             maxDelta: 30
             targetPosition: 0
 

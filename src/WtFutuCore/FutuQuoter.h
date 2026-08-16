@@ -327,6 +327,10 @@ private:
         return (newPrice > upper_bound || newPrice < lower_bound);
     }
 
+    /// 根据当前 tracker 中活跃子单重新汇总该档剩余量。
+    /// 用于避免 stra_buy/sell 拆成多子单时，最后一笔 onOrder 覆盖整档 qty。
+    void recomputeLevelQty(QuoteLevel& level) const;
+
 private:
     // v7.6 阶段3: per-quoter 递归自旋锁 — refreshQuotes/cancelAll(MdSpi)
     //   vs onTrade/onOrder/onEntrustAck/onScoutFill(TdSpi)。
