@@ -15,25 +15,6 @@
 namespace futu
 {
 
-namespace
-{
-// 撤单前防御：tracker 已 force-untrack 或订单已进入 PENDING_CANCEL 时，
-// FutuQuoter 本地 level 仍可能残留 stale id。此时不应再发 stra_cancel，
-// 只由调用方清理 level.order_ids / _order_id_to_level。
-// tracker 为空时保持旧行为（无条件撤单），避免破坏回测/无 tracker 路径。
-bool canSendCancel(const UnifiedOrderTracker* tracker, uint32_t order_id)
-{
-    if (!tracker)
-        return true;
-
-    UnifiedOrderInfo oi;
-    if (!tracker->getOrderInfoCopy(order_id, oi))
-        return false;
-
-    return !oi.isPendingCancel();
-}
-} // namespace
-
 FutuQuoter::FutuQuoter() : _tracker(nullptr)
 {
     RecursiveSpinGuard _g(_lock);
@@ -379,10 +360,8 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     // qty=0 侧: 仅撤存量单 (allow 阻断), 不挂新单
     if (bid_cancel_only) {
         for (uint32_t id : bid_level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::INVENTORY_LIMIT)) {
                 orderApiCall([&] { return _ctx->stra_cancel(id); });
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
             }
@@ -391,10 +370,8 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     }
     if (ask_cancel_only) {
         for (uint32_t id : ask_level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::INVENTORY_LIMIT)) {
                 orderApiCall([&] { return _ctx->stra_cancel(id); });
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
             }
@@ -405,10 +382,8 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     // 仅 need 侧: 撤残留 + 重挂 (stra_buy/sell 可能返回多个子单 ID, 全部跟踪)
     if (bid_need && qr.bidQty > 0) {
         for (uint32_t id : bid_level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::MANUAL)) {
                 orderApiCall([&] { return _ctx->stra_cancel(id); });
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::MANUAL);
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
             }
@@ -433,10 +408,8 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
 
     if (ask_need && qr.askQty > 0) {
         for (uint32_t id : ask_level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::MANUAL)) {
                 orderApiCall([&] { return _ctx->stra_cancel(id); });
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::MANUAL);
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
             }
@@ -473,10 +446,8 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
     // Bid
     if (qr.bidQty == 0) {
         for (uint32_t id : bid_level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::INVENTORY_LIMIT)) {
                 orderApiCall([&] { return _ctx->stra_cancel(id); });
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
             }
@@ -495,10 +466,8 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
         }
         if (need_update) {
             for (uint32_t id : bid_level.order_ids) {
-                if (canSendCancel(_tracker, id)) {
+                if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::PRICE_DEVIATION)) {
                     orderApiCall([&] { return _ctx->stra_cancel(id); });
-                    if (_tracker)
-                        _tracker->markPendingCancel(id, CancelReason::PRICE_DEVIATION);
                 } else {
                     WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
                 }
@@ -525,10 +494,8 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
     // Ask
     if (qr.askQty == 0) {
         for (uint32_t id : ask_level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::INVENTORY_LIMIT)) {
                 orderApiCall([&] { return _ctx->stra_cancel(id); });
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
             }
@@ -547,10 +514,8 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
         }
         if (need_update) {
             for (uint32_t id : ask_level.order_ids) {
-                if (canSendCancel(_tracker, id)) {
+                if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::PRICE_DEVIATION)) {
                     orderApiCall([&] { return _ctx->stra_cancel(id); });
-                    if (_tracker)
-                        _tracker->markPendingCancel(id, CancelReason::PRICE_DEVIATION);
                 } else {
                     WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
                 }
@@ -661,9 +626,7 @@ void FutuQuoter::cancelAll(wtp::IUftStraCtx* ctx)
 
     for (auto& level : _bid_levels) {
         for (uint32_t id : level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::MANUAL);
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::MANUAL)) {
                 orderApiCall([&] { return ctx->stra_cancel(id); });
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
@@ -675,9 +638,7 @@ void FutuQuoter::cancelAll(wtp::IUftStraCtx* ctx)
 
     for (auto& level : _ask_levels) {
         for (uint32_t id : level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::MANUAL);
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::MANUAL)) {
                 orderApiCall([&] { return ctx->stra_cancel(id); });
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
@@ -697,9 +658,7 @@ void FutuQuoter::cancelSide(wtp::IUftStraCtx* ctx, bool cancel_bid)
     auto& levels = cancel_bid ? _bid_levels : _ask_levels;
     for (auto& level : levels) {
         for (uint32_t id : level.order_ids) {
-            if (canSendCancel(_tracker, id)) {
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::INVENTORY_LIMIT);
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::INVENTORY_LIMIT)) {
                 orderApiCall([&] { return ctx->stra_cancel(id); });
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
@@ -736,9 +695,7 @@ bool FutuQuoter::onScoutFillCancelObligation(wtp::IUftStraCtx* ctx, uint32_t loc
                         info.is_bid ? "bid" : "ask",
                         _cfg.obligation_level);
         for (uint32_t id : ob_lv.order_ids) {
-            if (canSendCancel(_tracker, id)) {
-                if (_tracker)
-                    _tracker->markPendingCancel(id, CancelReason::MANUAL);
+            if (!_tracker || _tracker->tryMarkPendingCancel(id, CancelReason::MANUAL)) {
                 orderApiCall([&] { return ctx->stra_cancel(id); });
             } else {
                 WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, id);
@@ -808,7 +765,7 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint
                 UnifiedOrderInfo orderInfoBuf;
                 const UnifiedOrderInfo* orderInfo =
                     _tracker->getOrderInfoCopy(localid, orderInfoBuf) ? &orderInfoBuf : nullptr;
-                if (orderInfo && !orderInfo->isPendingCancel()) {
+                if (orderInfo) {
                     bool should_cancel = false;
                     if (orderInfo->isBid() && !_allow_bid)
                         should_cancel = true;
@@ -816,12 +773,15 @@ void FutuQuoter::onOrder(uint32_t localid, bool isCanceled, double leftQty, uint
                         should_cancel = true;
 
                     if (should_cancel && _ctx) {
-                        WTSLogger::warn(
-                            "[QUOTER] Post-submit cancel: {} order {} entered UnTrd but side blocked, cancelling",
-                            _cfg.code,
-                            localid);
-                        orderApiCall([&] { return _ctx->stra_cancel(localid); });
-                        _tracker->markPendingCancel(localid, CancelReason::INVENTORY_LIMIT);
+                        if (_tracker->tryMarkPendingCancel(localid, CancelReason::INVENTORY_LIMIT)) {
+                            WTSLogger::warn(
+                                "[QUOTER] Post-submit cancel: {} order {} entered UnTrd but side blocked, cancelling",
+                                _cfg.code,
+                                localid);
+                            orderApiCall([&] { return _ctx->stra_cancel(localid); });
+                        } else {
+                            WTSLogger::warn("FutuQuoter[{}]: skip stale/pending cancel order {}", _cfg.code, localid);
+                        }
                     }
                 }
             }

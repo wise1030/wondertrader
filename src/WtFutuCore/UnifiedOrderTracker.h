@@ -423,6 +423,20 @@ public:
         }
     }
 
+    /// 原子撤单标记：一次锁内完成“存在 && !pending_cancel”校验、扣 pending、置 pending_cancel。
+    /// 返回 true 表示本调用方成功取得撤单权，可以发送 stra_cancel；false 表示已由其他路径标记或订单不存在。
+    bool tryMarkPendingCancel(uint32_t orderId, CancelReason reason)
+    {
+        RecursiveSpinGuard _g(_lock);
+        UnifiedOrderInfo* order = getOrderByOrderId(orderId);
+        if (!order || order->isPendingCancel())
+            return false;
+
+        addPendingQty(order->code, order->isBid(), -order->qty);
+        order->setPendingCancel(reason);
+        return true;
+    }
+
     void clearPendingCancel(uint32_t orderId)
     {
         RecursiveSpinGuard _g(_lock);
