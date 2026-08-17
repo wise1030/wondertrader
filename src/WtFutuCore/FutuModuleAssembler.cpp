@@ -175,7 +175,6 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     // 配置历史上正负约定混用(默认 -200000, README 示例 50000), 统一取绝对值防御.
     portfolio_params.max_loss = std::abs(_config.risk.max_daily_loss);
     _portfolio->setParams(portfolio_params);
-    _portfolio->setUseUnifiedNetBook(_config.use_unified_net_book);
     _portfolio->setAnchorContract(_config.anchor_code);
 
     WTSLogger::info("FutuPortfolio: maxDelta={} (soft), hedgeRatio={}, maxExposure={}, maxLoss={}",

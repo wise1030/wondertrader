@@ -116,21 +116,7 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
         return;
 
     cs->last_price = lastPrice;
-    // v7.1: 分向簿有效时按方向分别计算浮盈 (与引擎口径一致,
-    //       不受 MM+arb 交织对净额均价的污染影响)
-    if (cs->long_qty > 0.01 || cs->short_qty > 0.01) {
-        cs->unrealized_pnl =
-            (cs->long_qty > 0.01 && cs->long_avg > 0 ? (lastPrice - cs->long_avg) * cs->long_qty * cs->multiplier : 0) +
-            (cs->short_qty > 0.01 && cs->short_avg > 0 ? (cs->short_avg - lastPrice) * cs->short_qty * cs->multiplier
-                                                       : 0);
-    } else if (cs->position != 0 && cs->avg_cost > 0) {
-        cs->unrealized_pnl = (lastPrice - cs->avg_cost) * cs->position * cs->multiplier;
-    } else if (cs->position == 0) {
-        // 平仓后清零浮盈, 避免残留浮盈与 realized_pnl 双重计数
-        cs->unrealized_pnl = 0;
-    }
-
-    // Update daily_pnl whenever markToMarket is called
+    // UnifiedNetBook：unrealized 由引擎 profit 权威更新，markToMarket 不再重算成本簿。
     updateDailyPnL(code);
 }
 
@@ -309,14 +295,12 @@ void FutuPortfolio::setShadowFromEngine(const std::string& code,
     cs->shadow_realized_pnl = engine_realized;
     cs->shadow_unrealized_pnl = engine_unrealized;
 
-    if (_use_unified_net_book) {
-        // 切换后：引擎 profit 为唯一权威，旧双簿字段同步为影子值。
-        cs->position = engine_net;
-        cs->realized_pnl = engine_realized;
-        cs->unrealized_pnl = engine_unrealized;
-        syncDirectionalFromNet(cs, engine_net, 0);
-        updateDailyPnL(code);
-    }
+    // UnifiedNetBook 为唯一权威：canonical 字段直接镜像引擎 net/profit。
+    cs->position = engine_net;
+    cs->realized_pnl = engine_realized;
+    cs->unrealized_pnl = engine_unrealized;
+    syncDirectionalFromNet(cs, engine_net, 0);
+    updateDailyPnL(code);
 }
 
 void FutuPortfolio::markShadowStale(const std::string& code)

@@ -832,6 +832,10 @@ void StrategyCoordinator::updateMarketData(wtp::IUftStraCtx* ctx, TickContext& t
     // Update portfolio (position and prices)
     if (_portfolio) {
         _portfolio->onTick(tc.code.c_str(), tick);
+        _portfolio->setShadowFromEngine(tc.code,
+                                        ctx->stra_get_local_position(tc.code.c_str()),
+                                        ctx->stra_get_local_closeprofit(tc.code.c_str()),
+                                        ctx->stra_get_local_posprofit(tc.code.c_str()));
         auto mid_it = _last_mid.find(tc.code);
         if (mid_it != _last_mid.end() && mid_it->second)
             mid_it->second->v.store(tc.mid, std::memory_order_relaxed);

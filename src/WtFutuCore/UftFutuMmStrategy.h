@@ -103,8 +103,6 @@ struct FutuMmConfig
     /// channel ready / session begin 时是否用账户实际净仓同步本策略配置合约。
     /// 仅适用于“合约归属唯一”场景；多策略共享合约时必须保持 false。
     bool sync_account_position = false;
-    /// 是否启用 UnifiedNetBook（引擎 profit 权威）。默认 false=影子期，验证后再切 true。
-    bool use_unified_net_book = false;
 
     struct Portfolio
     {
