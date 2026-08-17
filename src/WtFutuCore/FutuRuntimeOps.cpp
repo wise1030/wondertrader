@@ -109,6 +109,9 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         _portfolio->onTradeFill(stdCode, isLong, static_cast<int>(offset), vol, price);
         _portfolio_ctx_dirty = true;
 
+        ContractState cs_before_sync;
+        bool has_before = _portfolio->getContractSnapshot(stdCode, cs_before_sync);
+
         // UnifiedNetBook 影子簿：从引擎本地 profit 镜像，不参与决策，仅用于对账。
         _portfolio->setShadowFromEngine(stdCode,
                                         local_net,
@@ -117,10 +120,9 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
 
         double shadow_net = _portfolio->getShadowNet(stdCode);
         double shadow_realized = _portfolio->getShadowRealizedPnl(stdCode);
-        ContractState cs_before_resync;
-        if (_portfolio->getContractSnapshot(stdCode, cs_before_resync)) {
-            if (std::abs(cs_before_resync.position - shadow_net) > 0.01 ||
-                std::abs(cs_before_resync.realized_pnl - shadow_realized) > 0.01) {
+        if (has_before) {
+            if (std::abs(cs_before_sync.position - shadow_net) > 0.01 ||
+                std::abs(cs_before_sync.realized_pnl - shadow_realized) > 0.01) {
                 _portfolio->markShadowStale(stdCode);
                 if (_risk_monitor)
                     _risk_monitor->broadcastCostBasisStale(stdCode);
@@ -128,23 +130,23 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
                                 "old_realized={:.2f} shadow_realized={:.2f}",
                                 s.id(),
                                 stdCode,
-                                cs_before_resync.position,
+                                cs_before_sync.position,
                                 shadow_net,
-                                cs_before_resync.realized_pnl,
+                                cs_before_sync.realized_pnl,
                                 shadow_realized);
+            } else {
+                _portfolio->clearShadowStale(stdCode);
             }
-        }
 
-        // 净持仓以引擎真值校验 (防漏单/异常路径漂移)
-        ContractState cs_chk_buf;
-        const ContractState* cs_chk = _portfolio->getContractSnapshot(stdCode, cs_chk_buf) ? &cs_chk_buf : nullptr;
-        if (cs_chk && std::abs(cs_chk->position - local_net) > 0.01) {
-            WTSLogger::warn("UftFutuMmStrategy[{}] position book divergence: {} book={:.0f} engine={:.0f}, resyncing",
-                            s.id(),
-                            stdCode,
-                            cs_chk->position,
-                            local_net);
-            _portfolio->resyncPosition(stdCode, local_net);
+            // 净持仓以引擎真值校验 (防漏单/异常路径漂移)
+            if (std::abs(cs_before_sync.position - local_net) > 0.01) {
+                WTSLogger::warn("UftFutuMmStrategy[{}] position book divergence: {} book={:.0f} engine={:.0f}, resyncing",
+                                s.id(),
+                                stdCode,
+                                cs_before_sync.position,
+                                local_net);
+                _portfolio->resyncPosition(stdCode, local_net);
+            }
         }
     }
 
@@ -418,11 +420,8 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     bool has_valid_price = false; // 是否有有效价格用于 delta 计算
 
     for (const auto& ci : _contract_infos) {
-        // 默认使用策略本地持仓；仅当配置 syncAccountPosition=true 且合约归属唯一时，
-        // 才以账户实际净仓同步本策略配置合约。
-        double local_net = s._config.sync_account_position
-                               ? ctx->stra_get_position(ci.code.c_str())
-                               : ctx->stra_get_local_position(ci.code.c_str());
+        // UnifiedNetBook：唯一权威为策略本地净仓。账户持仓只做对账，不进入策略簿。
+        double local_net = ctx->stra_get_local_position(ci.code.c_str());
 
         // 尝试获取当前价格用于 Delta 计算
         // 只使用 _last_mid (最新中间价)，这是从已收到的 tick 中计算的
@@ -445,7 +444,7 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
                             ci.code,
                             currentPos,
                             local_net,
-                            s._config.sync_account_position ? "account" : "local");
+                            "local");
         }
         _portfolio->setShadowFromEngine(ci.code,
                                         local_net,

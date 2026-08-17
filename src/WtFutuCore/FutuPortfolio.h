@@ -75,6 +75,8 @@ struct ContractState
     double shadow_realized_pnl = 0.0;
     double shadow_unrealized_pnl = 0.0;
     bool shadow_stale = false; ///< 影子簿或成本基不可信，风控应降级处理
+    double day_open_unrealized = 0.0;       ///< 当日首次引擎浮盈锚点
+    bool day_unrealized_anchor_valid = false;
 
     // Market data (last_price 已前置, perf#11)
     double bid1; ///< Best bid
@@ -307,6 +309,7 @@ public:
                              double engine_realized,
                              double engine_unrealized);
     void markShadowStale(const std::string& code);
+    void clearShadowStale(const std::string& code);
     bool isShadowStale(const std::string& code) const;
     bool hasStaleCostBasis() const;
     double getShadowNet(const std::string& code) const;

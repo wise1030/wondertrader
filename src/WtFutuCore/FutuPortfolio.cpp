@@ -140,6 +140,8 @@ void FutuPortfolio::resetDailyPnl()
         cs.realized_pnl = 0;
         cs.unrealized_pnl = 0;
         cs.daily_pnl = 0;
+        cs.day_open_unrealized = 0;
+        cs.day_unrealized_anchor_valid = false;
     }
 }
 
@@ -221,12 +223,20 @@ void FutuPortfolio::setShadowFromEngine(const std::string& code,
 
     cs->shadow_net = engine_net;
     cs->shadow_realized_pnl = engine_realized;
-    cs->shadow_unrealized_pnl = engine_unrealized;
+
+    if (!cs->day_unrealized_anchor_valid) {
+        cs->day_open_unrealized = engine_unrealized;
+        cs->day_unrealized_anchor_valid = true;
+    }
+    double day_unrealized = engine_unrealized - cs->day_open_unrealized;
+    cs->shadow_unrealized_pnl = day_unrealized;
 
     // UnifiedNetBook 为唯一权威：canonical 字段直接镜像引擎 net/profit。
+    double prev = cs->position;
     cs->position = engine_net;
     cs->realized_pnl = engine_realized;
-    cs->unrealized_pnl = engine_unrealized;
+    cs->unrealized_pnl = day_unrealized;
+    checkOvershootSignFlip(code.c_str(), prev, engine_net);
     updateDailyPnL(code);
 }
 
@@ -236,6 +246,14 @@ void FutuPortfolio::markShadowStale(const std::string& code)
     ContractState* cs = getContract(code);
     if (cs)
         cs->shadow_stale = true;
+}
+
+void FutuPortfolio::clearShadowStale(const std::string& code)
+{
+    RecursiveSpinGuard _g(_lock);
+    ContractState* cs = getContract(code);
+    if (cs)
+        cs->shadow_stale = false;
 }
 
 bool FutuPortfolio::isShadowStale(const std::string& code) const

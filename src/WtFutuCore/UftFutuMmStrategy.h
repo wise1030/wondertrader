@@ -100,9 +100,6 @@ struct FutuMmConfig
     std::string coordinator_config;
     std::string spread_arbitrage_config;
     bool is_backtest = false;
-    /// channel ready / session begin 时是否用账户实际净仓同步本策略配置合约。
-    /// 仅适用于“合约归属唯一”场景；多策略共享合约时必须保持 false。
-    bool sync_account_position = false;
 
     struct Portfolio
     {
