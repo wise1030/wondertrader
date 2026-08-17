@@ -86,8 +86,8 @@ void MonitorBridge::onSessionEnd(wtp::IUftStraCtx* ctx, uint32_t uTDate)
 
     double closeprofit = 0, dynprofit = 0;
     for (const auto& cs : _portfolio->getAllContractsSnapshot()) {
-        closeprofit += cs.realized_pnl;
-        dynprofit += cs.unrealized_pnl;
+        closeprofit += cs.shadow_realized_pnl;
+        dynprofit += cs.shadow_unrealized_pnl;
     }
     appendFundsCsv(uTDate, closeprofit, dynprofit, 0.0);
 }
@@ -103,18 +103,18 @@ void MonitorBridge::doFlush(uint32_t tdate)
     // === 持仓 (契约对齐 CtaStraBaseCtx::save_data) ===
     rj::Value jPos(rj::kArrayType);
     for (const auto& cs : _portfolio->getAllContractsSnapshot()) {
-        total_profit += cs.realized_pnl;
-        total_dynprofit += cs.unrealized_pnl;
+        total_profit += cs.shadow_realized_pnl;
+        total_dynprofit += cs.shadow_unrealized_pnl;
 
-        double volume = std::abs(cs.position);
+        double volume = std::abs(cs.shadow_net);
         if (volume == 0.0)
             continue; // GUI 也过滤 volume=0, 直接不写
 
         rj::Value pItem(rj::kObjectType);
         pItem.AddMember("code", rj::Value(cs.code.c_str(), allocator), allocator);
         pItem.AddMember("volume", volume, allocator);
-        pItem.AddMember("closeprofit", cs.realized_pnl, allocator);
-        pItem.AddMember("dynprofit", cs.unrealized_pnl, allocator);
+        pItem.AddMember("closeprofit", cs.shadow_realized_pnl, allocator);
+        pItem.AddMember("dynprofit", cs.shadow_unrealized_pnl, allocator);
         pItem.AddMember("lastentertime", 0, allocator);
         pItem.AddMember("lastexittime", 0, allocator);
         pItem.AddMember("frozen", 0.0, allocator);
@@ -131,19 +131,15 @@ void MonitorBridge::doFlush(uint32_t tdate)
             dItem.AddMember("volume", qty, allocator);
             dItem.AddMember("opentime", (uint64_t)0, allocator);
             dItem.AddMember("opentdate", tdate, allocator);
-            dItem.AddMember("profit", cs.unrealized_pnl, allocator);
+            dItem.AddMember("profit", cs.shadow_unrealized_pnl, allocator);
             dItem.AddMember("maxprofit", 0.0, allocator);
             dItem.AddMember("maxloss", 0.0, allocator);
             dItem.AddMember("opentag", "", allocator);
             dItem.AddMember("openbarno", 0, allocator);
             details.PushBack(dItem, allocator);
         };
-        if (cs.long_qty > 0)
-            addDetail(true, cs.long_qty, cs.long_avg);
-        if (cs.short_qty > 0)
-            addDetail(false, cs.short_qty, cs.short_avg);
-        if (cs.long_qty <= 0 && cs.short_qty <= 0)
-            addDetail(cs.position > 0, volume, cs.avg_cost); // 兜底: 净头寸
+        // UnifiedNetBook：仅输出净仓明细，不再暴露旧双簿成本。
+        addDetail(cs.shadow_net > 0, volume, cs.last_price);
 
         pItem.AddMember("details", details, allocator);
         jPos.PushBack(pItem, allocator);
