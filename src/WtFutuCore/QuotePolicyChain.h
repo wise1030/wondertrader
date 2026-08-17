@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cmath>
 #include <algorithm>
+#include <unordered_set>
 #include "../WTSTools/WTSLogger.h"
 #include "SpreadOptimizer.h"
 #include "ToxicFlowDetector.h"
@@ -51,6 +52,7 @@ struct QuotePolicyContext
     double tick_size = 0.0;
     double upper_limit = 0.0;
     double lower_limit = 0.0;
+    double last_price = 0.0; ///< 最新成交价 (L0 触板判定, 0=无成交)
     uint64_t timestamp = 0;
     bool cold_start = false;
 
@@ -241,6 +243,7 @@ private:
 
 //==============================================================================
 // 4. LimitPricePolicy — 涨跌停保护 (P0-2)
+//    L0: 交易价触板 → 全停 (义务报价豁免, 含 force_obligation)
 //    L1: 距涨跌停 <= 20 ticks → 加宽 spread 2x
 //    L2: 距涨跌停 <= 10 ticks → block 加仓侧
 //    L3: 锁板(mid ≈ 涨跌停) → 双边暂停
@@ -252,6 +255,31 @@ public:
     {
         if (!(ctx.upper_limit > 0 && ctx.lower_limit > 0 && ctx.tick_size > 0))
             return;
+
+        // L0: 交易价触板 → 全停 (交易所义务豁免口径: 最新价触板即豁免, 不等锁板)
+        //     守卫 last_price>0: 盘前/无成交时段 last=0, 否则恒触发下板误判
+        //     精确比较: 成交价不可能越过板价, 触板即 last==板价 (浮点精确表示)
+        //     日志按进入/离开触板状态跳变打, 避免贴板期间每 tick 日志洪水
+        if (ctx.last_price > 0 && std::isfinite(ctx.last_price)) {
+            if (ctx.last_price >= ctx.upper_limit) {
+                st.allow_bid = false;
+                st.allow_ask = false;
+                if (_touch_active.insert(ctx.code).second)
+                    WTSLogger::error("[LIMIT-TOUCH] {} last={} touches UPPER {}, STOP all quotes",
+                                     ctx.code, ctx.last_price, ctx.upper_limit);
+                return;
+            }
+            if (ctx.last_price <= ctx.lower_limit) {
+                st.allow_bid = false;
+                st.allow_ask = false;
+                if (_touch_active.insert(ctx.code).second)
+                    WTSLogger::error("[LIMIT-TOUCH] {} last={} touches LOWER {}, STOP all quotes",
+                                     ctx.code, ctx.last_price, ctx.lower_limit);
+                return;
+            }
+        }
+        if (_touch_active.erase(ctx.code) > 0)
+            WTSLogger::info("[LIMIT-TOUCH] {} last={} off limit, resume quoting", ctx.code, ctx.last_price);
 
         double dist_upper = (ctx.upper_limit - ctx.mid) / ctx.tick_size;
         double dist_lower = (ctx.mid - ctx.lower_limit) / ctx.tick_size;
@@ -288,6 +316,9 @@ public:
             WTSLogger::error("[LIMIT] {} LOCKED at limit, PAUSE all quotes", ctx.code);
         }
     }
+
+private:
+    std::unordered_set<std::string> _touch_active; ///< L0 触板状态 (日志跳变节流)
 };
 
 //==============================================================================

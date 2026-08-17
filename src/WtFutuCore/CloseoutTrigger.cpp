@@ -47,6 +47,10 @@ bool CloseoutTrigger::process(wtp::IUftStraCtx* ctx, TickContext& tc)
 
     case CloseoutSub::FAILED: {
         uint64_t now_ms = tc.timestamp;
+        // 非交易时段不 retry: 收盘/休市期间发出的减仓单必被柜台拒绝,
+        // 空耗 retry 配额 (2026-08-17: 15:00 收盘后 15:16 仍在无效 retry)
+        if (!tc.is_trading_session)
+            return true;
         if (_deps.risk_monitor->checkCloseoutRetry(now_ms)) {
             if (_deps.cancel_all_quotes) _deps.cancel_all_quotes(ctx);
             if (_deps.portfolio) {

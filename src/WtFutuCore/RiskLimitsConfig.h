@@ -42,7 +42,7 @@ struct RiskRateLimits
         : max_orders_per_sec(50), max_cancels_per_sec(30), max_trades_per_sec(20), max_delta_change_per_sec(3.0),
           delta_rate_window_sec(2), delta_rate_cooldown_ms(15000), position_breach_pause_threshold(1.2),
           delta_critical_mult(1.5), delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9),
-          position_hard_block_ratio(1.0), widen_threshold(1), max_consecutive_same_side(3), same_side_window_ms(3000),
+          position_hard_block_ratio(1.0), widen_threshold(1), max_consecutive_same_side(5), same_side_window_ms(3000),
           same_side_pause_ms(5000)
     {}
 
@@ -62,7 +62,7 @@ struct RiskRateLimits
         r.position_warning_l2 = FutuConfig::readDouble(v, "positionWarningL2", 0.9);
         r.position_hard_block_ratio = FutuConfig::readDouble(v, "positionHardBlockRatio", 1.0);
         r.widen_threshold = FutuConfig::readUInt32(v, "widenThreshold", 1);
-        r.max_consecutive_same_side = FutuConfig::readUInt32(v, "maxConsecutiveSameSide", 3);
+        r.max_consecutive_same_side = FutuConfig::readUInt32(v, "maxConsecutiveSameSide", 5);
         r.same_side_window_ms = FutuConfig::readUInt32(v, "sameSideWindowMs", 3000);
         r.same_side_pause_ms = FutuConfig::readUInt32(v, "sameSidePauseMs", 5000);
         return r;

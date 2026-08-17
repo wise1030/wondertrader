@@ -497,10 +497,10 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     // Check if risk utilization is below recovery threshold
     const PortfolioParams& params = portfolio->getParams();
 
-    // Check delta utilization (软指标)
-    double delta_util = portfolio->getPortfolioDeltaUtilization();
-    if (delta_util > _recovery_config.recovery_threshold)
-        return false;
+    // 不检查 delta_utilization: delta 是软指标, 职责是调节 skew
+    // (见 checkRiskLimits 注释 "不触发硬风控动作"), 不应作为恢复硬闸门 —
+    // 否则 "HALT→无法交易→delta 降不下来→永不恢复" 死锁
+    // (2026-08-17 ao 实盘: delta_util=1.7 挡住全天 2232 次恢复检查)。
 
     // Check exposure utilization (use gross exposure)
     double exposure = portfolio->getTotalGrossExposure();

@@ -59,6 +59,7 @@ struct TickContext
     double bid_px;
     double ask_px;
     double mid;
+    double last_px; ///< 最新成交价 (L0 触板判定, 0=无成交)
     uint64_t timestamp;
     uint32_t time_hms;
     uint32_t date;
@@ -94,7 +95,8 @@ struct TickContext
     double total_exposure = 0.0;
 
     TickContext()
-        : bid_px(0), ask_px(0), mid(0), timestamp(0), time_hms(0), date(0), is_trading_session(false),
+        : bid_px(0), ask_px(0), mid(0), last_px(0), timestamp(0), time_hms(0), date(0),
+          is_trading_session(false),
           market_state_paused(false), toxicity_paused(false), tick_size(0), upper_limit(0),
           lower_limit(0)
     {}
@@ -415,6 +417,7 @@ private:
     uint64_t _last_perf_ms = 0;                 // v7.7 C3: perf 统计节流 (原 static, 跨实例共享)
     uint64_t _last_summary_ms = 0;              // v7.7 C3: 60s 摘要节流 (原 static)
     uint64_t _nan_tick_cnt = 0;                 // v7.7 C3: nan tick 计数 (原 static thread_local)
+    uint64_t _limit_skip_cnt = 0;               // 锁板单边盘口 skip 计数 (日志节流)
     uint64_t _last_pause_diag_ms = 0;           // 上次shouldPause诊断日志时间戳(ms)
 
     // 5A-2: 报价决策链 (GLFT 后的 6 个调整阶段; 软风控倍数/毒性冷却

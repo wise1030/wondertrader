@@ -732,6 +732,7 @@ bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::
     // Extract prices
     tc.bid_px = tick->bidprice(0);
     tc.ask_px = tick->askprice(0);
+    tc.last_px = tick->price(); // L0 触板判定用最新成交价 (无成交时段=0, 由 LimitPricePolicy 守卫)
 
     // nan/inf tick 防御 — IEEE754 下 nan<=0 == false,会绕过 <=0 校验
     // 历史教训: EC 数据存在 ts=0859... 预开盘 nan tick 污染 SpreadCalculator 的 leg_history,
@@ -748,6 +749,19 @@ bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::
     }
 
     if (tc.bid_px <= 0 || tc.ask_px <= 0) {
+        // 锁板单边盘口: 报价循环跳过, L0 触板撤单不会执行 -> 存量单残留。
+        // 已知边角: 开盘/跳空即锁板时无前置触板 tick, 残留单挂板价队列,
+        // 开板回落时可能被逆选择成交。此处仅告警 (严格撤单需 Quoter 级 cancelAll 入口)。
+        // 注: tc.upper/lower_limit 与 tc.tick_size 在本分支之后才填充,
+        //     直接读 tick, 且用精确比较 (成交价不可能越过板价)。
+        double ul = tick->upperlimit(), ll = tick->lowerlimit();
+        if (tc.last_px > 0 && ((ul > 0 && tc.last_px >= ul) || (ll > 0 && tc.last_px <= ll))) {
+            if ((++_limit_skip_cnt & 0xFF) == 1) { // 每 256 次打一条,避免日志洪水
+                WTSLogger::warn("StrategyCoordinator: {} one-sided book at limit (last={} ul={} ll={}), "
+                                "quote cycle skipped, residual orders may remain (cnt={})",
+                                tc.code, tc.last_px, ul, ll, _limit_skip_cnt);
+            }
+        }
         return false;
     }
 
@@ -1088,6 +1102,7 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
     pctx.tick_size = tc.tick_size;
     pctx.upper_limit = tc.upper_limit;
     pctx.lower_limit = tc.lower_limit;
+    pctx.last_price = tc.last_px;
     pctx.timestamp = tc.timestamp;
     pctx.cold_start = cold_start;
     pctx.spread_opt = tc.spread_opt;

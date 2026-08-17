@@ -66,9 +66,15 @@ void CloseoutOrchestrator::onTick(wtp::IUftStraCtx* ctx, wtp::WTSTickData* tick,
         //   HALT 撤销 CLOSEOUT 在途单后 inflight=0 -> 下一轮继续发。
         //   转 FAILED 终态, 由风控恢复/retry 机制接管 (有界 max_retries)。
         //   注意: closeout 流程自身只 pauseQuoting 不 haltTrading, 此门不误伤。
-        if (_deps.risk_monitor->isTradingHalted()) {
+        // v7.9: 仅 IRREVERSIBLE halt 阻断。REVERSIBLE halt (报单错误等)
+        //   不应拦截减仓 — closeout 是风险收敛, 与 halt 目的不悖;
+        //   且 REVERSIBLE halt 只撤 MM quoter 单, 不动 OrderRouter 的
+        //   closeout 在途单, T2 重发循环问题在此类 halt 下不存在。
+        //   (2026-08-17 ao 实盘: 报单错误 halt 锁死收盘减仓, 裸仓过夜)
+        if (_deps.risk_monitor->isTradingHalted() &&
+            _deps.risk_monitor->getHaltCategory() == RiskCategory::IRREVERSIBLE) {
             if (_deps.risk_monitor->getCloseoutSub() != CloseoutSub::FAILED) {
-                WTSLogger::error("[CLOSEOUT] Trading halted during flattening, abort executor -> FAILED");
+                WTSLogger::error("[CLOSEOUT] Trading halted (IRREVERSIBLE) during flattening, abort executor -> FAILED");
                 _deps.risk_monitor->markCloseoutFailed(_now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow());
             }
             return;

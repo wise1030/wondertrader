@@ -107,3 +107,42 @@ TEST(SideFillBreakerTest, DisabledWhenThresholdZero)
         EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + i * 100));
     EXPECT_FALSE(b.isPaused("SHFE.ao2610", t0 + 1000));
 }
+
+TEST(SideFillBreakerTest, ReducingFillsDoNotTrigger)
+{
+    SideFillBreaker b(makeCfg(3, 3000, 5000));
+    const uint64_t t0 = 1000000;
+    // 减仓方向 (adds_inventory=false) 的连续成交不累计、不触发
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0, false));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 100, false));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 200, false));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 300, false));
+    EXPECT_FALSE(b.isPaused("SHFE.ao2610", t0 + 400));
+}
+
+TEST(SideFillBreakerTest, ReducingFillResetsOppositeStreak)
+{
+    SideFillBreaker b(makeCfg(3, 3000, 5000));
+    const uint64_t t0 = 1000000;
+    // 加仓卖出 2 笔 -> 减仓买入 1 笔 (打断卖序列) -> 加仓卖出 2 笔, 不应触发
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", false, t0, true));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", false, t0 + 100, true));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 200, false)); // 减仓买入, 打断卖序列
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", false, t0 + 300, true)); // 卖序列重新计数 1
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", false, t0 + 400, true)); // 2
+    EXPECT_FALSE(b.isPaused("SHFE.ao2610", t0 + 500));
+    // 再来 1 笔加仓卖出 -> 满 3 笔触发
+    EXPECT_TRUE(b.onFill("SHFE.ao2610", false, t0 + 500, true));
+}
+
+TEST(SideFillBreakerTest, MixedAddAndReduce)
+{
+    SideFillBreaker b(makeCfg(3, 3000, 5000));
+    const uint64_t t0 = 1000000;
+    // 加仓买入 2 笔 -> 减仓买入 2 笔 (不累计) -> 加仓买入 1 笔, 满 3 笔加仓才触发
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0, true));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 100, true));
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 200, false)); // 减仓, 不累计
+    EXPECT_FALSE(b.onFill("SHFE.ao2610", true, t0 + 300, false)); // 减仓, 不累计
+    EXPECT_TRUE(b.onFill("SHFE.ao2610", true, t0 + 400, true));   // 第 3 笔加仓 -> 触发
+}

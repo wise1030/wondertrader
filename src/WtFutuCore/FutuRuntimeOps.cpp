@@ -81,8 +81,12 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     // （收盘减仓由 CloseoutExecutor 自行限速, 避免暂停循环）。
     // 作用域: 仅暂停 MM 报价（FutuQuoter）。OrderRouter 的 closeout/taker/arb
     // 减仓对冲单不受影响——这些是风控减仓动作，暂停期间仍应允许执行。
+    // adds_inventory: 持仓为 pre-fill 值 (onTradeFill 在下方才更新);
+    // 持多时卖出/持空时买入 = 减仓, 只打断反侧序列不累计熔断。
+    const double pos_prefill = _portfolio ? _portfolio->getPosition(stdCode) : 0.0;
+    const bool adds_inventory = (is_buy && pos_prefill >= 0) || (!is_buy && pos_prefill <= 0);
     if (_risk_monitor && !_trading_state.isCloseoutActive() &&
-        _risk_monitor->onSideFill(stdCode, is_buy, _exchange_time_ms)) {
+        _risk_monitor->onSideFill(stdCode, is_buy, _exchange_time_ms, adds_inventory)) {
         auto qit = _quoters.find(stdCode);
         if (qit != _quoters.end() && qit->second)
             qit->second->cancelAll(ctx);
@@ -388,9 +392,11 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     bool has_valid_price = false; // 是否有有效价格用于 delta 计算
 
     for (const auto& ci : _contract_infos) {
-        // 使用策略本地持仓（而不是账户持仓）
-        // 一个账户可能有多个策略，每个策略只管理自己的持仓
-        double local_net = ctx->stra_get_local_position(ci.code.c_str());
+        // 默认使用策略本地持仓；仅当配置 syncAccountPosition=true 且合约归属唯一时，
+        // 才以账户实际净仓同步本策略配置合约。
+        double local_net = s._config.sync_account_position
+                               ? ctx->stra_get_position(ci.code.c_str())
+                               : ctx->stra_get_local_position(ci.code.c_str());
 
         // 尝试获取当前价格用于 Delta 计算
         // 只使用 _last_mid (最新中间价)，这是从已收到的 tick 中计算的
@@ -408,17 +414,18 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
             if (price > 0) {
                 _portfolio->markToMarket(ci.code, price);
             }
-            WTSLogger::info("UftFutuMmStrategy[{}] Position sync: {} local_portfolio={} -> local_net={}",
+            WTSLogger::info("UftFutuMmStrategy[{}] Position sync: {} portfolio={} -> source_net={} (source={})",
                             s.id(),
                             ci.code,
                             currentPos,
-                            local_net);
+                            local_net,
+                            s._config.sync_account_position ? "account" : "local");
         }
 
         // 记录日志
         if (price > 0) {
             WTSLogger::info(
-                "UftFutuMmStrategy[{}] Contract {} synced: local_net={}, multiplier={}, tickSize={}, price={:.2f}",
+                "UftFutuMmStrategy[{}] Contract {} synced: net={}, multiplier={}, tickSize={}, price={:.2f}",
                 s.id(),
                 ci.code,
                 local_net,
@@ -426,7 +433,7 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
                 ci.tick_size,
                 price);
         } else {
-            WTSLogger::warn("UftFutuMmStrategy[{}] Contract {} synced: local_net={}, NO PRICE (delta will be 0, "
+            WTSLogger::warn("UftFutuMmStrategy[{}] Contract {} synced: net={}, NO PRICE (delta will be 0, "
                             "waiting for first tick)",
                             s.id(),
                             ci.code,
@@ -747,12 +754,14 @@ void FutuRuntimeOps::onEntrust(
     }
 
     // 报单失败 — 通用计数
+    // 注: 柜台错误分类 (平仓不足 50/51 / 资金不足 31 等) 属框架层职责,
+    //     策略层不得解析柜台错误码/文本 (见 AGENTS.md §2 与"已知外部限制")
     std::string errMsg = message ? message : "";
     _order_error_count++;
 
     WTSLogger::error("UftFutuMmStrategy[{}] Order FAILED (count={}/{}): localid={}, error={}",
                      s.id(),
-                     _order_error_count,
+                     _order_error_count.load(),
                      _config.order_control.order_error_threshold,
                      localid,
                      errMsg);

@@ -272,9 +272,10 @@ public:
     /// 同侧连续成交熔断（按合约独立计数）: 记录一笔成交,
     /// 返回 true 表示本次触发了熔断（调用方应立即撤该合约全部报价）。
     /// 暂停到期自动恢复；CLOSEOUT 阶段由调用方豁免（不调用本方法）。
-    bool onSideFill(const std::string& code, bool is_buy, uint64_t now_ms)
+    /// adds_inventory=false 的减仓成交只打断反侧序列, 不累计熔断。
+    bool onSideFill(const std::string& code, bool is_buy, uint64_t now_ms, bool adds_inventory = true)
     {
-        return _side_fill_breaker.onFill(code, is_buy, now_ms);
+        return _side_fill_breaker.onFill(code, is_buy, now_ms, adds_inventory);
     }
 
     /// 查询该合约是否处于熔断暂停期（合约级双边暂停，报价路径每 tick 调用）

@@ -27,6 +27,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     //------------------------------------------------------------
     _config.anchor_code = cfg->getCString("anchorCode");
     _config.is_backtest = readBool(cfg, "isBacktest", false);
+    _config.sync_account_position = readBool(cfg, "syncAccountPosition", false);
 
     //------------------------------------------------------------
     // 读取配置文件路径
@@ -180,6 +181,13 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     // 参数边界校验（不影响运行时延迟）
     //------------------------------------------------------------
     {
+        if (_config.is_backtest && _config.sync_account_position) {
+            WTSLogger::error("UftFutuMmStrategy[{}] syncAccountPosition=true is not allowed in backtest mode; "
+                             "backtest must use local position source",
+                             id);
+            return false;
+        }
+
         // Delta 软指标参数校验（用于 skew 和对冲决策，不触发风控）
         if (_config.portfolio.max_delta <= 0 || _config.portfolio.max_delta > 100000000) {
             WTSLogger::error(

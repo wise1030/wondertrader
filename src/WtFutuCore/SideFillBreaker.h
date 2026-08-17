@@ -29,10 +29,10 @@
 namespace futu
 {
 
-/// 熔断器配置（默认值: 3 笔 / 3s 窗口 / 5s 暂停）
+/// 熔断器配置（默认值: 5 笔 / 3s 窗口 / 5s 暂停）
 struct SideFillBreakerConfig
 {
-    uint32_t max_consecutive_same_side = 3; ///< 同侧连续成交触发阈值 (0=禁用)
+    uint32_t max_consecutive_same_side = 5; ///< 同侧连续成交触发阈值 (0=禁用)
     uint32_t window_ms = 3000;              ///< 连续计数窗口 (ms)
     uint32_t pause_ms = 5000;               ///< 触发后暂停该合约报价时长 (ms)
 };
@@ -57,7 +57,11 @@ public:
     const SideFillBreakerConfig& config() const { return _cfg; }
 
     /// 记录一笔成交；返回 true 表示本次触发了熔断（调用方应立即撤单并暂停报价）。
-    bool onFill(const std::string& code, bool is_buy, uint64_t now_ms)
+    /// adds_inventory=false (减仓方向的成交: 持多时卖出/持空时买入) 只打断反侧
+    /// 连续序列, 不累计熔断 — 降低库存的成交是被鼓励的逆向交易, 熔断它会把
+    /// 策略在回补段拽出场, 形成"卖出→回补被熔断→恢复后再被卖出"棘轮
+    /// (2026-08-17 ao 实盘: 10 次买方熔断中多数是回补空单的正确交易)。
+    bool onFill(const std::string& code, bool is_buy, uint64_t now_ms, bool adds_inventory = true)
     {
         SpinLockGuard _g(_flag);
         if (_cfg.max_consecutive_same_side == 0 || _cfg.pause_ms == 0)
@@ -80,6 +84,10 @@ public:
             st.bid_count = 0;
             st.bid_window_start_ms = 0;
         }
+
+        // 减仓方向的成交不累计熔断 (反侧打断逻辑仍执行)
+        if (!adds_inventory)
+            return false;
 
         uint32_t& count = is_buy ? st.bid_count : st.ask_count;
         uint64_t& window_start = is_buy ? st.bid_window_start_ms : st.ask_window_start_ms;
