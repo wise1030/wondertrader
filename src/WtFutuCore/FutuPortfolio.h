@@ -79,6 +79,13 @@ struct ContractState
     double short_qty; ///< 空向持有量
     double short_avg; ///< 空向加权成本
 
+    // UnifiedNetBook 影子簿：只记录、不参与风控/报价决策。
+    // 权威来源为引擎本地净仓 + 引擎本地已实现/未实现 profit。
+    double shadow_net = 0.0;
+    double shadow_realized_pnl = 0.0;
+    double shadow_unrealized_pnl = 0.0;
+    bool shadow_stale = false; ///< 影子簿或成本基不可信，风控应降级处理
+
     // Market data (last_price 已前置, perf#11)
     double bid1; ///< Best bid
     double ask1; ///< Best ask
@@ -309,6 +316,17 @@ public:
 
     /// v7.1: 引擎净持仓真值再同步 (防漏单漂移); 保留主导侧成本, 缺失侧清零
     void resyncPosition(const std::string& code, double engine_net);
+
+    /// UnifiedNetBook 影子簿：从引擎 profit 镜像
+    void setShadowFromEngine(const std::string& code,
+                             double engine_net,
+                             double engine_realized,
+                             double engine_unrealized);
+    void markShadowStale(const std::string& code);
+    bool isShadowStale(const std::string& code) const;
+    double getShadowNet(const std::string& code) const;
+    double getShadowRealizedPnl(const std::string& code) const;
+    double getShadowUnrealizedPnl(const std::string& code) const;
 
     //==========================================================================
     // B5: 过冲保险丝 (ARB_SELF_CLOSE_DESIGN v2.1)

@@ -109,6 +109,12 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         _portfolio->onTradeFill(stdCode, isLong, static_cast<int>(offset), vol, price);
         _portfolio_ctx_dirty = true;
 
+        // UnifiedNetBook 影子簿：从引擎本地 profit 镜像，不参与决策，仅用于对账。
+        _portfolio->setShadowFromEngine(stdCode,
+                                        local_net,
+                                        ctx->stra_get_local_closeprofit(stdCode),
+                                        ctx->stra_get_local_posprofit(stdCode));
+
         // 净持仓以引擎真值校验 (防漏单/异常路径漂移)
         ContractState cs_chk_buf;
         const ContractState* cs_chk = _portfolio->getContractSnapshot(stdCode, cs_chk_buf) ? &cs_chk_buf : nullptr;
@@ -421,6 +427,10 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
                             local_net,
                             s._config.sync_account_position ? "account" : "local");
         }
+        _portfolio->setShadowFromEngine(ci.code,
+                                        local_net,
+                                        ctx->stra_get_local_closeprofit(ci.code.c_str()),
+                                        ctx->stra_get_local_posprofit(ci.code.c_str()));
 
         // 记录日志
         if (price > 0) {

@@ -288,6 +288,59 @@ void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
     syncDirectionalFromNet(cs, engine_net, 0);
     checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position); // B5
     updateDailyPnL(code);
+    // 引擎再同步意味着本地成本簿出现过偏差，保守标记 stale。
+    cs->shadow_stale = true;
+}
+
+void FutuPortfolio::setShadowFromEngine(const std::string& code,
+                                        double engine_net,
+                                        double engine_realized,
+                                        double engine_unrealized)
+{
+    RecursiveSpinGuard _g(_lock);
+    ContractState* cs = getContract(code);
+    if (!cs)
+        return;
+
+    cs->shadow_net = engine_net;
+    cs->shadow_realized_pnl = engine_realized;
+    cs->shadow_unrealized_pnl = engine_unrealized;
+}
+
+void FutuPortfolio::markShadowStale(const std::string& code)
+{
+    RecursiveSpinGuard _g(_lock);
+    ContractState* cs = getContract(code);
+    if (cs)
+        cs->shadow_stale = true;
+}
+
+bool FutuPortfolio::isShadowStale(const std::string& code) const
+{
+    RecursiveSpinGuard _g(_lock);
+    const ContractState* cs = getContract(code);
+    return cs ? cs->shadow_stale : false;
+}
+
+double FutuPortfolio::getShadowNet(const std::string& code) const
+{
+    RecursiveSpinGuard _g(_lock);
+    const ContractState* cs = getContract(code);
+    return cs ? cs->shadow_net : 0.0;
+}
+
+double FutuPortfolio::getShadowRealizedPnl(const std::string& code) const
+{
+    RecursiveSpinGuard _g(_lock);
+    const ContractState* cs = getContract(code);
+    return cs ? cs->shadow_realized_pnl : 0.0;
+}
+
+double FutuPortfolio::getShadowUnrealizedPnl(const std::string& code) const
+{
+    RecursiveSpinGuard _g(_lock);
+    const ContractState* cs = getContract(code);
+    return cs ? cs->shadow_unrealized_pnl : 0.0;
 }
 
 void FutuPortfolio::syncDirectionalFromNet(ContractState* cs, double net, double avgCost)
