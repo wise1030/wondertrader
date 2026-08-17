@@ -184,7 +184,8 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
     auto& violations = _violations_buf;
     if (!violations.empty()) {
         RiskCategory category;
-        RiskAction action = _deps.risk_monitor->determineActionWithCategory(violations, category);
+        RiskAction action = _deps.risk_monitor->determineActionWithCategory(
+            violations, category, _deps.portfolio ? _deps.portfolio->hasStaleCostBasis() : false);
 
         switch (action) {
         case RiskAction::HALT_TRADING:

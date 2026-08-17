@@ -338,7 +338,8 @@ public:
     /// @param outCategory Output: risk category (reversible/irreversible)
     /// @return Action to take
     RiskAction determineActionWithCategory(const std::vector<RiskViolation>& violations,
-                                           RiskCategory& outCategory) const;
+                                           RiskCategory& outCategory,
+                                           bool cost_basis_stale = false) const;
 
     //==========================================================================
     // State

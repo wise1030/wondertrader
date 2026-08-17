@@ -290,6 +290,9 @@ void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
     updateDailyPnL(code);
     // 引擎再同步意味着本地成本簿出现过偏差，保守标记 stale。
     cs->shadow_stale = true;
+    WTSLogger::warn("Portfolio[{}] shadow cost basis stale after engine resync (engine_net={:.1f})",
+                    code,
+                    engine_net);
 }
 
 void FutuPortfolio::setShadowFromEngine(const std::string& code,
@@ -320,6 +323,16 @@ bool FutuPortfolio::isShadowStale(const std::string& code) const
     RecursiveSpinGuard _g(_lock);
     const ContractState* cs = getContract(code);
     return cs ? cs->shadow_stale : false;
+}
+
+bool FutuPortfolio::hasStaleCostBasis() const
+{
+    RecursiveSpinGuard _g(_lock);
+    for (const auto& c : _contracts) {
+        if (c.shadow_stale)
+            return true;
+    }
+    return false;
 }
 
 double FutuPortfolio::getShadowNet(const std::string& code) const

@@ -320,7 +320,8 @@ RiskAction FutuRiskMonitor::determineAction(const std::vector<RiskViolation>& vi
 }
 
 RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskViolation>& violations,
-                                                        RiskCategory& outCategory) const
+                                                        RiskCategory& outCategory,
+                                                        bool cost_basis_stale) const
 {
     outCategory = RiskCategory::REVERSIBLE; // Default: reversible
 
@@ -330,6 +331,12 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
     // 1. Check for irreversible risks (daily loss) - requires manual intervention
     for (const auto& v : violations) {
         if (v.type == RiskLimitType::DAILY_LOSS && v.severity == RiskSeverity::CRITICAL) {
+            if (cost_basis_stale) {
+                // 成本基不可信时，日亏不得驱动不可逆决策。
+                outCategory = RiskCategory::REVERSIBLE;
+                WTSLogger::warn("[RISK] DAILY_LOSS critical but cost basis stale -> downgraded to REVERSIBLE HALT");
+                return RiskAction::HALT_TRADING;
+            }
             outCategory = RiskCategory::IRREVERSIBLE;
             return RiskAction::HALT_TRADING;
         }

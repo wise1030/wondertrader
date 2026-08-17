@@ -324,6 +324,7 @@ public:
                              double engine_unrealized);
     void markShadowStale(const std::string& code);
     bool isShadowStale(const std::string& code) const;
+    bool hasStaleCostBasis() const;
     double getShadowNet(const std::string& code) const;
     double getShadowRealizedPnl(const std::string& code) const;
     double getShadowUnrealizedPnl(const std::string& code) const;
