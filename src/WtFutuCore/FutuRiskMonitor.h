@@ -355,6 +355,9 @@ public:
 
     inline RiskCategory getHaltCategory() const { return _halt_category; }
 
+    /// 成本簿 stale 事件上报（EventNotifier/GUI 可见；按时间节流）
+    void broadcastCostBasisStale(const std::string& code);
+
     /// Halt trading with category (irreversible risks need manual recovery)
     /// @param category Risk category (reversible/irreversible)
     /// @param pnl_snapshot Current PnL at halt time (for loss-based recovery check)
@@ -575,6 +578,7 @@ private:
     static constexpr uint64_t WARN_THROTTLE_MS = 1000;
     mutable std::atomic<uint64_t> _last_delta_warn_ms{0};
     mutable std::atomic<uint64_t> _last_pos_breach_warn_ms{0};
+    mutable std::atomic<uint64_t> _last_cost_stale_alert_ms{0};
     mutable std::unordered_map<std::string, uint64_t> _last_soft_warn_ms;
 
     // Event notifier (optional)

@@ -195,6 +195,8 @@ public:
 
     void setParams(const PortfolioParams& params) { _params = params; }
     const PortfolioParams& getParams() const { return _params; }
+    void setUseUnifiedNetBook(bool enabled) { _use_unified_net_book = enabled; }
+    bool useUnifiedNetBook() const { return _use_unified_net_book; }
 
     void setAnchorContract(const std::string& code) { _anchor_code = code; }
     const std::string& getAnchorContract() const { return _anchor_code; }
@@ -579,6 +581,7 @@ private:
     mutable RecursiveSpinLock _lock;
 
     PortfolioParams _params;
+    bool _use_unified_net_book = false;
     std::string _anchor_code;
 
     std::vector<ContractState> _contracts;

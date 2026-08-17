@@ -115,6 +115,26 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
                                         ctx->stra_get_local_closeprofit(stdCode),
                                         ctx->stra_get_local_posprofit(stdCode));
 
+        double shadow_net = _portfolio->getShadowNet(stdCode);
+        double shadow_realized = _portfolio->getShadowRealizedPnl(stdCode);
+        ContractState cs_before_resync;
+        if (_portfolio->getContractSnapshot(stdCode, cs_before_resync)) {
+            if (std::abs(cs_before_resync.position - shadow_net) > 0.01 ||
+                std::abs(cs_before_resync.realized_pnl - shadow_realized) > 0.01) {
+                _portfolio->markShadowStale(stdCode);
+                if (_risk_monitor)
+                    _risk_monitor->broadcastCostBasisStale(stdCode);
+                WTSLogger::warn("UftFutuMmStrategy[{}] shadow-book divergence: {} old_net={:.1f} shadow_net={:.1f} "
+                                "old_realized={:.2f} shadow_realized={:.2f}",
+                                s.id(),
+                                stdCode,
+                                cs_before_resync.position,
+                                shadow_net,
+                                cs_before_resync.realized_pnl,
+                                shadow_realized);
+            }
+        }
+
         // 净持仓以引擎真值校验 (防漏单/异常路径漂移)
         ContractState cs_chk_buf;
         const ContractState* cs_chk = _portfolio->getContractSnapshot(stdCode, cs_chk_buf) ? &cs_chk_buf : nullptr;

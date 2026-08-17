@@ -308,6 +308,15 @@ void FutuPortfolio::setShadowFromEngine(const std::string& code,
     cs->shadow_net = engine_net;
     cs->shadow_realized_pnl = engine_realized;
     cs->shadow_unrealized_pnl = engine_unrealized;
+
+    if (_use_unified_net_book) {
+        // 切换后：引擎 profit 为唯一权威，旧双簿字段同步为影子值。
+        cs->position = engine_net;
+        cs->realized_pnl = engine_realized;
+        cs->unrealized_pnl = engine_unrealized;
+        syncDirectionalFromNet(cs, engine_net, 0);
+        updateDailyPnL(code);
+    }
 }
 
 void FutuPortfolio::markShadowStale(const std::string& code)

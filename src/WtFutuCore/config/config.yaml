@@ -73,6 +73,7 @@ strategies:
         anchorCode: SHFE.ag.ag2608
         isBacktest: false             # 回测模式 (on_trade 只撤不挂, 避免 _orders 迭代器失效; 生产=false)
         syncAccountPosition: false    # channel ready 时是否用账户净仓同步本策略配置合约；仅合约归属唯一时可开
+        useUnifiedNetBook: false      # UnifiedNetBook 开关；false=影子期，true=切换引擎 profit 权威
 
         contracts:
           - code: SHFE.ag.ag2608

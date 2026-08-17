@@ -86,6 +86,17 @@ void FutuRiskMonitor::pruneRateWindows(uint64_t now)
     }
 }
 
+void FutuRiskMonitor::broadcastCostBasisStale(const std::string& code)
+{
+    uint64_t now = _current_time.load(std::memory_order_relaxed);
+    uint64_t last = _last_cost_stale_alert_ms.load(std::memory_order_relaxed);
+    if (now < last || now - last < 5000)
+        return;
+    _last_cost_stale_alert_ms.store(now, std::memory_order_relaxed);
+    broadcastAlert("COST_BASIS_STALE",
+                   fmt::format("Contract {} cost basis is stale; daily-loss irreversible halt is downgraded", code));
+}
+
 void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::string& message)
 {
     // Log the alert

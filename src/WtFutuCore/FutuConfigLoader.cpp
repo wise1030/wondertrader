@@ -28,6 +28,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     _config.anchor_code = cfg->getCString("anchorCode");
     _config.is_backtest = readBool(cfg, "isBacktest", false);
     _config.sync_account_position = readBool(cfg, "syncAccountPosition", false);
+    _config.use_unified_net_book = readBool(cfg, "useUnifiedNetBook", false);
 
     //------------------------------------------------------------
     // 读取配置文件路径
