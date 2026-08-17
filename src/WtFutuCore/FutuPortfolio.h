@@ -66,18 +66,8 @@ struct ContractState
 
     // Position state
     double prev_position;  ///< Previous position for trade effect logging
-    double avg_cost;       ///< Average cost (主导侧均价, 兼容字段)
     double unrealized_pnl; ///< Unrealized P&L
     double realized_pnl;   ///< Realized P&L (accumulated from closed positions)
-
-    // v7.1 分向成本簿 (offset 标志驱动记账)
-    // 净额均价推断在 MM+arb 共享同合约净头寸时必然失真 (arb 腿的开平
-    // 被误判为 MM 的加减仓, avg_cost 被污染 → daily_pnl 假阳性日亏)。
-    // 分向簿与交易所/回测引擎口径一致: position = long_qty - short_qty
-    double long_qty;  ///< 多向持有量
-    double long_avg;  ///< 多向加权成本
-    double short_qty; ///< 空向持有量
-    double short_avg; ///< 空向加权成本
 
     // UnifiedNetBook 影子簿：只记录、不参与风控/报价决策。
     // 权威来源为引擎本地净仓 + 引擎本地已实现/未实现 profit。
@@ -104,8 +94,8 @@ struct ContractState
 
     ContractState()
         : position(0), hedge_ratio(1.0), multiplier(1), last_price(0), code(), tick_size(1),
-          hedge_ratio_initialized(false), prev_position(0), avg_cost(0), unrealized_pnl(0), realized_pnl(0),
-          long_qty(0), long_avg(0), short_qty(0), short_avg(0), bid1(0), ask1(0), daily_pnl(0), is_active(true),
+          hedge_ratio_initialized(false), prev_position(0), unrealized_pnl(0), realized_pnl(0),
+          bid1(0), ask1(0), daily_pnl(0), is_active(true),
           last_update(0), max_position(0), target_position(0), contract_max_delta(0)
     {}
 
@@ -286,12 +276,6 @@ public:
     /// Mark to market with last price
     void markToMarket(const std::string& code, double lastPrice);
 
-    /// Add realized PnL for a contract (accumulated on position close)
-    void addRealizedPnl(const std::string& code, double pnl);
-
-    /// Set reference price for overnight positions (pre_close as cost basis)
-    void setReferencePrice(const std::string& code, double refPrice);
-
     /// Update daily_pnl for a contract (daily_pnl = unrealized_pnl + realized_pnl)
     void updateDailyPnL(const std::string& code);
 
@@ -340,10 +324,6 @@ public:
 private:
     /// sign-flip 检测 (onPositionUpdate / updatePosition 两入口共用, .cpp 实现)
     void checkOvershootSignFlip(const char* code, double prev, double now);
-    /// 净持仓 -> 分向簿同步 (onPositionUpdate/updatePosition/resyncPosition 统一口径)
-    /// net>0: 多头侧持有; net<0: 空头侧持有; net==0: 清零。
-    /// 主导侧均价缺失时用 avgCost(>0) 或 last_price 兜底锚定。
-    void syncDirectionalFromNet(ContractState* cs, double net, double avgCost);
     SpreadArbitrageManager* _arb_manager = nullptr;
 
 public:

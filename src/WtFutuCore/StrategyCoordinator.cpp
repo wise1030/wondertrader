@@ -767,21 +767,6 @@ bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::
 
     tc.mid = (tc.bid_px + tc.ask_px) / 2.0;
 
-    // P0-1: 隔夜持仓用昨收(pre_close)作为成本基准
-    // v7.7 性能#1: tc.cs 快照已在 processTick 入口填充, 此处只读
-    if (_portfolio) {
-        const ContractState* cs = tc.cs_valid ? &tc.cs : nullptr;
-        if (cs && cs->position != 0 && cs->avg_cost == 0) {
-            // 首次收到 tick 且有隔夜持仓,用昨收设置成本基准
-            double pre_close = tick->preclose();
-            if (pre_close > 0) {
-                _portfolio->setReferencePrice(tc.code, pre_close);
-                WTSLogger::info(
-                    "Overnight position reference: {} cost={} (pre_close), pos={}", tc.code, pre_close, cs->position);
-            }
-        }
-    }
-
     // P0-2: 填充涨跌停价到 TickContext
     tc.upper_limit = tick->upperlimit();
     tc.lower_limit = tick->lowerlimit();

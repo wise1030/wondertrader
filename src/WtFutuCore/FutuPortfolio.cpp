@@ -120,32 +120,6 @@ void FutuPortfolio::markToMarket(const std::string& code, double lastPrice)
     updateDailyPnL(code);
 }
 
-void FutuPortfolio::addRealizedPnl(const std::string& code, double pnl)
-{
-    RecursiveSpinGuard _g(_lock);
-    markAggregatesDirty(); // F4
-    ContractState* cs = getContract(code);
-    if (!cs)
-        return;
-    cs->realized_pnl += pnl;
-    cs->daily_pnl = cs->unrealized_pnl + cs->realized_pnl;
-}
-
-void FutuPortfolio::setReferencePrice(const std::string& code, double refPrice)
-{
-    RecursiveSpinGuard _g(_lock);
-    markAggregatesDirty(); // F4
-    ContractState* cs = getContract(code);
-    if (!cs || refPrice <= 0)
-        return;
-    cs->avg_cost = refPrice;
-    // v7.1: 分向簿同步锚定 (隔夜持仓日初成本基准 = 昨收)
-    if (cs->long_qty > 0.01)
-        cs->long_avg = refPrice;
-    if (cs->short_qty > 0.01)
-        cs->short_avg = refPrice;
-}
-
 void FutuPortfolio::updateDailyPnL(const std::string& code)
 {
     RecursiveSpinGuard _g(_lock);
@@ -166,15 +140,6 @@ void FutuPortfolio::resetDailyPnl()
         cs.realized_pnl = 0;
         cs.unrealized_pnl = 0;
         cs.daily_pnl = 0;
-        // 隔夜持仓重置成本基准为 0 — 触发 StrategyCoordinator 首 tick 的
-        // pre_close 分支 (position!=0 && avg_cost==0) 以昨收重设 avg_cost.
-        // 否则 markToMarket 用昨日 avg_cost 重算浮盈, 把昨日盈亏混入今日 daily_pnl,
-        // 违背"日内 PnL 不跨日累计"的风控语义 (max_loss 误触).
-        if (cs.position != 0) {
-            cs.avg_cost = 0;
-            cs.long_avg = 0; // v7.1: 分向簿同步重置, setReferencePrice 重锚
-            cs.short_avg = 0;
-        }
     }
 }
 
@@ -190,7 +155,6 @@ void FutuPortfolio::onPositionUpdate(const char* stdCode, double newPos)
     // 记录前一个position用于成交效果日志
     cs->prev_position = cs->position;
     cs->position = newPos;
-    syncDirectionalFromNet(cs, newPos, 0); // 分向簿与净持仓同步，避免首次成交重建偏差
 
     checkOvershootSignFlip(stdCode, cs->prev_position, newPos); // B5
 }
@@ -205,9 +169,6 @@ void FutuPortfolio::updatePosition(const std::string& code, double position, dou
 
     double prev = cs->position; // B5: 捕获前值 (本函数不维护 prev_position 字段)
     cs->position = position;
-    if (avgCost > 0)
-        cs->avg_cost = avgCost;
-    syncDirectionalFromNet(cs, position, avgCost); // 分向簿与净持仓同步
 
     checkOvershootSignFlip(code.c_str(), prev, position); // B5
 }
@@ -221,44 +182,12 @@ void FutuPortfolio::onTradeFill(const std::string& code, bool is_long_side, int 
         return;
 
     cs->prev_position = cs->position;
-
-    double& side_qty = is_long_side ? cs->long_qty : cs->short_qty;
-    double& side_avg = is_long_side ? cs->long_avg : cs->short_avg;
-
-    if (offset == 0) // OPEN: 加仓, 加权均价
-    {
-        side_avg = (side_qty > 0.01) ? (side_avg * side_qty + price * vol) / (side_qty + vol) : price;
-        side_qty += vol;
-    } else // CLOSE(1)/CLOSETODAY(2): 对持有均价实现盈亏
-    {
-        double close_qty = std::min(vol, side_qty);
-        if (side_avg > 0 && close_qty > 0.01) {
-            double realized = is_long_side ? (price - side_avg) * close_qty * cs->multiplier
-                                           : (side_avg - price) * close_qty * cs->multiplier;
-            cs->realized_pnl += realized;
-        }
-        side_qty -= close_qty;
-        if (side_qty < 0.01) {
-            side_qty = 0;
-            side_avg = 0;
-        }
-
-        // 平仓量超出持有量的部分 = 净仓模式下的反向开仓
-        double excess = vol - close_qty;
-        if (excess > 0.01) {
-            double& opp_qty = is_long_side ? cs->short_qty : cs->long_qty;
-            double& opp_avg = is_long_side ? cs->short_avg : cs->long_avg;
-            opp_avg = (opp_qty > 0.01) ? (opp_avg * opp_qty + price * excess) / (opp_qty + excess) : price;
-            opp_qty += excess;
-        }
-    }
-
-    // 兼容字段: 净持仓 + 主导侧均价 (markToMarket 已改分向, 仅供遗留消费者)
-    cs->position = cs->long_qty - cs->short_qty;
-    cs->avg_cost = (cs->long_qty >= cs->short_qty) ? cs->long_avg : cs->short_avg;
-
-    checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position); // B5
-    updateDailyPnL(code);
+    // UnifiedNetBook：成交后的净仓与 PnL 由 processTradeFill 从引擎 profit 镜像，
+    // 本函数只保留 prev_position 供成交效果日志使用。
+    (void)is_long_side;
+    (void)offset;
+    (void)vol;
+    (void)price;
 }
 
 void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
@@ -271,7 +200,6 @@ void FutuPortfolio::resyncPosition(const std::string& code, double engine_net)
 
     cs->prev_position = cs->position;
     cs->position = engine_net;
-    syncDirectionalFromNet(cs, engine_net, 0);
     checkOvershootSignFlip(code.c_str(), cs->prev_position, cs->position); // B5
     updateDailyPnL(code);
     // 引擎再同步意味着本地成本簿出现过偏差，保守标记 stale。
@@ -299,7 +227,6 @@ void FutuPortfolio::setShadowFromEngine(const std::string& code,
     cs->position = engine_net;
     cs->realized_pnl = engine_realized;
     cs->unrealized_pnl = engine_unrealized;
-    syncDirectionalFromNet(cs, engine_net, 0);
     updateDailyPnL(code);
 }
 
@@ -347,29 +274,6 @@ double FutuPortfolio::getShadowUnrealizedPnl(const std::string& code) const
     RecursiveSpinGuard _g(_lock);
     const ContractState* cs = getContract(code);
     return cs ? cs->shadow_unrealized_pnl : 0.0;
-}
-
-void FutuPortfolio::syncDirectionalFromNet(ContractState* cs, double net, double avgCost)
-{
-    if (net > 0.01) {
-        cs->long_qty = net;
-        cs->short_qty = 0;
-        cs->short_avg = 0;
-        if (cs->long_avg <= 0)
-            cs->long_avg = (avgCost > 0) ? avgCost : cs->last_price;
-        cs->avg_cost = cs->long_avg;
-    } else if (net < -0.01) {
-        cs->short_qty = -net;
-        cs->long_qty = 0;
-        cs->long_avg = 0;
-        if (cs->short_avg <= 0)
-            cs->short_avg = (avgCost > 0) ? avgCost : cs->last_price;
-        cs->avg_cost = cs->short_avg;
-    } else {
-        cs->long_qty = cs->short_qty = 0;
-        cs->long_avg = cs->short_avg = 0;
-        cs->avg_cost = 0;
-    }
 }
 
 void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double now)
