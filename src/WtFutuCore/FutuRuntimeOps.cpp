@@ -121,31 +121,28 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         double shadow_net = _portfolio->getShadowNet(stdCode);
         double shadow_realized = _portfolio->getShadowRealizedPnl(stdCode);
         if (has_before) {
-            if (std::abs(cs_before_sync.position - shadow_net) > 0.01 ||
-                std::abs(cs_before_sync.realized_pnl - shadow_realized) > 0.01) {
+            // 引擎 on_trade 先更新本地净仓再回调策略，故 local_net 已是成交后值。
+            // 真漂移应扣除本笔 delta：expected_pre = post_net - (buy ? +vol : -vol)。
+            double expected_pre = local_net - (is_buy ? vol : -vol);
+            bool net_drift = std::abs(cs_before_sync.position - expected_pre) > 0.01;
+            // 开仓不改变已实现盈亏，只有 OPEN 可做 realized 校验；CLOSE 的实现盈亏引擎内不可预知。
+            bool realized_drift =
+                isOpen && std::abs(cs_before_sync.realized_pnl - shadow_realized) > 0.01;
+
+            if (net_drift || realized_drift) {
                 _portfolio->markShadowStale(stdCode);
                 if (_risk_monitor)
                     _risk_monitor->broadcastCostBasisStale(stdCode);
-                WTSLogger::warn("UftFutuMmStrategy[{}] shadow-book divergence: {} old_net={:.1f} shadow_net={:.1f} "
-                                "old_realized={:.2f} shadow_realized={:.2f}",
+                WTSLogger::warn("UftFutuMmStrategy[{}] shadow-book true divergence: {} pre_book={:.1f} expected_pre={:.1f} "
+                                "realized_drift={}",
                                 s.id(),
                                 stdCode,
                                 cs_before_sync.position,
-                                shadow_net,
-                                cs_before_sync.realized_pnl,
-                                shadow_realized);
+                                expected_pre,
+                                realized_drift);
+                _portfolio->resyncPosition(stdCode, local_net);
             } else {
                 _portfolio->clearShadowStale(stdCode);
-            }
-
-            // 净持仓以引擎真值校验 (防漏单/异常路径漂移)
-            if (std::abs(cs_before_sync.position - local_net) > 0.01) {
-                WTSLogger::warn("UftFutuMmStrategy[{}] position book divergence: {} book={:.0f} engine={:.0f}, resyncing",
-                                s.id(),
-                                stdCode,
-                                cs_before_sync.position,
-                                local_net);
-                _portfolio->resyncPosition(stdCode, local_net);
             }
         }
     }
