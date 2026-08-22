@@ -46,9 +46,11 @@ struct SignalAggregatorConfig
     uint32_t momentum_window = 50;
     uint32_t lead_lag_window = 50;
 
-    // 阈值参数
-    double vol_elevated = 0.002; // should_widen + vol_tier -> ELEVATED (统一阈值)
-    double vol_extreme = 0.004;  // vol_tier -> EXTREME (should_pause)
+    // 阈值参数 (V8-S10: 默认值同步 _ec_5d 实测标定 p95/p99.5, 旧 0.002/0.004
+    // 对 EC 不可达)
+    double vol_elevated = 0.0005; // should_widen + vol_tier -> ELEVATED (统一阈值)
+    double vol_extreme = 0.0017;  // vol_tier -> EXTREME (should_pause)
+    uint32_t vol_stats_log_interval = 0; // V8-S10: vol 分布统计埋点间隔 (0=关闭, 标定用)
 
     // Alpha 权重配置
     double ofi_weight = 0.35;
@@ -62,7 +64,6 @@ struct SignalAggregatorConfig
     double large_trade_threshold = 50.0;
     double book_imbalance_threshold = 0.2;
     double momentum_ema_alpha = 0.1;
-    uint32_t lead_lag_lag_ms = 50;
 
     uint32_t warmup_ticks = 50;
 
@@ -107,7 +108,6 @@ struct SignalAggregatorConfig
             if (ll) {
                 c.use_lead_lag = true;
                 c.lead_lag_window = FutuConfig::readUInt32(ll, "window", 50);
-                c.lead_lag_lag_ms = FutuConfig::readUInt32(ll, "lagMs", 50);
             }
         }
 
@@ -159,8 +159,9 @@ struct SignalAggregatorConfig
         wtp::WTSVariant* vol = v->get("volatility");
         if (vol) {
             c.volatility_window = FutuConfig::readUInt32(vol, "window", 100);
-            c.vol_elevated = FutuConfig::readDouble(vol, "elevatedThreshold", 0.002);
-            c.vol_extreme = FutuConfig::readDouble(vol, "extremeThreshold", 0.004);
+            c.vol_elevated = FutuConfig::readDouble(vol, "elevatedThreshold", 0.0005);
+            c.vol_extreme = FutuConfig::readDouble(vol, "extremeThreshold", 0.0017);
+            c.vol_stats_log_interval = FutuConfig::readUInt32(vol, "statsLogInterval", 0);
         }
 
         //------------------------------------------------------------
@@ -317,6 +318,7 @@ private:
             auto vol = std::make_unique<RealizedVolSignalSource>();
             vol->setWindowSize(_cfg.volatility_window);
             vol->setVolThresholds(_cfg.vol_elevated, _cfg.vol_extreme);
+            vol->setStatsLogInterval(_cfg.vol_stats_log_interval);
             _vol_source = vol.get();
             _sources[SignalType::VOLATILITY] = std::move(vol);
         }
@@ -402,7 +404,6 @@ private:
         if (_cfg.use_lead_lag) {
             LeadLagSignalSource::Config ll_cfg;
             ll_cfg.window = _cfg.lead_lag_window;
-            ll_cfg.lag_ms = _cfg.lead_lag_lag_ms;
             auto src = std::make_unique<LeadLagSignalSource>(ll_cfg);
             // LL 不做幅度归一化 — LL 信号特性与其他信号不同:
             // 大部分 tick 是重复值(anchor tick 频率低), p95 归一化会爆炸.
@@ -658,19 +659,23 @@ private:
         // IC 验证: 输出各信号源归一化后的值 + 最终 alpha (debug 级)
         // 注意: ofi/trade/book/mom/ll 打的是归一化后的 _ctx.alpha.*_component
         // 这些值才是真正参与 alpha_sum 的值
-        WTSLogger::debug("[SIGNAL_DECOMP] {} mid={:.2f} | "
-                         "ofi={:.4f} trade={:.4f} book={:.4f} mom={:.4f} ll={:.4f} | "
-                         "alpha={:.4f} conf={:.4f} valid={}",
-                         _ctx.code,
-                         _ctx.mid_price,
-                         _ctx.alpha.ofi_component,
-                         _ctx.alpha.trade_component,
-                         _ctx.alpha.book_imbalance_component,
-                         _ctx.alpha.momentum_component,
-                         _ctx.alpha.lead_lag_component,
-                         _ctx.alpha.alpha,
-                         _ctx.alpha.confidence,
-                         _ctx.alpha.valid ? 1 : 0);
+        // V8 §5#2: %50 降采样对齐 toxicity 日志 (logcfg 开 debug 时每 tick
+        // 每合约一次 fmt+落盘, 热路径浪费)
+        if (++_decomp_log_count % 50 == 0) {
+            WTSLogger::debug("[SIGNAL_DECOMP] {} mid={:.2f} | "
+                             "ofi={:.4f} trade={:.4f} book={:.4f} mom={:.4f} ll={:.4f} | "
+                             "alpha={:.4f} conf={:.4f} valid={}",
+                             _ctx.code,
+                             _ctx.mid_price,
+                             _ctx.alpha.ofi_component,
+                             _ctx.alpha.trade_component,
+                             _ctx.alpha.book_imbalance_component,
+                             _ctx.alpha.momentum_component,
+                             _ctx.alpha.lead_lag_component,
+                             _ctx.alpha.alpha,
+                             _ctx.alpha.confidence,
+                             _ctx.alpha.valid ? 1 : 0);
+        }
 
         // 保存当前 alpha 用于下次 EWMA 衰减
         if (_ctx.alpha.valid) {
@@ -706,6 +711,9 @@ private:
 
     // 上一次的 alpha 值，用于 EWMA 衰减（Alpha 跳跃修复）
     double _prev_alpha = 0.0;
+
+    // V8 §5#2: SIGNAL_DECOMP 日志降采样计数器
+    uint32_t _decomp_log_count = 0;
 
     //==========================================================================
     // Adaptive Weight Framework members

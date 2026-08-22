@@ -2,6 +2,7 @@
 #include "VolatilitySignalSource.h"
 #include "MarketDataContext.h"
 #include "FutuConfig.h"
+#include "../../WTSTools/WTSLogger.h"
 #include <algorithm>
 
 namespace futu
@@ -27,6 +28,8 @@ void RealizedVolSignalSource::update(const MarketDataContext& book)
         return;
 
     _result.timestamp = book.getTimestamp();
+    if (_code.empty())
+        _code = book.getCode();
 
     // Incremental return calculation
     if (_last_mid > 0) {
@@ -80,6 +83,22 @@ void RealizedVolSignalSource::updateVolatility()
     // Linear percentile mapping for SpreadOptimizer (sigma_sq) and ICWeightTracker (regime).
     // Maps [0, vol_extreme] -> [0, 85], caps at 100.
     _result.vol_percentile = std::min(100.0, vol / _vol_extreme * 85.0);
+
+    // V8-S10: vol 分布统计埋点 (标定 elevated/extreme 阈值用, 默认关闭)
+    if (_stats_log_interval > 0) {
+        _stats_min = std::min(_stats_min, vol);
+        _stats_max = std::max(_stats_max, vol);
+        _stats_sum += vol;
+        if (++_stats_count % _stats_log_interval == 0) {
+            WTSLogger::info("[VOL_STATS] {} samples={} vol={:.6f} min={:.6f} mean={:.6f} max={:.6f}",
+                            _code,
+                            _stats_count,
+                            vol,
+                            _stats_min,
+                            _stats_sum / _stats_count,
+                            _stats_max);
+        }
+    }
 }
 
 void RealizedVolSignalSource::reset()

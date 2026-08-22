@@ -155,69 +155,6 @@ bool PairsTradingStrategy::checkPairValidity() const
     return true;
 }
 
-CointegrationResult PairsTradingStrategy::testCointegration() const
-{
-    CointegrationResult result;
-
-    size_t n = _residual_history.size();
-    if (n < 30)
-        return result;
-
-    // Simplified ADF test: regressing delta_residual on residual_lag
-    // Model: Δy_t = γ * y_{t-1} + ε_t
-    // H0: γ >= 0 (不协整) vs H1: γ < 0 (协整)
-
-    double sum_y = 0, sum_x = 0, sum_xy = 0, sum_xx = 0;
-
-    for (size_t i = 1; i < n; ++i) {
-        double y = _residual_history[i] - _residual_history[i - 1]; // Delta residual
-        double x = _residual_history[i - 1];                        // Lagged residual
-        sum_y += y;
-        sum_x += x;
-        sum_xy += x * y;
-        sum_xx += x * x;
-    }
-
-    size_t count = n - 1;
-    double denom = count * sum_xx - sum_x * sum_x;
-
-    if (std::abs(denom) < 1e-10)
-        return result;
-
-    double gamma = (count * sum_xy - sum_x * sum_y) / denom;
-
-    // 计算 gamma 的标准误差
-    double se_gamma = std::sqrt(1.0 / denom);
-    result.test_statistic = gamma / se_gamma;
-
-    // 基于 MacKinnon (1996) 近似 p-value 计算
-    // ADF 检验统计量服从修正的 Dickey-Fuller 分布
-    // 使用经验公式: log(p) ≈ a + b*|t| + c*|t|^2
-    // 参数来自 MacKinnon Table 1, Model 1 (no constant, no trend), N>25
-    double t_stat = std::abs(result.test_statistic);
-
-    if (t_stat > 0.01) {
-        // MacKinnon 近似参数（无截距无趋势模型）
-        static const double a = -0.762;
-        static const double b = -1.738;
-        static const double c = -0.0942;
-
-        double log_p = a + b * t_stat + c * t_stat * t_stat;
-        result.p_value = std::exp(log_p);
-        result.p_value = std::max(0.001, std::min(1.0, result.p_value));
-    } else {
-        result.p_value = 0.99; // 几乎不显著
-    }
-
-    // 协整判断：test_statistic 显著为负 且 p_value 足够小
-    result.is_cointegrated = (result.test_statistic < result.critical_value) && (result.p_value < 0.05);
-    result.beta = _current_beta;
-    result.alpha = _current_alpha;
-    result.residual_std = _residual_std;
-
-    return result;
-}
-
 SpreadSignal PairsTradingStrategy::generateSignal(const SpreadState& state, uint64_t current_time)
 {
     SpreadSignal signal;

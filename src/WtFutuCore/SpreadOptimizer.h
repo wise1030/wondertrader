@@ -58,16 +58,15 @@ struct GLFTParams
 
     double pause_spread_mult_ratio; ///< spread_mult 暂停阈值比例 (default 0.9)
     double delta_skew_power;        ///< delta skew 非线性幂次 (default 1.5)
-    double inventory_skew_scale; ///< 库存skew放大系数 (default 2.0, 使中持仓时ask接近贴mid) [legacy delta路径]
     double vol_percentile_scale; ///< 波动率百分位归一化分母 (default 50.0)
 
-    // v7.1 连续控制重设计: 归一化仓位 skew (pos_util 口径)
+    // v7.1 连续控制重设计: 归一化库存 skew (delta_util 口径, 2026-08-19 起统一 delta)
     double inventory_skew_gain;  ///< 归一化库存skew增益 (default 1.0; skew_norm=util^power×gain, 1.0=贴mid)
-    double skew_cross_max_ticks; ///< util≥1.0 时授权减仓侧穿越 mid 的最大 tick 数 (default 3.0)
+    double skew_cross_max_ticks; ///< delta util≥1.0 时授权减仓侧穿越 mid 的最大 tick 数 (default 3.0)
 
     // v3 双维 skew 权重（>0 启用加权模式，=0/未设则保留旧 max 模式）
     double portfolio_skew_weight; ///< portfolio delta skew 权重 (default 0.5)
-    double contract_skew_weight;  ///< contract delta+pos skew 权重 (default 1.0)
+    double contract_skew_weight;  ///< contract delta skew 权重 (default 1.0)
 
     GLFTParams()
         : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5), phi(0.20), delta_skew_threshold(0.3),
@@ -76,7 +75,7 @@ struct GLFTParams
           low_confidence_spread_factor(2.0) // M8: 统一为 2.0 (低置信度应扩大 spread; 此前构造 0.8 vs yaml 2.0 行为相反)
           ,
           low_confidence_threshold(0.3), vol_scale(5.0), depth_normalization(100.0), no_depth_spread_mult(1.5),
-          depth_sensitivity_scale(0.2), pause_spread_mult_ratio(0.9), delta_skew_power(1.5), inventory_skew_scale(2.0),
+          depth_sensitivity_scale(0.2), pause_spread_mult_ratio(0.9), delta_skew_power(1.5),
           vol_percentile_scale(50.0), inventory_skew_gain(1.0), skew_cross_max_ticks(3.0), portfolio_skew_weight(0.5),
           contract_skew_weight(1.0)
     {}
@@ -105,7 +104,6 @@ struct GLFTParams
         p.depth_sensitivity_scale = FutuConfig::readDouble(v, "depthSensitivityScale", 0.2);
         p.pause_spread_mult_ratio = FutuConfig::readDouble(v, "pauseSpreadMultRatio", 0.9);
         p.delta_skew_power = FutuConfig::readDouble(v, "deltaSkewPower", 1.5);
-        p.inventory_skew_scale = FutuConfig::readDouble(v, "inventorySkewScale", 2.0);
         p.vol_percentile_scale = FutuConfig::readDouble(v, "volPercentileScale", 50.0);
         p.inventory_skew_gain = FutuConfig::readDouble(v, "inventorySkewGain", 1.0);
         p.skew_cross_max_ticks = FutuConfig::readDouble(v, "skewCrossMaxTicks", 3.0);
@@ -162,21 +160,21 @@ struct PortfolioContext
     double current_hedge_ratio;
     double current_price;
     double contract_max_delta;    ///< 单合约 Delta 软限制（用于归一化 inventory skew）
-    double contract_pos_util;     ///< v7.1: 带符号仓位利用率 (pos+同向pending)/maxPos, 正=多 负=空
-    bool contract_pos_util_valid; ///< v7.1: contract_pos_util 是否有效 (统一口径 skew 开关)
+    double contract_delta_util;   ///< 带符号 delta 利用率 (delta+同向pending×hr)/contract_max_delta, 正=多 负=空
+    bool contract_delta_util_valid; ///< contract_delta_util 是否有效 (统一口径 skew 开关)
     std::vector<RelatedInventory> related;
 
     PortfolioContext()
         : total_delta(0), total_exposure(0), current_multiplier(1), current_hedge_ratio(1), current_price(1),
-          contract_max_delta(0), contract_pos_util(0), contract_pos_util_valid(false)
+          contract_max_delta(0), contract_delta_util(0), contract_delta_util_valid(false)
     {}
     void clear()
     {
         related.clear();
         total_delta = total_exposure = 0;
         contract_max_delta = 0;
-        contract_pos_util = 0;
-        contract_pos_util_valid = false;
+        contract_delta_util = 0;
+        contract_delta_util_valid = false;
     }
     void addRelated(const std::string& c, double inv, double corr, double hr, double mult, double px)
     {
@@ -229,6 +227,8 @@ public:
     /// 计算最优报价
     /// @param midPrice 中间价
     /// @param contractDelta 当前合约 delta (= position * hedge_ratio, 有正负号)
+    ///        [2026-08-19 起不再参与 skew 计算 — 单合约 skew 输入改由
+    ///         PortfolioContext.contract_delta_util 注入; 参数保留仅为 API 兼容]
     /// @param ctx 信号上下文（含 alpha, volatility, toxicity, book_imbalance）
     /// @param alphaSensitivity Alpha 敏感度（ticks per alpha unit）
     /// @param pCtx 组合上下文（可选，用于组合级 skew）
@@ -240,10 +240,9 @@ public:
 
     // Internal Logic (exposed for testing/secondary use)
     double computeBaseSpread(const SignalContext& ctx) const;
-    double computeContractDeltaSkew(double contractDelta, double contractMaxDelta) const;
-    /// v7.1: 归一化仓位 skew (tick 单位). skew_norm=util^power×gain, 1.0=贴mid;
-    /// util≥1.0 时授权穿越 mid, 上限 1+cross_max/half_spread.
-    double computeContractPosSkew(double signed_pos_util, double half_spread_ticks, double cross_max_ticks) const;
+    /// 归一化库存 skew (tick 单位, delta 口径). skew_norm=delta_util^power×gain, 1.0=贴mid;
+    /// delta_util≥1.0 时授权穿越 mid, 上限 1+cross_max/half_spread.
+    double computeContractDeltaSkew(double signed_delta_util, double half_spread_ticks, double cross_max_ticks) const;
     double computePortfolioDeltaSkew(double totalDelta) const;
 
 private:

@@ -321,4 +321,35 @@ void PerformanceMonitor::resetLatency(LatencyType type)
     _current_latency_ns[static_cast<int>(type)].store(0, std::memory_order_relaxed);
 }
 
+bool PerformanceMonitor::checkThresholds(uint64_t now_ms)
+{
+    // V8-R3: warn/critical 阈值接线 -- 此前配置注入后无任何逻辑读取
+    if (now_ms < _last_threshold_log_ms || now_ms - _last_threshold_log_ms < _log_interval_ms)
+        return false;
+    _last_threshold_log_ms = now_ms;
+
+    bool has_critical = false;
+    const LatencyType channels[] = {LatencyType::TICK_TO_QUOTE, LatencyType::SIGNAL_TO_ORDER};
+    const char* names[] = {"TickToQuote", "FullChain"};
+
+    for (int i = 0; i < 2; i++) {
+        auto stats = getLatencyStats(channels[i]);
+        if (stats.count < 100) // 样本不足不告警 (启动期噪声)
+            continue;
+        if (stats.p99_ns > static_cast<double>(_critical_threshold_ns)) {
+            has_critical = true;
+            WTSLogger::error("[PERF] {} p99={:.1f}us exceeds CRITICAL threshold ({}us)",
+                             names[i],
+                             stats.p99_ns / 1000.0,
+                             _critical_threshold_ns / 1000.0);
+        } else if (stats.p99_ns > static_cast<double>(_warn_threshold_ns)) {
+            WTSLogger::warn("[PERF] {} p99={:.1f}us exceeds warn threshold ({}us)",
+                            names[i],
+                            stats.p99_ns / 1000.0,
+                            _warn_threshold_ns / 1000.0);
+        }
+    }
+    return has_critical;
+}
+
 } // namespace futu

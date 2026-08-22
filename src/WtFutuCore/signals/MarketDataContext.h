@@ -22,6 +22,7 @@
 #include <cstdint>
 #include "../../Includes/FasterDefs.h"
 #include "../../Includes/WTSMarcos.h"
+#include "../../WTSTools/WTSLogger.h"
 #include "TickTransactionInferer.h"
 
 NS_WTP_BEGIN
@@ -215,18 +216,28 @@ public:
     {
         if (!tick)
             return;
+        // V8-P0-4: 未装配合约信息 (工厂漏调 setContract) 时一次性告警 --
+        // 此情形下 tick_size/大单阈值为默认值, derived metrics 不可信
+        if (!_contract_warned && _state.getCode().empty()) {
+            _contract_warned = true;
+            WTSLogger::warn("MarketDataContext: onTick before setContract -- tick_size/largeTradeThreshold "
+                            "are defaults, derived metrics unreliable");
+        }
         _state.onTick(tick);
         _flow.onTickInference(tick, _state.getTickSize());
     }
 
     void onOrderQueue(wtp::WTSOrdQueData* data)
     {
-        (void)data; // implementation depends on API
+        // TODO(V8-R3): L2 逐笔委托入口空实现 -- 接线后 TradeFlow 双通道口径问题
+        // (S9: tick 推断 vs 逐笔共用累积器, L2 场景同一成交量计两次) 需先解决
+        (void)data;
     }
 
     void onOrderDetail(wtp::WTSOrdDtlData* data)
     {
-        (void)data; // implementation depends on API
+        // TODO(V8-R3): 同上, L2 逐笔成交入口
+        (void)data;
     }
 
     void onTransaction(wtp::WTSTransData* data) { _flow.onTransaction(data); }
@@ -277,6 +288,7 @@ public:
 private:
     OrderBookStateTracker _state;
     TradeFlowTracker _flow;
+    bool _contract_warned = false; ///< V8-P0-4: 首帧未装配告警只触发一次
 };
 
 } // namespace futu

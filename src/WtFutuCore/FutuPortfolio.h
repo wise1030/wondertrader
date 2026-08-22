@@ -466,17 +466,10 @@ public:
     /// @return 需要减仓的合约列表
     std::vector<const ContractState*> getContractsNeedingReduction(double threshold = 0.0) const;
 
-    /// Portfolio delta utilization based on net delta (扣除目标持仓)
-    /// 用于组合级 skew 激进度计算
-    inline double getPortfolioDeltaUtilization() const
-    {
-        if (_params.portfolio_max_delta <= 0)
-            return 0;
-        return std::abs(getNetDelta()) / _params.portfolio_max_delta;
-    }
-
-    /// Raw portfolio delta utilization (原始持仓)
-    /// 用于组合级 skew 计算和对冲决策
+    /// Portfolio delta utilization (原始持仓 delta, 全链路单一口径)
+    /// 2026-08-19 语义边界原则: portfolio delta 统一原始口径 (与组合 skew 的 getTotalDelta 对齐);
+    /// 净口径 (扣 target) 仅限 closeout "距目标偏离量" 语义使用 getNetDelta(), 不用于利用率.
+    /// 用于组合级 skew 激进度计算、风险分级与对冲决策
     inline double getRawPortfolioDeltaUtilization() const
     {
         if (_params.portfolio_max_delta <= 0)
@@ -501,7 +494,7 @@ public:
     /// Get current risk level based on delta utilization
     inline RiskLevel getRiskLevel() const
     {
-        double util = getPortfolioDeltaUtilization();
+        double util = getRawPortfolioDeltaUtilization();
         if (util < 0.5)
             return RiskLevel::NORMAL;
         if (util < 0.7)
@@ -513,30 +506,7 @@ public:
         return RiskLevel::CRITICAL;
     }
 
-    /// Get quote size multiplier based on risk level
-    inline double getQtyMultiplierByRisk() const
-    {
-        switch (getRiskLevel()) {
-        case RiskLevel::NORMAL:
-            return 1.0;
-        case RiskLevel::WARNING:
-            return 0.9;
-        case RiskLevel::ELEVATED:
-            return 0.7;
-        case RiskLevel::HIGH:
-            return 0.5;
-        case RiskLevel::CRITICAL:
-            return 0.3;
-        default:
-            return 1.0;
-        }
-    }
-
-    /// Check if should pause quoting based on risk level
-    inline bool shouldPauseQuoting() const { return getRiskLevel() >= RiskLevel::CRITICAL; }
-
-    /// Check if should reduce quoting (partial pause)
-    inline bool shouldReduceQuoting() const { return getRiskLevel() >= RiskLevel::HIGH; }
+    // V8-R3: shouldPauseQuoting/shouldReduceQuoting 死接口已删 (零调用者)
 
     //==========================================================================
     // Hedging

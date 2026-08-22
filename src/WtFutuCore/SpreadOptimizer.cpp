@@ -32,6 +32,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
 {
     const GLFTParams params = snapshotParams(); // F20: seqlock 一致性快照, 防热更新撕裂读
     GLFTResult result;
+    (void)contractDelta; // API 兼容保留; skew 输入由 pCtx->contract_delta_util 注入
 
     //==========================================================================
     // 1. Base Spread with GLFT Enhancement
@@ -124,29 +125,29 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     result.fair_value = midPrice + result.alpha_adjustment;
 
     //==========================================================================
-    // 4. Delta Skew (统一用 delta)
+    // 4. Delta Skew (统一 delta 口径, 2026-08-19 语义边界原则)
     //    - 单合约 delta skew: 防止单合约头寸过度累积
+    //      (输入 = (delta+同向pending×hr)/contract_max_delta, 由风控前置计算注入)
     //    - 组合 delta skew: 防止组合整体头寸过度累积
     //==========================================================================
     double half_spread = result.base_spread / 2.0;
 
-    // v7.1 连续控制: pos_util ≥ 1.0 时授权减仓侧穿越 mid
-    bool cross_authorized = pCtx && pCtx->contract_pos_util_valid && std::abs(pCtx->contract_pos_util) >= 1.0;
+    // v7.1 连续控制: delta_util ≥ 1.0 时授权减仓侧穿越 mid
+    bool cross_authorized = pCtx && pCtx->contract_delta_util_valid && std::abs(pCtx->contract_delta_util) >= 1.0;
 
-    double contractMaxDelta = pCtx ? pCtx->contract_max_delta : 0;
     double totalDelta = pCtx ? pCtx->total_delta : 0;
 
-    // v7.1: 优先用统一仓位口径 (pos+同向pending)/maxPos 的归一化 skew;
-    //       未注入时回退 legacy delta 口径 (行为兼容)
+    // 单合约 skew: 统一 delta 口径 (单一路径, legacy 双路径已删除);
+    //       未注入 (contract_max_delta<=0) 时单合约 skew 为 0, 仅组合维度生效
     double contract_skew =
-        (pCtx && pCtx->contract_pos_util_valid)
-            ? computeContractPosSkew(pCtx->contract_pos_util, half_spread, params.skew_cross_max_ticks)
-            : computeContractDeltaSkew(contractDelta, contractMaxDelta);
+        (pCtx && pCtx->contract_delta_util_valid)
+            ? computeContractDeltaSkew(pCtx->contract_delta_util, half_spread, params.skew_cross_max_ticks)
+            : 0.0;
     double portfolio_skew = computePortfolioDeltaSkew(totalDelta);
 
     // v3 双维 skew：从"取较大者"改为加权求和（权重在 GLFTParams）
     // - portfolio_skew_weight=0.5: portfolio 维度（控总敞口，温和影响）
-    // - contract_skew_weight=1.0:  contract 维度（控单合约+pos，主导力）
+    // - contract_skew_weight=1.0:  contract 维度（控单合约 delta，主导力）
     // 旧路径(max)保留：若两个权重之和<=0则退回 max 模式（向前兼容）
     double delta_skew;
     if (params.portfolio_skew_weight + params.contract_skew_weight > 1e-9) {
@@ -258,33 +259,19 @@ double SpreadOptimizer::computeBaseSpread(const SignalContext& ctx) const
     return std::clamp(spread, params.base_spread * params.min_spread_mult, params.base_spread * params.max_spread_mult);
 }
 
-double SpreadOptimizer::computeContractDeltaSkew(double contractDelta, double contractMaxDelta) const
-{
-    const GLFTParams params = snapshotParams(); // F20
-    if (contractMaxDelta <= 0)
-        return 0.0;
-
-    double utilization = contractDelta / contractMaxDelta;
-
-    double direction = (utilization > 0) ? -1.0 : 1.0;
-    // 修正2: 乘以inventory_skew_scale增强中持仓skew力度
-    // scale=2.0时util=0.6→skew=-0.930(接近-half_base=-1.0), ask从+0.566降至+0.070
-    return direction * fastPow(std::abs(utilization), params.delta_skew_power) * params.inventory_skew_scale;
-}
-
 double
-SpreadOptimizer::computeContractPosSkew(double signed_pos_util, double half_spread_ticks, double cross_max_ticks) const
+SpreadOptimizer::computeContractDeltaSkew(double signed_delta_util, double half_spread_ticks, double cross_max_ticks) const
 {
     const GLFTParams params = snapshotParams(); // F20
     if (half_spread_ticks <= 0)
         return 0.0;
 
-    double util = std::abs(signed_pos_util);
+    double util = std::abs(signed_delta_util);
     if (util <= 1e-9)
         return 0.0;
 
-    double direction = (signed_pos_util > 0) ? -1.0 : 1.0;
-    // v7.1 归一化库存 skew: skew_norm = util^power × gain
+    double direction = (signed_delta_util > 0) ? -1.0 : 1.0;
+    // v7.1 归一化库存 skew (delta 口径): skew_norm = util^power × gain
     //   norm=1.0 → 减仓侧贴 mid; gain=1.0, power=1.5 时:
     //   util=0.5→0.35×half, util=0.8→0.72×half, util=1.0→贴mid
     double norm = fastPow(util, params.delta_skew_power) * params.inventory_skew_gain;

@@ -433,9 +433,7 @@ struct ArbCloseConfig
     struct ExecutionPolicy
     {
         int order_flag = 0;            ///< 0=GFD 1=FAK 2=FOK
-        double price_offset_ticks = 0; ///< 相对对手价/mid 偏移
         uint64_t timeout_ms = 30000;   ///< 未成交升级窗口
-        bool upgrade_to_taker = false; ///< 超时是否升级对手价
     };
     ExecutionPolicy stop_loss_policy; ///< FAK 对手价, 1s
     ExecutionPolicy timeout_policy;   ///< GFD mid, 30s 升级
@@ -446,23 +444,14 @@ struct ArbCloseConfig
     uint64_t overshoot_cooldown_ms = 3600000;   ///< 触发保险丝后 pair 冷却
     bool intent_broadcast = true;               ///< 与 Coordinator 协同 (B1+B2)
 
-    /// per-strategy 覆盖 (v2.1 §十四建议2; 默认空 = 全局配置生效)
-    struct StrategyOverride
-    {
-        bool close_long = false;
-        bool close_short = false;
-        std::string execution = "timeout_policy";
-    };
-    std::unordered_map<std::string, StrategyOverride> strategy_overrides;
+    // V8-R3: StrategyOverride/strategy_overrides 死结构已删 (零消费者)
 
     ArbCloseConfig()
     {
         stop_loss_policy.order_flag = 1; // FAK
         stop_loss_policy.timeout_ms = 1000;
-        stop_loss_policy.upgrade_to_taker = false;
         timeout_policy.order_flag = 0; // GFD
         timeout_policy.timeout_ms = 30000;
-        timeout_policy.upgrade_to_taker = true;
     }
 
     bool is_allowed(SpreadSignalType t) const

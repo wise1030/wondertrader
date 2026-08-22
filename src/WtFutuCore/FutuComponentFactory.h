@@ -42,8 +42,15 @@ public:
                                                                   double base_spread = 2.0,
                                                                   double tick_size = 1.0);
 
-    /// Create MarketDataContext (no config needed)
-    static std::unique_ptr<MarketDataContext> createMarketDataContext(const CoordinatorConfig& config);
+    /// Create MarketDataContext with contract wiring (V8-P0-4)
+    /// @param config Coordinator configuration
+    ///        (largeTradeThreshold read from modules.signalAggregator.signals.trade_flow, single source)
+    /// @param code Contract std code
+    /// @param tick_size Contract tick size (single source for Context/Inferer/SignalContext;
+    ///        <=0 时告警并跳过装配, derived metrics 将使用默认值)
+    static std::unique_ptr<MarketDataContext> createMarketDataContext(const CoordinatorConfig& config,
+                                                                      const std::string& code = "",
+                                                                      double tick_size = 0.0);
 
     /// Create ToxicFlowDetector with ToxicityParams from CoordinatorConfig
     static std::unique_ptr<ToxicFlowDetector> createToxicFlowDetector(const CoordinatorConfig& config);

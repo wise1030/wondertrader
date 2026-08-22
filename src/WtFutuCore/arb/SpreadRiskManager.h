@@ -99,35 +99,6 @@ struct RiskAlert
     RiskAlert() : level(Level::INFO), type(Type::POSITION_LIMIT), value(0), threshold(0), timestamp(0) {}
 };
 
-//==============================================================================
-// Portfolio Risk Summary
-//==============================================================================
-
-struct PortfolioRiskSummary
-{
-    double total_position; ///< Total spread position
-    double total_exposure; ///< Total market exposure
-    double var_99;         ///< Portfolio VaR (99%)
-    double max_drawdown;   ///< Current drawdown
-
-    uint32_t active_pairs;  ///< Number of active pairs
-    uint32_t pairs_at_risk; ///< Pairs with risk warnings
-
-    double avg_correlation;      ///< Average pair correlation
-    double min_correlation;      ///< Minimum correlation
-    uint32_t correlation_breaks; ///< Number of correlation breaks
-
-    double liquidity_score; ///< Portfolio liquidity score
-
-    bool has_stop_loss;      ///< Is stop loss triggered
-    bool has_critical_alert; ///< Is there a critical alert
-
-    PortfolioRiskSummary()
-        : total_position(0), total_exposure(0), var_99(0), max_drawdown(0), active_pairs(0), pairs_at_risk(0),
-          avg_correlation(0), min_correlation(0), correlation_breaks(0), liquidity_score(1), has_stop_loss(false),
-          has_critical_alert(false)
-    {}
-};
 
 //==============================================================================
 // Spread Risk Manager
@@ -173,10 +144,8 @@ public:
     SpreadRiskMetrics calculatePairRisk(const std::string& pair_id) const;
 
     /// Calculate portfolio risk summary
-    PortfolioRiskSummary calculatePortfolioRisk() const;
 
     /// Calculate VaR for a position
-    double calculateVaR(const std::string& pair_id, double confidence = 0.99) const;
 
     //==========================================================================
     // Risk Checks
@@ -186,10 +155,8 @@ public:
     bool canOpenPosition(const std::string& pair_id, double size) const;
 
     /// Check for correlation breakdown
-    bool checkCorrelationBreak(const std::string& pair_id) const;
 
     /// Check for convergence failure
-    bool checkConvergenceFailure(const std::string& pair_id) const;
 
     /// Generate risk alerts
     std::vector<RiskAlert> generateAlerts() const;
@@ -199,7 +166,6 @@ public:
     //==========================================================================
 
     /// Get allowed position size for a pair
-    double getAllowedPositionSize(const std::string& pair_id) const;
 
     /// Get current position for a pair
     double getCurrentPosition(const std::string& pair_id) const;
@@ -211,7 +177,6 @@ public:
     void reset();
 
     /// Get active alerts
-    const std::vector<RiskAlert>& getActiveAlerts() const { return _active_alerts; }
 
     /// Clear acknowledged alerts
     void clearAlerts() { _active_alerts.clear(); }
@@ -222,7 +187,6 @@ private:
     //==========================================================================
 
     void updateAlerts();
-    double calculatePortfolioVaR(double confidence) const;
     bool checkPositionLimits(const std::string& pair_id, double size) const;
 
     //==========================================================================

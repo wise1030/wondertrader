@@ -34,10 +34,14 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     if (!_deps.async_arb || !_deps.use_spread_arbitrage)
         return;
 
-    // closeout 期间暂停套利 — 新开仓会让 closeout drain (getOrderCount>0) 永不完成,
-    // 且 arb 单会被强平单反向成交. isCloseoutTriggered 覆盖 TRIGGERED→COMPLETED/FAILED,
-    // 直至 next session resetCloseout(IDLE) 自动恢复.
-    if (_deps.risk_monitor && _deps.risk_monitor->isCloseoutTriggered())
+    // closeout 活跃平仓期暂停套利 — 新开仓会让 closeout drain (getOrderCount>0) 永不完成,
+    // 且 arb 单会被强平单反向成交.
+    // V8-A12: 旧条件 isCloseoutTriggered 覆盖 COMPLETED/FAILED 直至下一 session,
+    // 期间 pushTick/processPendingOrders/processOrphanLegs 全部冻结 — closeout 失败
+    // 回退时裸腿对冲与 in_flight 清理停摆, 敞口持续暴露。改为仅在活跃平仓状态
+    // (DRAINING/ASSESSING/EXECUTING) 暂停; COMPLETED(已平) / FAILED(放弃) 后恢复
+    // 处理, 孤儿腿对冲可重新保护残余敞口, 新信号仍受自身 B-3/风控闸门约束。
+    if (_deps.risk_monitor && _deps.risk_monitor->isCloseoutFlattening())
         return;
 
     // ============================================================
@@ -144,6 +148,10 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                                 order.code,
                                 live_pos,
                                 signed_qty);
+                // V8-A10: skip 路径必须释放 B-3 in_flight (此前直接 return,
+                // 止损重试在 5s 内被 B4 防双发抑制, 真实敞口窗口)
+                if (!order.pair_id.empty() && _deps.arb_manager)
+                    _deps.arb_manager->onArbSignalDropped(order.pair_id);
                 return;
             }
             if (live_pos * predicted < 0) {
@@ -157,6 +165,9 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
             }
             if (exe_qty < 0.5) {
                 WTSLogger::info("[ARB_CLOSE] {} skip: live_pos={:.1f} already consumed by MM", order.code, live_pos);
+                // V8-A10: 同上, skip 释放 in_flight
+                if (!order.pair_id.empty() && _deps.arb_manager)
+                    _deps.arb_manager->onArbSignalDropped(order.pair_id);
                 return;
             }
             if (order.order_flag == 1) // FAK → 对手价
@@ -360,7 +371,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
         [this]() -> double {
             if (!_deps.portfolio)
                 return 0.0;
-            return _deps.portfolio->getPortfolioDeltaUtilization(); // abs(net_delta)/max_delta
+            return _deps.portfolio->getRawPortfolioDeltaUtilization(); // abs(total_delta)/max_delta (原始口径, 单一定义)
         }());
 
     // ============================================================
@@ -415,11 +426,14 @@ void ArbExecutionBridge::onTradeFill(
                 double hedge_price =
                     isLong ? (cs && cs->bid1 > 0 ? cs->bid1 : price) : (cs && cs->ask1 > 0 ? cs->ask1 : price);
                 if (isLong) {
-                    auto rr = _deps.order_router->submitSell(ctx, stdCode, hedge_price, hedge_qty, Source::CLOSEOUT, 1);
+                    // V8-A9: 残腿对冲单此前冒用 Source::CLOSEOUT -- 污染 closeout
+                    // 订单统计且意外享受 Fix4 的 REVERSIBLE halt 豁免 (orphan 队列
+                    // 路径已正确用 HEDGING, 见 :317-319)
+                    auto rr = _deps.order_router->submitSell(ctx, stdCode, hedge_price, hedge_qty, Source::HEDGING, 1);
                     if (rr.rejected)
                         WTSLogger::warn("ORPHAN LEG HEDGE SELL {} rejected - invalid price={}", stdCode, hedge_price);
                 } else {
-                    auto rr = _deps.order_router->submitBuy(ctx, stdCode, hedge_price, hedge_qty, Source::CLOSEOUT, 1);
+                    auto rr = _deps.order_router->submitBuy(ctx, stdCode, hedge_price, hedge_qty, Source::HEDGING, 1);
                     if (rr.rejected)
                         WTSLogger::warn("ORPHAN LEG HEDGE BUY {} rejected - invalid price={}", stdCode, hedge_price);
                 }

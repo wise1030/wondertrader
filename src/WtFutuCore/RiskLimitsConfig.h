@@ -30,7 +30,8 @@ struct RiskRateLimits
     double delta_warning_mult;
     double position_warning_l1;
     double position_warning_l2;
-    double position_hard_block_ratio;
+    double position_hard_block_ratio; ///< block_add 阈值比率 (2026-08-19 起为 delta 口径:
+                                      ///< |delta| >= contract_max_delta×ratio; 键名保留兼容)
     uint32_t widen_threshold;
 
     // 同侧连续成交熔断 (per-contract side fill breaker)

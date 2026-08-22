@@ -10,6 +10,19 @@
 #include <chrono>
 #include <thread>
 
+namespace {
+// V8-R4/A5: replay 时钟优先 (µs), 首帧前兜底墙钟
+uint64_t arbNowUs(const std::atomic<uint64_t>& replay_us)
+{
+    uint64_t r = replay_us.load(std::memory_order_relaxed);
+    if (r > 0)
+        return r;
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::high_resolution_clock::now().time_since_epoch())
+                                     .count());
+}
+} // namespace
+
 namespace futu
 {
 
@@ -78,8 +91,8 @@ bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, dou
         // 回测: 直接同步处理 (不开 arb 线程, 避免 data race)
         processTick(tick);
 
-        auto now = std::chrono::high_resolution_clock::now();
-        uint64_t current_time = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+        // V8-R4/A5: 回测同步路径用 replay 时钟 (墙钟下 TIMEOUT_EXIT 不可复现)
+        uint64_t current_time = arbNowUs(_replay_now_us);
         processSignals(current_time);
         return true;
     }
@@ -243,9 +256,7 @@ void AsyncArbitrageExecutor::arbThreadFunc()
             // ================================================================
             // 获取当前时间
             // ================================================================
-            auto now = std::chrono::high_resolution_clock::now();
-            uint64_t current_time =
-                std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+            uint64_t current_time = arbNowUs(_replay_now_us);
 
             // ================================================================
             // 生成信号条件：
@@ -309,10 +320,13 @@ void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
     auto signals = _arb_manager->generateSignals(current_time);
 
     for (const auto& signal : signals) {
-        // Only process high-confidence signals
+        // V8-R3: 双层置信度阈值统一 -- 原硬编码 0.5 与 Manager 放行阈
+        // min_signal_confidence(0.3) 不一致, [0.3,0.5) 信号每 arb 周期
+        // 空转"生成->过闸->丢弃->释放"; 统一读 Manager 同一配置
+        double min_conf = _arb_manager ? _arb_manager->getConfig().min_signal_confidence : 0.5;
         // 注意: OPEN 类信号在 B-3 门已置 in_flight; 被 confidence 过滤丢弃时必须释放,
-        // 否则 pair 卡死至 60s 超时. MR 阈值入场时 confidence 恰为 0.5, 用 >= 保留最弱有效信号.
-        if (signal.confidence >= 0.5) {
+        // 否则 pair 卡死至 60s 超时. 用 >= 保留最弱有效信号.
+        if (signal.confidence >= min_conf) {
             executeSignal(signal);
             _signals_generated.fetch_add(1, std::memory_order_relaxed);
         } else {
@@ -426,9 +440,11 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     if (price_adjusted && _min_profit_threshold.load(std::memory_order_relaxed) > 0) {
         // Calculate spread impact from price adjustment
         // For LONG_SPREAD: buy leg1, sell leg2
-        // Profit = (leg2_price - orig_leg2) - (leg1_price - orig_leg1)
+        //   Profit change = (leg2_price - orig_leg2) - (leg1_price - orig_leg1)
         // For SHORT_SPREAD: sell leg1, buy leg2
-        // Profit = (orig_leg1 - leg1_price) - (orig_leg2 - leg2_price)
+        //   Profit change = (leg1_price - orig_leg1) - (leg2_price - orig_leg2)
+        // V8-A1: 原短价差分支第二项为 + 号 (两腿损失互抵成差值 b-a 而非 -(a+b)),
+        // 真实损失超阈的止损/平仓单被放行, 净有利单可能被误拒; 注释公式同步修正
 
         double price_impact_leg1 = leg1_price - orig_leg1_price;
         double price_impact_leg2 = leg2_price - orig_leg2_price;
@@ -440,7 +456,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
             spread_impact = -(price_impact_leg1) - (leg2_is_buy ? price_impact_leg2 : -price_impact_leg2);
         } else {
             // Short spread: getting less for leg1 (bad), paying more for leg2 (bad)
-            spread_impact = price_impact_leg1 + (leg2_is_buy ? price_impact_leg2 : -price_impact_leg2);
+            spread_impact = price_impact_leg1 - (leg2_is_buy ? price_impact_leg2 : -price_impact_leg2);
         }
 
         // Convert to ticks (using average tick size)
@@ -535,7 +551,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
                                             leg1_is_buy,
                                             leg1_qty,
                                             leg1_price,
-                                            std::chrono::steady_clock::now(),
+                                            arbNowUs(_replay_now_us),
                                             0.0})) {
             WTSLogger::error("AsyncArb CRITICAL: orphan queue FULL (64), "
                              "leg1 exposed! pair={}, leg1={}",
@@ -572,7 +588,7 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
                                                  double current_delta_ratio)
 {
     size_t processed = 0;
-    auto now = std::chrono::steady_clock::now();
+    uint64_t now = arbNowUs(_replay_now_us); // V8-R4/A5: replay µs
 
     // Dual-queue SPSC-safe design:
     // 1. Pop all new orphan legs from arb thread (SPSC queue)
@@ -593,7 +609,7 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
     // Process all deferred legs
     std::vector<OrphanLeg> still_deferred;
     for (auto& leg : _orphan_legs_deferred) {
-        auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - leg.timestamp).count();
+        int64_t age_ms = (now > leg.timestamp) ? static_cast<int64_t>((now - leg.timestamp) / 1000) : 0;
 
         // 根据delta_ratio动态调整超时
         // delta_ratio越高(接近或超过max_delta)，超时越短，对冲越积极

@@ -23,6 +23,7 @@
 #include "SignalAggregator.h"
 #include "StrategyCoordinator.h"
 #include "OrderRouter.h"  // B6: cancelByPair + IOrderSink upcast
+#include "OrderApiGuard.h" // B+ 修复(P1-2): 通道恢复 zombie 清扫的引擎侧全撤
 #include "AsyncArbitrageExecutor.h"
 #include "RiskLiquidator.h"
 #include "MonitorBridge.h"
@@ -53,11 +54,11 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     auto& _order_tracker = s._order_tracker;
     auto& _performance_monitor = s._performance_monitor;
     auto& _perf_analyzer = s._perf_analyzer;
-    auto& _last_mid = s._last_mid;
     auto& _signal_aggregators = s._signal_aggregators;
     auto& _self_trade_calibrator = s._self_trade_calibrator;
     auto& _toxicity_detector = s._toxicity_detector;
     auto& _order_error_count = s._order_error_count;
+    auto& _contract_infos = s._contract_infos;
     auto& _trading_state = s._trading_state;
     auto& _violations_buf = s._violations_buf;
     auto& _blocked_contracts = s._blocked_contracts;
@@ -210,17 +211,31 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         trade.is_buy = is_buy;
         trade.qty = vol;
         trade.price = price;
-        trade.timestamp = ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL + ctx->stra_get_secs();
-        auto mid_it = _last_mid.find(stdCode);
-        if (mid_it != _last_mid.end()) {
-            trade.mid_at_trade = mid_it->second->v.load(std::memory_order_acquire);
+        // V8-R3: 统一 replay 时钟 — 旧 date 合成格式(~2e13) 与 onTickUpdate 的
+        // actiontime(~9e7) 双域混用, pending adverse 的 30s 强制过期分支
+        // (now > trade_timestamp) 恒假; 且 trading_time_sec 量纲错误。
+        trade.timestamp = _exchange_time_ms;
+        double mid_at_trade_v = _coordinator ? _coordinator->getLastMid(stdCode) : 0.0;
+        if (mid_at_trade_v > 0) {
+            trade.mid_at_trade = mid_at_trade_v;
             // 计算价差和穿越状态
             ContractState cs_buf;
             const ContractState* cs = _portfolio->getContractSnapshot(stdCode, cs_buf) ? &cs_buf : nullptr;
-            trade.spread_at_trade = cs ? cs->tick_size * 2.0 : 0.2; // 与SelfTradeCalibrator一致
+            // V8-R7: 硬编码 0.2 兜底会向统计口径掺默认值噪声 (EC tick=0.5)。
+            // portfolio 快照缺失时回落到配置解析的 tick_size; 仍未知记 0
+            // (TradeRecord::spreadCaptured 有 <=0 守卫, 返回 0 而非伪值)。
+            double tick_for_spread = cs ? cs->tick_size : 0.0;
+            if (tick_for_spread <= 0) {
+                for (const auto& ci : _contract_infos) {
+                    if (ci.code == stdCode && ci.tick_size > 0) {
+                        tick_for_spread = ci.tick_size;
+                        break;
+                    }
+                }
+            }
+            trade.spread_at_trade = tick_for_spread > 0 ? tick_for_spread * 2.0 : 0.0;
             // 判断是否穿越价差：买单成交价>=mid 或 卖单成交价<=mid 表示主动穿越
-            double mid = mid_it->second->v.load(std::memory_order_acquire);
-            trade.is_crossing = isLong ? (price >= mid) : (price <= mid);
+            trade.is_crossing = isLong ? (price >= mid_at_trade_v) : (price <= mid_at_trade_v);
         }
         // 记录成交时的 alpha 信号和波动率（用于 alpha 绩效追踪）
         auto sig_it = _signal_aggregators.find(stdCode);
@@ -246,10 +261,10 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
         double mid_at_fill = price;
         constexpr double DEFAULT_FILL_SPREAD = 0.2; // 无盘口快照时的默认价差
         double spread_at_fill = DEFAULT_FILL_SPREAD;
-        auto mid_it = _last_mid.find(stdCode);
-        if (mid_it != _last_mid.end()) {
-            mid_at_fill = mid_it->second->v.load(std::memory_order_acquire);
-        }
+        if (_coordinator)
+            mid_at_fill = _coordinator->getLastMid(stdCode);
+        if (mid_at_fill <= 0)
+            mid_at_fill = price;
 
         // 计算当前价差
         ContractState cs_buf;
@@ -391,7 +406,6 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     auto& _price_stale = s._price_stale;
     auto& _async_arb = s._async_arb;
     auto& _contract_infos = s._contract_infos;
-    auto& _last_mid = s._last_mid;
     auto& _portfolio = s._portfolio;
     auto& _risk_monitor = s._risk_monitor;
     auto& _violations_buf = s._violations_buf;
@@ -400,6 +414,7 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     auto& _coordinator = s._coordinator;
     auto& _liquidator = s._liquidator;
     auto& _order_router = s._order_router;
+    auto& _quoters = s._quoters;
 
     _channel_ready = true;
     _price_stale = true; // P1-4: 标记价格过期，直到收到首个 tick
@@ -408,6 +423,32 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     if (_async_arb) {
         _async_arb->setEnabled(true);
     }
+
+    // B+: 通道恢复锚点 - 清空 zombie 集合与 halt 闩锁 (通道断连期间撤单无 ack
+    // 会累计 zombie; 恢复后引擎 queryOrders/queryPosition 已重建真实在途/持仓,
+    // 撤不掉的残留交持仓对账, 不再由 tracker 持有)。置于同步流程之前。
+    // B+ 修复(P1-2): zombie 的成因正是断连中撤单失败, 升级时的 cancelAll 兜底
+    // 在通道断开时发送已失败, 重连后无人补发 (引擎 onRspOrders 只重建自身账本,
+    // 不对策略回调)。故 (a) 引擎侧全撤清扫 -- 此时所有活单均不应存在
+    // (on_channel_lost 已 cancelAll, 幸存者=zombie; live 空串=全撤语义;
+    // mocker 空串为 no-op, 但回测撤单必成功无 zombie 路径);
+    // (b) 广播 onOrder(canceled) 清孤儿槽 -- 订单已死且回报丢失的 id 其 terminal
+    // 永不到达, 残留会永久阻塞该层挂单门禁 (tryMarkPendingCancel 对未知 id
+    // 返回 false, cancelLevelOrders 静默跳过)。
+    std::vector<uint32_t> zombie_ids;
+    if (s._order_tracker)
+        zombie_ids = s._order_tracker->clearZombies();
+    if (!zombie_ids.empty()) {
+        WTSLogger::error("UftFutuMmStrategy[{}] channel ready with {} zombie orders -> engine cancelAll sweep + slot purge",
+                         s.id(),
+                         zombie_ids.size());
+        orderApiCall([&] { return ctx->stra_cancel_all(""); });
+        for (auto& [code, quoter] : _quoters)
+            for (uint32_t id : zombie_ids)
+                quoter->onOrder(id, true, 0, 0, 0);
+    }
+    if (_risk_monitor)
+        _risk_monitor->clearZombieHalts();
 
     //============================================================
     // 同步持仓和未成交订单
@@ -421,11 +462,11 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         double local_net = ctx->stra_get_local_position(ci.code.c_str());
 
         // 尝试获取当前价格用于 Delta 计算
-        // 只使用 _last_mid (最新中间价)，这是从已收到的 tick 中计算的
+        // 只使用最新中间价 (V8-R4: Coordinator 单一属主)
         double price = 0;
-        auto midIt = _last_mid.find(ci.code);
-        if (midIt != _last_mid.end() && midIt->second->v.load(std::memory_order_acquire) > 0) {
-            price = midIt->second->v.load(std::memory_order_acquire);
+        double midv = _coordinator ? _coordinator->getLastMid(ci.code) : 0.0;
+        if (midv > 0) {
+            price = midv;
             has_valid_price = true;
         }
 
@@ -740,7 +781,6 @@ void FutuRuntimeOps::onEntrust(
     auto& _violations_buf = s._violations_buf;
     auto& _liquidator = s._liquidator;
     auto& _contract_infos = s._contract_infos;
-    auto& _last_mid = s._last_mid;
 
     //============================================================
     // 策略层不做柜台特定错误分类
@@ -898,6 +938,15 @@ void FutuRuntimeOps::onOrderEvent(UftFutuMmStrategy& strat,
             quoter->onOrder(localid, isCanceled, leftQty, uTime_HHMM, sec_in_min);
             break;
         }
+    }
+
+    // B+: live 事件驱动补挂 — 撤单终态回报后 slot 空出, 立即按最新价补挂,
+    // 不等下一 tick (回测维持下一 tick processQuoting 补挂, 保可复现性;
+    // 两环境时序差异属有意为之, 见 AGENTS.md B+ 方案)。
+    // requoteAfterFill 自带全部守卫 (canQuote/isTradingHalted/side_pause/retreat/
+    // 200ms 限频) 与"义务深度仍有效则不动"判定, 无活可补时为零成本空转。
+    if (isCanceled && !strat._is_backtest && strat._coordinator) {
+        strat._coordinator->requoteAfterFill(ctx, stdCode, now_ms, false /*from_fill*/);
     }
 
     // 从自成交防护模块中移除（订单撤销或完全成交）

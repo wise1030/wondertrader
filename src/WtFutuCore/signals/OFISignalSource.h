@@ -118,14 +118,11 @@ public:
             _result.cumulative_ofi = _cumulative_ofi;
 
             // Calculate bid/ask pressure
-            double total_pressure = 1.0 + std::abs(_result.ofi);
-            if (_result.ofi > 0) {
-                _result.bid_pressure = (1.0 + _result.ofi) / (2.0 * total_pressure) * 2.0;
-                _result.ask_pressure = 1.0 - _result.bid_pressure;
-            } else {
-                _result.ask_pressure = (1.0 - _result.ofi) / (2.0 * total_pressure) * 2.0;
-                _result.bid_pressure = 1.0 - _result.ask_pressure;
-            }
+            // V8-S5: 原公式代数上退化为阶跃 (ofi>0 时恒 bid=1/ask=0, ofi=0 处不连续翻转):
+            //   (1+ofi)/(2×(1+|ofi|))×2 == 1.0 (任意 ofi>0)
+            // 改为线性互补映射: ofi ∈ [-1,1] -> pressure ∈ [0,1], 连续且互补
+            _result.bid_pressure = 0.5 * (1.0 + _result.ofi);
+            _result.ask_pressure = 0.5 * (1.0 - _result.ofi);
 
             _result.bid_pressure = std::clamp(_result.bid_pressure, 0.0, 1.0);
             _result.ask_pressure = std::clamp(_result.ask_pressure, 0.0, 1.0);

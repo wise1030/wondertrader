@@ -105,8 +105,8 @@ void UnifiedOrderTracker::untrackOrder(uint32_t orderId, uint64_t currentTime)
     bool isMM = order.isMMOrder();
     double price = order.price;
 
-    // F9: 全源 pending 减量 (pendingCancel 单已在 mark 时扣除, 不重复)
-    if (order.isActive() && !order.isPendingCancel())
+    // F9/B+: 全源 pending 减量 (active 单 mark 时不再扣除, 统一在 untrack 时减)
+    if (order.isActive())
         addPendingQty(code.c_str(), isBid, -order.qty);
 
     // Update statistics
@@ -363,25 +363,61 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(const std:
     // 复用成员缓冲 (主线程单线程调用), 消除每 tick 3 次 vector 堆分配
     _actions_buf.clear();
 
-    // 清扫卡死的 pending_cancel 单 — 撤单 ack 丢失/通道断连时单永远卡在 PENDING_CANCEL,
-    // 占用 max_orders 配额且干扰自成交/在途统计. 超时强制 untrack (ack 若随后到达,
-    // onOrderDone 找不到记录, 无副作用).
+    // B+: 卡死的 pending_cancel 单 — 超时**重发撤单**而非遗忘 (旧实现 force untrack
+    //   是 2026-08-19 僵尸单事故根源: 撤单被 CTP 前置流控静默吞掉后策略遗忘活单,
+    //   其在交易所存续/幽灵成交污染簿记)。重试 cancel_max_retries 次仍无 ack →
+    //   置 IS_ZOMBIE (保留跟踪+计入 pending), 经 getZombieEscalations 升级处置:
+    //   告警 + 合约 halt + stra_cancel_all(fullCode) 引擎侧兜底。**永不遗忘活单**。
     if (_cfg.pending_cancel_timeout_ms > 0) {
-        _stale_buf.clear();
+        _zombie_codes_buf.clear();
         for (size_t i = 0; i < _orders.size(); ++i) {
             UnifiedOrderInfo& order = _orders[i];
-            if (!order.isActive() || !order.isPendingCancel())
+            if (!order.isActive() || !order.isPendingCancel() || order.isZombie())
                 continue;
-            if (order.cancel_time == 0)
-                order.cancel_time = currentTime; // 首次观察到, 记录时刻
-            else if (currentTime - order.cancel_time >= _cfg.pending_cancel_timeout_ms)
-                _stale_buf.push_back(order.order_id);
+            if (order.cancel_time == 0) {
+                order.cancel_time = currentTime; // 懒赋值兜底 (mark 时未带时刻的路径)
+            } else if (currentTime - order.cancel_time >= _cfg.pending_cancel_timeout_ms) {
+                if (order.cancel_retry_count < _cfg.cancel_max_retries) {
+                    order.cancel_retry_count++;
+                    order.cancel_time = currentTime; // 重试刷新计时
+                    WTSLogger::warn("UnifiedOrderTracker: cancel ack timeout ({}ms), retry #{} order {}",
+                                    _cfg.pending_cancel_timeout_ms,
+                                    order.cancel_retry_count,
+                                    order.order_id);
+                    CancelAction retry_action;
+                    retry_action.order_id = order.order_id;
+                    retry_action.reason = CancelReason::TIMEOUT;
+                    _actions_buf.push_back(retry_action);
+                } else {
+                    order.setZombie();
+                    WTSLogger::error(
+                        "UnifiedOrderTracker: order {} cancel retry x{} all failed -> ZOMBIE (kept tracked, escalate)",
+                        order.order_id,
+                        order.cancel_retry_count);
+                    if (!_zombie_escalated[order.code]) {
+                        _zombie_escalated[order.code] = true;
+                        _zombie_codes_buf.push_back(order.code);
+                    }
+                }
+            }
         }
-        for (uint32_t oid : _stale_buf) {
-            WTSLogger::warn("UnifiedOrderTracker: cancel ack timeout ({}ms), force untrack order {}",
-                            _cfg.pending_cancel_timeout_ms,
-                            oid);
-            untrackOrder(oid, currentTime);
+
+        // B+ 修复(P2-3): 维护存活 zombie 合约集合; zombie 已清零 (被兜底 cancelAll
+        // 杀掉且回报清账) 的合约重置升级去重 -- 同合约再度出现 zombie 时可重新升级。
+        _zombie_alive_buf.clear();
+        for (size_t i = 0; i < _orders.size(); ++i) {
+            const UnifiedOrderInfo& order = _orders[i];
+            if (order.isActive() && order.isZombie()
+                && std::find(_zombie_alive_buf.begin(), _zombie_alive_buf.end(), order.code)
+                       == _zombie_alive_buf.end())
+                _zombie_alive_buf.push_back(order.code);
+        }
+        for (auto it = _zombie_escalated.begin(); it != _zombie_escalated.end();) {
+            if (std::find(_zombie_alive_buf.begin(), _zombie_alive_buf.end(), it->first)
+                == _zombie_alive_buf.end())
+                it = _zombie_escalated.erase(it);
+            else
+                ++it;
         }
     }
 
@@ -433,8 +469,8 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(const std:
 
             action.reason = CancelReason::STALE;
             _actions_buf.push_back(action);
-            addPendingQty(order.code, order.isBid(), -order.qty);
-            order.setPendingCancel(CancelReason::STALE);
+            // B+: pendingCancel 仍计入全源 pending, 不再扣减; 撤单时刻=动作发出时刻
+            order.setPendingCancel(CancelReason::STALE, currentTime);
             continue;
         }
     }
@@ -556,6 +592,31 @@ bool UnifiedOrderTracker::shouldCancelDueToRate(uint64_t currentTime)
         return _stats.cancel_rate > _cfg.max_cancel_rate;
     }
     return false;
+}
+
+//==============================================================================
+// B+: Clear Zombies (通道恢复锚点)
+//==============================================================================
+
+std::vector<uint32_t> UnifiedOrderTracker::clearZombies()
+{
+    RecursiveSpinGuard _g(_lock);
+    _stale_buf.clear();
+    for (size_t i = 0; i < _orders.size(); ++i) {
+        const UnifiedOrderInfo& order = _orders[i];
+        if (order.isActive() && order.isZombie())
+            _stale_buf.push_back(order.order_id);
+    }
+    for (uint32_t oid : _stale_buf) {
+        WTSLogger::warn("UnifiedOrderTracker: clearZombies untrack order {} (hand off to position reconciliation)", oid);
+        untrackOrder(oid, 0);
+    }
+    if (!_zombie_escalated.empty())
+        _zombie_escalated.clear();
+    _zombie_alive_buf.clear();
+
+    // B+ 修复(P1-2): 返回被遗忘的 zombie id, 调用方需引擎侧补发全撤 + 清孤儿槽
+    return std::vector<uint32_t>(_stale_buf.begin(), _stale_buf.end());
 }
 
 } // namespace futu

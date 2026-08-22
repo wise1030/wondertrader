@@ -96,7 +96,7 @@ class BilateralQuoteStats
 {
 public:
     BilateralQuoteStats()
-        : _session_info(nullptr), _last_minute_units(0) // minute*1000 + sec_in_min
+        : _session_info(nullptr)
           ,
           _bilateral_start_units(0), _total_bilateral_units(0), _session_total_secs(0), _is_bilateral(false),
           _bilateral_switch_count(0), _total_spread_ticks(0), _spread_sample_count(0)
@@ -146,7 +146,6 @@ public:
     /// @param uTime_HHMM 当前时间 HHMM 格式（来自 stra_get_time）
     void onSessionStart(uint32_t uTime_HHMM)
     {
-        _last_minute_units = 0;
         _bilateral_start_units = INVALID_UNITS;
         _total_bilateral_units = 0;
         _is_bilateral = false;
@@ -253,7 +252,6 @@ public:
         // else: 持续双边或持续非双边，不做时间累加（onSessionEnd 时 flush 残余双边段）
 
         _is_bilateral = new_bilateral;
-        _last_minute_units = now_units;
 
         // Spread 样本（仅在双边时记录）
         if (new_bilateral) {
@@ -369,7 +367,6 @@ public:
                                               _bilateral_switch_count);
 
         // 段内自包含口径：清零
-        _last_minute_units = 0;
         _bilateral_start_units = INVALID_UNITS;
         _total_bilateral_units = 0;
         _is_bilateral = false;
@@ -395,7 +392,6 @@ public:
         if (ses > 0)
             _session_total_secs = ses;
 
-        _last_minute_units = 0;
         _bilateral_start_units = INVALID_UNITS;
         _total_bilateral_units = bil;
         _is_bilateral = false;
@@ -492,7 +488,6 @@ private:
     std::string _code;              ///< 合约代码（序列化用）
 
     // 时间累计（单位：秒）
-    uint64_t _last_minute_units;     ///< 最近一次 update 的 session-累计秒
     uint64_t _bilateral_start_units; ///< 当前双边段的起始 session-累计秒
     uint64_t _total_bilateral_units; ///< 双边累计秒
     uint64_t _session_total_secs;    ///< session 总秒数（trading section 之和）

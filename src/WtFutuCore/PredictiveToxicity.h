@@ -37,20 +37,23 @@ struct PredictiveToxicityConfig
     uint32_t vpin_window;        ///< Number of buckets for VPIN
     double vpin_bucket_size;     ///< Target volume per bucket (0=auto)
     double alpha_threshold;      ///< Alpha signal threshold
-    double ofi_weight;           ///< Weight for OFI component
+    double ofi_weight;           ///< Weight for OFI component (V8-T6: 通道内归一, 和=1)
     double trade_weight;         ///< Weight for trade imbalance component
+    double vpin_weight;          ///< V8-T6: combined 中 VPIN 通道权重 (alpha 通道 = 1-w)
+    double extreme_threshold;    ///< V8-R2: extreme 信号判定门槛 (单通道分数超此值才兜底;
+                                 ///< 旧硬编码 0.6 低于 OFI 归一器设计的常态映射区 0.5-0.8, 恒触发)
     uint32_t min_warmup_buckets; ///< Minimum buckets before VPIN is reliable (warmup gate)
 
     PredictiveToxicityConfig()
         : vpin_threshold(0.85), vpin_window(50), vpin_bucket_size(1000), alpha_threshold(0.7), ofi_weight(0.5),
-          trade_weight(0.5), min_warmup_buckets(5)
+          trade_weight(0.5), vpin_weight(0.5), extreme_threshold(0.9), min_warmup_buckets(5)
     {}
 };
 
 /// Predictive toxicity result
 struct PredictiveToxicityResult
 {
-    double vpin;           ///< Current VPIN value
+    double vpin;           ///< Current VPIN value (V8-T3: [0,1] 桶归一口径)
     double ofi_toxicity;   ///< OFI-based toxicity
     double trade_toxicity; ///< Trade imbalance toxicity
     double alpha_toxicity; ///< Combined alpha toxicity
@@ -58,10 +61,11 @@ struct PredictiveToxicityResult
     bool is_toxic;         ///< Exceeds threshold
     int toxic_side;        ///< 1=buy toxic, -1=sell toxic, 0=none
     double extreme_signal; ///< Maximum extreme signal (> 0.9)
+    bool vpin_ready;       ///< V8-T4: 桶数已达 warmup 门 (VPIN 通道有效)
 
     PredictiveToxicityResult()
         : vpin(0), ofi_toxicity(0), trade_toxicity(0), alpha_toxicity(0), combined_score(0), is_toxic(false),
-          toxic_side(0), extreme_signal(0)
+          toxic_side(0), extreme_signal(0), vpin_ready(false)
     {}
 };
 

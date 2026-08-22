@@ -35,6 +35,9 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
     _total_volume += trade.qty;
     _total_trades++;
     _last_trade_time = trade.timestamp;
+    // V8-R3: 首笔成交锚定 _start_time (此前恒 0 -> trading_time_sec 恒 0)
+    if (_start_time == 0)
+        _start_time = trade.timestamp;
 
     // Calculate PnL impact
     double immediate_pnl = trade.immediatePnL();
@@ -151,6 +154,13 @@ void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint
 void PerformanceAnalyzer::recordQuote(
     const std::string& code, double bidPrice, double askPrice, double bidQty, double askQty, uint64_t timestamp)
 {
+    // V8-R3: 仅计数 -- 报价维度统计待有真实消费需求时再接 (参数有意不用)
+    (void)code;
+    (void)bidPrice;
+    (void)askPrice;
+    (void)bidQty;
+    (void)askQty;
+    (void)timestamp;
     _quote_count++;
 }
 
@@ -308,10 +318,10 @@ double PerformanceAnalyzer::calculateAdverseSelection(const TradeRecord& trade) 
 
 MarketCondition PerformanceAnalyzer::determineMarketCondition(uint64_t timestamp) const
 {
-    // Simplified market condition determination
-    // In production, this would use volatility, trend metrics, etc.
-
-    // Default to NORMAL
+    // V8-R3: 占位实现 -- 真实 regime 输入由 R4 的 RegimeTracker 提供
+    // (自 SignalAggregator 归还 ICWeightTracker 的滚动状态)。当前所有
+    // ConditionPerformance 统计都落在 NORMAL 单桶。
+    (void)timestamp;
     return MarketCondition::NORMAL;
 }
 

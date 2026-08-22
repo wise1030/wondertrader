@@ -38,6 +38,7 @@ namespace futu
 
 class FutuPortfolio;
 class UnifiedOrderTracker;
+enum class CancelReason : uint8_t; // 前置声明 (定义在 UnifiedOrderTracker.h)
 
 /// A single price level in the quote ladder (lightweight, no order state)
 struct QuoteLevel
@@ -83,7 +84,7 @@ struct QuoterConfig
     double min_valid_qty;     ///< 全侧总深度有效阈值，用于统计/重挂 (default: 1.0)
 
     // v3 软风控参数（use_bilateral_quote=false 路径专用，bilateral 路径不受影响）
-    double qty_decay_factor;   ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_util)
+    double qty_decay_factor;   ///< qty 指数衰减因子 (default: 2.0)，bidQty *= exp(-factor * long_delta_util)
     double obligation_min_qty; ///< 全侧总深度义务阈值 (default: 10); 不直接决定单档报单量
     double
         obligation_max_spread_ticks; ///< 软 obligation 最大报价宽度 ticks (default: 10) — 同时用于报价生成和双边统计判断 (统一, 挂在哪=统计到哪)
@@ -182,6 +183,13 @@ public:
     /// Cancel all outstanding quotes on one side only
     /// @param cancel_bid  true=cancel all bid orders, false=cancel all ask orders
     void cancelSide(wtp::IUftStraCtx* ctx, bool cancel_bid);
+
+    /// B+: 发送撤单但**保留** slot id (发送即遗忘是 2026-08-19 僵尸单事故根源)。
+    /// id 在 onOrder 终态 (Cncld/全成) 时才从 slot 移除; 未确认前挂单门禁
+    /// (order_ids 非空) 阻止同层挂新单, 防双份敞口。已 pendingCancel 的 id
+    /// 静默跳过 (B+ 正常态, 由 tracker 超时重试/升级接管)。
+    /// @return 本次实际发出撤单请求的数量
+    uint32_t cancelLevelOrders(wtp::IUftStraCtx* ctx, QuoteLevel& level, CancelReason reason, uint64_t now = 0);
 
     /// v7.2 scout: 自由内层(level<obligation_level)成交 → 撤同侧义务层挂单
     /// (scout 成交=逆向信号, 避免义务大单在旧价被逆向成交; 重挂由下一tick按新价完成)
@@ -393,7 +401,7 @@ private:
                                         double short_decay);
 
     /// Flexible pricing: can be unilateral, can be blocked by block_add (inventory management).
-    /// Qty decay based on utilization. Sticky pricing to reduce churn.
+    /// Qty decay based on delta utilization. Sticky pricing to reduce churn.
     QuoteResult computeFlexiblePrices(uint32_t level,
                                       double mid,
                                       double l0_bid_price,

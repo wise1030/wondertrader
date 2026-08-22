@@ -10,9 +10,7 @@ namespace futu
 {
 
 StatisticalArbStrategy::StatisticalArbStrategy()
-    : _last_update(0), _prev_zscore(0), _prev_correlation(0), _adaptive_weight_zscore(0.30),
-      _adaptive_weight_momentum(0.20), _adaptive_weight_volatility(0.15), _adaptive_weight_correlation(0.20),
-      _adaptive_weight_mspread(0.15), _last_signal_time(0), _entry_signal(0)
+    : _last_update(0), _prev_zscore(0), _prev_correlation(0), _last_signal_time(0), _entry_signal(0)
 {}
 
 void StatisticalArbStrategy::updateState(const SpreadState& state, uint64_t timestamp)
@@ -48,32 +46,28 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
     feat.zscore_momentum = calculateMomentumFeature(state);
     feat.volatility_ratio = calculateVolatilityFeature(state);
     feat.correlation_trend = calculateCorrelationFeature(state);
-    feat.mspread_imbalance = calculateMSpreadFeature(state);
-    feat.volume_imbalance =
-        (state.total_volume > 0)
-            ? std::max(-1.0, std::min(1.0, (state.buy_volume - state.sell_volume) / state.total_volume))
-            : 0;
 
     // Calculate composite signal using weights
-    double w_z = _config.use_adaptive_weights ? _adaptive_weight_zscore : _config.weight_zscore;
-    double w_m = _config.use_adaptive_weights ? _adaptive_weight_momentum : _config.weight_momentum;
-    double w_v = _config.use_adaptive_weights ? _adaptive_weight_volatility : _config.weight_volatility;
-    double w_c = _config.use_adaptive_weights ? _adaptive_weight_correlation : _config.weight_correlation;
-    double w_s = _config.use_adaptive_weights ? _adaptive_weight_mspread : _config.weight_mspread;
+    // V8-A3: mspread/volume_imbalance 死因子已删 (输入从未填充, 见 .h 注释)
+    // V8-R3: 自适应权重链 (recordOutcome/updateAdaptiveWeights) 零调用已删 --
+    // adaptive 权重恒等于初始值 (与静态权重同值), 此处行为零变化
+    double w_z = _config.weight_zscore;
+    double w_m = _config.weight_momentum;
+    double w_v = _config.weight_volatility;
+    double w_c = _config.weight_correlation;
 
     // Normalize weights
-    double w_sum = w_z + w_m + w_v + w_c + w_s;
+    double w_sum = w_z + w_m + w_v + w_c;
     if (w_sum > 0) {
         w_z /= w_sum;
         w_m /= w_sum;
         w_v /= w_sum;
         w_c /= w_sum;
-        w_s /= w_sum;
     }
 
     // Composite signal
     feat.composite_signal = w_z * feat.zscore + w_m * feat.zscore_momentum + w_v * (feat.volatility_ratio - 1.0) +
-                            w_c * feat.correlation_trend + w_s * feat.mspread_imbalance;
+                            w_c * feat.correlation_trend;
 
     // Clamp to [-1, 1]
     feat.composite_signal = std::max(-1.0, std::min(1.0, feat.composite_signal));
@@ -132,7 +126,9 @@ double StatisticalArbStrategy::calculateVolatilityFeature(const SpreadState& sta
     recent_vol /= 10;
     hist_vol /= (n - 10);
 
-    if (hist_vol < 1e-10)
+    // V8-A11: n==10 时 hist 段为空 (0/0=NaN), `NaN < 1e-10` 恒 false 会滑过守卫
+    // -> composite 钳位成 +1.0 最强做空信号。!(x>=eps) 形式同时拦截 NaN。
+    if (!(hist_vol >= 1e-10))
         return 1.0;
 
     return recent_vol / hist_vol;
@@ -160,76 +156,8 @@ double StatisticalArbStrategy::calculateCorrelationFeature(const SpreadState& st
     return std::max(-1.0, std::min(1.0, trend * 5.0));
 }
 
-double StatisticalArbStrategy::calculateMSpreadFeature(const SpreadState& state) const
-{
-    if (state.mid_price <= 0)
-        return 0;
-
-    double raw_spread = state.ask_price - state.bid_price;
-    double relative_spread = raw_spread / state.mid_price;
-
-    double volume_weight = 1.0;
-    if (state.total_volume > 0 && state.average_trade_size > 0) {
-        double trade_intensity = state.total_volume / state.average_trade_size;
-        volume_weight = std::min(1.0 + trade_intensity * 0.01, 2.0);
-    }
-
-    double mspread = relative_spread * volume_weight;
-    return std::max(-1.0, std::min(1.0, mspread * 100.0));
-}
-
-void StatisticalArbStrategy::updateAdaptiveWeights()
-{
-    // Adjust weights based on feature performance
-    if (_performance.sample_count < 10)
-        return;
-
-    const double learning_rate = 0.1;
-    const double min_weight = 0.05;
-    const double max_weight = 0.50;
-
-    // Increase weight for features that have performed well
-    _adaptive_weight_zscore =
-        std::min(max_weight, _adaptive_weight_zscore + learning_rate * _performance.zscore_return);
-    _adaptive_weight_zscore = std::max(min_weight, _adaptive_weight_zscore);
-
-    _adaptive_weight_momentum =
-        std::min(max_weight, _adaptive_weight_momentum + learning_rate * _performance.momentum_return);
-    _adaptive_weight_momentum = std::max(min_weight, _adaptive_weight_momentum);
-
-    _adaptive_weight_volatility =
-        std::min(max_weight, _adaptive_weight_volatility + learning_rate * _performance.volatility_return);
-    _adaptive_weight_volatility = std::max(min_weight, _adaptive_weight_volatility);
-
-    _adaptive_weight_correlation =
-        std::min(max_weight, _adaptive_weight_correlation + learning_rate * _performance.correlation_return);
-    _adaptive_weight_correlation = std::max(min_weight, _adaptive_weight_correlation);
-
-    _adaptive_weight_mspread =
-        std::min(max_weight, _adaptive_weight_mspread + learning_rate * _performance.mspread_return);
-    _adaptive_weight_mspread = std::max(min_weight, _adaptive_weight_mspread);
-}
-
-void StatisticalArbStrategy::recordOutcome(double pnl, const StatisticalFeatures& features)
-{
-    // Update performance tracking for adaptive weights
-    // B13 fix: tanh normalize pnl to [-1,1] — prevents learning rate × 10000 from
-    // instantly saturating weights to max, making adaptive learning ineffective.
-    double scaled_pnl = std::tanh(pnl / (_config.base_qty * 10.0 + 1.0));
-
-    _performance.zscore_return = 0.9 * _performance.zscore_return + 0.1 * scaled_pnl * features.zscore;
-    _performance.momentum_return = 0.9 * _performance.momentum_return + 0.1 * scaled_pnl * features.zscore_momentum;
-    _performance.volatility_return =
-        0.9 * _performance.volatility_return + 0.1 * scaled_pnl * (features.volatility_ratio - 1.0);
-    _performance.correlation_return =
-        0.9 * _performance.correlation_return + 0.1 * scaled_pnl * features.correlation_trend;
-    _performance.mspread_return = 0.9 * _performance.mspread_return + 0.1 * scaled_pnl * features.mspread_imbalance;
-
-    _performance.sample_count++;
-
-    if (_config.use_adaptive_weights)
-        updateAdaptiveWeights();
-}
+// V8-A3: calculateMSpreadFeature 已删除 -- SpreadState 微结构字段
+// (mid/bid/ask/total_volume/average_trade_size) 全链路从未填充, 恒返回 0
 
 SpreadSignal StatisticalArbStrategy::generateSignal(const SpreadState& state, uint64_t current_time)
 {
@@ -319,12 +247,6 @@ void StatisticalArbStrategy::reset()
     _features = StatisticalFeatures();
     _prev_zscore = 0;
     _prev_correlation = 0;
-    _performance = FeaturePerformance();
-    _adaptive_weight_zscore = 0.30;
-    _adaptive_weight_momentum = 0.20;
-    _adaptive_weight_volatility = 0.15;
-    _adaptive_weight_correlation = 0.20;
-    _adaptive_weight_mspread = 0.15;
     _last_signal_time = 0;
     _entry_signal = 0;
 }

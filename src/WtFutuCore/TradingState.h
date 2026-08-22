@@ -25,7 +25,7 @@
  *   多字段复合操作 (reset/exitToQuoting) 是逐字段 store, 存在 ns 级
  *   混合视图窗口 — 仅在 session begin/end 安静期调用, 可接受。
  *
- *   过渡期策略层 _cb_mtx 大锁仍在 (FUTU_CALLBACK_LOCK=1 默认),
+ *   策略层 _cb_mtx 大锁为永久基线 (V8-R4: 细粒度开关已删),
  *   本类的原子化保证大锁移除后单字段读写/转移依然安全。
  *
  *   DEBUG 构建 _writer_tid 断言: 原子化后单写者契约已废弃,

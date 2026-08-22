@@ -24,6 +24,17 @@
   是框架层（TraderCTP / TraderAdapter / WtUftCore）的职责。策略层只做与自身
   持仓/风险相关的通用处理（如通用错误计数），不得解析柜台错误码/错误文本。
 
+### 架构原则：delta 与 position 的语义边界（2026-08-19 用户明确）
+
+- **策略逻辑 = delta 口径**。报价计算的全部环节（skew、qty 衰减、义务报价、
+  穿越授权、retreat 等）只使用 delta：contract delta（= position × hedge_ratio）、
+  portfolio delta；归一化分母只用 delta 软限（`contract_max_delta` / `portfolio_max_delta`）。
+- **风控逻辑 = position 口径**。`maxPosition` 等持仓硬限制只用于风险闸门，
+  触发即暂停报价/交易（halt_quoting / pending_drain / side_pause / taker reduce）。
+- **禁止混用**：风控硬顶（maxPosition）不得作为策略报价参数的归一化分母或
+  触发阈值；策略软限不得直接触发风控硬停止。同一概念（如 portfolio delta）
+  全链路必须单一定义（原始/净口径只选一种）。
+
 ## 3. 构建与部署
 
 ```bash
@@ -42,6 +53,10 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner -c <config.y
 - 策略日志: `outputs/Strategy_uft.log`，Runner 日志: `outputs/Runner.log`
 - 成交/资金: `outputs_bt/uft/{trades,funds,positions,closes}.csv`
 - 回测 coordinator 必须 `useAsyncArbThread: false`（主线程同步）
+- 回测策略配置必须显式 `isBacktest: true`（默认 false！）。该开关不仅控制
+  "on_trade 只撤不挂"，B+ 起还门控 live-only 路径（事件驱动补挂）：
+  缺失时在回测回调栈内同步发单 → mocker `_orders` 迭代器失效 → 死循环
+  （2026-08-21 实证：unordered_dense::erase→next 无限循环，CPU 105% 日志冻结）
 
 ## 5. 生产部署（远程 ubuntu@129.211.5.54）
 
@@ -87,6 +102,554 @@ halt→recover→halt（每 session 3 次恢复预算耗尽后停摆）。
 
 **验证**：重启后观察 5 分钟 — 预期买方报价正常成交回补，卖方拒单仅 warn 不再 HALT
 
+## 已完成方案（2026-08-21，B+ 订单槽状态机，已部署验证）
+
+**背景**：8/19-8/20 僵尸单事故 — 撤单"发送即遗忘"+ tracker 5s force-untrack
+→ 撤单静默失效（主因: halt cancelAll 爆发撞 CTP 前置流控, doCancel 同步失败被吞）
+→ 僵尸单在交易所存续（8/19 timeout 3633 次 → 次日晨残留 858 手），冻结可平量、
+幽灵成交污染簿记。两轮复核确认的 B+ 方案（撤单确认后才清槽 + 重试 + zombie 升级）。
+
+**修改清单**：
+1. `UnifiedOrderTracker.h/cpp`：mark 时写 cancel_time（新增 now 参数）；
+   PendingCancel 仍计入全源 pending（删 mark/clear 两处 addPendingQty 增减，自成交排除不变）；
+   checkAutoCancel 超时改"重试动作 + cancel_time 刷新 + retry_count++"，
+   K 次后置 IS_ZOMBIE（保留跟踪/计入 pending/升级），**永不 force-untrack 活单**；
+   配置键 pending_cancel_timeout_ms 改为重试间隔(默认300ms) + 新增 cancel_max_retries(默认3)
+2. `FutuQuoter.cpp`：5 处"发送即 clear"删除（handleObligation/handleFlexible/cancelAll/
+   cancelSide/onScoutFillCancelObligation），id 保留至 onOrder 终态移除；
+   挂单门禁 = level.order_ids.empty()（PendingCancel 不挂新单）；
+   "skip stale/pending cancel" warn 降级 debug（B+ 下是正常态）
+3. `StrategyCoordinator.cpp`：processAutoCancel 发撤单前先 tryMarkPendingCancel；
+   zombie 升级 = error 日志 + 该合约 halt 闩锁（FutuRiskMonitor 新增 zombie halt 集合）
+   + `stra_cancel_all(fullCode)` 引擎侧兜底（**必须传 fullCode 格式 "SHFE.ao2609"**
+   或空串全撤，见"已知外部限制"fullCode/stdCode 不一致）
+4. `FutuRuntimeOps.cpp`：live-only 事件驱动补挂 — onOrderEvent 撤单终态后
+   复用 requoteAfterFill 全部守卫补挂；回测维持下一 tick（保可复现性）
+5. 通道锚点：onChannelReady 清 zombie 集合+halt 闩锁（对不上的交持仓对账）；
+   on_channel_lost 的 cancelAll+halt 照旧
+
+**验证（全部完成）**：TestUnits `test_order_slot_bplus.cpp` 6/6 通过；
+全量 46/48（2 个环境性既有失败）；回测 A/B 626→620 笔（噪声内）、
+0 HALT/0 zombie/0 timeout/0 error；Release md5 82b86679… 部署远程单实例，
+校验 0 警告，13:30 起零重试/零 zombie/零 skip、零段错误（当日 117 万行
+segv 均为旧实例 13:08:39 退出竞态刷屏）。实盘撤单重试路径待报价流恢复
+（簿记破位 halt 属 W3 既有事项）后观察。
+
+**明确不做**：mocker 撤单必成功，超时/重试/zombie 路径回测不可复现，
+靠单测+实盘小流量验证；回测与实盘补挂时序不同属有意为之。
+
+## 已完成方案（2026-08-21③，B+ 复核修复，已验证）
+
+**背景**：B+ 落地后复核发现（用户已确认按建议修复）：
+- P1-1 `_zombie_halt`/`_last_soft_warn_ms`（FutuRiskMonitor）被数据线程
+  （processAutoCancel/processQuoting）与交易线程（onChannelReady/requoteAfterFill）
+  无锁并发读写 unordered_map = UB/崩溃风险
+- P1-2 clearZombies 只清 tracker，quoter 槽残留 id 成孤儿：tryMarkPendingCancel 对
+  未知 id 返回 false -> 该层挂单门禁永久关闭且不再补发撤单；且断连中失败的撤单
+  重连后无人补发（引擎 onRspOrders 只重建自身账本，不对策略回调）-> 部分回归
+  8/19 "发送即遗忘" 事故模式
+- P2-3 zombie halt 闩锁仅 onChannelReady 清除：无断连的流控吞单场景合约停牌至
+  下次重连/重启；`_zombie_escalated` 按合约去重导致同合约第二个 zombie 无升级/
+  无日志/无 cancelAll 兜底
+- P2-4 handleBilateralQuote sticky 判定取 order_ids[0]，B+ 下头部常为 pendingCancel
+  残留 -> 撤单飞行期每 tick 强制顶单 churn（路径A当前禁用，属潜伏缺陷）
+- P3：FutuQuoter.cpp:749 残留 warn 未降级；UnifiedOrderTracker.h T4 注释旧口径；
+  dist coordinator.yaml 缺新键；UftStraContext.cpp DATA_SIZE_STEP 越界修改未记录；
+  delta/position 语义分离改动包无方案记录
+
+**修改清单（全部完成）**：
+1. `FutuRiskMonitor.h/cpp`：SpinLockGuard 保护 `_zombie_halt`（新增 retainZombieHalts
+   释放无存活 zombie 合约的闩锁）与 `_last_soft_warn_ms`（两处读改写）
+2. `UnifiedOrderTracker.h/cpp`：`clearZombies()` 返回 untrack 的 zombie id 列表；
+   checkAutoCancel 维护存活 zombie 合约集合（`getAliveZombieContracts()`），zombie
+   清零的合约重置 `_zombie_escalated` 去重（重新武装升级）；T4 注释更新
+3. `StrategyCoordinator.cpp`：processAutoCancel 每tick `retainZombieHalts(存活集合)`
+4. `FutuRuntimeOps.cpp`：onChannelReady 中 clearZombies 返回非空时
+   `orderApiCall(stra_cancel_all(""))` 引擎侧全撤清扫 + 广播
+   `quoter->onOrder(id, true, 0, 0, 0)` 清孤儿槽
+5. `FutuQuoter.cpp`：handleBilateralQuote sticky 判定改"从尾向头找最新 live 单"；
+   :749 warn 降级为静默
+6. `test_order_slot_bplus.cpp`：+3 用例（ClearZombiesReturnsUntrackedIds/
+   EscalationRearmsAfterZombieGone/ZombieHaltLatchReleaseAndRearm）
+7. `dist/WtBtFutu/coordinator.yaml` 已同步（md5 与 src 一致）
+
+**验证（全部完成）**：
+- TestUnits：OrderSlotBPlus 9/9、全量 55/57（2 个既有环境性失败）
+- **逐比特 A/B**：逆向 16 处编辑重建修复前 .so，md5 `b1fead96…` 与修复前部署件
+  完全一致 -> 证明修复与基线唯一差异为本轮修改
+- 回测行为零回归：`_ec_5d` 修复前 21933 笔 / 修复后 22169/22264/22150 笔（±1.5%
+  mocker 随机噪声内）；`configbt_v5` 修复前后均 3 笔；0 zombie/0 timeout/0 HALT，
+  PnL 正常收敛（5 日动态权益 60.9 万）
+- 路径A（双边接口）修复无回测覆盖（useBilateralQuote=false），启用前需专项验证
+
+**遗留发现（B+ 验证记录勘误）**：AGENTS.md B+ 条目的"回测 A/B 626->620 笔"用当前
+dist 任何配置均不可复现（`_ec_5d` 实际 ~22k 笔且修复前二进制同样如此；残留的 621
+行 trades.csv 疑为陈旧输出）。22k 为 B+ 二进制的真实行为，非本轮修复引入；若需
+复核请用逐比特 A/B 法（备份于 /tmp/opencode/prefix_ab/）。
+
+## 已完成方案（2026-08-19→21，delta/position 语义分离，补记）
+
+**背景**：2026-08-19 用户明确语义边界原则（见 §2 架构原则），本条目补记其落地
+（与 B+ 同工作树实现，此前漏记方案条目）。
+
+**修改清单**：
+- `FutuRiskMonitor::computeInventoryStrategyInputs`：分子 = 同向 delta +
+  同向 pending×hedge_ratio，分母 = contract_max_delta（策略软限）；
+  maxPosition 硬闸门独立于 checkHardPositionRisk，block_add 阈值改
+  |delta| >= maxDelta×ratio
+- `PreTradeDecision.h`：StrategyInputs 字段更名 long_util/short_util ->
+  long_delta_util/short_delta_util
+- `SpreadOptimizer`：单路径 skew（legacy contractMaxDelta 双路径删除），
+  输入 = PortfolioContext.contract_delta_util；inventorySkewScale 参数删除
+- `FutuPortfolio`：getPortfolioDeltaUtilization(净口径) 删除，全链路统一
+  getRawPortfolioDeltaUtilization(原始口径)；getQtyMultiplierByRisk 死代码删除
+- `UftFutuMmStrategy`：on_init 增 maxDelta/maxPosition 配置关系校验（软限>硬顶
+  或 maxDelta 缺配时告警）
+- 配置注释更新（config.yaml/coordinator.yaml/hotparams.yaml，键名保留兼容）
+
+**验证**：test_inventory_delta_separation.cpp 8 用例（delta 口径/义务触发/硬停独立/
+零配置回退/skew 单路径）；行为影响：maxDelta≠maxPosition 的合约 util 缩放变化
+（_ec_5d 等宽配置数值不变）。
+
+## 当前方案（2026-08-22，V8 诊断报告 R1 轮，用户已确认执行）
+
+**R1 已实施完成（代码在树），验证结论见下，R2 方案追加于后。**
+
+### R1 实施记录（2026-08-22）
+
+修改清单（全部完成）：
+1. **P0-1**：FutuHotParamManager（syncFromFile 只写共享内存+置 pending、值比对去重、
+   26 参数边界表+strtod 全串校验拒收 "abc"/负值/布尔、parseHotParamFile 纯函数）；
+   FutuHotParamWatcher（每轮 parse+diff 取代 mtime 秒粒度门控、去掉 Targets、
+   空 hotparams.yaml 不再导致 watcher 不启动）；UftFutuMmStrategy::on_tick 锁内
+   drain（consumePendingApply -> on_params_updated，recursive_mutex 嵌套安全）
+2. **P0-2**：FutuRiskMonitor 新增 recordOrders(n) 批量接口，record*/pruneRateWindows
+   四处 SpinLockGuard(_rate_lock) 串行化（修复既有 SPSC 多生产者违规）；
+   StrategyCoordinator processQuoting/requoteAfterFill 两处捕获 refreshQuotes
+   返回值计数；closeout/liquidator 有意不计数（紧急路径不因频控 HALT 卡死）
+3. **P0-4**：createMarketDataContext(config, code, tick_size) 装配 setContract +
+   setLargeTradeThreshold（大单阈值单源于 signalAggregator.signals.trade_flow）；
+   assembler 传 ci.code/ci.tick_size；MarketDataContext::onTick 首帧未装配一次性告警
+4. **T1+T5**：StrategyCoordinator 补 ofi_component 搬运；QuotePolicyChain 方向交换
+   （1=激进买流->抑制 ask，§6.2 语义）；SelfTradeCalibrator 死字段注释标注
+5. **A1**：AsyncArbitrageExecutor 短价差 spread_impact 符号 + 注释公式修正
+
+测试：新增 test_hot_param_manager(9)/test_toxicity_direction(10)/test_v8_r1_p0(9)
+= 22 用例全过；全量 77/79（2 个既有环境性失败，0 回归）。
+
+**验证（逐比特 A/B 三方对比，基线经 md5 888db4db… 复现证明逐比特一致）**：
+
+| 指标 | 基线(B+③) | R1 全量 | R1 仅关 P0-4 |
+|---|---|---|---|
+| _ec_5d 成交笔数 | 22,268 | 5,104 | 5,286 |
+| closeprofit(0612) | 616,850 | 128,600 | 151,225 |
+| TOXIC 抑制事件 | 74 | ~12,600 | 5,311 |
+| HALT/zombie/timeout/error | 0 | 0 | 0 |
+
+**关键发现（R1 不可独立上生产，须与 R2 同批部署）**：
+- 主因是 **T1 激活 ofi 通道**：毒性分数从 trade-only 通道的 0.12-0.15 常驻升至
+  0.25-0.29（阈值 adverse_threshold=0.10 是 ofi 恒 0 时代标定），触发 72 倍
+  （74->5311），其中 90% 因 ofi/imbalance 符号分歧走双边抑制+冷却 -> 报价长期
+  暂停，成交/PnL 双降 77%
+- 根因即报告 T6（权重不归一：alpha_toxicity 上限 0.3+0.3=0.6）+ T7（large_trade_ratio
+  未传，trade 通道被压半）+ S5（OFI pressure 阶跃退化，符号噪声大、|ofi| 频繁饱和
+  ±1 触发 extreme 通道 503 次）+ T2（realized 权重平方 0.16）+ T4（VPIN 独立触发
+  被门面丢弃）--全部属 R2"毒性评分归一化"范畴
+- P0-4（tick_size 0.2->0.5）为次因（-3.4% 成交），其方向正确但效应需在 R2
+  归一化后重新评估
+- P0-1/P0-2/A1 回测路径无行为影响（watcher 不跑回测/0 次频控违规/arb 路径禁用）
+
+### 1. P0-1 热参数 watcher 线程收编（FutuHotParamWatcher/Manager/UftFutuMmStrategy）
+
+现状：watcher 线程检测 mtime -> syncFromFile -> **在 watcher 线程内直接 applyAll**，
+裸写 `_config.quoting`/SignalAggregator 权重/FutuPortfolio 参数（绕过 _cb_mtx，
+唯一未串行化的写者）；且无值校验（"abc"->0.0、负值照收）、mtime 秒级粒度同秒修改丢失、
+start() 首轮重复 sync。回测侧引擎无 `start_watching`（仅 WtUftRunner.cpp:363 调用），
+故不可依赖 commit_section 通知路径（回测不触发）。
+
+**方案**（dirty flag + tick 线程 drain，报告建议项）：
+1. `FutuHotParamManager`：
+   - `syncFromFile` 拆两步：新增纯函数 `parseHotParamFile(filepath)`（加载+校验，
+     返回合法 (idx,value) 列表，便于单测）；syncFromFile 逐项与共享内存现值比对，
+     **有差异才写入并计数**，变更数 >0 时置 `std::atomic<bool> _pending_apply`；
+     **删除 syncFromFile 内的 applyAll 调用**（签名去掉 Targets/strategy_id）
+   - 新增 26 参数 min/max 边界表 + finite 校验：越界/NaN -> warn+跳过该键（保留旧值）；
+     变更时逐键输出 old->new 审计日志
+   - 新增 `consumePendingApply()`
+2. `FutuHotParamWatcher`：watchLoop 改为**每轮直接 parse+diff**（值比对替代 mtime 门控，
+   修复秒粒度丢失与首轮重复 sync；1Hz 解析 30 键 yaml 开销可忽略）；start() 的
+   Targets 参数与 mtime 字段删除；初始 sync 失败判定改为"解析失败"（空文件=0 变更=成功，
+   修复空 hotparams.yaml 导致 watcher 不启动的潜伏 bug）
+3. `UftFutuMmStrategy::on_tick`（:585 guard 之后）：`if (_hot_mgr.consumePendingApply())
+   on_params_updated();`（recursive_mutex 嵌套安全，复用其 Targets 组装+日志）
+   -- applyAll 从此只在 _cb_mtx 内执行（on_params_updated / on_tick 两入口同锁）
+
+### 2. P0-2 做市报单纳入 ORDER_RATE 频控（FutuRiskMonitor/StrategyCoordinator）
+
+现状：recordOrder 仅 3 调用点（RiskCoordinator.cpp:98 taker、ArbExecutionBridge.cpp:270/356
+arb），MM 报单路径零计数 -> 最高频来源对频控失明。**实盘 on_entrust 仅失败时触发**
+（TraderAdapter.cpp:1335，成功回报不存在），报告备选的 on_entrust 成功分支计数在实盘
+恒为零，不可用。另：频控环 LockFreeRingBuffer 为 SPSC，现有 md 线程+arb 线程双生产者
+已是违规（实盘 async arb 线程）。
+
+**方案**：
+1. `FutuRiskMonitor`：新增 `recordOrders(uint32_t n)` 批量接口；recordOrder/recordCancel/
+   recordTrade/pruneRateWindows 四处加 SpinLockGuard（复用 _zombie_halt 的 atomic_flag
+   模式，新 flag `_rate_lock`）-- 同时修复既有双生产者违规
+2. `StrategyCoordinator`：processQuoting（:1179）与 requoteAfterFill（:1379）两处捕获
+   refreshQuotes 返回值（实际挂单数），n>0 时 `_risk_monitor->recordOrders(n)`
+   （handleObligation/Flexible/Bilateral 全部经 refreshQuotes 汇聚，天然全覆盖；
+   requoteAfterFill 实盘跑 TdSpi 线程，由 1 的锁保护）
+3. 保留 taker/arb 现有 3 处计数（与 MM 路径不相交，无重复计数）；
+   closeout/liquidator **不计数**（紧急减仓路径不应被频控 HALT 卡死，设计决策）
+4. StrategyCoordinator._risk_monitor 若未接线则补 setRiskMonitor（FutuModuleAssembler）
+
+### 3. P0-4 MarketDataContext 装配接线（FutuComponentFactory/FutuModuleAssembler）
+
+现状：createMarketDataContext 忽略参数（FutuComponentFactory.cpp:46-49），
+setContract/setLargeTradeThreshold 全仓零调用 -> OrderBookStateTracker tick_size
+恒为默认 0.2（EC 实际 0.5，depth_imbalance 距离权重系统性偏差 2.5 倍）、
+大单阈值两套口径（tracker 10.0 vs 信号层配置 50.0）。
+
+**方案**：
+1. `createMarketDataContext(config, code, tick_size)`：工厂内解析
+   modules.signalAggregator.signals.trade_flow.largeTradeThreshold（缺省 50.0，
+   与信号层同一 yaml 源，单一口径），调 setContract(code,tick_size) +
+   setLargeTradeThreshold(threshold)（后者顺带把 tick_size 灌入 TickTransactionInferer，
+   TradeFlowTracker::setConfig:130-138 链路已通）；tick_size<=0 时 error+保留默认
+2. `FutuModuleAssembler.cpp:472` 传 ci.code、ci.tick_size
+3. `MarketDataContext::onTick` 首帧校验：setContract 未调用过（getCode().empty()）
+   一次性 warn（"tick_size/大单阈值为默认值，数值不可信"）
+4. SignalAggregator._ctx.tick_size = book.getTickSize()（SignalAggregator.h:226）
+   自动获得正确值，无需另改
+
+### 4. T1 ofi_component 搬运 + T5 方向对齐（StrategyCoordinator/QuotePolicyChain）
+
+现状：AlphaResult 构造（StrategyCoordinator.cpp:931-934）漏填 ofi_component（恒 0）
+-> toxic_side 永远 0 -> 毒性单边抑制从不生效（恒走双边抑制 else 分支）。
+**耦合**：修 T1 后单边抑制开始生效，而 ToxicityPolicy（QuotePolicyChain.h:216-229）
+当前映射为 toxic_side==1（激进买流）-> 停 **bid**——微结构上错边（知情买方吃的是我方
+**ask**），修 T1 不修方向会比现状（双边全停）更糟。T5 全量裁决属 R2，但方向映射
+必须与 T1 同车落地（报告 §6.2 建议：1=激进买流 -> 抑制 ask）。
+
+**方案**：
+1. `StrategyCoordinator.cpp:931-934`：补 `alpha_res.ofi_component =
+   sig_ctx.alpha.ofi_component;`（SignalAggregator.h:339 已算好，纯搬运）
+2. `QuotePolicyChain.h:216-229` 方向交换：toxic_side==1 -> `st.allow_ask=false`
+   （"激进买流，ask 面临逆向选择"）；==-1 -> `st.allow_bid=false`；日志文案同步
+3. SelfTradeCalibrator.h:94 注释矛盾（1=avoid sell vs cpp 反号）为死字段（零消费者，
+   仅 sig_ctx.toxicity.toxic_side 死写），**本轮只改注释**标明语义待 R2 裁决
+4. onSyntheticAlpha 路径（ToxicFlowDetector.cpp:79）同样漏填，但该路径整体为死代码
+   （SyntheticSignalFusion hasAnySource() 恒 false，R3 清扫对象），本轮不动
+
+### 5. A1 spread_impact 空价差符号修复（AsyncArbitrageExecutor）
+
+现状：:443 短价差分支 `pi1 + (leg2_is_buy ? pi2 : -pi2)`，代数推导（空价差利润变化
+= pi1 - pi2）与文件内注释均证明应为 **减号**；现状两腿损失互抵（b-a 而非 -(a+b)），
+真实损失超阈的止损/平仓单被放行、净有利单可能被误拒。
+
+**方案**：:443 `+` 改 `-`；:428-431 注释公式同步修正（"Profit = (leg1-orig1) -
+(leg2-orig2)"）。注：回测 arb_close.enabled=false 且 minProfitThreshold 可能为 0，
+该路径回测覆盖有限，以代数推导+代码评审为主（记入验证说明）。
+
+### 6. 测试与验证
+
+1. **TestUnits 新增**：
+   - `test_hot_param_manager.cpp`：parseHotParamFile 合法值/越界跳过/NaN 跳过/未知键忽略/
+     值 diff 置 pending、consumePendingApply 原子性
+   - `test_toxicity_direction.cpp`：表驱动--ofi>0&imb>0 -> toxic_side==1；ofi<0&imb<0
+     -> -1；方向交换后 ToxicityPolicy 抑制边正确（1->ask 停、-1->bid 停、0->双停）；
+     warmup 门（vpin_ready 前 vpin=0）
+   - P0-2/P0-4 用例并入上述或独立：recordOrders 批量+双线程计数一致性；
+     setContract 后 getTickSize/getSpreadTicks/estimateLiquidity 数值正确性
+2. **构建**：`make -j WtFutuCore` + TestUnits 全量（基线 55/57，2 个既有环境性失败）
+3. **回测 A/B**（_ec_5d）：本轮 P0-4（tick_size 0.2->0.5）与 T1（毒性单边抑制生效）
+   为**预期行为变化**，验证目标从"逐比特一致"改为：0 error/0 HALT/0 zombie/0 timeout、
+   PnL 正常收敛、日志确认 tick_size=0.5 装配成功、毒性单边抑制方向抽样正确；
+   成交数变化幅度记录在案（基线：当前部署版 .so 先跑一轮留存）
+4. **部署**：Debug .so -> dist/WtBtFutu（§3 流程）；生产 Release+远程部署不在本轮，
+   待回测行为变化评估后另行确认
+
+**明确不做**：T2/T3/T4/T6/T7（毒性数值）、S2-S10、A2-A10 其余、R2-R4、P0-3 细粒度
+契约、R5/R6 配置语义、watcher mtime 精度（已被值比对方案取代）。
+
+
+### R2 实施记录（2026-08-22，已完成，回测验证通过）
+
+修改清单（全部完成）：
+1. **T2**：RealizedToxicity::updateCache 删除内部 ×_cfg.weight（加权归门面单次施加，
+   原 realized 有效权重 0.4²=0.16）
+2. **T6**：ToxicFlowDetector::setParams 对 pred ofi/trade 权重通道内归一（和=1）；
+   combined 的 vpin/alpha 权重可配置（vpinWeight 键，默认 0.5）；
+   ToxicityParams::fromVariant 加载期边界校验（adverse/vpin/weights 越界回落默认+warn）
+3. **T3**：PredictiveToxicity 桶内 imbalance 按实际桶量归一（|buy-sell|/total∈[0,1]），
+   vpin=窗口桶归一均值（经典 VPIN 口径，严格有界；原 |buy-sell|/(n×bucket_size)
+   单边流可达 1.2 无界高估）
+4. **T4**：ToxicFlowDetector 门面 is_toxic 恢复 OR 条件
+   （toxic_score>adverse || vpin_ready && vpin>vpinThreshold；PredictiveToxicityResult
+   新增 vpin_ready 字段）
+5. **T7**：StrategyCoordinator 构造 TradeImbalanceResult 补 large_trade_ratio
+   （trade_toxicity 从 0.5×|imb| 恢复满幅）
+6. **S5**：OFISignalSource bid/ask_pressure 阶跃公式改线性互补 0.5×(1±ofi)
+   （原代数恒等于 0/1 阶跃；暂无下游消费者，纯数学修复）
+7. **S2**：LeadLagSignalSource _current_mid/_current_timestamp 构造初始化（UB 修复）
+8. **S3**：OrderBookStateTracker::updateDerivedMetrics 单边盘口 mid/spread 清零
+   （与策略层 C1 对齐；消费方均有 mid<=0 守卫）
+9. **A2**：SpreadCalculator::getState 写 current_price=current_spread + Manager
+   stored_state 同步 -- TrendFollowing 价格止损链路打通（原恒 0 死分支）
+10. **A3**：StatisticalArbStrategy 删除 mspread_imbalance/volume_imbalance 死因子及
+    weight_mspread/_adaptive_weight_mspread/mspread_return（输入字段全链路从未填充，
+    4 因子归一；L2 管道就绪后按真实语义重建）
+11. **A9**：残腿对冲单 Source::CLOSEOUT -> Source::HEDGING（不再污染 closeout 统计
+    /享受 Fix4 REVERSIBLE 豁免）
+12. **A10**：bridge 平仓单两处 skip 路径补 onArbSignalDropped 释放 B-3 in_flight
+    （原止损重试 5s 内被 B4 防双发抑制）
+13. **R2-附加**：extreme 信号判定门槛可配置（extremeSignalThreshold，默认 0.9；
+    原硬编码 0.6 低于 OFI 归一器设计常态区 0.5-0.8，为常态触发路径）；
+    toxic_side 归属与 pred is_toxic 解耦（extreme 兜底触发也可带方向）
+
+测试：ToxicNormalization 6 用例（VPIN 有界/均衡为 0/权重归一/realized 无内权/
+vpin 独立触发/方向解耦），全量 82/84（2 既有环境失败）。
+
+**回测标定与验证（_ec_5d，4 交易日 × 3 合约）**：
+
+| 指标 | 基线(B+③) | R1 | R2(0.65) | R2(0.75 定稿) |
+|---|---|---|---|---|
+| 成交笔数 | 22,268 | 5,104 | 14,482 | 18,792 |
+| dynbalance(0612) | 414,417 | 83,625 | 279,139 | 268,421 |
+| TOXIC 事件 | 74 | ~5,311 | 4,092(全双边) | 2,784(284 单边) |
+| error/HALT/zombie | 0 | 0 | 0 | 0 |
+
+- 触发成分：2,880 次落在 combined 0.65-0.8 区间（非 extreme）；vpin 独立仅 2 次；
+  方向归属生效（of/imb 同号时单边抑制）
+- **固化配置**：adverseThreshold=0.75, vpinThreshold=0.60, extremeSignalThreshold=0.9,
+  vpinWeight=0.5（src 权威已同步，dist 已部署）
+- **已知权衡**：毒性保护降低回测 PnL（268k vs 基线 414k，-35%）--基线的"半瞎"检测器
+  （ofi 恒 0+realized 稀释+trade 压半）穿毒性流赚报价；保护的尾部风险价值回测不可见，
+  属实盘 A/B 裁决项。事件 Episode 聚集的本质是 OFI 归一器将常态映射至 0.5-0.8
+  （信号 LEVEL 被用作 DEVIATION 分数），根治属 R4 信号重设计
+- 0.65→0.75 敏感度低（分数密集区 0.65-0.85），阈值非关键路径
+
+**R1+R2 部署状态**：dist/WtBtFutu 已部署（Debug 回测版）。生产 Release+远程部署
+待用户确认（建议观察毒性单边抑制实盘表现后再上）。
+
+### R3 实施记录（2026-08-22，已完成，回测零回归验证通过）
+
+修改清单（全部完成）：
+1. **SyntheticSignalFusion 整体删除**（710 行 + ToxicFlowDetector 的 feed*/runFusionCycle/
+   onSyntheticAlpha + UftFutuMmStrategy 每 tick 空转调用）；扩展性裁决与三条可取
+   思想记录于 R4 方案（用户确认）
+2. **半接线清理**：SpreadArbitrageManager 的 setQuotingCallback/_quoting_callback/
+   shouldPauseQuoting 删（保留 getQuotingAdjustmentForLeg 观测模式--QuotePolicyChain
+   在用）；FutuPortfolio shouldPauseQuoting/shouldReduceQuoting 删
+3. **adaptiveParam 模块删除**：updateAdaptiveParams 空函数/调用/配置节/ModuleParams
+   字段/use_adaptive_param 传播链全删
+4. **CorrelationManager 假接口删**：getSpreadSignals(返回{})/hasSpreadOpportunity
+   (硬编码ratio)/getCorrelationsFor/getAggregateDelta/removeContract；保留相关性
+   计算核心（getCorrelation/getHedgeRatio 在用）
+5. **arb 假配置清理**：7 个无消费 _default_* 读点+字段（halfLife/correlationWindow/
+   minCorrelation/lookbackWindow/pt entryZ/maPeriod/breakout）+ mmEnhancementWeight/
+   useHybridStrategy + arb_close 的 price_offset_ticks/upgrade_to_taker/
+   StrategyOverride 结构 + yaml 同步删除
+6. **双层置信度统一**：executor 硬编码 0.5 -> 读 Manager 同一配置（minSignalConfidence
+   单键，yaml 0.3→0.5）；Manager 闸门在 B-3 门前置 NONE，无 in_flight 卡死风险
+7. **死方法群**：computeIntent/combineSignals/testCointegration/canOpenPosition 转发/
+   getRiskSummary/getActiveAlerts/checkConvergenceFailure/getAllowedPositionSize/
+   calculatePortfolioRisk/calculateVaR(×2)/checkCorrelationBreak/PortfolioRiskSummary
+   结构/StatisticalArb 自适应链(recordOutcome/updateAdaptiveWeights/_performance/
+   FeaturePerformance) -- 均零调用（逐项 grep 复核）
+8. **PerformanceMonitor 接线**：warn/critical 阈值此前注入无消费 -> checkThresholds
+   (1s 节拍, p99 超阈分级告警, _log_interval_ms 限频, 挂 StrategyCoordinator);
+   P999=99 错误别名删
+9. **PerformanceAnalyzer 占位修正**：_start_time 首笔成交锚定（trading_time_sec
+   恒 0 修复）；determineMarketCondition 显式标注占位（待 R4 RegimeTracker）;
+   recordQuote 参数标记有意不用
+10. **L2 入口明示 TODO**：onOrderQueue/onOrderDetail 空实现标注（含 S9 双通道
+    口径前置条件）
+11. **杂项**：BilateralQuoteStats _last_minute_units 死字段；RealizedToxicity
+    decay_factor/_latest_book/_has_book_data/onBookAnalysis 死链（含 ToxicFlowDetector
+    转发与 detectEnhancedToxicity）；**TickTransactionInferer 数值泄漏修复**
+    （add 全量/prune 乘 confidence -> 记录原始量对称增减，InferenceRecord+volume 字段）；
+    SpreadCalculator::onTick 声明未定义死接口删（链接地雷，测试引爆发现）；
+    误删的 ToxicFlowDetector analyze/onTickVolume/onTrade/getAvgAdverseMove 声明恢复
+12. **TestUnits 补缺**：test_v8_r3_coverage.cpp 4 用例（SpreadCalculator 配对/
+    z-score/A2 current_price、TickInferer 泄漏回归/方向分类）
+
+测试：全量 86/88（2 个既有环境失败）。
+
+**回测验证（_ec_5d vs R2 基线）**：18,524 笔（-1.4%，mocker 噪声内）；TOXIC 2,784
+（与 R2 完全一致）；0 error/HALT/zombie；dynbalance 297,846（+11% -- inferer 泄漏
+修复属合法行为变化：large_trade_ratio 不再被泄漏膨胀的分母稀释，trade 毒性通道
+恢复满幅；其余清扫项行为中性）。
+
+**遗留**：arb 合约乘数死亡链（loadConfig 不读→onTick 丢弃→calculator 恒 1）--
+涉 arb 数学变更，无测试护栏前不动，归 R4；S6 安慰剂配置（momentum window/
+LeadLag lagMs/scale 注释漂移）未处理。
+
+1. **SyntheticSignalFusion 整体删除**（710 行）：feedTickInference/feedBookSignal/
+   addSelfTradeCalibration 零调用、hasAnySource() 恒 false、runFusionCycle 每 tick
+   空转调用（UftFutuMmStrategy.cpp:571-573 一并删）；ToxicFlowDetector::onSyntheticAlpha
+   同步删除（其唯一调用方）
+2. **MarketMakingEnhancer 半接线清理**：`enhanceMarketMaking` 空开关移除（config 键
+   保留兼容但注释标 deprecated）或接线 -- 评估后定
+3. **adaptiveParam 空函数删除**（StrategyCoordinator.cpp:1354-1363 空体 + 配置键）
+4. **CorrelationManager 套利假接口删除**：getSpreadSignals 返回 {}、
+   hasSpreadOpportunity 硬编码等半成品方法（保留相关性计算的真实消费部分）
+5. **arb 假配置群清理**：读入无消费的键（correlationWindow/minCorrelation/maPeriod/
+   breakoutThreshold/halfLife/mmEnhancementWeight/useHybridStrategy/price_offset_ticks/
+   upgrade_to_taker/strategy_overrides）--未消费键启动 warn 改为删除+注释
+6. **双层置信度阈值统一**：Manager 放行 0.3 vs 执行器丢弃 0.5 -> 单一配置键
+7. **死方法群清扫**：computeIntent/combineSignals/testCointegration/
+   recordOutcome+updateAdaptiveWeights(注: recordOutcome 在 R2 已真实接线, 保留)/
+   checkConvergenceFailure/getAllowedPositionSize/getRiskSummary/getActiveAlerts 等
+   零调用（逐一 grep 复核后删）
+8. **PerformanceMonitor 死接线**：warn/critical/logInterval 注入后无逻辑读取、
+   Percentile 枚举 P999=99 修正
+9. **PerformanceAnalyzer 占位指标**：determineMarketCondition 恒 NORMAL、
+   _start_time 恒 0、recordQuote 忽略参数 -- 修正或删
+10. **L2 数据入口明示 TODO**：onOrderQueue/onOrderDetail (void)data 补 TODO 注释
+11. **杂项**：BilateralQuoteStats _last_minute_units、RealizedToxicity decay_factor/
+    book 数据、TickTransactionInferer 内部累计链数值泄漏、ISignalCombiner+Registry
+    等占位
+### R4 实施记录（2026-08-22，4/6 项完成，回测零回归验证通过）
+
+已完成：
+1. **A8 EMERGENCY 接入 halt 通道**：UftFutuMmStrategy::handleRiskAlert 对
+   EMERGENCY 级 (arb 组合回撤超 portfolio_stop_loss) 执行
+   haltTrading(IRREVERSIBLE, -drawdown) + _spread_arb_manager->disable() --
+   套利组合止损线从"假保险丝"(只日志+广播)变为真实动作; 收盘 closeout
+   保持 Fix4 豁免; 线程上下文已注释 (arb 线程回调, 原子写)
+2. **A5 arb 时钟统一**：AsyncArbitrageExecutor 新增 setReplayNowUs(策略每 tick
+   注入 _exchange_time_ms×1000)，替换 5 处墙钟 (同步路径/arb 线程循环/orphan
+   入队与老化 ×2)；SpreadArbitrageManager position_open_time 改用 _now_ms；
+   首帧前 (atomic=0) 兜底墙钟。回测中 TIMEOUT_EXIT/maxDivergenceTime/orphan
+   超时自此可复现触发
+3. **_last_mid 单一属主**（R2 项）：策略壳 MidSlot 成员/预填/写入删除，
+   Coordinator 为唯一属主 (processTick tc.mid 写入)，新增 getLastMid 访问器；
+   消费方 (perf analyzer/on_transaction 方向分类/spread_at_trade/closeout mid/
+   self-trade calibrator) 全部改经访问器，时序等价
+4. **P0-3 细粒度模式正式废弃**：FUTU_CALLBACK_LOCK=0 编译开关删除，回调大锁
+   无条件化；UftFutuMmStrategy.h/EventDispatcher.h/TradingState.h 注释同步。
+   依据: 生产恒用大锁、=0 存在 ≥6 处假无锁、保留开关=保留误开启陷阱
+
+验证：全量 TestUnits 86/88（2 既有环境失败）；_ec_5d 回测 vs R3 基线：
+18,530 笔（+0.03% 噪声内）、TOXIC 2,784（完全一致）、0 error/HALT/zombie、
+dynbalance 291,878（-2% 噪声内）。预期零回归达成（arb 回测不触发故 A8/A5
+无路径、_last_mid 时序等价、开关默认即 1）。
+
+### R4b 待执行（两大结构重构，需独立会话 + 全额 A/B 预算）
+
+**1. SpreadArbitrageManager 拆分（约 1459 行 → 三组件）**：
+- `ArbCalcEngine`：SpreadCalculatorManager + strategies（纯计算，无状态副作用）
+- `ArbGatekeeper`：B-3 门/两族 in_flight/CloseIntent/超时队列/信号冷却
+  （从 applyB3Gate/onArbSignalDropped/onArbOrderFilled/超时清理抽出）
+- `LegExecutionFSM`：PENDING→LEG1_SENT→LEG2_SENT→HEDGING→DONE，
+  撤单/拒单/部分成交为迁移事件（替代散落 executor/bridge/manager 三处的
+  隐式状态拼凑；A6/A7 孤儿腿对冲与方向逻辑重复随之收敛）
+- 前置：arb 乘数死亡链修复（loadConfig 读 multiplier → manager 传递 →
+  calculator 消费）一并纳入；回测开启 arb_close 灰度路径获得覆盖
+- 验证：TestUnits 新增 Gatekeeper/FSM 表驱动用例 + arb 开启配置的回测 A/B
+
+**2. computeAlpha 拆解（SignalAggregator.h:502-679 上帝方法）**：
+- ICRecorder（信号-收益配对）/RegimeTracker（两套滚动 MA deque 归还
+  ICWeightTracker）/ConfidenceCalculator 三协作者
+- 删除非 const getContext()（S4 双写者），毒性结果改 update() 显式入参
+- 吸收 Fusion 三思想（见上）：per-source confidence 连续加权（ConfidenceCalculator）、
+  源级方向命中率（IC 低延迟补充）、合成交易流（L2 缺失补偿备选管道）
+- 验证：signals 层表驱动单测（权重归一/regime 因子/IC 配对）+ _ec_5d A/B
+  （R4 版为基线，alpha 语义变化需逐项归因）
+
+## 已完成方案（2026-08-22②，V8 诊断报告 R5 收尾轮，已验证）
+
+**背景**：R1-R4 完成后对报告全量 60+ 条目逐条代码级复核。确认已修复且执行准确的：
+P0-1/P0-2/P0-3(正式废弃)/P0-4、T1-T7、S2/S3/S5、A1/A2/A3/A5/A8/A9/A10/A14、
+R2(_last_mid 单属主)。**复核发现的剩余未修项**即本轮范围（R4b 两大结构重构
+按既定裁决留待独立会话）。
+
+**修改清单**：
+1. **R3-残余（PerformanceAnalyzer 时钟双域）**：recordTrade 时间戳 =
+   date 合成格式(~2e13) vs onTickUpdate = actiontime(~9e7) → `now > trade_timestamp`
+   恒假，30s 低流动性强制过期分支死代码。统一为 replay `_exchange_time_ms`
+   （FutuRuntimeOps 写入侧 + UftFutuMmStrategy onTickUpdate 调用侧），
+   顺带修复 trading_time_sec 量纲（合成格式 /1000 ≠ 秒）
+2. **R5（FutuConfig 读取语义）**：readDouble/readUInt32 区分"键缺失/VT_Null/
+   空串/类型错(Object/Array)"→ 回落默认值（原 asDouble 空串→0.0，protectTicks
+   空值会静默关价格保护）；readBool 支持数值型（YAML `1`→true，原 asBoolean
+   只认 true/yes 字符串）；已全量扫描现行 yaml，无语义漂移键
+3. **R6（loader fail-fast）**：contracts 缺失/非数组/为空 → error+return false
+   （原静默通过零合约空跑）；anchorCode 空或不在 contracts 列表 → error+false
+4. **R7（spread_at_trade 硬编码 0.2）**：兜底改查 `_contract_infos` 配置的
+   tick_size×2，查不到记 0（spreadCaptured 有 <=0 守卫返回 0，统计口径
+   不再掺默认值噪声）
+5. **R4（TscClock 四项缺陷）**：now() 加 lfence 序列化；calibrate() 增加
+   invariant-TSC cpuid 探测（非 invariant → error 日志+返回 false，不再
+   静默 0.4）；新增 maybeRecalibrate 低频重校准接口（调用方低频路径）
+6. **A11（NaN 护栏）**：calculateVolatilityFeature 的 `hist_vol < 1e-10` 判据
+   对 NaN 恒假（n==10 时 0/0 滑过）→ 改 `!(hist_vol >= 1e-10)`；
+   estimateHalfLife 分母零方差守卫（denom<1e-12 → return 0）
+7. **A12（closeout 冻结桥）**：bridge 早退条件 isCloseoutTriggered →
+   isCloseoutFlattening（仅 DRAINING/ASSESSING/EXECUTING 活跃平仓期暂停），
+   FAILED/COMPLETED 后孤儿腿对冲与 in_flight 清理解冻（原冻结至下一 session，
+   closeout 失败回退时裸腿持续暴露）
+8. **A13（1:N 方向冲突）**：getArbCloseDirection any-match → 全量遍历，
+   方向一致返回该方向，冲突返回 kConflict(2)；ArbCloseSyncPolicy 对冲突
+   双侧抑制（原无序遍历首个 intent 静默丢信息）
+9. **R1（side_pause 语义）**：注释澄清两字段镜像同一合约级熔断器
+   （行为本一致，声明误导）
+10. **S6（安慰剂配置）**：momentum window 接线（calculateMomentum 改用最近
+    min(window,128) 收益，原固定全缓冲 128）；LeadLag lagMs 全链删除
+    （未实现的安慰剂键：yaml/loader/Config 三处）；scale_factor 注释漂移修正
+    （:198 "default 10000" 实为 3000）。**注意：momentum window 生效是真实
+    信号行为变化**（50 vs 128 窗口），回测 A/B 归因记录
+11. **S10（vol 阈值 EC 不可达）**：VolatilitySignalSource 增加低频 vol 分布
+    埋点（info 级，可配置间隔，默认关）→ 回测取 EC realized_vol 分布 →
+    按 p95/p99 标定 elevated/extreme 写回 coordinator.yaml
+12. **性能顺手项**：EventDispatcher::dispatch 空 listener 早退（报告 §5#6）；
+    SIGNAL_DECOMP debug 日志 %50 降采样对齐 toxicity（§5#2）
+
+**测试**：新增 test_v8_r5_fixes.cpp — FutuConfig 空值/类型/布尔语义、
+loader fail-fast、A11 NaN 护栏、momentum window 生效、A13 冲突双侧、
+PerformanceAnalyzer 同时钟超时分支生效
+
+**验证**：make WtFutuCore+TestUnits（基线 86/88，2 既有环境失败）→
+_ec_5d 回测 A/B vs R4 基线（18,530 笔/TOXIC 2,784/dynbalance 291,878）→
+预期：A11/A12/A13/R1/R3/R4/R5/R6/R7 回测路径零行为变化；momentum window
+生效为唯一预期信号变化，归因记录
+
+### R5 实施记录（2026-08-22②，已完成，回测验证通过）
+
+修改清单 1-12 全部落地（见上），S10 标定结果：
+- **实测分布**（_ec_5d, 4 交易日 × 3 合约, statsLogInterval=20 采样 n=18,496）：
+  pooled p50=0.000148 / p95=0.000484 / p99=0.001173 / p99.5=0.001660 /
+  max=0.003660 — 证实旧阈值 0.002/0.004 超出 4 日最大值, 分档不可达
+- **固化配置**：elevatedThreshold=0.0005(≈p95) / extremeThreshold=0.0017(≈p99.5)，
+  src 权威+dist 已同步; 代码默认值 (SignalAggregator/VolatilitySignalSource) 同步;
+  statsLogInterval 键保留 (默认 0 关闭, 标定工具)
+- **生效证据**：回测日志 `[DIAG] shouldPause=true vol_tier=3 realized_vol=0.003193`
+  — EXTREME 分档首次真实触发 (18 次/4 日, 尾部频率合理)
+
+测试：新增 test_v8_r5_fixes.cpp 11 用例（FutuConfig 语义×2 / loader fail-fast×4 /
+A11 NaN 护栏×2 / momentum window / 分析器时钟过期 / TscClock 校准）全过，
+全量 97/99（2 个既有环境性失败，0 回归）。
+
+**回测 A/B（_ec_5d vs R4 基线）**：
+
+| 指标 | R4 基线 | R5 | 归因 |
+|---|---|---|---|
+| 成交笔数 | 18,530 | 17,788 (-4.0%) | S10 vol 闸门生效(±widen/pause)+momentum window 50 生效, 两项预期行为变化 |
+| TOXIC 抑制 | 2,784 | 2,770 (-0.5%) | 毒性链路无变化 ✓ |
+| dynbalance(0612) | 291,878 | 306,882 (+5.1%) | vol 高位拉宽减少逆向成交, 方向合理 |
+| error/HALT/zombie | 0 | 0 | ✓ |
+
+**部署状态**：dist/WtBtFutu 已部署（Debug 回测版，含 R1-R5 全部）。
+生产 Release+远程部署待用户确认（A12 closeout 解冻与 A13 冲突双侧抑制
+改变实盘边缘行为, 建议随 R1+R2 同批观察窗口评估）。
+
+**明确不做（移交 R4b/后续）**：S4/S7/S8（computeAlpha 拆解）、A4-残余
+（腿间配对双重标准）/A6/A7（LegExecutionFSM）、arb 乘数死亡链、S9
+（TradeFlow 双通道，L2 前置）、§5 其余性能项、README v7.x 架构描述同步
+（待 R4b 后一次性更新）
+
 ## 已知外部限制（框架层，禁止越界修复）
 
 - **WtBtCore/HftMocker.cpp 回测不可复现**：`splitVolume()` 用 `srand(time(NULL))`
@@ -108,11 +671,21 @@ halt→recover→halt（每 session 3 次恢复预算耗尽后停摆）。
 - **成交审计账与事件流不一致（2026-08-17 发现，待框架排查）**：
   实盘 trades.csv 出现同秒重复记录（SELL×2-4）且 BUY 方向大量丢失，
   与 on_trade 事件流（本地持仓驱动，自洽）矛盾；疑似框架 CSV 落地路径问题。
+- **stra_cancel_all 的 code 匹配口径回测/实盘不一致（2026-08-21 发现，禁止越界修复）**：
+  实盘 `TraderAdapter::cancelAll(stdCode)` 用 `getFullCode()`（"SHFE.ao2609" 两段式,
+  WTSContractInfo.hpp:184）匹配入参，策略传 stdCode（"SHFE.ao.ao2609" 三段式）**永不匹配、
+  静默全不撤**；回测 `UftMocker::stra_cancel_all` 用 `_code`（stdCode）匹配能撤到。
+  策略层调用 stra_cancel_all 兜底时必须传 fullCode 格式或空串（全撤）。
 
 ## 框架层已打补丁（越界修改记录，2026-08-03，GUI 监控接入需要）
 
+- **`src/WtUftCore/UftStraContext.cpp`**（2026-08-21，B+ 期间顺手修改，本次补记）：
+  `DATA_SIZE_STEP` 8000 -> 200000。原因：做市场景单日订单/成交/明细量可达数万，
+  8000 步长的 mmap 块（order/trade/round/detail 四个 .membin 文件）频繁扩容重映射。
+  内存影响：四块各 ~12-17MB 磁盘（mmap 惰性分页，RSS 按触碰量计）。
+  上游修复（按量自适应扩容）后可还原。
 - **`src/WtUftRunner/WtUftRunner.cpp`**：`config()` 尾部补 `initEvtNotifier()` 调用。
-  原因：框架缺陷——`initEvtNotifier()` 定义存在但从未被调用（对比 WtRunner.cpp:241 /
+  原因：框架缺陷--`initEvtNotifier()` 定义存在但从未被调用（对比 WtRunner.cpp:241 /
   WtRtRunner.cpp:654 均有调用），导致 config.yaml 的 `notifier` 段被静默忽略，
   EventNotifier 不发布任何 MQ 事件，WtMonSvr GUI 无法接收实时订单/成交/日志。
   上游修复后可还原。重建流程：`dist/WtRunnerFutu/rebuild_release.sh`。

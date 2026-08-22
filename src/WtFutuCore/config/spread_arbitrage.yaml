@@ -10,15 +10,16 @@ spread_arbitrage:
   enabled: true
   enhanceMarketMaking: true         # 套利信号增强做市
   primaryStrategy: "mean_reversion"  # 主策略: mean_reversion / trend_following / pairs_trading / statistical_arb
-  useHybridStrategy: false          # 多策略混合模式 (当前仅单策略)
+                                    # V8-R3: useHybridStrategy/mmEnhancementWeight 及全部无消费的
+                                    # statistical 子键已删 (读入后无任何消费路径)
   maxTotalPosition: 20              # 组合最大持仓
   maxPairs: 3                       # 最大 pair 数
-  minSignalConfidence: 0.3          # 最小信号置信度
+  minSignalConfidence: 0.5          # 最小信号置信度 (V8-R3: Manager/Executor 统一单键;
+                                    # 原 0.3 放行+0.5 丢弃双层不一致, [0.3,0.5) 空转)
   signalCooldownMs: 2000            # 信号冷却 (ms, 每 pair 独立)
   minProfitThresholdTicks: 1.0      # A10: 开仓信号最低利润门槛 (ticks)
                                     # 语义: >= 2x(taker_spread+fee) - maker_rebate
                                     # 价格调整成本超此阈值则拒单 (此前未接线, 恒放行)
-  mmEnhancementWeight: 0.5          # 做市增强权重
 
   # ============================================================
   # C0: 套利分级平仓配置 (ARB_SELF_CLOSE_DESIGN v2.1)
@@ -40,15 +41,11 @@ spread_arbitrage:
 
     stop_loss_policy:                   # 止损执行策略: FAK + 对手价
       order_flag: 1                     # 0=GFD 1=FAK 2=FOK
-      price_offset_ticks: 0
       timeout_ms: 1000
-      upgrade_to_taker: false
 
     timeout_policy:                     # 超时执行策略: GFD mid, 30s 升级
       order_flag: 0
-      price_offset_ticks: 0
       timeout_ms: 30000
-      upgrade_to_taker: true
 
     max_close_size_pct: 0.5             # 单次平仓量上限 (vs spread_position)
     close_in_flight_timeout_ms: 5000    # B4: 平仓 in_flight 超时
@@ -97,18 +94,12 @@ spread_arbitrage:
   # ============================================================
   statistical:
     meanReversion:
-      halfLife: 100                  # 半衰期 (默认 100)
       entryZThreshold: 2.0
       exitZThreshold: 0.5           # A9: 补全 (代码读 exitZThreshold)
       stopLossZ: 3.0
       addSafetyRatio: 0.75
     pairsTrading:
-      lookbackWindow: 100
       entryZThreshold: 2.0
-      correlationWindow: 100         # 相关性窗口 (默认 100)
-      minCorrelation: 0.7            # 最小相关系数 (默认 0.7)
     trendFollowing:
       stopLossPct: 0.02
       maxTrendBars: 50
-      maPeriod: 20                   # 均线周期 (默认 20)
-      breakoutThreshold: 1.5         # 突破阈值 (默认 1.5)

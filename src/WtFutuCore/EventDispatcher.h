@@ -46,7 +46,7 @@ namespace futu {
 // - All TradingState transitions fire via dispatcher as events
 // - Single TradingStateWriter listener processes transitions
 // - Eliminates 6 scattered writers -> 1 centralized writer
-// - Enables FUTU_CALLBACK_LOCK=0 (no need for _cb_mtx to serialize state writes)
+// (V8-R4: FUTU_CALLBACK_LOCK=0 已废弃删除 -- 本注释为历史说明)
 //==============================================================================
 
 enum class CoordinatorEvent
@@ -68,6 +68,9 @@ public:
     /// Synchronous dispatch (hot path direct call, no queue)
     void dispatch(CoordinatorEvent event)
     {
+        // V8 §5#6: 零订阅时避免每帧两枪空转遍历 (hasListeners 此前存在但未使用)
+        if (_listeners.empty())
+            return;
         for (auto& l : _listeners)
             l(event);
     }

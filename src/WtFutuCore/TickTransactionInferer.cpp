@@ -358,6 +358,7 @@ void TickTransactionInferer::updateAccumulation(const InferredTransaction& trans
     // Record to history
     InferenceRecord record;
     record.signed_volume = signed_vol;
+    record.volume = trans.volume; // 原始量: _total/_large 桶按此对称增减 (V8-R3 泄漏修复)
     record.confidence = trans.confidence;
     record.is_large = trans.volume >= _config.large_trade_threshold;
     record.timestamp = trans.timestamp;
@@ -392,17 +393,20 @@ void TickTransactionInferer::pruneHistory(uint64_t current_time)
         const auto& oldest = _inference_history.front();
         if (oldest.timestamp < window_start) {
             // Subtract from accumulated stats
-            double vol = std::abs(oldest.signed_volume);
+            // V8-R3: buy/sell 桶按 confidence 加权口径对称扣除 (与 add 一致);
+            // _large/_total 桶按原始量扣除 -- 原 prune 对 total/large 扣
+            // volume×confidence 而 add 加全量, 残留 (1-confidence)×volume 单调膨胀
+            double weighted = std::abs(oldest.signed_volume);
             if (oldest.signed_volume > 0) {
-                _accumulated.buy_volume -= vol;
+                _accumulated.buy_volume -= weighted;
             } else {
-                _accumulated.sell_volume -= vol;
+                _accumulated.sell_volume -= weighted;
             }
 
             if (oldest.is_large) {
-                _large_volume -= vol;
+                _large_volume -= oldest.volume;
             }
-            _total_volume -= vol;
+            _total_volume -= oldest.volume;
 
             _inference_history.pop();
         } else {

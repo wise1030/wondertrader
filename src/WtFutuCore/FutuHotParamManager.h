@@ -8,8 +8,11 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 #include <memory>
 #include <unordered_map>
 #include "../Includes/FasterDefs.h"
@@ -102,9 +105,20 @@ public:
     /// 应用全部热参数到各模块 (on_params_updated 委托)
     void applyAll(const Targets& t, const char* strategy_id);
 
-    /// 从文件同步热参数值到共享内存并应用 (供 FutuHotParamWatcher 调用)
-    /// @return 成功解析并更新的参数个数
-    uint32_t syncFromFile(const char* filepath, const Targets& t, const char* strategy_id);
+    /// V8-P0-1: 从文件同步热参数值到共享内存 -- **只写共享内存 + 置 pending 标志**,
+    /// 不再直接 applyAll (watcher 线程裸写主链路状态是 P0 数据竞争);
+    /// 应用由 UftFutuMmStrategy::on_tick 在 _cb_mtx 内 drain (on_params_updated)
+    /// @return -1=文件解析失败; >=0=实际发生值变更的参数个数 (值比对去重)
+    int32_t syncFromFile(const char* filepath);
+
+    /// V8-P0-1: tick 线程消费 pending 标志 (true=有变更待应用)
+    bool consumePendingApply() { return _pending_apply.exchange(false, std::memory_order_acq_rel); }
+
+    /// V8-P0-1: 解析 + 校验 hotparams 文件 (纯函数, 供单测)
+    /// 越界/NaN/非数值类型 -> 跳过该键 (warn); 值合法但与共享内存相同 -> 由
+    /// syncFromFile 值比对去重
+    /// @return false=文件解析失败; true=out 收录全部合法 (idx,value) (可为空)
+    static bool parseHotParamFile(const char* filepath, std::vector<std::pair<uint32_t, double>>& out);
 
     double hotVal(HotParamIndex idx) const
     {
@@ -146,8 +160,9 @@ public:
         return names;
     }
 
-private:
+protected:
     HotParamEntry _hot_params[HP_COUNT];
+    std::atomic<bool> _pending_apply{false}; ///< V8-P0-1: watcher 置位, tick 线程 drain
 };
 
 } // namespace futu

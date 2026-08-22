@@ -10,7 +10,7 @@
 namespace futu
 {
 
-RealizedToxicity::RealizedToxicity() : _has_calibration_data(false), _has_book_data(false), _cache_dirty(true) {}
+RealizedToxicity::RealizedToxicity() : _has_calibration_data(false), _cache_dirty(true) {}
 
 //------------------------------------------------------------------------------
 // Data Input
@@ -20,13 +20,6 @@ void RealizedToxicity::onCalibration(const CalibrationResult& calibration)
 {
     _latest_calibration = calibration;
     _has_calibration_data = true;
-    _cache_dirty = true;
-}
-
-void RealizedToxicity::onBookAnalysis(double imbalance_score)
-{
-    _latest_book.imbalance_score = imbalance_score;
-    _has_book_data = true;
     _cache_dirty = true;
 }
 
@@ -55,9 +48,11 @@ void RealizedToxicity::updateCache() const
             _cached_result.confidence = sample_confidence * _latest_calibration.confidence;
         }
 
-        // Decayed score: apply weight and time decay
+        // Decayed score: apply time decay (V8-T2: 删除内部 ×_cfg.weight --
+        // 加权是门面 ToxicFlowDetector 的职责 (realized_weight),
+        // 内外双重相乘使有效权重 = self_trade_weight² = 0.16, realized 通道被稀释 2.5 倍)
         if (_cached_result.confidence > 0) {
-            _cached_result.decayed_score = _cached_result.adverse_ratio * _cfg.weight * _cached_result.confidence;
+            _cached_result.decayed_score = _cached_result.adverse_ratio * _cached_result.confidence;
         }
     }
 
@@ -87,7 +82,6 @@ double RealizedToxicity::getToxicityScore() const
 void RealizedToxicity::reset()
 {
     _has_calibration_data = false;
-    _has_book_data = false;
     _cache_dirty = true;
     _cached_result = RealizedToxicityResult();
 }

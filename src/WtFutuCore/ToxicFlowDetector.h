@@ -21,15 +21,11 @@
 #include "AlphaTypes.h"
 #include "SelfTradeCalibrator.h"
 #include "MarketDataContext.h"
-#include "SyntheticSignalFusion.h"
 #include "PredictiveToxicity.h"
 #include "RealizedToxicity.h"
 
 namespace futu
 {
-
-// Forward declarations
-struct SyntheticTransactionData;
 
 /// Legacy toxicity parameters (for backward compatibility)
 struct ToxicityParams
@@ -38,7 +34,9 @@ struct ToxicityParams
     double alpha_weight;
     double book_weight;
     double self_trade_weight;
-    double extreme_signal_weight; ///< Extreme signal discount weight (default 0.8)
+    double extreme_signal_weight;     ///< Extreme signal discount weight (default 0.8)
+    double extreme_signal_threshold;  ///< V8-R2: extreme 判定门槛 (单通道分数>此值才兜底, 默认 0.9)
+    double vpin_weight;               ///< V8-T6: combined 中 VPIN 通道权重 (alpha 通道 = 1-w, 默认 0.5)
     double vpin_threshold;
     uint32_t vpin_window;
     double vpin_bucket_size;
@@ -46,7 +44,7 @@ struct ToxicityParams
 
     ToxicityParams()
         : adverse_threshold(0.10), alpha_weight(0.3), book_weight(0.3), self_trade_weight(0.4),
-          extreme_signal_weight(0.8),
+          extreme_signal_weight(0.8), extreme_signal_threshold(0.9), vpin_weight(0.5),
           vpin_threshold(0.10) // H2: 统一与 fromVariant 默认一致 (此前构造 0.7 vs fromVariant 0.10, 差 7 倍)
           ,
           vpin_window(50), vpin_bucket_size(1000), vpin_min_warmup_buckets(5)
@@ -64,6 +62,36 @@ struct ToxicityParams
         p.book_weight = FutuConfig::readDouble(v, "bookWeight", 0.3);
         p.self_trade_weight = FutuConfig::readDouble(v, "selfTradeWeight", 0.4);
         p.extreme_signal_weight = FutuConfig::readDouble(v, "extremeSignalWeight", 0.8);
+        p.extreme_signal_threshold = FutuConfig::readDouble(v, "extremeSignalThreshold", 0.9);
+        p.vpin_weight = FutuConfig::readDouble(v, "vpinWeight", 0.5);
+
+        // V8-T6: 加载期边界校验 (此前越界值静默生效)
+        if (!(p.adverse_threshold > 0 && p.adverse_threshold <= 1)) {
+            WTSLogger::warn("ToxicityParams: adverseThreshold={} invalid, fallback 0.10", p.adverse_threshold);
+            p.adverse_threshold = 0.10;
+        }
+        if (!(p.vpin_threshold > 0 && p.vpin_threshold <= 1)) {
+            WTSLogger::warn("ToxicityParams: vpinThreshold={} invalid, fallback 0.10", p.vpin_threshold);
+            p.vpin_threshold = 0.10;
+        }
+        if (!(p.alpha_weight >= 0 && p.book_weight >= 0 && p.alpha_weight + p.book_weight > 0)) {
+            WTSLogger::warn("ToxicityParams: alphaWeight+bookWeight invalid, fallback 0.3/0.3");
+            p.alpha_weight = 0.3;
+            p.book_weight = 0.3;
+        }
+        if (!(p.self_trade_weight >= 0 && p.self_trade_weight <= 1)) {
+            WTSLogger::warn("ToxicityParams: selfTradeWeight={} invalid, fallback 0.4", p.self_trade_weight);
+            p.self_trade_weight = 0.4;
+        }
+        if (!(p.vpin_weight >= 0 && p.vpin_weight <= 1)) {
+            WTSLogger::warn("ToxicityParams: vpinWeight={} invalid, fallback 0.5", p.vpin_weight);
+            p.vpin_weight = 0.5;
+        }
+        if (!(p.extreme_signal_threshold >= 0.5 && p.extreme_signal_threshold <= 1)) {
+            WTSLogger::warn("ToxicityParams: extremeSignalThreshold={} invalid, fallback 0.9",
+                            p.extreme_signal_threshold);
+            p.extreme_signal_threshold = 0.9;
+        }
         return p;
     }
 };
@@ -115,84 +143,40 @@ public:
     // Enhanced Detection (for markets without L2 transaction data)
     //==========================================================================
 
-    void onSyntheticAlpha(const SyntheticTransactionData& synth_trans, const AlphaResult& alpha);
-    void onBookAnalysis(const BookAnalysisResult& book_analysis);
     void onSelfTradeCalibration(const CalibrationResult& calibration);
 
+    // V8-R3: SyntheticSignalFusion 已整体删除 (数据入口 feed* 零外部调用,
+    // hasAnySource() 恒 false, runFusionCycle 每 tick 空转; 其三源硬编码的
+    // 融合模式扩展性逊于 SignalAggregator 的 slot+lambda 开闭设计,
+    // 可取思想已记录于 AGENTS.md R4 方案)
+
+    // V8-R3: detectEnhancedToxicity/onBookAnalysis 死接口已删 (零外部调用;
+    // book 通道数据从未接入 realized)
+
     //==========================================================================
-    // Synthetic Signal Fusion (integrated)
+    // VPIN - Delegated to PredictiveToxicity
     //==========================================================================
 
-    /// Feed tick inference data into the internal fusion engine
-    void feedTickInference(const InferredTransaction& tick_inf);
+    void setBucketSize(double bucket_size);
 
-    /// Feed book signal into the internal fusion engine
-    void feedBookSignal(const DepthImbalanceSignal& book_sig);
+    void onTrade(double price, double qty, bool isBuy, uint64_t timestamp);
 
-    /// Enable/disable fusion engine
-    void setFusionEnabled(bool enabled) { _fusion_enabled = enabled; }
-    bool isFusionEnabled() const { return _fusion_enabled; }
-
-    /// Access the internal fusion engine for advanced configuration
-    SyntheticSignalFusion& getFusion() { return _signal_fusion; }
-    const SyntheticSignalFusion& getFusion() const { return _signal_fusion; }
-
-    /// Enhanced toxicity detection combining all sources
-    ToxicityMetrics detectEnhancedToxicity(const BookAnalysisResult& book_sig,
-                                           const CalibrationResult& self_calib,
-                                           const AlphaResult& alpha);
+    void onTickVolume(const char* stdCode, const wtp::WTSTickData* tick);
 
     //==========================================================================
     // Analysis
     //==========================================================================
 
-    /// Compute toxicity metrics (combines predictive + realized)
+    /// Get combined toxicity metrics (cached until cache_dirty)
     ToxicityMetrics analyze() const;
 
-    /// Get quick toxicity score (0-1)
+    /// Quick toxicity score
     double getToxicityScore() const;
 
-    /// Check if current flow is toxic
-    inline bool isToxicFlow() const
-    {
-        updateCache();
-        return _cached_metrics.is_toxic;
-    }
-
-    /// Get toxic side (1=Buy, -1=Sell, 0=None)
-    inline int getToxicSide() const
-    {
-        updateCache();
-        return _cached_metrics.toxic_side;
-    }
-
-    //==========================================================================
-    // Individual Metrics
-    //==========================================================================
-
+    /// Average adverse move from realized toxicity (ticks)
     double getAvgAdverseMove() const;
 
-    //==========================================================================
-    // VPIN (Volume Bucket) Analysis - Delegated to PredictiveToxicity
-    //==========================================================================
-
-    void setBucketSize(double bucket_size);
-    void onTrade(double price, double qty, bool isBuy, uint64_t timestamp);
-    void onTickVolume(const char* stdCode, const wtp::WTSTickData* tick);
-    double getVPIN() const { return _predictive.getVPIN(); }
-
-    //==========================================================================
-    // Reset
-    //==========================================================================
-
     void reset();
-
-    //==========================================================================
-    // Fusion Cycle (called by UftFutuMmStrategy per tick)
-    //==========================================================================
-
-    /// Run fusion and feed results back into toxicity detection
-    void runFusionCycle();
 
     //==========================================================================
     // Component Access (for advanced use)
@@ -211,14 +195,6 @@ private:
     // Sub-components
     PredictiveToxicity _predictive;
     RealizedToxicity _realized;
-
-    // Synthetic signal fusion (integrated from standalone module)
-    SyntheticSignalFusion _signal_fusion;
-    bool _fusion_enabled = true;
-
-    // Legacy data (for backward compatibility)
-    BookAnalysisResult _latest_book_analysis;
-    bool _has_book_data = false;
 
     // Cached analysis
     mutable ToxicityMetrics _cached_metrics;

@@ -38,20 +38,18 @@ struct StatisticalArbConfig
     uint32_t feature_window; ///< Window for feature calculation
     uint32_t min_samples;    ///< Minimum samples required
 
-    // Feature weights
+    // Feature weights (V8-A3: weight_mspread 已随死因子删除, 4 因子归一)
     double weight_zscore;      ///< Z-Score feature weight
     double weight_momentum;    ///< Momentum feature weight
     double weight_volatility;  ///< Volatility feature weight
     double weight_correlation; ///< Correlation feature weight
-    double weight_mspread;     ///< Microstructure spread weight
 
     uint32_t convergence_timeout; ///< Timeout for convergence (seconds)
-    bool use_adaptive_weights;    ///< Adapt weights based on performance
 
     StatisticalArbConfig()
         : entry_threshold(0.7), exit_threshold(0.3), stop_loss_threshold(1.5), max_position(15.0), base_qty(1.0),
           feature_window(100), min_samples(50), weight_zscore(0.30), weight_momentum(0.20), weight_volatility(0.15),
-          weight_correlation(0.20), weight_mspread(0.15), convergence_timeout(5400), use_adaptive_weights(true)
+          weight_correlation(0.20), convergence_timeout(5400)
     {}
 };
 
@@ -65,8 +63,6 @@ struct StatisticalFeatures
     double zscore_momentum;   ///< Z-Score change rate
     double volatility_ratio;  ///< Volatility ratio (leg1/leg2)
     double correlation_trend; ///< Correlation trend
-    double mspread_imbalance; ///< Microstructure spread imbalance
-    double volume_imbalance;  ///< Volume imbalance
 
     double composite_signal;  ///< Weighted composite signal
     double signal_confidence; ///< Signal confidence
@@ -75,31 +71,18 @@ struct StatisticalFeatures
     double feature_stability; ///< Stability of features
     bool is_valid;            ///< Are features valid
 
+    // V8-A3: mspread_imbalance/volume_imbalance 因子已删除 -- 其输入
+    // (SpreadState 微结构字段) 全链路从未填充 (SpreadCalculator 只收腿的最新价,
+    // 无合成价差盘口/成交量数据), 恒 0 参与 composite 属死权重; 待 L2 数据
+    // 管道就绪后 (R4) 再按真实语义重建。
+
     StatisticalFeatures()
-        : zscore(0), zscore_momentum(0), volatility_ratio(1), correlation_trend(0), mspread_imbalance(0),
-          volume_imbalance(0), composite_signal(0), signal_confidence(0), feature_stability(0), is_valid(false)
+        : zscore(0), zscore_momentum(0), volatility_ratio(1), correlation_trend(0), composite_signal(0),
+          signal_confidence(0), feature_stability(0), is_valid(false)
     {}
 };
 
-//==============================================================================
-// Feature Performance Tracker
-//==============================================================================
 
-struct FeaturePerformance
-{
-    double zscore_return;      ///< Average return from zscore signal
-    double momentum_return;    ///< Average return from momentum signal
-    double volatility_return;  ///< Average return from volatility signal
-    double correlation_return; ///< Average return from correlation signal
-    double mspread_return;     ///< Average return from mspread signal
-
-    uint32_t sample_count; ///< Number of samples
-
-    FeaturePerformance()
-        : zscore_return(0), momentum_return(0), volatility_return(0), correlation_return(0), mspread_return(0),
-          sample_count(0)
-    {}
-};
 
 //==============================================================================
 // Statistical Arbitrage Strategy
@@ -153,12 +136,6 @@ public:
     // Performance Tracking
     //==========================================================================
 
-    /// Record signal outcome for adaptive weights
-    void recordOutcome(double pnl, const StatisticalFeatures& features);
-
-    /// Get feature performance
-    const FeaturePerformance& getFeaturePerformance() const { return _performance; }
-
     static constexpr const char* getName() { return "StatisticalArb"; }
 
 private:
@@ -171,9 +148,7 @@ private:
     double calculateMomentumFeature(const SpreadState& state) const;
     double calculateVolatilityFeature(const SpreadState& state) const;
     double calculateCorrelationFeature(const SpreadState& state) const;
-    double calculateMSpreadFeature(const SpreadState& state) const;
 
-    void updateAdaptiveWeights();
     double calculatePositionSize(const StatisticalFeatures& features) const;
     double calculateConfidence(const StatisticalFeatures& features) const;
 
@@ -206,17 +181,11 @@ private:
     // Performance Tracking
     //==========================================================================
 
-    FeaturePerformance _performance;
 
     //==========================================================================
     // Adaptive Weights
     //==========================================================================
 
-    double _adaptive_weight_zscore;
-    double _adaptive_weight_momentum;
-    double _adaptive_weight_volatility;
-    double _adaptive_weight_correlation;
-    double _adaptive_weight_mspread;
 
     //==========================================================================
     // Signal State

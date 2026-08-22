@@ -1,6 +1,9 @@
 /*!
  * \file FutuHotParamWatcher.cpp
  * \brief hotparams.yaml 文件监视器实现
+ *
+ * V8-P0-1: 每轮 parse+值比对 (替代 mtime 秒粒度门控), 只写共享内存+置脏,
+ * applyAll 由策略 on_tick 在 _cb_mtx 内 drain (见 UftFutuMmStrategy::on_tick)。
  */
 #include "FutuHotParamWatcher.h"
 #include "FutuHotParamManager.h"
@@ -24,7 +27,6 @@ FutuHotParamWatcher::~FutuHotParamWatcher()
 
 bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath,
                                 FutuHotParamManager* hot_mgr,
-                                const FutuHotParamManager::Targets& targets,
                                 uint32_t interval_ms)
 {
     if (_running.load())
@@ -46,11 +48,11 @@ bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath,
     _filepath = filepath;
     _interval_ms = interval_ms;
     _hot_mgr = hot_mgr;
-    _targets = targets;
-    _last_mtime = 0;
     _stop_flag.store(false);
 
     // 首次同步 (把文件当前值写入共享内存, 确保文件为权威源)
+    // 语义: 解析失败才视为失败; 空文件/无有效键 = 0 变更 = 成功
+    // (旧逻辑 updated>0 才成功, 空 hotparams.yaml 会导致 watcher 不启动)
     if (!syncFileToSharedMemory())
     {
         WTSLogger::error("FutuHotParamWatcher: initial sync failed, watcher not started");
@@ -60,7 +62,9 @@ bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath,
     _worker.reset(new std::thread([this]() { watchLoop(); }));
     _running.store(true);
 
-    WTSLogger::info("FutuHotParamWatcher: started for {} (interval={}ms)", _filepath, _interval_ms);
+    WTSLogger::info("FutuHotParamWatcher: started for {} (interval={}ms, apply on tick thread)",
+                    _filepath,
+                    _interval_ms);
     return true;
 }
 
@@ -81,14 +85,14 @@ void FutuHotParamWatcher::watchLoop()
 {
     while (!_stop_flag.load())
     {
+        // V8-P0-1: 每轮全量 parse+diff -- 值比对在 syncFromFile 内完成,
+        // 无变化零写入; 规避 mtime 秒级粒度丢同秒二次修改的问题
         try
         {
-            uint64_t mtime = boost::filesystem::last_write_time(boost::filesystem::path(_filepath));
-            if (mtime > _last_mtime)
+            if (!syncFileToSharedMemory())
             {
-                _last_mtime = mtime;
-                WTSLogger::info("FutuHotParamWatcher: {} modified, syncing to shared memory", _filepath);
-                syncFileToSharedMemory();
+                // 文件正在被写入等暂态解析失败: 下轮重试, 不终止 watcher
+                WTSLogger::error("FutuHotParamWatcher: parse {} failed, retry next poll", _filepath);
             }
         }
         catch (const std::exception& e)
@@ -105,8 +109,8 @@ bool FutuHotParamWatcher::syncFileToSharedMemory()
     if (!_hot_mgr)
         return false;
 
-    uint32_t updated = _hot_mgr->syncFromFile(_filepath.c_str(), _targets, _strategy_id.c_str());
-    return updated > 0;
+    // -1 = 解析失败; >=0 = 值变更数 (可为 0)
+    return _hot_mgr->syncFromFile(_filepath.c_str()) >= 0;
 }
 
 } // namespace futu

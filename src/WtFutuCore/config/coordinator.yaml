@@ -10,7 +10,7 @@
 #     use_signal_aggregator / useHedging
 #
 #   模块级开关 (写在 modules.<name>.enabled):
-#     toxicityDetector / spreadOptimizer / adaptiveParam / selfTradePrevention
+#     toxicityDetector / spreadOptimizer / selfTradePrevention
 #
 # 找不到键时使用编译期默认值(见 UftFutuMmStrategy.h::Modules 构造函数),
 # 不构成"第二处配置", 仅为代码内 fallback.
@@ -25,8 +25,9 @@ coordinator:
   use_signal_aggregator: true
 
   # --- v7.1 taker 紧急减仓 (大量成交突然穿仓时主动吃单; 报价永不停) ---
-  # 合约 util=(|pos|+pending)/maxPos >= takerReduceThreshold 时,
-  # FAK 对手价平掉超出 takerReduceTargetUtil×maxPos 的部分; 每合约限频
+  # [风控口径] 合约 util=|净头寸|/maxPosition >= takerReduceThreshold 时,
+  # FAK 对手价平掉超出 takerReduceTargetUtil×maxPosition 的部分; 每合约限频.
+  # 注意: 这是风控动作 (position 口径), 与策略链路的 delta 软限 (maxDelta) 相互独立.
   takerReduceThreshold: 1.1        # 触发阈值 (0=禁用; v7.3: PAUSE_QUOTING 死分支已删除,
                                    #   仓位控制全部由连续链承担: skew(1.0)->force义务(1.0)->taker(1.1))
   takerReduceTargetUtil: 0.8       # 减仓目标利用率
@@ -71,7 +72,6 @@ coordinator:
           emaAlpha: 0.1
         lead_lag:
           window: 50
-          lagMs: 50
 
       # === Alpha 模型 (模型层) ===
       model:
@@ -87,8 +87,12 @@ coordinator:
       # === 辅助信号 (不参与 alpha 模型, 驱动 should_widen/should_pause) ===
       volatility:
         window: 100
-        elevatedThreshold: 0.002  # >=此值 -> ELEVATED + should_widen
-        extremeThreshold: 0.004   # >=此值 -> EXTREME + should_pause
+        # V8-S10: 按 _ec_5d 实测分布标定 (2026-08-22, 4 交易日 × 3 合约, n=18496):
+        #   pooled p50=0.000148 p95=0.000484 p99=0.001173 p99.5=0.001660 max=0.003660
+        #   旧值 0.002/0.004 ≈ 常态 15/30 倍, 超出 4 日实测最大值, 分档不可达
+        elevatedThreshold: 0.0005 # >=此值 -> ELEVATED + should_widen (≈p95)
+        extremeThreshold: 0.0017  # >=此值 -> EXTREME + should_pause (≈p99.5)
+        statsLogInterval: 0       # V8-S10: vol 分布埋点间隔 (0=关闭; 标定时置 20)
 
       # === 公共参数 ===
       warmupTicks: 20
@@ -96,16 +100,22 @@ coordinator:
     # --- 毒性检测器 (VPIN + OFI + 自成交校准) ---
     toxicityDetector:
       enabled: true                # 模块级开关 (唯一位置: modules.<name>.enabled)
-      adverseThreshold: 0.25       # 综合毒性触发阈值
-      vpinThreshold: 0.30          # VPIN 单独触发阈值
-      window: 20                   # VPIN 桶大小
+      # V8-R2 归一化后各分数严格 [0,1]: alpha_toxicity=归一(ofi/trade)权重加权和,
+      # vpin=桶归一 imbalance 均值, combined=vpinWeight×vpin+(1-vpinWeight)×alpha。
+      # 典型市场 combined ~0.4-0.5 (OFI 归一器设计映射典型值到 tanh 0.5-0.8),
+      # 阈值须显著高于常态 (旧值 0.25 是 ofi 通道恒 0 时代标定, 不可比)
+      adverseThreshold: 0.75       # 综合毒性触发阈值 (R2 回测标定: 0.65->2.8k 事件/0.75->2.8k, 敏感度低; 详见 AGENTS.md R2)
+      vpinThreshold: 0.60          # VPIN 单独触发阈值 (V8-T4: 恢复独立 OR 条件)
+      vpinWeight: 0.5              # V8-T6: combined 中 VPIN 通道权重 (alpha 通道=1-w)
+      window: 20                   # VPIN 桶数窗口
       bucketSize: 50
       minWarmupBuckets: 5          # 预热桶数 (低于此数不触发)
       cooloffMs: 5000              # 毒性冷却期
-      alphaWeight: 0.5             # alpha 通道权重
-      bookWeight: 0.3              # 盘口不平衡通道权重
-      selfTradeWeight: 0.4         # 自成交通道权重
-      extremeSignalWeight: 0.8     # 极端信号权重
+      alphaWeight: 0.5             # alpha 通道内 OFI 权重 (与 bookWeight 一起归一化, V8-T6)
+      bookWeight: 0.3              # alpha 通道内 trade imbalance 权重
+      selfTradeWeight: 0.4         # 自成交通道权重 (V8-T2: 单次施加, 不再平方)
+      extremeSignalWeight: 0.8     # 极端信号权重 (单通道分数超 extremeSignalThreshold 时兜底)
+      extremeSignalThreshold: 0.9  # V8-R2: extreme 判定门槛 (旧硬编码 0.6 低于 OFI 常态区 0.5-0.8, 恒触发)
 
     # --- GLFT 价差优化器 ---
     # 注意: baseSpread 不在此配置 - 它从 config.yaml 的 quoting.baseSpread 加载
@@ -129,11 +139,10 @@ coordinator:
       volPercentileScale: 50.0     # 波动率分位缩放
       pauseSpreadMultRatio: 0.9    # 暂停时价差乘子比率
       toxicitySpreadFactor: 1.0
-      # v7.1 连续控制: 归一化仓位 skew (统一口径 util=(pos+同向pending)/maxPos)
+      # v7.1 连续控制: 归一化库存 skew (统一 delta 口径 util=(delta+同向pending×hr)/maxDelta)
       # skew_norm = util^deltaSkewPower × inventorySkewGain; 1.0 = 减仓侧贴 mid
       inventorySkewGain: 1.0
-      inventorySkewScale: 2.0      # 库存偏斜缩放
-      # util>=1.0 时授权减仓侧穿越 mid 的最大 tick 数 (主动减仓; 须 < obligationMaxSpreadTicks=10)
+      # delta util>=1.0 时授权减仓侧穿越 mid 的最大 tick 数 (主动减仓; 须 < obligationMaxSpreadTicks=10)
       skewCrossMaxTicks: 3.0
       portfolioSkewWeight: 0.5     # 组合偏斜权重
       contractSkewWeight: 1.0      # 单合约偏斜权重
@@ -158,16 +167,12 @@ coordinator:
     autoCancel:
       maxAgeMs: 10000              # 订单最大存活时间 (ms)
       priceDeviation: 3.0          # 价格偏离阈值 (ticks)
+      # B+: 撤单确认重试 (替代旧"超时5s强制遗忘"——2026-08-19 僵尸单事故根源)
+      cancelRetryIntervalMs: 300   # 撤单 ack 超时重发间隔 (ms)
+      cancelMaxRetries: 3          # 最大重试次数, 达到后 zombie 升级 (halt合约+cancelAll兜底)
 
     # --- 相关性管理器 ---
     correlationManager:
       windowSize: 100              # 相关性计算窗口
       minCorrelation: 0.5          # 最小相关系数
       spreadZThreshold: 2.0        # 价差 Z-Score 阈值
-
-    # --- 自适应参数 (当前为占位, 未启用) ---
-    adaptiveParam:
-      enabled: false               # 模块级开关 (唯一位置)
-      updateInterval: 100          # 更新间隔 (tick)
-      minPhi: 0.001                # 最小 phi
-      maxPhi: 0.1                  # 最大 phi

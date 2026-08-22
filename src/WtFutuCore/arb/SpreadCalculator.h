@@ -70,8 +70,8 @@ public:
     // Data Input
     //==========================================================================
 
-    /// Update with new tick data
-    void onTick(const std::string& code, double price, double multiplier, uint64_t timestamp);
+    // V8-R3: onTick(code,...) 声明未定义的死接口已删 (链接地雷) --
+    // 生产路径经 SpreadCalculatorManager::onTick 按 leg 分发到 onLegXTick
 
     /// Update with WTSTickData
     void onLeg1Tick(double price, uint64_t timestamp);

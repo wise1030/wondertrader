@@ -14,6 +14,9 @@
 #include "../WTSUtils/WTSCfgLoader.h"
 #include "../Includes/WTSVariant.hpp"
 
+#include <cerrno>
+#include <cstdlib>
+
 namespace futu
 {
 
@@ -159,44 +162,129 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
 namespace futu
 {
 
-uint32_t FutuHotParamManager::syncFromFile(const char* filepath, const Targets& t, const char* strategy_id)
+int32_t FutuHotParamManager::syncFromFile(const char* filepath)
 {
+    std::vector<std::pair<uint32_t, double>> parsed;
+    if (!parseHotParamFile(filepath, parsed))
+        return -1;
+
+    uint32_t updated = 0;
+    for (const auto& kv : parsed)
+    {
+        double* ptr = _hot_params[kv.first].ptr;
+        if (!ptr)
+            continue;
+        // 值比对: 无变化不写不计数 (mtime 秒粒度导致的重复 sync / 同秒二次修改
+        // 天然去重, watcher 每轮全量 parse+diff 也因此零写入)
+        if (*ptr != kv.second)
+        {
+            WTSLogger::info("FutuHotParamManager: hot param '{}' {} -> {}",
+                            _hot_params[kv.first].name,
+                            *ptr,
+                            kv.second);
+            *ptr = kv.second;
+            updated++;
+        }
+    }
+
+    // V8-P0-1: 只置脏标志, applyAll 由 on_tick 在 _cb_mtx 内执行
+    if (updated > 0)
+        _pending_apply.store(true, std::memory_order_release);
+
+    return static_cast<int32_t>(updated);
+}
+
+bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<std::pair<uint32_t, double>>& out)
+{
+    out.clear();
     WTSVariant* cfg = WTSCfgLoader::load_from_file(filepath);
     if (!cfg)
     {
         WTSLogger::error("FutuHotParamManager: failed to load {}", filepath);
-        return 0;
+        return false;
     }
 
-    const char* const* names = paramNames();
-    uint32_t updated = 0;
-    uint32_t found = 0;
+    // V8-P0-1: 26 参数边界表 -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
+    struct Bounds
+    {
+        double lo;
+        double hi;
+    };
+    static const Bounds bounds[HP_COUNT] = {
+        /* base_spread */ {0.0, 1000.0},
+        /* base_qty */ {0.0, 100000.0},
+        /* level_qty_multiplier */ {0.0, 1000.0},
+        /* level_step */ {0.0, 1000.0},
+        /* max_delta */ {0.0, 1000000.0},
+        /* alpha_sensitivity */ {0.0, 1000.0},
+        /* ofi_weight */ {0.0, 10.0},
+        /* trade_weight */ {0.0, 10.0},
+        /* book_imbalance_weight */ {0.0, 10.0},
+        /* momentum_weight */ {0.0, 10.0},
+        /* lead_lag_weight */ {0.0, 10.0},
+        /* strong_threshold */ {0.0, 1.0},
+        /* confidence_weight_min */ {0.0, 1.0},
+        /* confidence_weight_max */ {0.0, 1.0},
+        /* phi */ {0.0001, 1.0},
+        /* delta_skew_threshold */ {0.0, 1.0},
+        /* delta_skew_factor */ {0.0, 100.0},
+        /* max_spread_mult */ {0.0, 100.0},
+        /* min_spread_mult */ {0.0, 100.0},
+        /* depth_sensitivity */ {0.0, 1000.0},
+        /* toxicity_spread_factor */ {0.0, 100.0},
+        /* low_confidence_spread_factor */ {0.0, 100.0},
+        /* sticky_threshold */ {0.0, 1000000.0},
+        /* improve_retreat_ratio */ {0.0, 1000.0},
+        /* protect_ticks */ {0.0, 10000.0},
+        /* max_price_deviation */ {0.0, 1000000.0},
+    };
+    static_assert(sizeof(bounds) / sizeof(bounds[0]) == HP_COUNT, "bounds table size mismatch");
 
+    const char* const* names = paramNames();
     for (uint32_t i = 0; i < HP_COUNT; i++)
     {
         const char* key = names[i];
         if (!cfg->has(key))
             continue;
 
-        found++;
-        double val = cfg->getDouble(key);
-        if (_hot_params[i].ptr)
+        // V8-R5 语义修正: WTSVariant 内部标量统一字符串存储 (yaml_to_variant
+        // 对所有标量 as<std::string>, asDouble=atof), "abc"/"true"/空串静默
+        // 变 0.0 -- strtod 全串校验拒收非数值内容
+        const char* raw = cfg->getCString(key);
+        double val = 0;
+        bool numeric = false;
+        if (raw && *raw)
         {
-            *_hot_params[i].ptr = val;
-            updated++;
+            char* end = nullptr;
+            errno = 0;
+            double v = std::strtod(raw, &end);
+            if (end != raw && *end == '\0' && errno != ERANGE)
+            {
+                val = v;
+                numeric = true;
+            }
         }
+        if (!numeric)
+        {
+            WTSLogger::warn("FutuHotParamManager: '{}' non-numeric value '{}', skipped", key, raw ? raw : "");
+            continue;
+        }
+        const Bounds& b = bounds[i];
+        // NaN: 两个比较均为 false -> !true 拒收; inf: 超上界拒收
+        if (!(val >= b.lo && val <= b.hi))
+        {
+            WTSLogger::warn("FutuHotParamManager: '{}'={} out of range [{},{}], skipped",
+                            key,
+                            val,
+                            b.lo,
+                            b.hi);
+            continue;
+        }
+        out.emplace_back(i, val);
     }
 
     cfg->release();
-
-    WTSLogger::info("FutuHotParamManager: syncFromFile {} found={} updated={}", filepath, found, updated);
-
-    if (updated > 0)
-    {
-        applyAll(t, strategy_id);
-    }
-
-    return updated;
+    return true;
 }
 
 } // namespace futu

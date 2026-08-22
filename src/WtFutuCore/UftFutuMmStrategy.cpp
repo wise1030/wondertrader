@@ -55,7 +55,6 @@
 #include "TickTransactionInferer.h"
 #include "SelfTradeCalibrator.h"
 #include "SignalAggregator.h" // 新增：信号聚合器
-#include "SyntheticSignalFusion.h"
 #include "FutuConfigValidator.h" // 配置校验
 
 #include <cmath>
@@ -64,17 +63,14 @@
 #include <chrono>
 
 //==========================================================================
-// v7.6: 回调大锁编译开关 (默认 1; -DFUTU_CALLBACK_LOCK=0 切细粒度模式)
+// V8-R4/P0-3: 回调大锁 -- FUTU_CALLBACK_LOCK=0 细粒度编译开关已正式删除。
+// 依据: 生产基线恒为 1; =0 模式存在至少 6 处已证实的假无锁
+// (SelfTradeCalibrator map 并发插入/PerformanceMonitor 裸计数/
+// consumePairTag 锁外/EventDispatcher subscribe 等, 见 DIAGNOSTIC_REPORT_V8
+// P0-3), 保留开关 = 保留误开启即 data race 的认知陷阱。
+// 若未来需要细粒度并发, 须先建立跨线程写点清单并逐项 seqlock/atomic 化。
 //==========================================================================
-#ifndef FUTU_CALLBACK_LOCK
-#define FUTU_CALLBACK_LOCK 1
-#endif
-
-#if FUTU_CALLBACK_LOCK
 #define FUTU_CB_LOCK_GUARD() std::lock_guard<std::recursive_mutex> _cb_lock(_cb_mtx)
-#else
-#define FUTU_CB_LOCK_GUARD() ((void)0)
-#endif
 
 namespace futu
 {
@@ -200,6 +196,23 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
                     static_cast<int>(alert.type),
                     alert.message);
 
+    // V8-R4/A8: EMERGENCY 此前只日志+广播, 套利组合止损线是"假保险丝" --
+    // 达阈后 MM 照常报价、arb 照常开新仓, 兜底只剩做市侧另一套日亏线。
+    // 接入: IRREVERSIBLE halt (停 MM 报价, 收盘 closeout 保持 Fix4 豁免)
+    // + disable arb (停新信号; 持仓由 closeout/残腿对冲处置)。
+    // 线程: 回调来自 arb 线程 (live) -- haltTrading 内部为原子写, 与
+    // zombie-halt 路径同类; disable 与 arb 主循环同线程。
+    if (alert.level == RiskAlert::Level::EMERGENCY) {
+        if (_risk_monitor && !_risk_monitor->isTradingHalted()) {
+            _risk_monitor->haltTrading(RiskCategory::IRREVERSIBLE, -alert.value);
+            WTSLogger::error("[ARB_RISK] EMERGENCY halt triggered: arb portfolio drawdown {:.2f} >= {:.2f}",
+                             alert.value,
+                             alert.threshold);
+        }
+        if (_spread_arb_manager && _spread_arb_manager->isEnabled())
+            _spread_arb_manager->disable();
+    }
+
     // 转发到 EventNotifier (运维侧订阅 nanomsg topic="ARB_RISK")
     if (_event_notifier) {
         std::string msg = fmt::format("[L{}] pair={} type={} val={:.2f}/thr={:.2f}: {}",
@@ -285,6 +298,23 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
         // Portfolio 参数校验
         FutuConfigValidator::checkPositive("portfolio_max_delta", _portfolio->getParams().portfolio_max_delta, vr);
 
+        // 单合约 delta/position 语义边界校验 (2026-08-19):
+        //   maxDelta = 策略库存软限 (skew/qty衰减/义务/穿越的归一化基准)
+        //   maxPosition = 风控硬顶 (仅 halt 闸门)
+        for (const auto& ci : _contract_infos) {
+            if (ci.max_position > 0 && ci.max_delta <= 0) {
+                vr.addWarning(fmt::format("{}: maxDelta 未配置(<=0) — 策略库存调控(skew/衰减/义务)失效, "
+                                          "仅剩 maxPosition 硬停",
+                                          ci.code));
+            } else if (ci.max_position > 0 && ci.max_delta > ci.max_position) {
+                vr.addWarning(fmt::format("{}: maxDelta({:.0f}) > maxPosition({:.0f}) — 策略软限高于风控硬顶, "
+                                          "义务/穿越等调节到达前即被硬停, 软限无意义",
+                                          ci.code,
+                                          ci.max_delta,
+                                          ci.max_position));
+            }
+        }
+
         // 输出结果
         for (const auto& err : vr.errors) {
             WTSLogger::error("UftFutuMmStrategy[{}] Config validation ERROR: {}", id(), err);
@@ -351,15 +381,10 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 
     // 启动 hotparams.yaml 文件监视器 (修改后自动写入共享内存并触发热更新)
     // 仅在实盘模式启用 (回测无共享内存)
+    // V8-P0-1: watcher 只写共享内存+置脏标志, 参数应用由 on_tick 在
+    // _cb_mtx 内 drain -- 不再把 Targets 交给 watcher 线程直接 applyAll
     if (!_is_backtest) {
-        FutuHotParamManager::Targets t;
-        t.config = &_config;
-        t.quoters = &_quoters;
-        t.spread_opts = &_spread_optimizers;
-        t.aggregators = &_signal_aggregators;
-        t.coordinator = _coordinator.get();
-        t.portfolio = _portfolio.get();
-        _hot_watcher.start(id(), "hotparams.yaml", &_hot_mgr, t, 1000);
+        _hot_watcher.start(id(), "hotparams.yaml", &_hot_mgr, 1000);
     }
 
     // 输出初始化日志
@@ -449,9 +474,8 @@ void UftFutuMmStrategy::handleMarketDataUpdate(const char* stdCode, WTSTickData*
 {
     if (mid > 0) {
         _portfolio->markToMarket(stdCode, mid);
-        // v7.6: init 定码预填, 结构不可变; 未知码跳过 (订阅合约必然已预填)
-        if (auto it = _last_mid.find(stdCode); it != _last_mid.end())
-            it->second->v.store(mid, std::memory_order_release);
+        // V8-R4: _last_mid 写入删除 -- Coordinator 在 processTick 组合更新段
+        // 以 tc.mid 写同一时点的 mid (单一属主, 时序等价)
 
         if (_price_stale) {
             _price_stale = false;
@@ -537,10 +561,7 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
 
     // 记录报价到绩效分析器
     if (result.quote_placed && _perf_analyzer) {
-        double qmid = 0;
-        auto mid_it = _last_mid.find(stdCode);
-        if (mid_it != _last_mid.end())
-            qmid = mid_it->second->v.load(std::memory_order_acquire);
+        double qmid = _coordinator ? _coordinator->getLastMid(stdCode) : 0.0;
         _perf_analyzer->recordQuote(stdCode,
                                     qmid,
                                     qmid,
@@ -548,11 +569,6 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
                                     0,
                                     ctx->stra_get_date() * 1000000ULL + ctx->stra_get_time() * 100ULL +
                                         ctx->stra_get_secs());
-    }
-
-    // Run synthetic signal fusion cycle
-    if (_toxicity_detector && _toxicity_detector->isFusionEnabled()) {
-        _toxicity_detector->runFusionCycle();
     }
 
     // === Closeout 驱动 (已拆分至 CloseoutOrchestrator, 架构重构 C3) ===
@@ -566,6 +582,13 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
 void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
 {
     FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+
+    // V8-P0-1: 热参数 drain -- watcher 线程只写共享内存+置脏, 此处(_cb_mtx 内)
+    // 统一应用; 嵌套 recursive_mutex 安全, 复用 on_params_updated 的
+    // Targets 组装+日志。通道未就绪也照常 drain (参数应用不依赖行情通道)。
+    if (_hot_mgr.consumePendingApply())
+        on_params_updated();
+
     if (!_channel_ready || !tick)
         return;
 
@@ -592,6 +615,8 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
             _order_router->setNowMs(_exchange_time_ms);
         if (_spread_arb_manager)
             _spread_arb_manager->setNowMs(_exchange_time_ms);
+        if (_async_arb)
+            _async_arb->setReplayNowUs(_exchange_time_ms * 1000ULL); // V8-R4/A5
     }
     uint64_t now_ms = _exchange_time_ms;
     if (_risk_monitor)
@@ -608,8 +633,9 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     handleMarketDataUpdate(stdCode, tick, mid);
 
     // 3.5 PerformanceAnalyzer tick 更新 (真实 adverse selection 追踪)
+    // V8-R3: 与 recordTrade 同基准 replay _exchange_time_ms (旧 actiontime 双域混用)
     if (_perf_analyzer && mid > 0)
-        _perf_analyzer->onTickUpdate(stdCode, mid, tick->actiontime());
+        _perf_analyzer->onTickUpdate(stdCode, mid, _exchange_time_ms);
 
     // 4. LeadLag 跨合约推送
     handleLeadLagPush(stdCode, tick, mid);
@@ -664,8 +690,8 @@ void UftFutuMmStrategy::on_transaction(IUftStraCtx* ctx, const char* stdCode, WT
     uint64_t timestamp = trans.action_time;
 
     // 根据 price vs mid 判断方向
-    auto it = _last_mid.find(stdCode);
-    bool isBuy = (it != _last_mid.end()) ? (price >= it->second->v.load(std::memory_order_acquire)) : true;
+    double last_mid = _coordinator ? _coordinator->getLastMid(stdCode) : 0.0;
+    bool isBuy = (last_mid > 0) ? (price >= last_mid) : true;
 
     // 更新 SpreadOptimizer 的成交数据 (P0-2.1: Legacy onFill removed)
     if (_config.modules.use_spread_optimizer) {

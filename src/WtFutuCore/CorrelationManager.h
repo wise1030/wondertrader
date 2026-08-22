@@ -75,29 +75,17 @@ public:
                      const std::string& code2,
                      RelationType type = RelationType::CROSS_TERM,
                      double expectedBeta = 1.0);
-    void removeContract(const std::string& code);
 
     void onTick(const std::string& code, double price, uint64_t timestamp);
     void onTick(wtp::WTSTickData* tick);
 
     CorrelationStats getCorrelation(const std::string& code1, const std::string& code2) const;
-    std::vector<std::pair<std::string, CorrelationStats>> getCorrelationsFor(const std::string& code) const;
 
     double getSpreadZScore(const std::string& code1, const std::string& code2) const;
-    double getAggregateDelta(const std::map<std::string, double>& positions) const;
     double getHedgeRatio(const std::string& code1, const std::string& code2) const;
 
-    struct SpreadTradeSignal
-    {
-        std::string long_code;
-        std::string short_code;
-        double ratio;
-        double zscore;
-        double expected_return;
-        double confidence;
-    };
-    bool hasSpreadOpportunity(const std::string& code1, const std::string& code2, double& spreadRatio) const;
-    std::vector<SpreadTradeSignal> getSpreadSignals() const;
+    // V8-R3: 套利假接口 (getSpreadSignals 返回 {}/hasSpreadOpportunity 硬编码
+    // ratio=1.0/SpreadTradeSignal) 已删 -- 零调用者的半成品, 真实套利走 SpreadArbitrageManager
 
     size_t getContractCount() const { return _contracts.size(); }
     size_t getCorrelationCount() const { return _calculators.size(); }

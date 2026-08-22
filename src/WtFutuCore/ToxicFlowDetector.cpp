@@ -5,7 +5,6 @@
  * Combines PredictiveToxicity and RealizedToxicity for unified interface.
  */
 #include "ToxicFlowDetector.h"
-#include "SyntheticSignalFusion.h"
 #include "SelfTradeCalibrator.h"
 #include "MarketDataContext.h"
 #include "../Includes/WTSDataDef.hpp"
@@ -19,7 +18,7 @@ namespace futu
 // Constructor
 //------------------------------------------------------------------------------
 
-ToxicFlowDetector::ToxicFlowDetector() : _calibrator(nullptr), _has_book_data(false), _cache_dirty(true) {}
+ToxicFlowDetector::ToxicFlowDetector() : _calibrator(nullptr), _cache_dirty(true) {}
 
 //------------------------------------------------------------------------------
 // Configuration
@@ -35,8 +34,20 @@ void ToxicFlowDetector::setParams(const ToxicityParams& params)
     pred_cfg.vpin_window = params.vpin_window;
     pred_cfg.vpin_bucket_size = params.vpin_bucket_size;
     pred_cfg.alpha_threshold = params.adverse_threshold;
-    pred_cfg.ofi_weight = params.alpha_weight;
-    pred_cfg.trade_weight = params.book_weight;
+    // V8-T6: alpha 通道内 ofi/trade 权重归一化 (和=1) --
+    // 原样透传 alpha_weight/book_weight (0.5/0.3, 和=0.8) 使 alpha_toxicity
+    // 尺度被压缩且随配置漂移; 归一后 alpha_toxicity 严格 [0,1]
+    double w_sum = params.alpha_weight + params.book_weight;
+    if (w_sum > 0) {
+        pred_cfg.ofi_weight = params.alpha_weight / w_sum;
+        pred_cfg.trade_weight = params.book_weight / w_sum;
+    } else {
+        WTSLogger::warn("ToxicFlowDetector: alpha_weight+book_weight <= 0, fallback to 0.5/0.5");
+        pred_cfg.ofi_weight = 0.5;
+        pred_cfg.trade_weight = 0.5;
+    }
+    pred_cfg.vpin_weight = params.vpin_weight;
+    pred_cfg.extreme_threshold = params.extreme_signal_threshold;
     pred_cfg.min_warmup_buckets = params.vpin_min_warmup_buckets;
     _predictive.setConfig(pred_cfg);
 
@@ -58,7 +69,6 @@ void ToxicFlowDetector::setSelfTradeCalibrator(SelfTradeCalibrator* calibrator)
 
 void ToxicFlowDetector::reset()
 {
-    _has_book_data = false;
     _cache_dirty = true;
     _cached_metrics = ToxicityMetrics();
 
@@ -73,21 +83,6 @@ void ToxicFlowDetector::reset()
 void ToxicFlowDetector::updateMarketAlpha(const AlphaResult& alpha, const TradeImbalanceResult& tradeImb)
 {
     _predictive.updateAlpha(alpha, tradeImb);
-    _cache_dirty = true;
-}
-
-void ToxicFlowDetector::onSyntheticAlpha(const SyntheticTransactionData& synth_trans, const AlphaResult& alpha)
-{
-    // Update predictive with synthetic data
-    _predictive.updateAlpha(alpha, TradeImbalanceResult{});
-    _cache_dirty = true;
-}
-
-void ToxicFlowDetector::onBookAnalysis(const BookAnalysisResult& book_analysis)
-{
-    _latest_book_analysis = book_analysis;
-    _has_book_data = true;
-    _realized.onBookAnalysis(book_analysis.imbalance_score);
     _cache_dirty = true;
 }
 
@@ -157,7 +152,11 @@ void ToxicFlowDetector::updateCache() const
             std::max(_cached_metrics.toxic_score, pred_result.extreme_signal * _params.extreme_signal_weight);
     }
 
-    _cached_metrics.is_toxic = _cached_metrics.toxic_score > _params.adverse_threshold;
+    _cached_metrics.is_toxic = _cached_metrics.toxic_score > _params.adverse_threshold
+                               // V8-T4: 恢复 VPIN 独立触发条件 -- 此前 pred 的
+                               // OR 条件被门面丢弃, vpin 单独触发需 combined 通道
+                               // >2×vpin_threshold (0.5 加权稀释), 配置语义差 2 倍
+                               || (pred_result.vpin_ready && pred_result.vpin > _params.vpin_threshold);
 
     if (_cached_metrics.is_toxic) {
         _cached_metrics.toxic_side = pred_result.toxic_side;
@@ -186,65 +185,6 @@ double ToxicFlowDetector::getAvgAdverseMove() const
 {
     auto real_result = _realized.analyze();
     return real_result.avg_adverse_move;
-}
-
-//------------------------------------------------------------------------------
-// Enhanced Toxicity Detection
-//------------------------------------------------------------------------------
-
-ToxicityMetrics ToxicFlowDetector::detectEnhancedToxicity(const BookAnalysisResult& book_sig,
-                                                          const CalibrationResult& self_calib,
-                                                          const AlphaResult& alpha)
-{
-    // Update components
-    _predictive.updateAlpha(alpha, TradeImbalanceResult{});
-    _realized.onCalibration(self_calib);
-    _realized.onBookAnalysis(book_sig.imbalance_score);
-
-    // Return combined analysis
-    return analyze();
-}
-
-//==============================================================================
-// Synthetic Signal Fusion Integration
-//==============================================================================
-
-void ToxicFlowDetector::feedTickInference(const InferredTransaction& tick_inf)
-{
-    if (_fusion_enabled) {
-        _signal_fusion.addTickInference(tick_inf);
-        _cache_dirty = true;
-    }
-}
-
-void ToxicFlowDetector::feedBookSignal(const DepthImbalanceSignal& book_sig)
-{
-    if (_fusion_enabled) {
-        _signal_fusion.addBookSignal(book_sig);
-        _cache_dirty = true;
-    }
-}
-
-void ToxicFlowDetector::runFusionCycle()
-{
-    if (!_fusion_enabled)
-        return;
-
-    // 无任何输入源(feedTickInference/feedBookSignal/addSelfTradeCalibration 均未被调用)时
-    // fuse() 输出 direction=0 — 直接回灌会用空 alpha 覆盖 Predictive 的有效通道, 必须跳过.
-    if (!_signal_fusion.hasAnySource())
-        return;
-
-    // Fuse all available signals into synthetic transaction data
-    SyntheticTransactionData synth = _signal_fusion.fuse();
-
-    // Feed fused result back into toxicity detection
-    AlphaResult alpha;
-    alpha.alpha = synth.direction_signal;
-    alpha.confidence = synth.confidence;
-    alpha.timestamp = synth.timestamp;
-
-    onSyntheticAlpha(synth, alpha);
 }
 
 } // namespace futu

@@ -203,7 +203,8 @@ private:
     // Inference history for rolling window
     struct InferenceRecord
     {
-        double signed_volume; // Positive = buy, Negative = sell
+        double signed_volume; // Positive = buy, Negative = sell (confidence 加权)
+        double volume;        // V8-R3: 原始量 (prune 对称扣除用, 修复泄漏)
         double confidence;
         bool is_large;
         uint64_t timestamp;

@@ -172,7 +172,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
     //   消除旧 std::max 闩锁 (util 回落后 spread 仍被永久放大直到完整恢复).
     //   5A-2: 状态移入 RiskWidenPolicy。
     {
-        double cur_util = _deps.portfolio ? _deps.portfolio->getPortfolioDeltaUtilization() : 0;
+        double cur_util = _deps.portfolio ? _deps.portfolio->getRawPortfolioDeltaUtilization() : 0;
         double l1 = _deps.risk_monitor->getRateLimits().position_warning_l1;
         double l2 = _deps.risk_monitor->getRateLimits().position_warning_l2;
         bool halted = _deps.trading_state && _deps.trading_state->qphase == QuotingPhase::RISK_HALTED;
@@ -277,7 +277,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
             //  即 determineActionWithCategory 末尾 breachCount>=widen_threshold 的返回)
             // 5A-2: 状态移入 RiskWidenPolicy。
             {
-                double cur_util = _deps.portfolio ? _deps.portfolio->getPortfolioDeltaUtilization() : 0;
+                double cur_util = _deps.portfolio ? _deps.portfolio->getRawPortfolioDeltaUtilization() : 0;
                 double l2 = _deps.risk_monitor->getRateLimits().position_warning_l2;
                 _deps.quote_chain->riskWiden().onHardWiden(cur_util, l2);
             }

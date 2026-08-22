@@ -49,7 +49,8 @@ enum class OrderFlags : uint8_t
     IS_BID = 1 << 1, // Buy order
     IS_ACTIVE = 1 << 2,
     IS_MM_ORDER = 1 << 3, // Market making order (vs arbitrage)
-    IS_ARB_ORDER = 1 << 4 // Arbitrage order
+    IS_ARB_ORDER = 1 << 4, // Arbitrage order
+    IS_ZOMBIE = 1 << 5 // 撤单重试 K 次仍无 ack: 保留跟踪+计入 pending, 等升级处置 (B+)
 };
 
 inline OrderFlags operator|(OrderFlags a, OrderFlags b)
@@ -130,7 +131,8 @@ struct UnifiedOrderInfo
     uint64_t place_time;
     uint64_t last_check;
     uint64_t last_inv_cancel_check;
-    uint64_t cancel_time; ///< 首次观察到 PENDING_CANCEL 的时刻 (超时清扫用)
+    uint64_t cancel_time;        ///< 最近一次撤单发送/重试的时刻 (B+: mark 时写入, 重试时刷新)
+    uint32_t cancel_retry_count; ///< 撤单重试次数 (>= cancel_max_retries 置 IS_ZOMBIE)
     OrderFlags flags;
     CancelReason cancel_reason;
 
@@ -140,11 +142,14 @@ struct UnifiedOrderInfo
     inline bool isPendingCancel() const { return hasFlag(flags, OrderFlags::PENDING_CANCEL); }
     inline bool isMMOrder() const { return hasFlag(flags, OrderFlags::IS_MM_ORDER); }
     inline bool isArbOrder() const { return hasFlag(flags, OrderFlags::IS_ARB_ORDER); }
+    inline bool isZombie() const { return hasFlag(flags, OrderFlags::IS_ZOMBIE); }
 
-    inline void setPendingCancel(CancelReason reason)
+    inline void setPendingCancel(CancelReason reason, uint64_t now = 0)
     {
         flags = flags | OrderFlags::PENDING_CANCEL;
         cancel_reason = reason;
+        cancel_time = now; // 0 = 未知, checkAutoCancel 首次观察时懒赋值兜底
+        cancel_retry_count = 0;
     }
 
     inline void clearPendingCancel()
@@ -154,9 +159,11 @@ struct UnifiedOrderInfo
         cancel_reason = CancelReason::NONE;
     }
 
+    inline void setZombie() { flags = flags | OrderFlags::IS_ZOMBIE; }
+
     UnifiedOrderInfo()
         : order_id(0), level_index(0), price(0), qty(0), filled_qty(0), original_qty(0), place_mid(0), place_time(0),
-          last_check(0), last_inv_cancel_check(0), cancel_time(0), flags(OrderFlags::NONE),
+          last_check(0), last_inv_cancel_check(0), cancel_time(0), cancel_retry_count(0), flags(OrderFlags::NONE),
           cancel_reason(CancelReason::NONE)
     {
         memset(code, 0, MAX_CODE_LEN);
@@ -174,7 +181,8 @@ struct UnifiedTrackerConfig
     double price_deviation;
     double sticky_threshold;
     uint32_t max_cancel_rate;
-    uint32_t pending_cancel_timeout_ms; ///< 撤单 ack 超时, 超时强制 untrack (默认 5000)
+    uint32_t pending_cancel_timeout_ms; ///< B+: 撤单重试间隔 (默认 300ms, 超时重发而非遗忘)
+    uint32_t cancel_max_retries;        ///< B+: 撤单最大重试次数, 达到后置 IS_ZOMBIE (默认 3)
 
     // Self-trade prevention
     bool stp_enabled;
@@ -183,7 +191,8 @@ struct UnifiedTrackerConfig
 
     UnifiedTrackerConfig()
         : max_orders(20), max_age_ms(10000), price_deviation(3.0), sticky_threshold(2.0), max_cancel_rate(10),
-          pending_cancel_timeout_ms(5000), stp_enabled(true), stp_allow_same_price(false), stp_min_price_gap(1.0)
+          pending_cancel_timeout_ms(300), cancel_max_retries(3), stp_enabled(true), stp_allow_same_price(false),
+          stp_min_price_gap(1.0)
     {}
 };
 
@@ -403,8 +412,9 @@ public:
         if (remainingQty <= 0)
             untrackOrder(orderId);
         else {
-            // F9: 增量维护全源 pending (仅 active 非 pendingCancel 计入)
-            if (order->isActive() && !order->isPendingCancel())
+            // F9/B+: 增量维护全源 pending (active 即计入, 含 pendingCancel — 保守口径,
+            // 撤单飞行期仍视为在途, 防双份敞口)
+            if (order->isActive())
                 addPendingQty(order->code, order->isBid(), remainingQty - order->qty);
             order->qty = remainingQty;
         }
@@ -412,28 +422,27 @@ public:
 
     void untrackOrder(uint32_t orderId, uint64_t currentTime = 0);
 
-    void markPendingCancel(uint32_t orderId, CancelReason reason)
+    void markPendingCancel(uint32_t orderId, CancelReason reason, uint64_t now = 0)
     {
         RecursiveSpinGuard _g(_lock);
         UnifiedOrderInfo* order = getOrderByOrderId(orderId);
         if (order && !order->isPendingCancel()) {
-            // F9: active→pendingCancel, 移出全源 pending
-            addPendingQty(order->code, order->isBid(), -order->qty);
-            order->setPendingCancel(reason);
+            // B+: active→pendingCancel, 仍计入全源 pending (撤单未确认前敞口未消)
+            order->setPendingCancel(reason, now);
         }
     }
 
-    /// 原子撤单标记：一次锁内完成“存在 && !pending_cancel”校验、扣 pending、置 pending_cancel。
+    /// 原子撤单标记：一次锁内完成“存在 && !pending_cancel”校验、置 pending_cancel+撤单时刻。
+    /// B+: pendingCancel 单仍计入全源 pending (保守口径), 不再扣减。
     /// 返回 true 表示本调用方成功取得撤单权，可以发送 stra_cancel；false 表示已由其他路径标记或订单不存在。
-    bool tryMarkPendingCancel(uint32_t orderId, CancelReason reason)
+    bool tryMarkPendingCancel(uint32_t orderId, CancelReason reason, uint64_t now = 0)
     {
         RecursiveSpinGuard _g(_lock);
         UnifiedOrderInfo* order = getOrderByOrderId(orderId);
         if (!order || order->isPendingCancel())
             return false;
 
-        addPendingQty(order->code, order->isBid(), -order->qty);
-        order->setPendingCancel(reason);
+        order->setPendingCancel(reason, now);
         return true;
     }
 
@@ -442,8 +451,7 @@ public:
         RecursiveSpinGuard _g(_lock);
         UnifiedOrderInfo* order = getOrderByOrderId(orderId);
         if (order && order->isPendingCancel()) {
-            // F9: pendingCancel→active, 加回全源 pending
-            addPendingQty(order->code, order->isBid(), order->qty);
+            // B+: pending 未在 mark 时扣减, 此处无需加回
             order->clearPendingCancel();
         }
     }
@@ -549,7 +557,8 @@ public:
     /// Get total pending sell quantity for a contract (for position limit check)
     double getPendingSellQty(const std::string& code) const;
 
-    /// T4: 全源 pending (MM+arb 等所有 IS_ACTIVE 非 PENDING_CANCEL 单)。
+    /// T4: 全源 pending (MM+arb 等所有 IS_ACTIVE 单; B+ 起含 PENDING_CANCEL --
+    /// 撤单未确认前敞口未消的保守口径, 自成交/报价深度等实时性口径仍排除)。
     /// 旧口径只统计 MM 索引 -> arb 两腿/closeout 在途单对 skew/force/taker
     /// 的 util 投影不可见, 大幅 arb 建仓期间 util 系统性偏低。
     double getPendingBuyQtyAllSources(const std::string& code) const;
@@ -570,7 +579,7 @@ public:
 
         double deviation = std::abs(currentMid - order->place_mid) / tickSize;
         if (deviation > _cfg.price_deviation) {
-            addPendingQty(order->code, order->isBid(), -order->qty);
+            // B+: pendingCancel 仍计入全源 pending, 不再扣减
             order->setPendingCancel(CancelReason::PRICE_DEVIATION);
             return true;
         }
@@ -599,6 +608,21 @@ public:
                                                      double currentMid,
                                                      double tickSize,
                                                      bool stateChanged);
+
+    /// B+: zombie 升级列表 (本次 checkAutoCancel 新置 IS_ZOMBIE 的合约, 每合约去重)
+    /// 由调用方 (coordinator) 处置: 告警 + 该合约 halt + stra_cancel_all(fullCode) 兜底。
+    const std::vector<std::string>& getZombieEscalations() const { return _zombie_codes_buf; }
+
+    /// B+ 修复(P2-3): 当前仍有存活 IS_ZOMBIE 单的合约集合 (每次 checkAutoCancel 刷新)。
+    /// 调用方据此释放 zombie 已清零合约的 halt 闩锁 (retainZombieHalts)。
+    const std::vector<std::string>& getAliveZombieContracts() const { return _zombie_alive_buf; }
+
+    /// B+: 通道恢复锚点 - 清空 zombie 集合 (untrack 所有 IS_ZOMBIE 单, 清升级去重表)。
+    /// 撤不掉的残留交引擎侧持仓对账 (登录 queryOrders/queryPosition 重建)。
+    /// B+ 修复(P1-2): 返回被 untrack 的 zombie 订单 id -- 调用方需 (a) 引擎侧补发
+    /// 全撤 (断连中失败的撤单重连后无人补发) (b) 广播 quoter.onOrder(id,canceled)
+    /// 清孤儿槽 (terminal 回报永不到达时残留 id 会永久阻塞该层挂单门禁)。
+    std::vector<uint32_t> clearZombies();
 
     //==========================================================================
     // Self-Trade Prevention
@@ -745,11 +769,18 @@ private:
     // Per-contract indices (lightweight - only order IDs)
     wtp::wt_hashmap<std::string, std::vector<uint32_t>> _orders_by_code;
 
-    // F9: 全源 pending 增量计数 (track/untrack/updateQty/markPendingCancel
-    //   状态变迁时维护), getPending*QtyAllSources 从每 tick 遍历+hash
-    //   降为 O(1) 查询。不变量: 仅含 IS_ACTIVE 且非 PENDING_CANCEL 单。
+    // F9: 全源 pending 增量计数 (track/untrack/updateQty 状态变迁时维护),
+    //   getPending*QtyAllSources 从每 tick 遍历+hash 降为 O(1) 查询。
+    //   B+ 不变量: 含全部 IS_ACTIVE 单 (含 PENDING_CANCEL — 撤单未确认前敞口未消,
+    //   风控保守口径, 防双份敞口; 自成交/报价深度等实时性口径仍排除 PENDING_CANCEL)。
     wtp::wt_hashmap<std::string, double> _pending_buy_all;
     wtp::wt_hashmap<std::string, double> _pending_sell_all;
+
+    // B+: zombie 升级去重表 (zombie 清零的合约在 checkAutoCancel 中重置 -- 重新
+    //   武装升级, 修复"同合约第二个 zombie 无升级/无兜底"; clearZombies 时全清)
+    std::vector<std::string> _zombie_codes_buf;
+    std::vector<std::string> _zombie_alive_buf; // B+ 修复(P2-3): 存活 zombie 合约集合
+    wtp::wt_hashmap<std::string, bool> _zombie_escalated;
 
     inline void addPendingQty(const char* code, bool isBid, double delta)
     {

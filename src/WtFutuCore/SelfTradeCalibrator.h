@@ -91,7 +91,7 @@ struct SelfTradeToxicityMetrics
     double realized_toxicity;   ///< Post-trade realized toxicity
     double toxicity_score;      ///< Combined score
     bool is_toxic;              ///< Toxicity flag
-    int toxic_side;             ///< Toxic side (1=avoid sell, -1=avoid buy)
+    int toxic_side;             ///< = -recommended_side (V8-T5: 与 PredictiveToxicity "1=buy toxic" 语义不一致, 当前零消费者, R2 方向裁决时统一)
 
     // Detailed stats
     double avg_adverse_move; ///< Average adverse move (ticks)

@@ -43,9 +43,46 @@ std::unique_ptr<SpreadOptimizer> FutuComponentFactory::createSpreadOptimizer(con
     return optimizer;
 }
 
-std::unique_ptr<MarketDataContext> FutuComponentFactory::createMarketDataContext(const CoordinatorConfig& config)
+std::unique_ptr<MarketDataContext> FutuComponentFactory::createMarketDataContext(const CoordinatorConfig& config,
+                                                                                const std::string& code,
+                                                                                double tick_size)
 {
-    return std::make_unique<MarketDataContext>();
+    auto ctx = std::make_unique<MarketDataContext>();
+
+    // V8-P0-4: 大单阈值单一口径 -- 与信号层 TradeFlowSignalSource 读同一 yaml 键
+    // (此前 OrderBookStateTracker 默认 tick 0.2 / tracker 阈值 10.0 vs 信号层 50.0 三处分裂)
+    double large_trade_threshold = 50.0;
+    wtp::WTSVariant* root = config._raw_variant;
+    wtp::WTSVariant* modules = root ? root->get("modules") : nullptr;
+    wtp::WTSVariant* sig_agg = modules ? modules->get("signalAggregator") : nullptr;
+    wtp::WTSVariant* signals = sig_agg ? sig_agg->get("signals") : nullptr;
+    wtp::WTSVariant* trade_flow = signals ? signals->get("trade_flow") : nullptr;
+    if (trade_flow && trade_flow->has("largeTradeThreshold"))
+        large_trade_threshold = trade_flow->getDouble("largeTradeThreshold");
+    if (!(large_trade_threshold > 0)) { // 空/类型错/负值回落默认 (V8-R5 语义)
+        WTSLogger::warn("FutuComponentFactory: invalid largeTradeThreshold, fallback to 50.0");
+        large_trade_threshold = 50.0;
+    }
+
+    if (tick_size > 0) {
+        // setLargeTradeThreshold 顺带把 tick_size 灌入 TickTransactionInferer
+        // (TradeFlowTracker::setConfig 链路), SignalAggregator 经 book.getTickSize()
+        // 自动取到同一值 -- Context/Inferer/SignalContext 单一来源
+        ctx->setContract(code, tick_size);
+        ctx->setLargeTradeThreshold(large_trade_threshold);
+        WTSLogger::debug("MarketDataContext[{}]: wired tick_size={}, largeTradeThreshold={}",
+                         code,
+                         tick_size,
+                         large_trade_threshold);
+    } else {
+        // 首帧 onTick 亦有一次兜底告警 (MarketDataContext::onTick)
+        WTSLogger::error("MarketDataContext[{}]: invalid tick_size={}, contract wiring skipped "
+                         "(tick/depth/imbalance 数值将用默认值, 结果不可信)",
+                         code,
+                         tick_size);
+    }
+
+    return ctx;
 }
 
 std::unique_ptr<ToxicFlowDetector> FutuComponentFactory::createToxicFlowDetector(const CoordinatorConfig& config)

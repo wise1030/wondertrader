@@ -47,6 +47,18 @@ namespace futu
 
 namespace
 {
+/// stdCode ("SHFE.ao.ao2609" 三段式) -> fullCode ("SHFE.ao2609" 两段式).
+/// live TraderAdapter::cancelAll 用 getFullCode() 匹配入参 (框架坑, 见 AGENTS.md
+/// 已知外部限制); 已是两段式或无点的输入原样返回。
+std::string stdCodeToFullCode(const std::string& stdCode)
+{
+    auto p1 = stdCode.find('.');
+    auto p2 = stdCode.rfind('.');
+    if (p1 == std::string::npos || p2 == p1)
+        return stdCode;
+    return stdCode.substr(0, p1 + 1) + stdCode.substr(p2 + 1);
+}
+
 struct BilateralSeed
 {
     uint64_t bil = 0;
@@ -242,7 +254,6 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
         // 注：use_alpha_engine 和 use_market_state 已移除，由 SignalAggregator 内部管理
         _cfg.use_toxicity_detector = readModuleEnabled("toxicityDetector", _cfg.use_toxicity_detector);
         // spreadOptimizer 是策略核心，恒启用（不再提供 enabled 开关）
-        _cfg.use_adaptive_params = readModuleEnabled("adaptiveParam", _cfg.use_adaptive_params);
         _cfg.use_self_trade_prevention = readModuleEnabled("selfTradePrevention", _cfg.use_self_trade_prevention);
 
         // If market making is disabled, disable all MM-specific modules
@@ -295,18 +306,14 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
                 readUInt32(autoCancel, "maxAgeMs", _cfg.modules.auto_cancel_max_age_ms);
             _cfg.modules.auto_cancel_price_deviation =
                 readDouble(autoCancel, "priceDeviation", _cfg.modules.auto_cancel_price_deviation);
+            _cfg.modules.cancel_retry_interval_ms =
+                readUInt32(autoCancel, "cancelRetryIntervalMs", _cfg.modules.cancel_retry_interval_ms);
+            _cfg.modules.cancel_max_retries =
+                readUInt32(autoCancel, "cancelMaxRetries", _cfg.modules.cancel_max_retries);
         }
 
         // SelfTradePrevention: 已迁移到 StpConfig::fromVariant
 
-        // Adaptive parameters
-        wtp::WTSVariant* adaptive = modules->get("adaptiveParam");
-        if (adaptive) {
-            _cfg.modules.adaptive_update_interval =
-                readUInt32(adaptive, "updateInterval", _cfg.modules.adaptive_update_interval);
-            _cfg.modules.adaptive_min_phi = readDouble(adaptive, "minPhi", _cfg.modules.adaptive_min_phi);
-            _cfg.modules.adaptive_max_phi = readDouble(adaptive, "maxPhi", _cfg.modules.adaptive_max_phi);
-        }
 
         // CorrelationManager: 已迁移到 CorrelationConfig::fromVariant
 
@@ -456,12 +463,6 @@ void StrategyCoordinator::initLastMid()
 void StrategyCoordinator::initialize()
 {
     WTSLogger::info("StrategyCoordinator: initialized (perf={})", _cfg.perf_enabled);
-    // v7.7 业务#3: adaptive 模块现状文档化 — updateAdaptiveParams 是空占位,
-    // use_adaptive_params 开启时实际不工作, 启动期明示避免误导
-    if (_cfg.use_adaptive_params) {
-        WTSLogger::warn("StrategyCoordinator: use_adaptive_params=true but updateAdaptiveParams "
-                        "is a placeholder (no-op). Adaptive tuning is NOT active.");
-    }
 }
 
 //==========================================================================
@@ -596,8 +597,7 @@ ProcessingResult StrategyCoordinator::processTick(
     // (attemptPositionReduction used 3-tick cross-spread which was too costly;
     //  enhanced skew with clamp+scale now drives ask to mid for natural reduction)
 
-    // Stage 8: Update adaptive parameters
-    updateAdaptiveParams(ctx, tc);
+    // (V8-R3: Stage 8 adaptiveParam 空占位已删除)
 
     result.processed = true;
     _tick_count++;
@@ -615,9 +615,10 @@ ProcessingResult StrategyCoordinator::processTick(
             _perf_monitor->recordSignalToOrder(TscClock::toNs(TscClock::now() - tsc_tick0));
         }
 
-        // P0-4: 每秒更新一次性能统计
+        // P0-4: 每秒更新一次性能统计 + 阈值告警 (V8-R3: warn/critical 接线)
         if (tc.timestamp - _last_perf_ms >= 1000) {
             _perf_monitor->updatePerSecondCounters();
+            _perf_monitor->checkThresholds(tc.timestamp);
             _last_perf_ms = tc.timestamp;
         }
 
@@ -914,12 +915,19 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
     if (_cfg.use_toxicity_detector && _toxicity && sig_ctx.alpha.valid) {
         AlphaResult alpha_res;
         alpha_res.alpha = sig_ctx.alpha.alpha;
+        // V8-T1: ofi_component 在 slot 中已算好 (SignalAggregator.h lambda),
+        // 此前漏填恒 0 -> PredictiveToxicity 的 toxic_side 永远为 0,
+        // 毒性单边抑制从不生效 (恒走双边抑制分支)
+        alpha_res.ofi_component = sig_ctx.alpha.ofi_component;
         alpha_res.is_strong_signal = sig_ctx.alpha.is_strong_signal;
         alpha_res.timestamp = sig_ctx.timestamp;
 
         TradeImbalanceResult trade_res;
         trade_res.net_flow = sig_ctx.trade_flow.net_flow;
         trade_res.imbalance_ratio = sig_ctx.trade_flow.net_flow_normalized;
+        // V8-T7: large_trade_ratio 此前漏填恒 0, trade_toxicity 被 0.5 因子压半
+        // (0.5+0.5×0 -> 0.5), 大单主导的毒性流被低估
+        trade_res.large_trade_ratio = sig_ctx.trade_flow.large_trade_ratio;
 
         _toxicity->updateMarketAlpha(alpha_res, trade_res);
     }
@@ -1021,8 +1029,9 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
     }
 
     //==========================================================================
-    // 2.5 v3/v7.1 软风控前置: 统一仓位利用率口径
-    //   (pos+同向pending)/maxPos — skew 归一化注入 + quoter qty衰减/义务 共用
+    // 2.5 v3/v7.1 软风控前置: 统一 delta 利用率口径 (2026-08-19 语义边界原则)
+    //   (delta+同向pending×hr)/contract_max_delta — skew 归一化注入 + quoter qty衰减/义务 共用
+    //   maxPosition 仅用于风控硬闸门 (checkHardPositionRisk 内 halt_quoting)
     //==========================================================================
     PreTradeDecision decision;
     if (_risk_monitor) {
@@ -1049,10 +1058,12 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
             last_halted = decision.risk.halt_quoting;
         }
 
-        // v7.1: 带符号仓位利用率注入 skew (正=多 负=空, 取较大侧)
-        if (cs && cs->max_position > 0) {
-            p_ctx.contract_pos_util = (decision.strategy.long_util >= decision.strategy.short_util) ? decision.strategy.long_util : -decision.strategy.short_util;
-            p_ctx.contract_pos_util_valid = true;
+        // v7.1: 带符号 delta 利用率注入 skew (正=多 负=空, 取较大侧)
+        if (cs && cs->contract_max_delta > 0) {
+            p_ctx.contract_delta_util = (decision.strategy.long_delta_util >= decision.strategy.short_delta_util)
+                                            ? decision.strategy.long_delta_util
+                                            : -decision.strategy.short_delta_util;
+            p_ctx.contract_delta_util_valid = true;
         }
     }
 
@@ -1157,12 +1168,19 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
         cq.valid = true;
     }
 
-    tc.quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
-        tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
-        tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
-        tick->bidprice(0), tick->askprice(0),
-        decision.risk, decision.strategy
-    });
+    // V8-P0-2: MM 报单计入 ORDER_RATE 频控 -- 此前 recordOrder 仅 taker/arb
+    // 调用, 最高频的 MM 报单路径零计数, 频控对其失明; refreshQuotes 返回值
+    // 为本轮实际挂单数 (handleObligation/Flexible/Bilateral 全部汇聚于此)
+    {
+        uint32_t orders_placed = tc.quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
+            tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
+            tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
+            tick->bidprice(0), tick->askprice(0),
+            decision.risk, decision.strategy
+        });
+        if (orders_placed > 0 && _risk_monitor)
+            _risk_monitor->recordOrders(orders_placed);
+    }
 
     return true;
 }
@@ -1180,14 +1198,39 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
     const auto& actions = _order_tracker->checkAutoCancel(
         tc.code, tc.timestamp, tc.mid, tick_size, false);
 
+    //==========================================================================
+    // B+: zombie 升级处置 — 告警 + 该合约 halt 闩锁 + stra_cancel_all(fullCode) 兜底.
+    // 注意框架坑: live TraderAdapter::cancelAll 用 getFullCode()("SHFE.ao2609" 两段式)
+    // 匹配入参, 传 stdCode("SHFE.ao.ao2609" 三段式)永不匹配且静默全不撤 — 必须转
+    // fullCode (回测 mocker 用 stdCode 匹配, 行为不一致, 见 AGENTS.md 已知外部限制).
+    //==========================================================================
+    const auto& zcodes = _order_tracker->getZombieEscalations();
+    for (const auto& zcode : zcodes) {
+        std::string fc = stdCodeToFullCode(zcode);
+        WTSLogger::error("[RISK] {} ZOMBIE: cancel retries exhausted -> halt contract quoting + engine cancelAll({})",
+                         zcode,
+                         fc);
+        if (_risk_monitor)
+            _risk_monitor->setZombieHalt(zcode);
+        orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
+    }
+
+    // B+ 修复(P2-3): zombie 闩锁自动恢复 -- 兜底 cancelAll 杀掉 zombie 且回报清账后
+    // (存活 zombie 合约集合不再含该合约, tracker 每次 checkAutoCancel 刷新),
+    // 释放该合约的 halt 闩锁; 无断连场景 (流控吞单) 无需等通道重连/重启。
+    if (_risk_monitor)
+        _risk_monitor->retainZombieHalts(_order_tracker->getAliveZombieContracts());
+
     if (!actions.empty()) {
         for (const auto& action : actions) {
+            // B+: STALE 等动作 tracker 在发出时已标记 pendingCancel(含撤单时刻);
+            // TIMEOUT 重试动作本就在 pendingCancel 态 — 均直接发撤单即可。
             orderApiCall([&] { return ctx->stra_cancel(action.order_id); });
         }
         return true;
     }
 
-    return false;
+    return !zcodes.empty();
 }
 
 //==========================================================================
@@ -1205,9 +1248,11 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
 //   天然满足"撤剩余单重新挂单"语义。
 //==========================================================================
 
-bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms)
+bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms, bool from_fill)
 {
-    _event_dispatcher.dispatch(CoordinatorEvent::FillReceived);  // C10: fire at fill entry
+    // from_fill=false: B+ 撤单终态回报触发的事件驱动补挂 — 不是成交, 不发 FillReceived
+    if (from_fill)
+        _event_dispatcher.dispatch(CoordinatorEvent::FillReceived); // C10: fire at fill entry
     if (!ctx || !_quoters)
         return false;
     if (_cfg.requote_after_fill_min_interval_ms == 0)
@@ -1325,22 +1370,28 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
                      retreat_bid_applied,
                      retreat_ask_active,
                      retreat_ask_applied,
-                     decision.strategy.long_util,
-                     decision.strategy.short_util,
+                     decision.strategy.long_delta_util,
+                     decision.strategy.short_delta_util,
                      decision.strategy.block_add_long,
                      decision.strategy.block_add_short);
 
-    quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
-        latest_mid, new_l0_bid, new_l0_ask, q.spread_mult, allow_bid, allow_ask,
-        q.timestamp, q.upper_limit, q.lower_limit, q.best_bid, q.best_ask,
-        decision.risk, decision.strategy
-    });
+    // V8-P0-2: requoteAfterFill 补挂单同样计入频控 (实盘跑 TdSpi 事件驱动,
+    // 批量接口内部自旋锁保证多线程计数安全)
+    {
+        uint32_t orders_placed = quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
+            latest_mid, new_l0_bid, new_l0_ask, q.spread_mult, allow_bid, allow_ask,
+            q.timestamp, q.upper_limit, q.lower_limit, q.best_bid, q.best_ask,
+            decision.risk, decision.strategy
+        });
+        if (orders_placed > 0 && _risk_monitor)
+            _risk_monitor->recordOrders(orders_placed);
+    }
     return true;
 }
 
 //==========================================================================
 // Stage 7.5: Position Reduction — REMOVED
-// Replaced by enhanced skew (clamp + inventory_skew_scale) which drives
+// Replaced by enhanced skew (clamp + inventory_skew_gain, delta 口径) which drives
 // ask to mid for natural passive reduction, avoiding 3-tick cross-spread cost.
 //==========================================================================
 
@@ -1348,16 +1399,6 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
 // Stage 8: Update Adaptive Parameters
 //==========================================================================
 
-void StrategyCoordinator::updateAdaptiveParams(wtp::IUftStraCtx* ctx, const TickContext& tc)
-{
-    if (_tick_count % _cfg.param_update_interval != 0) {
-        return;
-    }
-
-    // Adaptive parameter update placeholder
-    // This is a placeholder - actual implementation would record performance
-    // and update parameters based on the manager's logic
-}
 
 //==========================================================================
 // Reset

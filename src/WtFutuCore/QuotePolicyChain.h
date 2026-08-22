@@ -157,7 +157,12 @@ public:
             return;
 
         int arb_close_dir = ctx.arb_manager->getArbCloseDirection(ctx.code);
-        if (arb_close_dir > 0) {
+        if (arb_close_dir == SpreadArbitrageManager::kArbCloseConflict) {
+            // V8-A13: 1:N 场景多个活跃 intent 方向冲突 — 单侧抑制依据不可靠, 双侧抑制
+            st.allow_bid = false;
+            st.allow_ask = false;
+            WTSLogger::debug("[ARB-SYNC] {} conflicting arb close intents (1:N), suppress MM both sides", ctx.code);
+        } else if (arb_close_dir > 0) {
             st.allow_ask = false;
             WTSLogger::debug("[ARB-SYNC] {} arb buying leg, suppress MM ask", ctx.code);
         } else if (arb_close_dir < 0) {
@@ -213,14 +218,18 @@ public:
             // 设置冷却期：即使score短暂回落，也保持保护期
             _resume_time.store(ctx.timestamp + ctx.toxicity_cooloff_ms, std::memory_order_release);
 
+            // V8-T5 方向语义统一 (与 T1 同车): toxic_side==1 为激进买流
+            // (ofi>0 且 trade imbalance>0, 见 PredictiveToxicity.cpp) --
+            // 知情买方吃的是我方 ask (逆向选择在 ask 侧), 故抑制 ask;
+            // ==-1 激进卖流 -> 抑制 bid。原映射 (1->停bid) 方向反了。
             if (tox.toxic_side == 1) {
-                st.allow_bid = false;
-                WTSLogger::warn(
-                    "[TOXIC] {} Buy-side toxic (score={:.2f}), pausing bid quotes", ctx.code, tox.toxic_score);
-            } else if (tox.toxic_side == -1) {
                 st.allow_ask = false;
                 WTSLogger::warn(
-                    "[TOXIC] {} Sell-side toxic (score={:.2f}), pausing ask quotes", ctx.code, tox.toxic_score);
+                    "[TOXIC] {} Aggressive buy flow (score={:.2f}), pausing ask quotes", ctx.code, tox.toxic_score);
+            } else if (tox.toxic_side == -1) {
+                st.allow_bid = false;
+                WTSLogger::warn(
+                    "[TOXIC] {} Aggressive sell flow (score={:.2f}), pausing bid quotes", ctx.code, tox.toxic_score);
             } else {
                 st.allow_bid = false;
                 st.allow_ask = false;

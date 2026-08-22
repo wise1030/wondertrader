@@ -60,10 +60,16 @@ void OrderBookStateTracker::onTick(wtp::WTSTickData* tick)
 
 void OrderBookStateTracker::updateDerivedMetrics()
 {
-    // Calculate mid price
+    // V8-S3: 单边盘口(锁板)时 mid/spread 清零而非保留上一双边时刻陈旧值 --
+    // 与策略层 C1 "mid=0 下游跳过" 语义对齐。此前锁板期间 RealizedVol 推 0 收益
+    // 使波动率坍缩 -> vol_tier 误判, 动量/IC 被陈旧 mid 污染。
+    // 消费方已具备 mid<=0 守卫 (VolatilitySignalSource/MomentumSignalSource 等)
     if (!_snapshot.bids.empty() && !_snapshot.asks.empty()) {
         _snapshot.mid_price = (_snapshot.bids[0].price + _snapshot.asks[0].price) / 2.0;
         _snapshot.spread = _snapshot.asks[0].price - _snapshot.bids[0].price;
+    } else {
+        _snapshot.mid_price = 0.0;
+        _snapshot.spread = 0.0;
     }
 
     // Calculate total depth

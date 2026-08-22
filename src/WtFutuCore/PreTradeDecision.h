@@ -2,10 +2,11 @@
  * \file PreTradeDecision.h
  * \brief Pre-trade decision types: RiskVerdict (风控闸门) + StrategyInputs (策略输入)
  *
- * 分层语义（策略与风控严格分离）:
+ * 分层语义（策略与风控严格分离, 2026-08-19 语义边界原则）:
  *   - RiskVerdict:     风控措施 (硬规则). 触发依据 = 净头寸 vs maxPosition.
  *                      回答 "能不能做": 暂停报单 / 流控撤单.
- *   - StrategyInputs:  策略调整 (软参数). 触发依据 = projected utilization (含在途).
+ *   - StrategyInputs:  策略调整 (软参数). 触发依据 = projected delta utilization (含在途),
+ *                      归一化分母 = contract_max_delta (delta 软限), 与 maxPosition 无关.
  *                      回答 "怎么做": skew / 义务报价 / flexible block side (库存管理).
  */
 #pragma once
@@ -35,15 +36,16 @@ struct RiskVerdict
 };
 
 /// 策略输入: 软调整参数, 供定价函数使用
-/// 准则: projected utilization (position + 同向 pending), 前瞻性库存管理
+/// 准则: projected delta utilization ((delta + 同向 pending×hedge_ratio) / contract_max_delta),
+///       前瞻性库存管理; delta = position × hedge_ratio
 struct StrategyInputs
 {
-    double long_util = 0.0;            ///< projected_long / maxPosition
-    double short_util = 0.0;           ///< projected_short / maxPosition
+    double long_delta_util = 0.0;      ///< projected_long_delta / contract_max_delta
+    double short_delta_util = 0.0;     ///< projected_short_delta / contract_max_delta
 
-    /// utilization >= 1.0 -> 减仓侧强制义务报价 (obligation 被动价加仓侧)
-    bool force_ask_obligation = false; ///< 多仓打满 -> ask 侧义务减仓报价
-    bool force_bid_obligation = false; ///< 空仓打满 -> bid 侧义务减仓报价
+    /// delta utilization >= 1.0 -> 减仓侧强制义务报价 (obligation 被动价加仓侧)
+    bool force_ask_obligation = false; ///< 多头 delta 打满 -> ask 侧义务减仓报价
+    bool force_bid_obligation = false; ///< 空头 delta 打满 -> bid 侧义务减仓报价
 
     /// flexible 策略决策 (库存管理): 不再加仓, qty=0
     /// 注意: 这是策略行为不是风控措施, 仅作用于 flexible 加仓侧

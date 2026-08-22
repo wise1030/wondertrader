@@ -257,6 +257,9 @@ public:
     /// Get recent trades
     const RingBuffer<TradeRecord, 16384>& getRecentTrades() const { return _trades; }
 
+    /// pending adverse 队列大小 (V8-R5 测试/诊断钩子: 验证低流动性超时过期生效)
+    size_t pendingAdverseCount() const { return _pending_adverse.size(); }
+
     //==========================================================================
     // Analysis Helpers
     //==========================================================================

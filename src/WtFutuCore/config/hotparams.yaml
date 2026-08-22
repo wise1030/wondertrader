@@ -15,6 +15,8 @@ level_qty_multiplier: 0.7
 level_step: 1.0
 
 # --- 组合参数 ---
+# max_delta = 组合级 delta 软限: 组合 skew 归一化基准 + RiskCoordinator 软响应
+# (WIDEN_SPREAD) 阈值分母; 原始 delta 口径 (|totalDelta|/max_delta), 非风控硬顶
 max_delta: 30
 
 # --- Alpha 灵敏度 ---

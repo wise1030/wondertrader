@@ -11,10 +11,20 @@ SET(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/build_${PLATFORM}/${CMAKE_BUILD_T
 #7. 添加源码
 file(GLOB SRCS *.cpp ./gtest/*.cc)
 
+# test_inventory_delta_separation 等用例直接调用 WtFutuCore 策略模块
+# (FutuRiskMonitor/SpreadOptimizer 非 header-only);
+# WtFutuCore 必须排在 WTSTools 之前 (其未定义符号由后者提供)
 SET(LIBS
+    WtFutuCore
     WTSTools
 	WTSUtils
     WtShareHelper)
+
+# WtFutuCore 头文件的裸名包含路径 (如 SpreadOptimizer.h 的 "ISignalSource.h")
+LIST(APPEND INCS
+    "../WtFutuCore"
+    "../WtFutuCore/arb"
+    "../WtFutuCore/signals")
 IF (MSVC)
 ELSE(GNUCC)
     LIST(APPEND LIBS pthread boost_filesystem)

@@ -40,8 +40,8 @@ enum class Percentile : uint8_t
     P50 = 50,
     P90 = 90,
     P95 = 95,
-    P99 = 99,
-    P999 = 99 // P99.9 - need to handle differently
+    P99 = 99
+    // V8-R3: P999=99 错误别名已删 (与 P99 同值, 输出会误导)
 };
 
 /// Latency statistics
@@ -149,6 +149,12 @@ public:
     uint64_t getCriticalThresholdNs() const { return _critical_threshold_ns; }
     uint32_t getLogInterval() const { return _log_interval_ms; }
 
+    /// V8-R3: warn/critical 阈值接线 (此前 set 注入后无任何逻辑读取) --
+    /// 全链路(TICK_TO_QUOTE/SIGNAL_TO_ORDER) p99 超阈输出告警,
+    /// _log_interval_ms 限频; 返回 true = 存在 critical 超限。
+    /// 由 StrategyCoordinator 1s 节拍调用 (perf_on 时)。
+    bool checkThresholds(uint64_t now_ms);
+
     //==========================================================================
     // Latency Recording (nanosecond precision)
     //==========================================================================
@@ -227,6 +233,7 @@ private:
     uint64_t _warn_threshold_ns = 10000;
     uint64_t _critical_threshold_ns = 50000;
     uint32_t _log_interval_ms = 1000;
+    mutable uint64_t _last_threshold_log_ms = 0; ///< V8-R3: 阈值告警限频
 
     // Latency history (using RingBuffer for O(1) operations)
     RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _tick_to_quote_history;

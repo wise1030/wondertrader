@@ -131,11 +131,11 @@ struct ModuleParams
     // AutoCancel (仍需保留)
     uint32_t auto_cancel_max_age_ms = 10000;
     double auto_cancel_price_deviation = 3.0;
+    // B+: 撤单重试 (pending_cancel_timeout_ms 语义已改为重试间隔)
+    uint32_t cancel_retry_interval_ms = 300; ///< 撤单 ack 超时重发间隔 (ms)
+    uint32_t cancel_max_retries = 3;         ///< 撤单最大重试次数, 达到后 zombie 升级
 
     // AdaptiveParam (仍需保留)
-    uint32_t adaptive_update_interval = 100;
-    double adaptive_min_phi = 0.001;
-    double adaptive_max_phi = 0.1;
 
     // Alpha influence (仍需保留，由 StrategyCoordinator 使用)
     double alpha_sensitivity = 2.0;
@@ -152,7 +152,6 @@ struct CoordinatorConfig
     bool use_toxicity_detector;
     bool use_spread_optimizer;
     bool use_self_trade_prevention;
-    bool use_adaptive_params;
 
     uint32_t param_update_interval;
     uint32_t closeout_minutes_before;
@@ -191,7 +190,7 @@ struct CoordinatorConfig
     CoordinatorConfig()
         : use_market_making(true), use_spread_arbitrage(false), use_signal_aggregator(true),
           use_toxicity_detector(true), use_spread_optimizer(true), use_self_trade_prevention(true),
-          use_adaptive_params(false), param_update_interval(100), closeout_minutes_before(5), close_time(150000),
+          param_update_interval(100), closeout_minutes_before(5), close_time(150000),
           closeout_flatten_position(true), night_close_time(0), night_minutes_before(5), perf_enabled(true),
           perf_log_interval(1000), perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000),
           perf_monitor_latency_threshold(100000), bilateral_stats_log_interval_sec(300),
@@ -336,9 +335,10 @@ public:
     /// v7.1: 成交后立即重挂 — 单边成交把挂单深度侵蚀到 min_valid_qty 以下时,
     /// 用最近一个 tick 的报价参数立即撤剩余单+重新挂单, 恢复双边做市义务,
     /// 不再等下一个 tick。requote_after_fill_min_interval_ms 限频防 churn。
-    bool requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms);
-    // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_scale)
-    void updateAdaptiveParams(wtp::IUftStraCtx* ctx, const TickContext& tc);
+    /// @param from_fill true=成交触发(发 FillReceived 事件); false=B+ 撤单终态回报
+    ///        触发的 live 事件驱动补挂 (不发 FillReceived, 其余守卫/限频完全一致)
+    bool requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms, bool from_fill = true);
+    // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_gain, delta 口径)
 
     inline bool isTradingHalted() const
     {
@@ -410,6 +410,16 @@ private:
     // Map structure immutable after initLastMid() -> unique_ptr avoids moving atomics.
     struct MidSlot { std::atomic<double> v{0.0}; };
     wtp::wt_hashmap<std::string, std::unique_ptr<MidSlot>> _last_mid;
+
+public:
+    /// V8-R4: _last_mid 唯一属主 (策略壳副本已删) -- 策略壳/TdSpi 路径经此读取
+    double getLastMid(const std::string& code) const
+    {
+        auto it = _last_mid.find(code);
+        return (it != _last_mid.end() && it->second) ? it->second->v.load(std::memory_order_acquire) : 0.0;
+    }
+
+private:
 
     // 减仓防重复触发 — removed (attemptPositionReduction deleted)
 

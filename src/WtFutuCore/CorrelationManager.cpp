@@ -51,46 +51,6 @@ void CorrelationManager::addRelation(const std::string& code1,
     }
 }
 
-void CorrelationManager::removeContract(const std::string& code)
-{
-    _contracts.erase(code);
-    for (auto it = _calculators.begin(); it != _calculators.end();) {
-        size_t slash_pos = it->first.find('/');
-        if (slash_pos != std::string::npos) {
-            std::string leg1 = it->first.substr(0, slash_pos);
-            std::string leg2 = it->first.substr(slash_pos + 1);
-            if (leg1 == code || leg2 == code) {
-                // F1/F2: 同步清理预建索引
-                SpreadCalculator* raw = it->second.get();
-                for (const std::string& leg : {leg1, leg2}) {
-                    auto cc = _code_calcs.find(leg);
-                    if (cc != _code_calcs.end()) {
-                        auto& v = cc->second;
-                        v.erase(std::remove_if(v.begin(), v.end(), [raw](const auto& e) { return e.first == raw; }),
-                                v.end());
-                        if (v.empty())
-                            _code_calcs.erase(cc);
-                    }
-                }
-                auto pi1 = _pair_index.find(leg1);
-                if (pi1 != _pair_index.end()) {
-                    pi1->second.erase(leg2);
-                    if (pi1->second.empty())
-                        _pair_index.erase(pi1);
-                }
-                auto pi2 = _pair_index.find(leg2);
-                if (pi2 != _pair_index.end()) {
-                    pi2->second.erase(leg1);
-                    if (pi2->second.empty())
-                        _pair_index.erase(pi2);
-                }
-                it = _calculators.erase(it);
-                continue;
-            }
-        }
-        ++it;
-    }
-}
 
 void CorrelationManager::onTick(const std::string& code, double price, uint64_t timestamp)
 {
@@ -166,43 +126,12 @@ CorrelationStats CorrelationManager::getCorrelation(const std::string& code1, co
     return stats;
 }
 
-std::vector<std::pair<std::string, CorrelationStats>>
-CorrelationManager::getCorrelationsFor(const std::string& code) const
-{
-    std::vector<std::pair<std::string, CorrelationStats>> result;
-    for (const auto& pair : _calculators) {
-        size_t slash_pos = pair.first.find('/');
-        if (slash_pos != std::string::npos) {
-            std::string leg1 = pair.first.substr(0, slash_pos);
-            std::string leg2 = pair.first.substr(slash_pos + 1);
-            if (leg1 == code) {
-                result.push_back({leg2, getCorrelation(code, leg2)});
-            } else if (leg2 == code) {
-                result.push_back({leg1, getCorrelation(code, leg1)});
-            }
-        }
-    }
-    return result;
-}
-
 double CorrelationManager::getSpreadZScore(const std::string& code1, const std::string& code2) const
 {
     auto calc = getCalculator(code1, code2);
     return calc ? calc->getZScore() : 0.0;
 }
 
-double CorrelationManager::getAggregateDelta(const std::map<std::string, double>& positions) const
-{
-    double total_delta = 0.0;
-    for (const auto& pos : positions) {
-        auto it = _contracts.find(pos.first);
-        if (it != _contracts.end()) {
-            double multiplier = it->second.multiplier;
-            total_delta += pos.second * multiplier * it->second.last_price;
-        }
-    }
-    return total_delta;
-}
 
 double CorrelationManager::getHedgeRatio(const std::string& code1, const std::string& code2) const
 {
@@ -280,22 +209,7 @@ double CorrelationManager::getHedgeRatio(const std::string& code1, const std::st
     return hedge_ratio;
 }
 
-bool CorrelationManager::hasSpreadOpportunity(const std::string& code1,
-                                              const std::string& code2,
-                                              double& spreadRatio) const
-{
-    auto calc = getCalculator(code1, code2);
-    if (calc && std::abs(calc->getZScore()) > _config.spread_z_threshold) {
-        spreadRatio = 1.0;
-        return true;
-    }
-    return false;
-}
 
-std::vector<CorrelationManager::SpreadTradeSignal> CorrelationManager::getSpreadSignals() const
-{
-    return {};
-}
 
 void CorrelationManager::reset()
 {

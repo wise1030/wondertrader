@@ -70,7 +70,6 @@ struct RiskAlert; // R1: handleRiskAlert 参数前向声明 (定义在 SpreadRis
 // 综合信号组件
 class TickTransactionInferer;
 class SelfTradeCalibrator;
-class SyntheticSignalFusion;
 
 // R3 v2: BilateralQuoteStats 已下放到 FutuQuoter 内部，本头文件不再前向声明
 
@@ -202,7 +201,6 @@ struct FutuMmConfig
     {
         bool use_spread_optimizer;
         bool use_toxicity_detector;
-        bool use_adaptive_param;
         bool use_performance_monitor;
         bool use_performance_analyzer;
         bool use_market_making;
@@ -211,7 +209,7 @@ struct FutuMmConfig
         bool use_self_trade_prevention; ///< 自成交防护开关（唯一权威: coordinator.yaml modules.selfTradePrevention.enabled）
         double stp_min_price_gap;       ///< 自成交防护最小价差（唯一权威: coordinator.yaml modules.selfTradePrevention.stpMinPriceGap）
         Modules()
-            : use_spread_optimizer(true), use_toxicity_detector(true), use_adaptive_param(false),
+            : use_spread_optimizer(true), use_toxicity_detector(true),
               use_performance_monitor(false), use_performance_analyzer(false), use_market_making(true),
               use_spread_arbitrage(false), use_async_arb_thread(true), use_self_trade_prevention(true),
               stp_min_price_gap(1.0)
@@ -439,7 +437,7 @@ private:
     {
         std::atomic<double> v{0.0};
     };
-    wtp::wt_hashmap<std::string, std::unique_ptr<MidSlot>> _last_mid;
+    // V8-R4: _last_mid 副本已删, 单一属主 StrategyCoordinator (getLastMid)
 
     // v7.4 P0-2: 回调串行化锁 — 框架源码核实实盘回调非单线程:
     //   on_tick 系列=CTP MdSpi 线程, on_trade/on_order/on_entrust=CTP TdSpi
@@ -447,10 +445,8 @@ private:
     //   回测单线程, 此锁恒无竞争 ~20ns; 实盘竞争仅发生在成交/ tick 同时刻。
     //   recursive: 防回调路径嵌套(如实盘 on_trade 内 stra_buy 的同步回执)。
     //
-    // v7.6 编译开关 FUTU_CALLBACK_LOCK (默认 1=大锁, 生产基线):
-    //   1 = 全部回调 _cb_mtx 串行化 (保守, 结构锁冗余但无害);
-    //   0 = 细粒度模式 — 依赖阶段1-3的原子/结构锁/order_api_mtx,
-    //       _cb_mtx 不再加 (实盘灰度验证前勿用)。
+    // V8-R4/P0-3: FUTU_CALLBACK_LOCK=0 细粒度开关已删 (≥6 处假无锁, 生产恒用
+    // 大锁; 细粒度化需先建跨线程写点清单逐项加锁 -- 见 DIAGNOSTIC_REPORT_V8)
     std::recursive_mutex _cb_mtx;
 
     // P0-1 (v7.4): 统一强平/减仓原语 (无状态, setDeps 即用)

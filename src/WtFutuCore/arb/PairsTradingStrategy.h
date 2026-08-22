@@ -128,7 +128,6 @@ public:
     //==========================================================================
 
     /// Test for cointegration
-    CointegrationResult testCointegration() const;
 
     /// Get current hedge ratio
     double getHedgeRatio() const { return _current_beta; }
@@ -183,7 +182,7 @@ private:
     //==========================================================================
 
     bool _is_valid_pair;
-    mutable double _current_correlation; // updated in const testCointegration()
+    mutable double _current_correlation;
 
     //==========================================================================
     // Signal State

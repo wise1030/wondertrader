@@ -27,7 +27,7 @@
 #include "../WTSTools/WTSLogger.h"
 #include "../WTSUtils/WTSCfgLoader.h"
 
-static const uint32_t DATA_SIZE_STEP = 8000;	//信息量每天最多4000
+static const uint32_t DATA_SIZE_STEP = 200000;	//做市场景单日订单量可达数万，预留20万容量
 
 USING_NS_WTP;
 
@@ -1413,4 +1413,3 @@ bool UftStraContext::stra_cancel_quote(uint32_t localid)
 
 	return ret;
 }
-

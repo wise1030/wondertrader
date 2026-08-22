@@ -25,11 +25,11 @@ namespace futu
 /// Realized toxicity configuration
 struct RealizedToxicityConfig
 {
-    double weight;        ///< Weight for realized toxicity in combined score
+    double weight;        ///< Weight for realized toxicity in combined score (V8-R3: 仅门面消费)
     uint32_t min_samples; ///< Minimum samples before using realized score
-    double decay_factor;  ///< Time decay factor (per second)
+    // V8-R3: decay_factor 死字段已删 (从未参与计算)
 
-    RealizedToxicityConfig() : weight(0.4), min_samples(3), decay_factor(0.01) {}
+    RealizedToxicityConfig() : weight(0.4), min_samples(3) {}
 };
 
 /// Realized toxicity result
@@ -75,7 +75,6 @@ public:
     void onCalibration(const CalibrationResult& calibration);
 
     /// Update with order book analysis
-    void onBookAnalysis(double imbalance_score);
 
     //==========================================================================
     // Analysis
@@ -101,9 +100,8 @@ private:
 
     // Calibration data
     CalibrationResult _latest_calibration;
-    BookAnalysisResult _latest_book;
+    // V8-R3: _latest_book/_has_book_data 死字段已删 (onBookAnalysis 死链)
     bool _has_calibration_data = false;
-    bool _has_book_data = false;
 
     // Cached result
     mutable RealizedToxicityResult _cached_result;

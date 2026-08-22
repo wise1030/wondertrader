@@ -46,7 +46,6 @@ struct SpreadArbitrageConfig
     // General settings
     bool enabled;               ///< Enable spread arbitrage
     bool enhance_market_making; ///< Enable MM enhancement
-    bool use_hybrid_strategy;   ///< Use hybrid strategy combination
 
     // Strategy selection
     ArbitrageStrategy primary_strategy;
@@ -60,16 +59,15 @@ struct SpreadArbitrageConfig
     uint32_t signal_cooldown_ms;  ///< Cooldown between signals
 
     // Integration settings
-    double mm_enhancement_weight; ///< Weight of MM enhancement signals
 
     // A10: 开仓信号最低利润门槛 (ticks), 语义 = 2×(taker_spread+fee) - maker_rebate (见 ARB_SELF_CLOSE_DESIGN §4.4)
     // 经 setMinProfitThreshold 接线到 AsyncArbitrageExecutor (价格调整成本超过此阈值则拒单)
     double min_profit_threshold_ticks;
 
     SpreadArbitrageConfig()
-        : enabled(true), enhance_market_making(true), use_hybrid_strategy(false),
+        : enabled(true), enhance_market_making(true),
           primary_strategy(ArbitrageStrategy::MEAN_REVERSION), max_total_position(50.0), max_pairs(10),
-          min_signal_confidence(0.3), signal_cooldown_ms(1000), mm_enhancement_weight(0.5),
+          min_signal_confidence(0.3), signal_cooldown_ms(1000),
           min_profit_threshold_ticks(1.0)
     {}
 };
@@ -103,7 +101,6 @@ using SpreadSignalCallback = std::function<void(const SpreadSignal&)>;
 using RiskAlertCallback = std::function<void(const RiskAlert&)>;
 
 /// Callback for quoting adjustments
-using QuotingAdjustCallback = std::function<void(const std::string& pair_id, const QuotingAdjustment&)>;
 
 //==============================================================================
 // Spread Arbitrage Manager
@@ -182,7 +179,6 @@ public:
     QuotingAdjustment getQuotingAdjustment(const std::string& pair_id, uint64_t current_time);
 
     /// Check if should pause quoting
-    bool shouldPauseQuoting(const std::string& code, bool is_bid) const;
 
     //==========================================================================
     // Position Management
@@ -235,16 +231,8 @@ public:
 
     //==========================================================================
     // Risk Management
-    //==========================================================================
-
-    /// Get current risk summary
-    PortfolioRiskSummary getRiskSummary() const;
-
-    /// Check if position is allowed
-    bool canOpenPosition(const std::string& pair_id, double size) const;
-
-    /// Get active risk alerts
-    std::vector<RiskAlert> getActiveAlerts() const;
+    // (V8-R3: getRiskSummary/getActiveAlerts/canOpenPosition 转发死接口已删;
+    //  SpreadRiskManager::canOpenPosition 由 applyB3Gate 内部调用)
 
     //==========================================================================
     // Callbacks
@@ -252,7 +240,6 @@ public:
 
     void setSignalCallback(SpreadSignalCallback callback) { _signal_callback = callback; }
     void setAlertCallback(RiskAlertCallback callback) { _alert_callback = callback; }
-    void setQuotingCallback(QuotingAdjustCallback callback) { _quoting_callback = callback; }
 
     /// Set contract multiplier for a specific contract code
     void setContractMultiplier(const std::string& code, double multiplier) { _contract_multipliers[code] = multiplier; }
@@ -274,8 +261,6 @@ private:
     //==========================================================================
 
     void initializeStrategy(StrategyInstance& instance, const SpreadPairConfig& config);
-    SpreadSignal
-    combineSignals(const std::vector<SpreadSignal>& signals, const SpreadState& state, uint64_t current_time);
     void dispatchSignal(const SpreadSignal& signal);
     void checkRiskAlerts();
 
@@ -290,17 +275,10 @@ private:
 
     // Statistical sub-strategy default parameters (from config file)
     // A9: 作为 pair 级参数的默认值来源 (pair 级未配置时回落), 键名与 spread_arbitrage.yaml 对齐
-    uint32_t _default_mr_half_life = 100;
     double _default_mr_entry_threshold = 2.0;
     double _default_mr_exit_threshold = 0.5;
     double _default_mr_stop_loss_z = 4.0;
     double _default_mr_add_safety_ratio = 0.75;
-    uint32_t _default_pt_correlation_window = 100;
-    double _default_pt_min_correlation = 0.7;
-    uint32_t _default_pt_spread_window = 50;
-    double _default_pt_entry_threshold = 2.0;
-    uint32_t _default_tf_ma_period = 20;
-    double _default_tf_breakout_threshold = 1.5;
     double _default_tf_stop_loss_pct = 0.02;
     uint32_t _default_tf_max_trend_bars = 50;
 
@@ -341,7 +319,6 @@ private:
 
     SpreadSignalCallback _signal_callback;
     RiskAlertCallback _alert_callback;
-    QuotingAdjustCallback _quoting_callback;
 
     //==========================================================================
     // Contract Multipliers
@@ -362,7 +339,6 @@ private:
 
     /// Pure helper: derive arb intent from z-score (with hysteresis).
     /// Hysteresis band: exit_z < |z| < entry_z → keep prev intent.
-    ArbIntent computeIntent(double z, const SpreadPairConfig& cfg, ArbIntent prev) const;
 
     /// B-3 gate: takes raw signal from strategy, applies portfolio-derived
     /// dedup + size adjustment + in-flight check. Returns possibly-modified
@@ -418,7 +394,9 @@ public:
     void clearActiveCloseIntent(const std::string& pair_id);
     /// 该合约是否有活跃平仓 intent (经 1:N 映射, any-match; 主线程读)
     bool hasActiveCloseIntent(const std::string& leg_code) const;
-    /// 该合约的平仓方向: 0=无, +1=arb 正在买该 leg, -1=arb 正在卖该 leg (B2 协同用)
+    /// 该合约的平仓方向: 0=无, +1=arb 正在买该 leg, -1=arb 正在卖该 leg (B2 协同用),
+    /// kArbCloseConflict=多个活跃 intent 方向冲突 (1:N 场景, 消费方应双侧抑制)
+    static constexpr int kArbCloseConflict = 2;
     int getArbCloseDirection(const std::string& leg_code) const;
 
     //==========================================================================

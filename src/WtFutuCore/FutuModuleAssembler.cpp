@@ -118,7 +118,6 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     // 模块开关（从 coordinator.yaml 读取，而非 config.yaml）
     _config.modules.use_toxicity_detector = coord_cfg.use_toxicity_detector;
     _config.modules.use_spread_optimizer = coord_cfg.use_spread_optimizer;
-    _config.modules.use_adaptive_param = coord_cfg.use_adaptive_params;
 
     //==========================================================================
     // 模块开关统一解析 (单一权威来源):
@@ -300,6 +299,9 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         tracker_cfg.max_age_ms = mp.auto_cancel_max_age_ms;
         tracker_cfg.price_deviation = mp.auto_cancel_price_deviation;
         tracker_cfg.sticky_threshold = _config.quoting.sticky_threshold;
+        // B+: 撤单重试间隔/最大次数 (替代旧"超时强制遗忘"语义)
+        tracker_cfg.pending_cancel_timeout_ms = mp.cancel_retry_interval_ms;
+        tracker_cfg.cancel_max_retries = mp.cancel_max_retries;
         // STP 唯一权威: coordinator.yaml modules.selfTradePrevention。
         // arb 启用时强制开启, 防止 arb 对手价单打到自己 MM 盘口。
         // Reason: arb sends marketable orders via OrderRouter that can cross own MM quotes.
@@ -464,9 +466,12 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
     //------------------------------------------------------------
     // 7. MarketDataContext（核心行情上下文）
+    // V8-P0-4: 传入合约信息装配 setContract/setLargeTradeThreshold
+    // (此前 tick_size 恒为默认 0.2, EC 实际 0.5 -> depth_imbalance 偏差 2.5 倍)
     //------------------------------------------------------------
     for (const auto& ci : _contract_infos) {
-        _market_data.emplace(ci.code, FutuComponentFactory::createMarketDataContext(coord_cfg));
+        _market_data.emplace(ci.code,
+                             FutuComponentFactory::createMarketDataContext(coord_cfg, ci.code, ci.tick_size));
     }
     WTSLogger::info("MarketDataContext: mandatory core enabled");
 
@@ -745,10 +750,7 @@ void FutuModuleAssembler::loadContractInfos(UftFutuMmStrategy& s, wtp::IUftStraC
     auto& _session_cache = s._session_cache;
     auto& _config = s._config;
 
-    // v7.6: _last_mid 定码预填 (init 后结构不可变, 值原子, MdSpi/TdSpi 无锁共享)
-    for (const auto& ci : _contract_infos) {
-        s._last_mid[ci.code] = std::make_unique<UftFutuMmStrategy::MidSlot>();
-    }
+    // V8-R4: 策略壳 _last_mid 预填已删 -- Coordinator initLastMid 为唯一属主
 
     for (auto& ci : _contract_infos) {
         std::string stdCode = fullCodeToStdCode(ci.code);

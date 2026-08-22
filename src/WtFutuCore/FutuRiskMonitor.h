@@ -21,12 +21,14 @@
 #include <cmath>
 #include <mutex>
 #include <array>
+#include <algorithm>
 #include <unordered_map>
 #include "../Includes/FasterDefs.h"
 #include "FutuConfig.h"
 #include "PreTradeDecision.h"
 #include "SideFillBreaker.h"
 #include "RiskLimitsConfig.h"
+#include "SpinLockGuard.h"
 #include "../Share/LockFreeRingBuffer.hpp"
 
 NS_WTP_BEGIN
@@ -245,6 +247,38 @@ public:
     const RateLimits& getRateLimits() const { return _rate_limits; }
     void setMaxPendingPerSide(double v) { _max_pending_per_side = v; }
 
+    /// B+: zombie 撤单升级的合约 halt 闩锁 (coordinator 在 zombie 升级时置位,
+    /// 通道恢复 onChannelReady 时 clearZombieHalts 复位)。闩锁期间该合约
+    /// halt_quoting - zombie 单悬而未决时不允许新增报价敞口。
+    /// B+ 修复(P1-1): 数据线程 (升级/读) 与交易线程 (通道恢复/事件补挂读)
+    /// 并发访问, SpinLockGuard 保护 (临界区 = 一次 map 操作, 无嵌套锁)。
+    void setZombieHalt(const std::string& code)
+    {
+        SpinLockGuard _g(_zombie_halt_lock);
+        _zombie_halt[code] = true;
+    }
+    void clearZombieHalts()
+    {
+        SpinLockGuard _g(_zombie_halt_lock);
+        _zombie_halt.clear();
+    }
+    /// B+ 修复(P2-3): 释放无存活 zombie 单合约的闩锁 -- zombie 被 cancelAll 兜底
+    /// 杀掉且回报清账后 (存活集合不再含该合约) 自动恢复报价, 无需等通道重连。
+    /// 由 processAutoCancel 每 tick 以 tracker 的存活集合驱动。
+    void retainZombieHalts(const std::vector<std::string>& aliveZombieContracts)
+    {
+        SpinLockGuard _g(_zombie_halt_lock);
+        if (_zombie_halt.empty())
+            return;
+        for (auto it = _zombie_halt.begin(); it != _zombie_halt.end();) {
+            if (std::find(aliveZombieContracts.begin(), aliveZombieContracts.end(), it->first)
+                == aliveZombieContracts.end())
+                it = _zombie_halt.erase(it);
+            else
+                ++it;
+        }
+    }
+
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
     const RecoveryConfig& getRecoveryConfig() const { return _recovery_config; }
 
@@ -268,6 +302,10 @@ public:
     void recordOrder();
     void recordCancel();
     void recordTrade();
+
+    /// V8-P0-2: 批量计入 n 笔报单 (MM 路径 refreshQuotes 返回的实际挂单数;
+    /// 单次加锁, 避免逐笔 recordOrder 的重复临界区开销)
+    void recordOrders(uint32_t n);
 
     /// 同侧连续成交熔断（按合约独立计数）: 记录一笔成交,
     /// 返回 true 表示本次触发了熔断（调用方应立即撤该合约全部报价）。
@@ -580,6 +618,22 @@ private:
     mutable std::atomic<uint64_t> _last_pos_breach_warn_ms{0};
     mutable std::atomic<uint64_t> _last_cost_stale_alert_ms{0};
     mutable std::unordered_map<std::string, uint64_t> _last_soft_warn_ms;
+
+    // B+ 修复(P1-1): 双线程 (数据/交易) 并发访问的软状态 map 均以自旋锁保护。
+    // _zombie_halt: setZombieHalt/clearZombieHalts/retainZombieHalts 写,
+    //   checkHardPositionRisk 读 (两线程均达)。
+    // _last_soft_warn_ms: checkHardPositionRisk/computeInventoryStrategyInputs
+    //   读改写 (两线程均达, 告警节流表; 既有竞态, 一并修复)。
+    mutable std::atomic_flag _zombie_halt_lock = ATOMIC_FLAG_INIT;
+    mutable std::atomic_flag _soft_warn_lock = ATOMIC_FLAG_INIT;
+    /// V8-P0-2: 频控时间环自旋锁 -- LockFreeRingBuffer 为 SPSC, 但
+    /// recordOrder 存在多生产者 (MdSpi processQuoting/requoteAfterFill、
+    /// arb 线程 ArbExecutionBridge), recordTrade/recordCancel 在 TdSpi,
+    /// pruneRateWindows 在 MdSpi -- 不加锁即 data race
+    mutable std::atomic_flag _rate_lock = ATOMIC_FLAG_INIT;
+
+    // B+: zombie 升级 halt 闩锁 (code -> true)
+    std::unordered_map<std::string, bool> _zombie_halt;
 
     // Event notifier (optional)
     wtp::EventNotifier* _event_notifier = nullptr;

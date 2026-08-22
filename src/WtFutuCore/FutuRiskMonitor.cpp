@@ -25,6 +25,9 @@ void FutuRiskMonitor::recordOrder()
     // P2-1: 去掉 atomic 双轨计数,直接用 ring buffer size() 读取
     // 旧代码 atomic +1 无条件、-1 有条件(try_pop 成功),ring buffer 满(256)时
     // try_push 失败仍 +1,导致计数单调虚高。改用 size() 精确反映 1 秒窗口内事件数。
+    // V8-P0-2: SPSC ring 存在多生产者 (MdSpi/arb/TdSpi), 自旋锁串行化
+    SpinLockGuard _g(_rate_lock);
+
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _order_times.try_peek()) {
         if (*item < cutoff)
@@ -35,9 +38,32 @@ void FutuRiskMonitor::recordOrder()
     _order_times.try_push(now);
 }
 
+void FutuRiskMonitor::recordOrders(uint32_t n)
+{
+    if (n == 0)
+        return;
+    uint64_t now = _current_time.load(std::memory_order_relaxed);
+
+    // V8-P0-2: MM 批量计数 (refreshQuotes 返回值), 单次临界区
+    SpinLockGuard _g(_rate_lock);
+
+    uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
+    while (auto item = _order_times.try_peek()) {
+        if (*item < cutoff)
+            _order_times.try_pop();
+        else
+            break;
+    }
+    for (uint32_t i = 0; i < n; i++)
+        _order_times.try_push(now);
+}
+
 void FutuRiskMonitor::recordCancel()
 {
     uint64_t now = _current_time.load(std::memory_order_relaxed);
+
+    // V8-P0-2: 同上, 多生产者串行化
+    SpinLockGuard _g(_rate_lock);
 
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _cancel_times.try_peek()) {
@@ -53,6 +79,9 @@ void FutuRiskMonitor::recordTrade()
 {
     uint64_t now = _current_time.load(std::memory_order_relaxed);
 
+    // V8-P0-2: 同上, 多生产者串行化
+    SpinLockGuard _g(_rate_lock);
+
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _trade_times.try_peek()) {
         if (*item < cutoff)
@@ -65,6 +94,9 @@ void FutuRiskMonitor::recordTrade()
 
 void FutuRiskMonitor::pruneRateWindows(uint64_t now)
 {
+    // V8-P0-2: 与 record* 同锁串行化 (此前 MdSpi prune 与 arb 线程 push 并发)
+    SpinLockGuard _g(_rate_lock);
+
     uint64_t cutoff = (now > 1000) ? (now - 1000) : 0;
     while (auto item = _order_times.try_peek()) {
         if (*item < cutoff)
@@ -1058,7 +1090,10 @@ PreTradeDecision FutuRiskMonitor::checkPreTradePosition(const std::string& code,
 
     ContractState cs_buf;
     const ContractState* cs = portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
-    if (!cs || cs->max_position <= 0)
+    // 2026-08-19 语义边界: 不在此按 max_position 早退 — 风控/策略各自在 impl 内
+    // 按自身口径设防 (风控=maxPosition, 策略=contract_max_delta), 避免硬顶未配时
+    // 误伤策略库存调控输入.
+    if (!cs)
         return PreTradeDecision{};
 
     return checkPreTradePositionImpl(code, cs, tracker, now_ms);
@@ -1070,9 +1105,6 @@ PreTradeDecision FutuRiskMonitor::checkPreTradePosition(const ContractState& cs,
 {
     // A3: 复用 TickContext.cs 快照 (processTick 入口 preCheck 已 getContractSnapshot),
     //     消除每 tick checkPreTradePosition 的重复递归锁+ContractState 拷贝
-    if (cs.max_position <= 0)
-        return PreTradeDecision{};
-
     return checkPreTradePositionImpl(cs.code, &cs, tracker, now_ms);
 }
 
@@ -1096,6 +1128,16 @@ RiskVerdict FutuRiskMonitor::checkHardPositionRisk(const std::string& code,
                                                   uint64_t now_ms) const
 {
     RiskVerdict risk;
+    // === B+: zombie 撤单升级闩锁 - zombie 单悬而未决, 暂停该合约全部报单 ===
+    // (独立于 maxPosition 闸门: 即使未配硬顶, zombie 风险也必须停牌)
+    // B+ 修复(P1-1): 数据/交易线程并发读, 自旋锁保护
+    {
+        SpinLockGuard _g(_zombie_halt_lock);
+        if (_zombie_halt.count(code) > 0) {
+            risk.halt_quoting = true;
+        }
+    }
+
     if (!cs || cs->max_position <= 0)
         return risk;
 
@@ -1103,15 +1145,23 @@ RiskVerdict FutuRiskMonitor::checkHardPositionRisk(const std::string& code,
     // 该合约该侧处于暂停期 -> 禁止报价（cancelAll + 不挂新单），到期自动恢复。
     // now_ms 为交易所时钟 (replay 基准, 与 onSideFill 写入一致), 0 = 不启用查询。
     if (now_ms > 0) {
+        // V8-R1: 熔断器本身不分方向 (isPaused 无 side 参数), 同侧触发即暂停
+        // 全合约报价, cancelAll 也是全撤 — 两字段镜像同一合约级状态属有意
+        // 为之, 非每侧独立暂停。若未来需要分侧语义需先给 breaker 加方向维度。
         risk.side_pause_bid = _side_fill_breaker.isPaused(code, now_ms);
         risk.side_pause_ask = risk.side_pause_bid;
     }
 
+    // B+ 修复(P1-1): 告警节流表双线程读改写, 自旋锁保护
     const uint64_t soft_now = _current_time.load(std::memory_order_relaxed);
-    uint64_t& last_soft = _last_soft_warn_ms[code];
-    const bool log_soft = (soft_now < last_soft || soft_now - last_soft >= WARN_THROTTLE_MS);
-    if (log_soft)
-        last_soft = soft_now;
+    bool log_soft = false;
+    {
+        SpinLockGuard _g(_soft_warn_lock);
+        uint64_t& last_soft = _last_soft_warn_ms[code];
+        log_soft = (soft_now < last_soft || soft_now - last_soft >= WARN_THROTTLE_MS);
+        if (log_soft)
+            last_soft = soft_now;
+    }
 
     // === Pending OrderFilter: per-side pending qty drain (风险层) ===
     if (_max_pending_per_side > 0) {
@@ -1150,69 +1200,80 @@ StrategyInputs FutuRiskMonitor::computeInventoryStrategyInputs(const std::string
                                                                double pending_sell) const
 {
     StrategyInputs strategy;
-    if (!cs || cs->max_position <= 0)
+    // 策略库存调控 = delta 口径 (2026-08-19 语义边界原则):
+    //   分子 = 同向 delta + 同向 pending×hedge_ratio, 分母 = contract_max_delta (delta 软限).
+    //   maxPosition 是风控硬顶, 只用于 RiskVerdict (checkHardPositionRisk), 不参与此函数.
+    if (!cs || cs->contract_max_delta <= 0)
         return strategy;
 
-    double projected_long = (cs->position > 0 ? cs->position : 0) + pending_buy;
-    double projected_short = (cs->position < 0 ? std::abs(cs->position) : 0) + pending_sell;
+    const double delta = cs->delta(); // position * hedge_ratio
+    const double hr = cs->hedge_ratio;
+    double projected_long = (delta > 0 ? delta : 0) + pending_buy * hr;
+    double projected_short = (delta < 0 ? std::abs(delta) : 0) + pending_sell * hr;
 
-    strategy.long_util = projected_long / cs->max_position;
-    strategy.short_util = projected_short / cs->max_position;
+    strategy.long_delta_util = projected_long / cs->contract_max_delta;
+    strategy.short_delta_util = projected_short / cs->contract_max_delta;
 
     // 热路径告警限频：per-contract 软告警 (cap/block_add)
     // 在持续超限时每 tick 刷屏，按时间节流至最多每 1s 一次。
+    // B+ 修复(P1-1): 双线程读改写, 自旋锁保护
     const uint64_t soft_now = _current_time.load(std::memory_order_relaxed);
-    uint64_t& last_soft = _last_soft_warn_ms[code];
-    const bool log_soft = (soft_now < last_soft || soft_now - last_soft >= WARN_THROTTLE_MS);
-    if (log_soft)
-        last_soft = soft_now;
+    bool log_soft = false;
+    {
+        SpinLockGuard _g(_soft_warn_lock);
+        uint64_t& last_soft = _last_soft_warn_ms[code];
+        log_soft = (soft_now < last_soft || soft_now - last_soft >= WARN_THROTTLE_MS);
+        if (log_soft)
+            last_soft = soft_now;
+    }
 
-    // v3: util >= 1.0 时只设 obligation 标志，不阻断；Quoter 负责
+    // v3: delta util >= 1.0 时只设 obligation 标志，不阻断；Quoter 负责
     //     (A) 加仓侧 qty 指数衰减 (util接近1时qty→0)
     //     (B) 减仓侧强制义务报价 (≥10手/≤10ticks)
-    if (strategy.long_util >= 1.0) {
+    if (strategy.long_delta_util >= 1.0) {
         strategy.force_ask_obligation = true;
         if (log_soft)
-            WTSLogger::warn("[RISK] {} LONG cap reached: pos={:.0f} pending_buy={:.0f} proj_long={:.0f}/{:.0f} "
+            WTSLogger::warn("[STRATEGY] {} LONG delta cap reached: delta={:.0f} pending_buy={:.0f} proj_long={:.0f}/{:.0f} "
                             "(util={:.2f}) → ASK obligation",
                             code,
-                            cs->position,
+                            delta,
                             pending_buy,
                             projected_long,
-                            cs->max_position,
-                            strategy.long_util);
+                            cs->contract_max_delta,
+                            strategy.long_delta_util);
     }
-    if (strategy.short_util >= 1.0) {
+    if (strategy.short_delta_util >= 1.0) {
         strategy.force_bid_obligation = true;
         if (log_soft)
-            WTSLogger::warn("[RISK] {} SHORT cap reached: pos={:.0f} pending_sell={:.0f} proj_short={:.0f}/{:.0f} "
+            WTSLogger::warn("[STRATEGY] {} SHORT delta cap reached: delta={:.0f} pending_sell={:.0f} proj_short={:.0f}/{:.0f} "
                             "(util={:.2f}) → BID obligation",
                             code,
-                            cs->position,
+                            delta,
                             pending_sell,
                             projected_short,
-                            cs->max_position,
-                            strategy.short_util);
+                            cs->contract_max_delta,
+                            strategy.short_delta_util);
     }
 
     // === block_add: 策略库存管理 (仅 flexible 加仓侧, 非风控措施) ===
-    // obligation 加仓侧由被动价承担 (obligation_max_spread_ticks), 不在此阻断
+    // obligation 加仓侧由被动价承担 (obligation_max_spread_ticks), 不在此阻断.
+    // 阈值 = contract_max_delta × positionHardBlockRatio (delta 口径; 配置键名保留兼容).
     if (_rate_limits.position_hard_block_ratio > 0) {
-        double abs_pos = std::abs(cs->position);
-        double hard_threshold = cs->max_position * _rate_limits.position_hard_block_ratio;
-        if (abs_pos >= hard_threshold) {
-            if (cs->position > 0) {
+        double abs_delta = std::abs(delta);
+        double hard_threshold = cs->contract_max_delta * _rate_limits.position_hard_block_ratio;
+        if (abs_delta >= hard_threshold) {
+            if (delta > 0) {
                 strategy.block_add_long = true;
             } else {
                 strategy.block_add_short = true;
             }
             if (log_soft)
-                WTSLogger::warn("[STRATEGY] {} BLOCK_ADD: pos={:.0f} >= {:.0f}*{:.2f} -> flexible stop adding {} (inventory management)",
+                WTSLogger::warn("[STRATEGY] {} BLOCK_ADD: delta={:.0f} >= {:.0f}*{:.2f} -> flexible stop adding {} (inventory management)",
                                 code,
-                                cs->position,
-                                cs->max_position,
+                                delta,
+                                cs->contract_max_delta,
                                 _rate_limits.position_hard_block_ratio,
-                                cs->position > 0 ? "long(bid)" : "short(ask)");
+                                delta > 0 ? "long(bid)" : "short(ask)");
         }
     }
 

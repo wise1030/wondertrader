@@ -133,8 +133,15 @@ private:
         if (n == 0)
             return;
 
-        // 滚动和直接取均值, 乘以1000作为缩放因子(对数收益率通常很小, 如0.0001级别)
-        double raw_momentum = _log_return_sum / static_cast<double>(n) * 1000.0;
+        // V8-S6: window 配置此前被静默忽略 (恒用全缓冲 128)。现按最近
+        // min(window, 128) 个收益取均值; O(w<=128) 直算, 开销可忽略。
+        const size_t w = std::min<size_t>(_cfg.window > 0 ? _cfg.window : 128, n);
+        double window_sum = 0;
+        for (size_t i = n - w; i < n; ++i)
+            window_sum += _log_returns[i];
+
+        // 均值乘以1000作为缩放因子(对数收益率通常很小, 如0.0001级别)
+        double raw_momentum = window_sum / static_cast<double>(w) * 1000.0;
 
         // Scale and clamp to [-1, 1]
         double momentum = std::tanh(raw_momentum);

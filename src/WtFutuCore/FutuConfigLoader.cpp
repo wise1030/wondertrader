@@ -59,6 +59,32 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
         }
     }
 
+    // V8-R6: 启动 fail-fast — 旧实现 contracts 缺失/类型错静默通过, 策略零合约
+    // 空跑; anchorCode 不校验 (空值导致 LeadLag/closeout 时间推导全部失效)。
+    if (_contract_infos.empty()) {
+        WTSLogger::error("UftFutuMmStrategy[{}] contracts missing/empty/not-an-array in config, refusing to start", id);
+        return false;
+    }
+    if (_config.anchor_code.empty()) {
+        WTSLogger::error("UftFutuMmStrategy[{}] anchorCode empty in config, refusing to start", id);
+        return false;
+    }
+    {
+        bool anchor_found = false;
+        for (const auto& ci : _contract_infos) {
+            if (ci.code == _config.anchor_code) {
+                anchor_found = true;
+                break;
+            }
+        }
+        if (!anchor_found) {
+            WTSLogger::error("UftFutuMmStrategy[{}] anchorCode {} not in contracts list, refusing to start",
+                             id,
+                             _config.anchor_code);
+            return false;
+        }
+    }
+
     //------------------------------------------------------------
     // 读取 Delta 软指标参数（用于 skew 和对冲决策，不触发风控）
     //------------------------------------------------------------

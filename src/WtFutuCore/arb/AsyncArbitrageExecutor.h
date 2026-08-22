@@ -183,6 +183,11 @@ public:
     void setConfig(const AsyncArbConfig& config) { _config = config; }
     const AsyncArbConfig& getConfig() const { return _config; }
 
+    /// V8-R4/A5: replay 时钟注入 (策略每 tick 调用, _exchange_time_ms×1000) --
+    /// 回测墙钟与模拟时间 1:N 漂移, TIMEOUT_EXIT/maxDivergenceTime/orphan 超时
+    /// 用墙钟在回测中永不触发; live 时 replay=交易所时间语义不变
+    void setReplayNowUs(uint64_t us) { _replay_now_us.store(us, std::memory_order_relaxed); }
+
     /// 直接开关套利 (避免 getConfig→改副本→setConfig 的整 struct atomic 拷贝).
     /// 用于 channel_lost 停套利 / channel_ready 恢复等高频联动.
     void setEnabled(bool enabled) { _config.enabled.store(enabled, std::memory_order_release); }
@@ -293,6 +298,7 @@ public:
     uint64_t ordersExecuted() const { return _orders_executed.load(); }
 
 private:
+    std::atomic<uint64_t> _replay_now_us{0}; ///< V8-R4/A5: 0=未注入(首帧前), 兜底墙钟
     //==========================================================================
     // Arb Thread
     //==========================================================================
@@ -339,7 +345,7 @@ private:
         bool leg1_is_buy;
         double leg1_qty;
         double leg1_price;
-        std::chrono::steady_clock::time_point timestamp;
+        uint64_t timestamp; ///< V8-R4/A5: replay 时钟 µs (墙钟仅首帧前兜底)
         // delta_ratio用于动态调整对冲超时
         // = abs(current_delta / max_delta), 0表示无delta限制
         double delta_ratio = 0.0;

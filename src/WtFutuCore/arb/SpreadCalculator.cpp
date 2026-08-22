@@ -389,8 +389,14 @@ double SpreadCalculator::estimateHalfLife() const
     double mean_x = sum_x / count;
     double mean_dx = sum_dx / count;
 
+    // V8-A11: 零方差 (价差恒定) 时分母为 0 -> theta=0/0=NaN, `NaN >= 0` 恒 false
+    // 滑过下方守卫 -> half_life=NaN 绕过 MeanReversion 半衰期过滤。
+    double denom = sum_xx - count * mean_x * mean_x;
+    if (denom < 1e-12)
+        return 0;
+
     // Calculate theta (slope)
-    double theta = (sum_x_dx - count * mean_x * mean_dx) / (sum_xx - count * mean_x * mean_x);
+    double theta = (sum_x_dx - count * mean_x * mean_dx) / denom;
 
     // theta should be negative for mean-reverting process
     if (theta >= 0)
@@ -412,6 +418,10 @@ SpreadState SpreadCalculator::getState() const
 {
     SpreadState state;
     state.current_spread = _current_spread;
+    // V8-A2: current_price 此前全链路从未赋值 -> TrendFollowing 止损分支
+    // (entry_price>0 && current_price>0 恒 false) 是死代码, 趋势价差仓无价格止损。
+    // 价差"价格"即价差值本身 (pnl_pct 以 spread 为分母, 接近 0 的价差该策略本身不应持仓)
+    state.current_price = _current_spread;
     state.spread_mean = _spread_mean;
     state.spread_std = _spread_std;
     state.zscore = _zscore;

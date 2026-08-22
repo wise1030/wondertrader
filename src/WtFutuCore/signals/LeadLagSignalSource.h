@@ -46,16 +46,21 @@ public:
     {
         uint32_t window; ///< Mid-change smoothing window size
         double weight;
-        uint32_t lag_ms;
         double scale_factor; ///< Signal scale factor (tanh input multiplier)
                              ///< bps scaling. EC mid~3700, 1 tick(0.5)=1.35bps
                              ///< scale=3000: tanh(1.35×0.3)=0.37 (moderate, 不饱和)
                              ///< scale=10000: tanh(1.35×0.3)=0.87 (偏饱和)
 
-        Config() : window(50), weight(0.3), lag_ms(50), scale_factor(3000.0) {}
+        // V8-S6: lag_ms 安慰剂键删除 — 从未实现 (没有任何时间偏移逻辑消费它),
+        // 保留会给人"领先滞后延迟可调"的错觉。真正的时延语义归 R4b 信号重设计。
+        Config() : window(50), weight(0.3), scale_factor(3000.0) {}
     };
 
-    explicit LeadLagSignalSource(const Config& cfg = Config()) : _cfg(cfg), _enabled(true), _cumulative_signal(0) {}
+    // V8-S2: _current_mid/_current_timestamp 原未初始化即被读 (calculateSignal
+    // 在首帧 update() 之前被 updateLeadContract 调用时触发 UB)
+    explicit LeadLagSignalSource(const Config& cfg = Config())
+        : _cfg(cfg), _enabled(true), _cumulative_signal(0), _current_mid(0), _current_timestamp(0)
+    {}
 
     //==========================================================================
     // ISignalSource Interface
@@ -130,7 +135,7 @@ public:
             double mid_change = (mid - info.last_mid) / info.last_mid;
 
             // 新增RingBuffer存储mid_change历史，计算窗口内加权平均
-            // 原代码仅存储单次mid_change，window/lag_ms配置未使用。
+            // 原代码仅存储单次mid_change，window 配置未使用。
             // 单次mid_change噪声大，容易被单笔大单或瞬时波动误导。
             // 现在用RingBuffer存储最近window次mid_change，计算加权平均：
             //   越新的数据权重越大(线性衰减)，越旧的数据权重越小。
@@ -191,7 +196,7 @@ private:
             double weight = std::abs(info.correlation);
             // Scale mid_change (ratio) by configurable factor
             // Old: × 100 (too weak for high-priced contracts like EC)
-            // New: × scale_factor (default 10000 = bps)
+            // New: × scale_factor (default 3000, 见 Config 注释的饱和分析)
             total_signal += info.mid_change * weight * _cfg.scale_factor;
             total_weight += weight;
         }

@@ -75,12 +75,12 @@ strategies:
 
         contracts:
           - code: SHFE.ag.ag2608
-            maxPosition: 50
-            maxDelta: 30
+            maxPosition: 50          # 风控硬顶: 仅 halt_quoting 闸门, |净头寸|>maxPosition 即全停
+            maxDelta: 30             # 策略库存软限: skew/qty衰减/义务/穿越的归一化基准 (delta 口径)
             targetPosition: 0
           - code: SHFE.ag.ag2612
-            maxPosition: 50
-            maxDelta: 30
+            maxPosition: 50          # 风控硬顶 (同上)
+            maxDelta: 30             # 策略库存软限 (同上)
             targetPosition: 0
 
         # ========================================================
