@@ -81,9 +81,9 @@ void AsyncArbitrageExecutor::stop()
 // Main Thread Interface
 //==============================================================================
 
-bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, double multiplier, uint64_t timestamp)
+bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, uint64_t timestamp)
 {
-    ArbTickData tick(code, price, multiplier, timestamp);
+    ArbTickData tick(code, price, timestamp);
 
     // 回测模式: 同步执行 (不开 arb 线程, 避免 data race)
     // 实盘模式: push 到队列由 arb 线程异步处理
@@ -308,7 +308,7 @@ void AsyncArbitrageExecutor::processTick(const ArbTickData& tick)
         return;
 
     // Update arbitrage manager with tick data
-    _arb_manager->onTick(tick.code, tick.price, tick.multiplier, tick.timestamp);
+    _arb_manager->onTick(tick.code, tick.price, tick.timestamp);
 }
 
 void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
@@ -332,13 +332,17 @@ void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
         } else {
             // B7 fix: 无论 OPEN 还是 CLOSE, 低 confidence 丢弃时都必须释放 in_flight,
             // 否则 STOP_LOSS/TIMEOUT 等 CLOSE 信号 confidence<0.5 时会卡 5s 超时.
-            _arb_manager->onArbSignalDropped(signal.pair_id);
+            _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // V8-A3: 按通道
         }
     }
 }
 
 void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
 {
+    // V8-A7 注记: 平仓方向判定共 3 处实现 (此处信号映射 /
+    // ArbExecutionBridge B3 仓位校验 / SpreadArbitrageManager::getArbCloseDirection
+    // intent 查询), 语义各异有意保留 — 合并需统一三处时点仓位快照口径,
+    // 属 arb 灰度开启后的结构项, 修改任一处理查另两处。
     // Determine buy/sell direction
     bool leg1_is_buy;
     if (signal.type == SpreadSignalType::OPEN_LONG_SPREAD || signal.type == SpreadSignalType::CLOSE_SHORT_SPREAD) {
@@ -354,7 +358,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         // A5: 零持仓时无法确定平仓方向, 降级 NONE 防止误开仓 (止损单错向=新开仓)
         if (st.spread_position == 0.0) {
             WTSLogger::warn("Arb[{}]: close/stop signal with zero spread_position, degraded to NONE", signal.pair_id);
-            _arb_manager->onArbSignalDropped(signal.pair_id);
+            _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // V8-A3: 按通道
             return;
         }
         leg1_is_buy = (st.spread_position < 0);
@@ -468,7 +472,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
             WTSLogger::warn("Arb signal REJECTED: price adjustment would cost {:.2f} ticks > threshold {:.2f}",
                             -spread_impact_ticks,
                             _min_profit_threshold.load(std::memory_order_relaxed));
-            _arb_manager->onArbSignalDropped(signal.pair_id); // 释放 B-3 in_flight
+            _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // 释放 B-3 in_flight (V8-A3: 按通道)
             return;
         }
 
@@ -519,7 +523,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
                         needed_slots,
                         available,
                         signal.pair_id);
-        _arb_manager->onArbSignalDropped(signal.pair_id); // 释放 B-3 in_flight
+        _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // 释放 B-3 in_flight (V8-A3: 按通道)
         return;                                           // 两腿都不提交，避免单腿风险
     }
 
@@ -527,7 +531,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     bool push1 = _order_queue->tryPush(order1);
     if (!push1) {
         WTSLogger::error("AsyncArb: leg1 push failed after pre-check! pair={}", signal.pair_id);
-        _arb_manager->onArbSignalDropped(signal.pair_id); // 释放 B-3 in_flight
+        _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // 释放 B-3 in_flight (V8-A3: 按通道)
         return;                                           // 第一腿失败，不提交第二腿
     }
 
@@ -552,12 +556,13 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
                                             leg1_qty,
                                             leg1_price,
                                             arbNowUs(_replay_now_us),
-                                            0.0})) {
+                                            0.0,
+                                            leg2_qty})) { // V8-A2: 对冲量=计划 leg2 量 (含 ratio)
             WTSLogger::error("AsyncArb CRITICAL: orphan queue FULL (64), "
                              "leg1 exposed! pair={}, leg1={}",
                              signal.pair_id,
                              signal.leg1_code);
-            _arb_manager->onArbSignalDropped(signal.pair_id);
+            _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // V8-A3: 按通道
         } else {
             WTSLogger::warn("AsyncArb: orphan leg recorded for auto-hedge, "
                             "pair={}, leg1={}",
@@ -608,6 +613,38 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
 
     // Process all deferred legs
     std::vector<OrphanLeg> still_deferred;
+    // V8-A2: 对冲失败有限重试 — 旧实现 fire-and-forget (拒绝/限流/无盘口价
+    // 仅日志, leg 一次性移出 deferred, 裸腿仅剩超时兜底)。现回调返回受理状态,
+    // 失败保留重试 (500ms 节流, 3 次上限后 error 放弃, 残余敞口交对账)。
+    constexpr uint32_t MAX_HEDGE_RETRY = 3;
+    constexpr uint64_t RETRY_INTERVAL_US = 500000; // 500ms
+    auto tryHedge = [&](OrphanLeg& leg, bool urgent) -> bool {
+        if (leg.last_attempt != 0 && now > leg.last_attempt && now - leg.last_attempt < RETRY_INTERVAL_US) {
+            still_deferred.push_back(std::move(leg)); // 节流中, 本轮不尝试
+            return false;
+        }
+        leg.last_attempt = now;
+        // 对冲量 = 计划 leg2 量 (含 ratio), 价格由回调方取 leg2 盘口快照
+        double hedge_qty = leg.hedge_qty > 0 ? leg.hedge_qty : leg.leg1_qty;
+        if (callback(leg.leg2_code, !leg.leg1_is_buy, hedge_qty, urgent))
+            return true;
+        leg.retry_count++;
+        if (leg.retry_count > MAX_HEDGE_RETRY) {
+            WTSLogger::error("OrphanLeg hedge GIVEUP: pair={}, leg2={}, retries exceeded ({}), "
+                             "residual exposure left to reconciliation",
+                             leg.pair_id,
+                             leg.leg2_code,
+                             leg.retry_count);
+            return true; // 丢弃 (有界放弃), 调用方视为已处理
+        }
+        WTSLogger::warn("OrphanLeg hedge RETRY {}/{}: pair={}, leg2={}",
+                        leg.retry_count,
+                        MAX_HEDGE_RETRY,
+                        leg.pair_id,
+                        leg.leg2_code);
+        still_deferred.push_back(std::move(leg));
+        return false;
+    };
     for (auto& leg : _orphan_legs_deferred) {
         int64_t age_ms = (now > leg.timestamp) ? static_cast<int64_t>((now - leg.timestamp) / 1000) : 0;
 
@@ -638,9 +675,6 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
 
         if (age_ms >= static_cast<int64_t>(effective_force)) {
             // Level 3: 超过force_ms → 强制市价对冲（最紧急）
-            bool hedge_is_buy = !leg.leg1_is_buy;
-            double hedge_price = leg.leg1_price; // fallback, callback会覆盖
-
             WTSLogger::error("OrphanLeg URGENT: pair={}, leg1={}{}@{}, "
                              "age={}ms > force={}ms (delta_ratio={:.2f}) → force market hedge on {}",
                              leg.pair_id,
@@ -653,13 +687,10 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
                              leg.delta_ratio,
                              leg.leg2_code);
 
-            callback(leg.leg2_code, hedge_is_buy, hedge_price, leg.leg1_qty, /*urgent=*/true);
-            ++processed;
+            if (tryHedge(leg, /*urgent=*/true))
+                ++processed;
         } else if (age_ms >= static_cast<int64_t>(effective_timeout)) {
             // Level 2: 超过timeout_ms → 对手价对冲（积极减仓）
-            bool hedge_is_buy = !leg.leg1_is_buy;
-            double hedge_price = leg.leg1_price; // fallback, callback会覆盖
-
             WTSLogger::warn("OrphanLeg HEDGE: pair={}, leg1={}{}@{}, "
                             "age={}ms > timeout={}ms (delta_ratio={:.2f}) → aggressive hedge on {}",
                             leg.pair_id,
@@ -672,8 +703,8 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
                             leg.delta_ratio,
                             leg.leg2_code);
 
-            callback(leg.leg2_code, hedge_is_buy, hedge_price, leg.leg1_qty, /*urgent=*/false);
-            ++processed;
+            if (tryHedge(leg, /*urgent=*/false))
+                ++processed;
         } else {
             // Level 1: 未超时 → 保留等待（给leg2重试机会）
             WTSLogger::debug("OrphanLeg DEFERRED: pair={}, leg1={}{}@{}, "

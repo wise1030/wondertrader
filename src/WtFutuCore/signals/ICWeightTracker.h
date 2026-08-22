@@ -330,6 +330,8 @@ public:
         double mom_ranging_factor;
         double ll_cross_term_factor;
         double ll_single_factor;
+        double book_deep_factor;
+        double book_thin_factor;
         double book_normal_factor;
 
         // Layer 3: confidence mapping
@@ -343,7 +345,9 @@ public:
             : base_ofi(0.25), base_trade(0.20), base_book(0.20), base_mom(0.15), base_ll(0.20), weight_floor(0.05),
               weight_cap(0.50), ic_window(2000), ic_horizon(5), ic_update_interval(50), ofi_thin_factor(0.5),
               ofi_deep_factor(1.5), trade_high_vol_factor(1.3), trade_low_vol_factor(0.7), mom_trending_factor(1.5),
-              mom_ranging_factor(0.5), ll_cross_term_factor(1.5), ll_single_factor(0.3), book_normal_factor(1.0),
+              mom_ranging_factor(0.5), ll_cross_term_factor(1.5), ll_single_factor(0.3),
+              // V8-A5: BOOK regime 因子去硬编码 (原 1.3/0.7 写死在 getRegimeFactor)
+              book_deep_factor(1.3), book_thin_factor(0.7), book_normal_factor(1.0),
               ic_confidence_weight(0.5), consistency_weight(0.5)
         {}
     };
@@ -379,10 +383,13 @@ public:
     /// \param regime Current market regime
     /// \param signal_values Current signal values [OFI, Trade, Book, Mom, LL]
     /// \param is_cross_term Whether this is a cross-term contract (affects LeadLag)
+    /// \param enabled V8-A5: 实际装配的信号掩码 — 禁用信号 w=0 且不进归一化
+    ///        分母 (旧实现固定 5 路归一, 禁用信号摊薄分母, cap-after-normalize
+    ///        语义与调试权重占比失真)
     /// \return Normalized weights indexed by WeightedSignalType, summing to 1.0
     ///         (array 替代 unordered_map: 消除每 tick 5 节点堆分配, perf#2/#6)
     std::array<double, static_cast<size_t>(WeightedSignalType::COUNT)>
-    computeWeights(const MarketRegime& regime, const double signal_values[5], bool is_cross_term)
+    computeWeights(const MarketRegime& regime, const double signal_values[5], bool is_cross_term, const bool enabled[5])
     {
         struct SignalEntry
         {
@@ -403,6 +410,8 @@ public:
         double weighted_direction = 0;
         double total_w = 0;
         for (int i = 0; i < 5; i++) {
+            if (!enabled[i])
+                continue;
             double s = entries[i].signal_val;
             if (std::abs(s) > 0.01) {
                 double sign = (s > 0) ? 1.0 : -1.0;
@@ -417,6 +426,8 @@ public:
         double raw_sum = 0;
 
         for (int i = 0; i < 5; i++) {
+            if (!enabled[i])
+                continue; // V8-A5: weights[] 零初始化, 禁用项保持 0 不进分母
             auto type = entries[i].type;
             double w_base = entries[i].base_weight;
 
@@ -479,6 +490,72 @@ public:
 
     const Config& getConfig() const { return _cfg; }
 
+    /// V8-S1/S2: 每 tick 统一入口 — IC 簿记 + regime 检测 + 动态权重。
+    /// IC/regime 是权重框架的内部簿记与 Layer2 输入, 此前长在外层
+    /// SignalAggregator (S7: Layer2 输入与权重框架层次耦合)。逐语句搬迁,
+    /// 同序同值, 零行为变化。
+    /// @return true = out_weights 已更新
+    bool processTick(const double slot_vals[5],
+                     const bool enabled[5],
+                     double mid,
+                     double vol_percentile,
+                     double avg_depth,
+                     bool is_cross_term,
+                     std::array<double, static_cast<size_t>(WeightedSignalType::COUNT)>& out_weights)
+    {
+        _tick_counter++;
+        // 记录信号值用于 IC 跟踪 (仅装配信号; 未就绪槽位值为 0, 与原语义一致)
+        for (uint8_t i = 0; i < 5; i++) {
+            if (enabled[i])
+                recordSignal(static_cast<WeightedSignalType>(i), slot_vals[i]);
+        }
+
+        // 记录 horizon-tick 前的信号对应的未来回报
+        // 口径: future_return = mid[t] - mid[t-horizon]
+        const uint32_t ic_horizon = _cfg.ic_horizon;
+        _mid_history_for_ic.push_back(mid);
+        if (_mid_history_for_ic.size() > static_cast<size_t>(ic_horizon) + 1)
+            _mid_history_for_ic.pop_front();
+        if (_tick_counter > ic_horizon && _mid_history_for_ic.size() > ic_horizon) {
+            double future_return = mid - _mid_history_for_ic.front();
+            recordReturn(future_return);
+        }
+
+        // 定期更新 IC
+        if (_tick_counter % _cfg.ic_update_interval == 0)
+            updateIC();
+
+        // Regime trend 检测: 短/长窗口 mid 滚动均值 (O(1))
+        _mid_ma_short.push_back(mid);
+        _ma_short_sum += mid;
+        if (_mid_ma_short.size() > MA_SHORT_WINDOW) {
+            _ma_short_sum -= _mid_ma_short.front();
+            _mid_ma_short.pop_front();
+        }
+        _mid_ma_long.push_back(mid);
+        _ma_long_sum += mid;
+        if (_mid_ma_long.size() > MA_LONG_WINDOW) {
+            _ma_long_sum -= _mid_ma_long.front();
+            _mid_ma_long.pop_front();
+        }
+        double short_ma = _ma_short_sum / _mid_ma_short.size();
+        double long_ma = _ma_long_sum / _mid_ma_long.size();
+        auto regime = MarketRegime::detect(vol_percentile, short_ma, long_ma, avg_depth);
+        out_weights = computeWeights(regime, slot_vals, is_cross_term, enabled);
+        return true;
+    }
+
+    /// V8-S1/S2: 清空 tick 簿记 (Aggregator reset 时调用)
+    void resetTickState()
+    {
+        _tick_counter = 0;
+        _mid_history_for_ic.clear();
+        _mid_ma_short.clear();
+        _mid_ma_long.clear();
+        _ma_short_sum = 0.0;
+        _ma_long_sum = 0.0;
+    }
+
     /// 热更新 Layer1 基础权重 — SignalAggregator::updateWeights 调用,
     /// 旧代码只改 SignalAggregatorConfig, 框架内 base 权重不同步 → 热更新无效.
     void updateBaseWeights(double ofi, double trade, double book, double mom, double ll)
@@ -501,6 +578,16 @@ private:
     Config _cfg;
     std::unordered_map<WeightedSignalType, RollingIC> _ic_trackers;
 
+    // V8-S1/S2: 每 tick 簿记状态 (自 SignalAggregator 迁入)
+    uint64_t _tick_counter = 0;
+    std::deque<double> _mid_history_for_ic;
+    std::deque<double> _mid_ma_short;
+    std::deque<double> _mid_ma_long;
+    double _ma_short_sum = 0.0;
+    double _ma_long_sum = 0.0;
+    static constexpr size_t MA_SHORT_WINDOW = 20;
+    static constexpr size_t MA_LONG_WINDOW = 60;
+
     double getRegimeFactor(WeightedSignalType type, const MarketRegime& regime, bool is_cross_term) const
     {
         switch (type) {
@@ -521,9 +608,9 @@ private:
         case WeightedSignalType::BOOK_IMBALANCE:
             // Book 在深流动性时更可靠(挂单真实), 薄流动性时易被撤单干扰
             if (regime.liquidity == MarketRegime::Liquidity::DEEP)
-                return 1.3;
+                return _cfg.book_deep_factor;
             if (regime.liquidity == MarketRegime::Liquidity::THIN)
-                return 0.7;
+                return _cfg.book_thin_factor;
             return _cfg.book_normal_factor;
 
         case WeightedSignalType::MOMENTUM:

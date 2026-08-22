@@ -471,6 +471,7 @@ void SpreadCalculatorManager::addSpreadPair(const SpreadPairConfig& pair_config)
     calc->setConfig(_config);
     calc->setSpreadType(pair_config.spread_type);
     calc->setLegRatios(pair_config.leg1_ratio, pair_config.leg2_ratio);
+    calc->setLegMultipliers(pair_config.leg1_multiplier, pair_config.leg2_multiplier); // V8-A1
 
     _calculators[pair_config.pair_id] = std::move(calc);
     _pair_configs[pair_config.pair_id] = pair_config;
@@ -504,7 +505,7 @@ void SpreadCalculatorManager::removeSpreadPair(const std::string& pair_id)
     _calculators.erase(it);
 }
 
-void SpreadCalculatorManager::onTick(const std::string& code, double price, double multiplier, uint64_t timestamp)
+void SpreadCalculatorManager::onTick(const std::string& code, double price, uint64_t timestamp)
 {
     auto it = _contract_to_pairs.find(code);
     if (it == _contract_to_pairs.end())

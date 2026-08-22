@@ -47,7 +47,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     // ============================================================
     // 主线程：快速推送 tick 数据到异步队列（~50ns，非阻塞）
     // ============================================================
-    _deps.async_arb->pushTick(stdCode, tick->price(), 1.0, tick->actiontime());
+    _deps.async_arb->pushTick(stdCode, tick->price(), tick->actiontime());
 
     // 从 Portfolio(SSOT) 回填套利 pair 仓位 — 使策略退出/止损分支与
     // 风控仓位检查读到真实仓位.
@@ -112,7 +112,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                     // B13 fix: drop 时同步释放 B-3 in_flight 闸门,
                     // 否则该 pair 冻结至 60s 超时 (1:N 聚合下多 pair 共享 leg 同价时触发)
                     if (_deps.arb_manager)
-                        _deps.arb_manager->onArbSignalDropped(order.pair_id);
+                        _deps.arb_manager->onArbSignalDropped(order.pair_id, order.is_close); // V8-A3: 按通道
                     return;
                 }
             }
@@ -151,7 +151,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 // V8-A10: skip 路径必须释放 B-3 in_flight (此前直接 return,
                 // 止损重试在 5s 内被 B4 防双发抑制, 真实敞口窗口)
                 if (!order.pair_id.empty() && _deps.arb_manager)
-                    _deps.arb_manager->onArbSignalDropped(order.pair_id);
+                    _deps.arb_manager->onArbSignalDropped(order.pair_id, order.is_close); // V8-A3: 按通道
                 return;
             }
             if (live_pos * predicted < 0) {
@@ -167,7 +167,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 WTSLogger::info("[ARB_CLOSE] {} skip: live_pos={:.1f} already consumed by MM", order.code, live_pos);
                 // V8-A10: 同上, skip 释放 in_flight
                 if (!order.pair_id.empty() && _deps.arb_manager)
-                    _deps.arb_manager->onArbSignalDropped(order.pair_id);
+                    _deps.arb_manager->onArbSignalDropped(order.pair_id, order.is_close); // V8-A3: 按通道
                 return;
             }
             if (order.order_flag == 1) // FAK → 对手价
@@ -286,9 +286,11 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     // 主线程：处理orphan leg自动对冲
     // ============================================================
     _deps.async_arb->processOrphanLegs(
-        [this, ctx](const std::string& code, bool is_buy, double price, double qty, bool urgent) {
+        // V8-A2: 返回受理状态供 executor 有限重试; 定价只取 leg2 盘口快照
+        // (旧 fallback 用 leg1 成交价下 leg2 单, 价格口径错误)
+        [this, ctx](const std::string& code, bool is_buy, double qty, bool urgent) -> bool {
             // 从Portfolio获取对手价（对冲方向用对手价确保成交）
-            double hedge_price = price; // fallback
+            double hedge_price = 0;
             if (_deps.portfolio) {
                 ContractState cs_buf;
                 const ContractState* cs = _deps.portfolio->getContractSnapshot(code, cs_buf) ? &cs_buf : nullptr;
@@ -317,8 +319,8 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
 
             // 价格保护: hedge_price必须>0
             if (hedge_price <= 0) {
-                WTSLogger::error("OrphanLeg hedge ABORTED: {} price=0, no market data yet", code);
-                return;
+                WTSLogger::warn("OrphanLeg hedge DEFER: {} no valid quote yet, will retry", code);
+                return false;
             }
 
             // 通过OrderRouter下单（Source::HEDGING）
@@ -347,6 +349,9 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 if (result.self_trade_blocked) {
                     WTSLogger::warn("OrphanLeg hedge self-trade blocked: {}", code);
                 }
+                // V8-A2: 拒绝/限流/自成交拦截/未受理 → false 触发 executor 重试
+                if (result.rejected || result.rate_limited || result.self_trade_blocked || result.localids.empty())
+                    return false;
             } else {
                 // Fallback: 直接调ctx API
                 if (is_buy) {
@@ -366,6 +371,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
             if (_deps.risk_monitor) {
                 _deps.risk_monitor->recordOrder();
             }
+            return true;
         },
         // 传入当前组合delta_ratio，用于动态调整对冲超时
         [this]() -> double {
@@ -478,7 +484,7 @@ void ArbExecutionBridge::onLegCancelled(wtp::IUftStraCtx* ctx, const std::string
         _deps.order_router->cancelByPair(ctx, pair_id); // A7
     markLegRejected(pair_id, 0);
     if (_deps.arb_manager)
-        _deps.arb_manager->onArbSignalDropped(pair_id);
+        _deps.arb_manager->onArbLegCancelled(pair_id); // V8-A3: 只释放在途通道
 }
 
 void ArbExecutionBridge::resetSession()

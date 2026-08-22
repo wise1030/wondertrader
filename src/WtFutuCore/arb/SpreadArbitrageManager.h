@@ -156,10 +156,9 @@ public:
     //==========================================================================
 
     /// Process incoming tick
-    void onTick(const std::string& code, double price, double multiplier, uint64_t timestamp);
-
-    /// Process incoming WTSTickData
-    void onWtTick(wtp::WTSTickData* tick);
+    /// V8-A1: 乘数死参数删除 — 乘数是合约静态属性, 由 pair 配置经
+    /// setLegMultipliers 装配进 calculator, 不应逐 tick 传递。
+    void onTick(const std::string& code, double price, uint64_t timestamp);
 
     //==========================================================================
     // Signal Generation
@@ -218,7 +217,12 @@ public:
     /// 信号在执行器侧被丢弃(未提交任何订单)时释放 in_flight。
     /// B-3 门在信号通过时即置 in_flight; 若执行器因 confidence 过滤/调价超限/
     /// 队列满而丢弃, 不回收则该 pair 卡死至超时(60s+), 期间完全禁发.
-    void onArbSignalDropped(const std::string& pair_id);
+    /// V8-A3: is_close 指定释放通道 (close 信号丢弃只清 close_in_flight,
+    /// 不再无差别清零双闸门)
+    void onArbSignalDropped(const std::string& pair_id, bool is_close);
+
+    /// V8-A3: 撤单事件专用 — 只释放实际在途 (>0.5) 的通道
+    void onArbLegCancelled(const std::string& pair_id);
 
     /// Configure in-flight timeout in milliseconds. Defaults to 60000 (60 seconds).
     /// Once elapsed, in_flight_qty is forcibly reset (defense against stuck orders
@@ -240,9 +244,6 @@ public:
 
     void setSignalCallback(SpreadSignalCallback callback) { _signal_callback = callback; }
     void setAlertCallback(RiskAlertCallback callback) { _alert_callback = callback; }
-
-    /// Set contract multiplier for a specific contract code
-    void setContractMultiplier(const std::string& code, double multiplier) { _contract_multipliers[code] = multiplier; }
 
     //==========================================================================
     // Management
@@ -319,12 +320,6 @@ private:
 
     SpreadSignalCallback _signal_callback;
     RiskAlertCallback _alert_callback;
-
-    //==========================================================================
-    // Contract Multipliers
-    //==========================================================================
-
-    wtp::wt_hashmap<std::string, double> _contract_multipliers; ///< Per-contract multiplier lookup
 
     //==========================================================================
     // Scheme B-3: Portfolio-Derived Arb State

@@ -66,6 +66,14 @@ public:
     void setSpreadType(SpreadType type) { _spread_type = type; }
     void setLegRatios(double leg1_ratio, double leg2_ratio);
 
+    /// V8-A1: 合约乘数接线 (WEIGHTED spread = r1*P1*m1 - r2*P2*m2)。
+    /// 此前无 setter, ctor 恒 1.0, 配置默认 300 从未生效。
+    void setLegMultipliers(double leg1_multiplier, double leg2_multiplier)
+    {
+        _leg1_multiplier = leg1_multiplier;
+        _leg2_multiplier = leg2_multiplier;
+    }
+
     //==========================================================================
     // Data Input
     //==========================================================================
@@ -248,7 +256,7 @@ public:
     //==========================================================================
 
     /// Update with tick for any contract
-    void onTick(const std::string& code, double price, double multiplier, uint64_t timestamp);
+    void onTick(const std::string& code, double price, uint64_t timestamp);
 
     //==========================================================================
     // State Access

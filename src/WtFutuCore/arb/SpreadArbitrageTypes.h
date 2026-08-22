@@ -132,7 +132,9 @@ struct SpreadPairConfig
     double widen_z_threshold; ///< Z-Score to widen spread
 
     SpreadPairConfig()
-        : spread_type(SpreadType::WEIGHTED), leg1_multiplier(300.0), leg2_multiplier(300.0), leg1_ratio(1.0),
+        // V8-A1: multiplier 默认 300 是烟雾弹 (全链从未接线, calculator 恒 1.0)。
+        // 默认 1.0 = 价格价差; 跨品种 pair 在 yaml 显式配 leg1Multiplier/leg2Multiplier。
+        : spread_type(SpreadType::WEIGHTED), leg1_multiplier(1.0), leg2_multiplier(1.0), leg1_ratio(1.0),
           leg2_ratio(1.0), entry_z_threshold(2.0), exit_z_threshold(0.5), stop_loss_z(4.0), trend_ma_fast(20),
           trend_ma_slow(60), min_trend_strength(0.001), stop_loss_pct(0.02), max_trend_bars(50), add_safety_ratio(0.75),
           max_spread_position(20.0), max_single_leg(30.0), lookback_window(200), convergence_timeout(3600),
@@ -377,6 +379,17 @@ enum class ArbIntent : uint8_t
 ///  - in_flight tracks unfilled arb orders to prevent double-firing
 struct PairArbState
 {
+    // V8-R4b/S-5: 两族 in_flight 状态表 (替代 FSM 的可见性收益)
+    //   通道        武装点                        扣减/清理点
+    //   open        applyB3Gate (过门即置)        onArbOrderFilled(扣减)
+    //                                             onArbSignalDropped(is_close=false)
+    //                                             onArbLegCancelled(在途才清)
+    //                                             generateSignal 内 60s 超时兜底
+    //   close       applyB3Gate (C0 放行时置)     onArbOrderFilled(优先扣)
+    //                                             onArbSignalDropped(is_close=true)
+    //                                             onArbLegCancelled(在途才清)
+    //                                             B4 close_in_flight_timeout(默认5s)
+    //   V8-A3 起释放按通道精确化, 撤单事件只清实际在途 (>0.5) 的通道。
     ArbIntent intent;
     uint64_t intent_set_tick;
 

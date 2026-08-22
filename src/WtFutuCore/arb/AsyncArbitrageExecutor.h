@@ -77,12 +77,11 @@ struct ArbTickData
 {
     FixedString24 code;  ///< A5: trivially copyable (was std::string)
     double price;
-    double multiplier;
     uint64_t timestamp;
 
-    ArbTickData() : price(0), multiplier(1), timestamp(0) {}
-    ArbTickData(const std::string& c, double p, double m, uint64_t t) : code(c), price(p), multiplier(m), timestamp(t)
-    {}
+    // V8-A1: multiplier 字段删除 (死参数 — bridge 恒传 1.0, 乘数由 pair 配置装配)
+    ArbTickData() : price(0), timestamp(0) {}
+    ArbTickData(const std::string& c, double p, uint64_t t) : code(c), price(p), timestamp(t) {}
 };
 static_assert(std::is_trivially_copyable_v<ArbTickData>, "ArbTickData must be trivially copyable for SPSC queue");
 
@@ -246,7 +245,7 @@ public:
     //==========================================================================
 
     /// Push tick data (called from main thread, non-blocking)
-    bool pushTick(const std::string& code, double price, double multiplier, uint64_t timestamp);
+    bool pushTick(const std::string& code, double price, uint64_t timestamp);
 
     /// Get pending orders (called from main thread)
     /// @param callback Function to call for each order
@@ -268,14 +267,39 @@ public:
     // Orphan Leg Auto-Hedge (Main Thread Interface)
     //==========================================================================
 
+    //==========================================================================
+    // Orphan leg tracking for auto-hedge (dual-queue for SPSC safety)
+    //==========================================================================
+    struct OrphanLeg
+    {
+        std::string pair_id;
+        uint32_t leg1_req_id;
+        std::string leg1_code;
+        std::string leg2_code;
+        bool leg1_is_buy;
+        double leg1_qty;
+        double leg1_price;
+        uint64_t timestamp; ///< V8-R4/A5: replay 时钟 µs (墙钟仅首帧前兜底)
+        // delta_ratio用于动态调整对冲超时
+        // = abs(current_delta / max_delta), 0表示无delta限制
+        double delta_ratio = 0.0;
+        // V8-A2: 对冲目标量 = 计划 leg2 量 (已含 leg ratio; 旧口径恒 leg1_qty,
+        // ratio!=1 时对冲错量); 0 = 未设置, 回落 leg1_qty
+        double hedge_qty = 0.0;
+        // V8-A2: 对冲失败重试簿记 (旧实现 fire-and-forget, 拒绝/限流仅日志)
+        uint32_t retry_count = 0;
+        uint64_t last_attempt = 0; ///< replay µs, 0=未尝试过
+    };
+
     /// Callback for orphan leg hedge orders
     /// @param code     Contract code to hedge (leg2_code)
     /// @param is_buy   Hedge direction (opposite of leg1)
-    /// @param price    Hedge price (aggressive: counter-price)
-    /// @param qty      Hedge quantity (same as leg1_qty)
+    /// @param qty      Hedge quantity (计划 leg2 量, 已含 ratio)
     /// @param urgent   True if timeout exceeded → force market order
-    using OrphanHedgeCallback =
-        std::function<void(const std::string& code, bool is_buy, double price, double qty, bool urgent)>;
+    /// @return V8-A2: true=对冲单已受理; false=拒绝/限流/无盘口价 → 调用方
+    ///         保留 leg 有限重试。定价权全部在回调方 (leg2 盘口快照),
+    ///         不再接受 executor 的 leg1 价兜底。
+    using OrphanHedgeCallback = std::function<bool(const std::string& code, bool is_buy, double qty, bool urgent)>;
 
     /// Process orphan legs and generate hedge orders (called from main thread)
     /// @param callback  Called for each orphan leg that needs hedging
@@ -287,6 +311,13 @@ public:
                              uint64_t timeout_ms = 5000,
                              uint64_t force_ms = 30000,
                              double current_delta_ratio = 0.0);
+
+    /// 登记孤儿腿 (arb 线程 → 主线程 SPSC 队列入口)。
+    /// executeSignal 腿 2 push 失败路径与测试共用。
+    bool enqueueOrphanLeg(const OrphanLeg& leg) { return _orphan_legs_from_arb.tryPush(leg); }
+
+    /// deferred 孤儿腿数量 (V8-A2 重试逻辑的测试/诊断钩子)
+    size_t orphanLegsDeferredCount() const { return _orphan_legs_deferred.size(); }
 
     //==========================================================================
     // Statistics
@@ -333,23 +364,6 @@ private:
     using OrderQueue = LockFreeQueue<ArbOrderRequest, 256>;
     std::unique_ptr<OrderQueue> _order_queue;
 
-    //==========================================================================
-    // Orphan leg tracking for auto-hedge (dual-queue for SPSC safety)
-    //==========================================================================
-    struct OrphanLeg
-    {
-        std::string pair_id;
-        uint32_t leg1_req_id;
-        std::string leg1_code;
-        std::string leg2_code;
-        bool leg1_is_buy;
-        double leg1_qty;
-        double leg1_price;
-        uint64_t timestamp; ///< V8-R4/A5: replay 时钟 µs (墙钟仅首帧前兜底)
-        // delta_ratio用于动态调整对冲超时
-        // = abs(current_delta / max_delta), 0表示无delta限制
-        double delta_ratio = 0.0;
-    };
 
     // Queue from arb thread → main thread (SPSC: arb pushes, main pops)
     LockFreeQueue<OrphanLeg, 64> _orphan_legs_from_arb;

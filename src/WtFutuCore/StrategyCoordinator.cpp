@@ -877,7 +877,6 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
     }
 
     const SignalContext& sig_ctx = aggregator->update(*book);
-    SignalContext& mutable_sig_ctx = aggregator->getContext();
 
     // 3. 更新市场状态暂停标志
     // 使用TradingState方法
@@ -959,16 +958,13 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
         }
 
         if (tox.is_toxic) {
-            mutable_sig_ctx.toxicity.toxicity_score = tox.toxic_score;
-            mutable_sig_ctx.toxicity.toxic_detected = true;
-            mutable_sig_ctx.toxicity.toxic_side = tox.toxic_side;
-            mutable_sig_ctx.toxicity.valid = true;
+            // V8-A6: 经显式入口写入 (单写者恢复), 不再反向裸写聚合器内部状态
+            aggregator->updateToxicity(tox.toxic_score, tox.toxic_side, true);
         } else {
             // toxic_detected每tick重算，不复位锁存
             // 与should_pause相同的锁存: 只设true不复位false
             // 导致toxic_detected一旦被设就永久锁死
-            mutable_sig_ctx.toxicity.toxic_detected = false;
-            mutable_sig_ctx.toxicity.valid = true;
+            aggregator->updateToxicity(tox.toxic_score, tox.toxic_side, false);
         }
     }
 }

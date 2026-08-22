@@ -93,8 +93,17 @@ public:
 
     void update(const SpreadState& state, uint64_t timestamp) override
     {
-        updatePrices(state.leg1_price, state.leg2_price, timestamp);
+        // V8-A4: 腿间配对去重 — calculator 已做 fresh-pairing (仅双腿都有新数据
+        // 才推进 last_update), 但本策略私有历史此前每次 update 都 push, 任一腿
+        // tick 会混入 (新腿价, 陈旧腿价) 样本, OLS beta 被陈旧价污染。
+        // 与 calculator 同标准: 无新配对样本时跳过。
+        if (state.last_update == 0 || state.last_update == _last_update)
+            return;
+        updatePrices(state.leg1_price, state.leg2_price, state.last_update);
     }
+
+    /// 私有价格历史样本数 (V8-A4 配对去重的测试/诊断钩子)
+    size_t priceSampleCount() const { return _price1_history.size(); }
 
     void configure(const SpreadPairConfig& cfg) override
     {

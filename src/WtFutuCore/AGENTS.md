@@ -650,6 +650,171 @@ A11 NaN 护栏×2 / momentum window / 分析器时钟过期 / TscClock 校准）
 （TradeFlow 双通道，L2 前置）、§5 其余性能项、README v7.x 架构描述同步
 （待 R4b 后一次性更新）
 
+## 已完成方案（2026-08-22③→23，V8-R4b 功能性修复+适度重构，已验证）
+
+**背景**：R1-R5 已提交（05dd475c）。用户裁决 R4b **不做过度拆分类/文件**，
+功能性修复可评估执行。原 R4b 两大结构重构据此重切分为三档。
+
+### A. 功能性修复（建议执行，均原位修改不新增文件）
+
+**A-1 arb 乘数死亡链**（报告 §4 遗留）
+- 证据链：loadConfig 不读 multiplier；bridge pushTick 硬编码 1.0
+  （ArbExecutionBridge.cpp:50）；SpreadCalculator 无 setLegMultipliers、
+  ctor 恒 1.0（SpreadCalculator.cpp:29）；SpreadPairConfig 默认 300 烟雾弹
+  （SpreadArbitrageTypes.h:135）；setContractMultiplier 零调用
+- 方案：①pair yaml 增 leg1Multiplier/leg2Multiplier（默认 1.0）loadConfig 读取；
+  ②SpreadCalculator 增 setLegMultipliers，addSpreadPair 接线；
+  ③SpreadPairConfig 默认 300→1.0；④删除每 tick multiplier 死参数链
+  （ArbTickData/pushTick/两级 onTick 签名）与 setContractMultiplier/
+  _contract_multipliers 死字段
+- 影响：不配乘数恒 1.0 行为不变；z-score 对常量缩放不变 → 同品种跨期
+  即使配上乘数也不改信号，仅修正 spread 绝对口径/跨品种 pair
+
+**A-2 A6 孤儿腿对冲 fire-and-forget**
+- 证据：bridge 回调 rejected/rate_limited/self_trade_blocked/price=0 仅日志
+  （ArbExecutionBridge.cpp:318-345），executor 一次性移出 deferred
+  （AsyncArbitrageExecutor.cpp:693 swap）；对冲量恒 leg1_qty（ratio≠1 错量）；
+  ctx fallback 用 leg1 价下 leg2 单
+- 方案：①hedge_qty 按 ratio 修正（leg1_qty×leg1_ratio/leg2_ratio，OrphanLeg
+  增 ratio 字段）；②回调返回受理状态，拒绝/限流/无价时 leg 保留 deferred
+  并记 retry_count，超上限（3 次）升级 error + 放弃（防死循环）；
+  ③对冲定价统一由 bridge 回调取 leg2 盘口（executor 不再传 leg1_price 兜底）
+- 风险：arb 路径回测无覆盖（arb_close 出厂 disabled），靠单测+实盘灰度
+
+**A-3 A7 残余：双 in_flight 无差别清零**
+- 证据：onArbSignalDropped 同时清 open+close 双 in_flight
+  （SpreadArbitrageManager.cpp:983-995）；onLegCancelled 调它
+  （ArbExecutionBridge.cpp:469-483）→ close 在途时 open 侧事件误清 close 闸门，
+  部分成交+撤单场景提前放行
+- 方案：释放语义按通道拆分 — onArbSignalDropped 只清 open in_flight；
+  新增 onArbCloseDropped 清 close in_flight；onLegCancelled 按 pair 当前
+  实际在途通道精确释放（各自检查 >0.5 才清）
+- 报告 A7 的"平仓方向 3 处重复实现"属结构性，只做注释交叉引用不合并
+  （合并需动 executor/bridge/manager 三处语义，收益低于风险）
+
+**A-4 A4 残余：PairsTrading 私有历史配对双标准**
+- 证据：calculator 已 fresh-pairing（SpreadCalculator.cpp:44-79），但
+  PairsTradingStrategy::updatePrices 每次 manager update 都 push
+  （state.leg1_price, state.leg2_price），任一腿 tick 进样本 → OLS beta 被
+  陈旧价污染
+- 方案：update() 按 state.last_update（calculator spread 样本时间戳）去重，
+  未更新跳过 push（需确认 getState 透传 _last_update，不透则补字段）
+
+**A-5 S8：归一化含未启用信号 + BOOK regime 硬编码**
+- 证据：computeWeights 固定 5 entries（ICWeightTracker.h:394-462），禁用信号
+  base weight 仍进 raw_sum → cap-after-normalize/调试占比失真；BOOK DEEP/THIN
+  1.3/0.7 硬编码（:524-527）
+- 方案：computeWeights 增 enabled_mask[5]（SignalAggregator 按 _sources 实际
+  装配传入），禁用项 w=0 不进 raw_sum；BOOK 两因子进 Config
+  （book_deep_factor=1.3/book_thin_factor=0.7 默认现值 → 行为零变化）
+- 影响：当前配置 5 信号全启用 → 归一化结果不变，仅语义修正
+
+**A-6 S4：SignalContext 双写者**
+- 证据：StrategyCoordinator.cpp:879 非 const getContext() 直写 toxicity.*
+  （:954-963）；非 const 重载全仓仅此一处消费
+- 方案：SignalAggregator 增 updateToxicity(score, side, valid) 显式入口，
+  coordinator 改调用，删除非 const getContext() 重载（纯搬运零行为变化）
+
+### B. 结构改进（v2：按业务归属的适度重构，用户裁决"不完全放弃、避免过度拆分"）
+
+实测现状：Manager 1324 行（R3 清扫后），分节已清晰（装配 :49-338 /
+信号生成 :339-561 / B-3 门 :707-982 / in_flight 回调 :983-1118 /
+B1 intent :1119-1190 / B5 过冲 :1191-1286 / B6 聚合 :1287-1324）；
+computeAlpha 175 行 = 槽位提取 + IC 记录(:531-553) + regime MA 检测(:559-577)
++ 权重计算 + 聚合/fallback/confidence 五段。
+
+**S-1 regime 检测归还 ICWeightTracker**（S7 核心，真层次修复）：
+_mid_ma_short/long + MA 和 + MarketRegime::detect 调用移入 ICWeightTracker
+（新接口 detectRegime(vol_percentile, mid, avg_depth)，内部维护 MA 状态）。
+Layer2 输入与权重框架同层 — 这是业务归属修正而非机械拆分。同序同值，
+零行为变化。
+
+**S-2 IC 记录段随 S-1 同车迁移**：recordSignal/recordReturn/updateIC +
+_mid_history_for_ic/_tick_counter 收拢为 ICWeightTracker::recordTick
+(slot_vals, mid) 单一入口（同为权重框架内部簿记）。
+
+**S-3 computeAlpha 线性化**：S-1/S-2 移出后剩 ~100 行已线性
+（提取→权重→聚合→fallback→confidence），三协作者拆分不再需要。
+
+**S-4 Manager 文件级二分**（同 class 两翻译单元，零 API 变化）：
+loadConfig/initializeStrategy/addSpreadPair/removeSpreadPair（~300 行纯装配，
+非热路径）→ SpreadArbitrageManagerInit.cpp；运行时文件 ~1000 行，
+保留 B-1/B-3/B-5/B-6 分节。收益：装配与运行时分视口，风险：零（纯搬运）。
+
+**S-5 in_flight 状态表注释**：Manager.h 两族 in_flight 字段处补全
+写入/清理点全列表（替代 FSM 的可见性收益，无代码风险）。
+
+**放弃项及理由**：LegExecutionFSM/ArbGatekeeper/ArbCalcEngine 类拆分 —
+执行状态散布 executor/bridge/manager 是真实复杂度，但 arb 无回测覆盖，
+搬移无法验证等价性；A-2/A-3 原位修复后残余风险可接受，待 arb_close
+灰度开启有覆盖后再评估。ConfidenceCalculator 类不做（S-1/S-2 后
+confidence 段仅 ~15 行）。
+
+### C. 明确不做（v2 裁决）
+
+- ArbCalcEngine/ArbGatekeeper/LegExecutionFSM 三组件拆分（见 B 放弃项理由）
+- ICRecorder/ConfidenceCalculator 独立类（S-1/S-2 收拢后无残量）
+- SyntheticSignalFusion 三思想吸收（per-source confidence 已有 ICWeightTracker
+  等价物；其余随子系统已删）
+
+### 测试与验证
+
+- TestUnits 新增：A-1 乘数接线（computeSpread 含乘数）、A-2 拒单重试保留、
+  A-3 双通道精确释放、A-4 配对去重样本数一致、A-5 禁用信号归一和=1
+- S-1/S-2 迁移等价性：regime 序列/IC 更新节拍逐值比对（同输入同输出）
+- 全量回归 + _ec_5d A/B 预期零行为变化（乘数恒 1/5 信号全启用/arb 回测
+  disabled/A-6 纯搬运/S-1/S-2 同序同值/S-4 纯搬运），出现差异即归因
+- A-2/A-3 实盘行为变化点：孤儿腿对冲会重试、in_flight 释放更精确 — 部署
+  后观察窗口重点项
+
+### R4b 实施记录（2026-08-23，已完成，回测零回归验证通过）
+
+修改清单（全部完成）：
+1. **A-1**：pair yaml 增 leg1Multiplier/leg2Multiplier（默认 1.0）；
+   SpreadCalculator 增 setLegMultipliers 并在 addSpreadPair 接线；
+   SpreadPairConfig 默认 300→1.0；删除每 tick multiplier 死参数链
+   （ArbTickData/pushTick/两级 onTick 签名）+ onWtTick 死接口 +
+   setContractMultiplier/_contract_multipliers 死字段
+2. **A-2**：OrphanLeg 增 hedge_qty（计划 leg2 量，含 ratio）/retry_count/
+   last_attempt；OrphanHedgeCallback 改返回受理状态、删 price 参数
+   （定价全部归 bridge 的 leg2 盘口快照，executor 不再传 leg1 价兜底）；
+   失败保留重试（500ms 节流、3 次上限后 error 放弃）；bridge 回调对
+   rejected/rate_limited/self_trade_blocked/无盘口价返回 false；
+   enqueueOrphanLeg/orphanLegsDeferredCount 测试接缝
+3. **A-3**：onArbSignalDropped 增 is_close 按通道释放；新增 onArbLegCancelled
+   只清实际在途（>0.5）通道；executor 6 处调用点传 is_close_signal(type)，
+   bridge 3 处传 order.is_close，onLegCancelled 改新接口。
+   **A-3b 误报记录**：曾疑 in_flight 超时比较 µs 对 ms 常量（1000×），
+   复核 applyB3Gate 入口有 current_time_us/1000 换算，ms 域一致，无 bug，
+   已回退改动 — 教训：改超时逻辑前先确认时间域换算点
+4. **A-4**：PairsTradingStrategy::update 按 state.last_update 去重
+   （calculator fresh-pairing 同标准）；priceSampleCount 测试钩子
+5. **A-5**：computeWeights 增 enabled[5] 掩码（禁用信号 w=0 不进分母，
+   consistency 同步排除）；BOOK regime 因子进 Config（book_deep_factor=1.3/
+   book_thin_factor=0.7 默认现值）；Aggregator 装配末尾构建 _wtype_enabled
+6. **A-6**：SignalAggregator 增 updateToxicity 显式入口，删除非 const
+   getContext() 重载；coordinator 两分支改调用（else 分支现同步刷新
+   score/side，消费方仅读 toxic_detected，行为中性）
+7. **S-1/S-2**：AdaptiveWeightFramework 新增 processTick（IC 簿记+regime
+   MA 检测+computeWeights 单入口）与 resetTickState；SignalAggregator 删除
+   _tick_counter/_mid_history_for_ic/_mid_ma_* 成员，computeAlpha 175→~110 行
+8. **S-3**：computeAlpha 经 S-1/S-2 收拢后已线性，无需进一步拆分
+9. **S-4**：SpreadArbitrageManagerInit.cpp（同 class 第二翻译单元）=
+   loadConfig/initializeStrategy/addSpreadPair/removeSpreadPair ~270 行纯装配；
+   主文件 1089 行运行时
+10. **S-5**：PairArbState 两族 in_flight 写入/清理点状态表注释；
+    executor executeSignal 平仓方向 3 处实现交叉引用注释（A-7 残余收尾）
+
+测试：test_v8_r4b.cpp 8 用例（乘数接线×2/对冲重试×2/通道精确释放/
+配对去重/禁用归一/processTick 复位）全过；全量 105/107（2 既有环境失败）。
+
+**回测 A/B（_ec_5d vs R5 基线）**：17,771 笔（-0.1% 噪声内）、TOXIC 2,770
+（完全一致）、dynbalance 306,882（逐比特一致）、0 error/HALT/zombie —
+预期零行为变化达成。
+
+**部署状态**：dist/WtBtFutu 已部署（Debug 回测版）。A-2/A-3 改变 arb 实盘
+边缘行为（对冲重试/闸门精确释放），arb_close 灰度开启时需重点观察。
+
 ## 已知外部限制（框架层，禁止越界修复）
 
 - **WtBtCore/HftMocker.cpp 回测不可复现**：`splitVolume()` 用 `srand(time(NULL))`
@@ -691,3 +856,127 @@ A11 NaN 护栏×2 / momentum window / 分析器时钟过期 / TscClock 校准）
   上游修复后可还原。重建流程：`dist/WtRunnerFutu/rebuild_release.sh`。
 - **`dist/WtRunnerFutu/libWtMsgQue.so`**：EventNotifier 按 CWD 优先查找 MQ 模块，
   需将该库置于 runner 工作目录（从 dist/bin 拷贝）。
+
+## 当前方案（2026-08-23，去大锁（_cb_mtx）低延迟等价设计，V9 诊断产出，待用户确认后执行）
+
+### 背景
+
+- `_cb_mtx`（UftFutuMmStrategy.h recursive_mutex）串行化全部 13 个回调入口。
+  其真实代价不是平均开销（回测单线程恒无竞争 ~20ns），而是**尾延迟**：
+  实盘 on_trade 到达时若 MdSpi 正在 processTick（refreshQuotes 锁内发 CTP 单
+  可达 µs~ms 级），TdSpi 整笔成交处理被阻塞到 tick 结束，劣化 p99/p999 的
+  quote→fill 与 fill→requote 时延。
+- 目标：**消除跨线程阻塞、快路径零新增开销、回测行为逐比特不变**。
+- 教训引用：V8-R4/P0-3 删除 FUTU_CALLBACK_LOCK=0 细粒度开关——失败根因是
+  没有跨线程写点清单就动手（≥6 处假无锁）。本方案第一交付物即写点清单。
+
+### 设计原则（属主化 + 快照 + 投递，而非撒胡椒面加锁）
+
+1. **每个可变对象唯一属主线程**：非属主要么不碰、要么经快照读
+   （atomic/seqlock/generation 门控拷贝）、要么投递命令给属主线程。
+2. **快路径零新增成本**：热路径不新增锁竞争点与 atomic RMW；读侧只允许纯 load
+   （acq/rel 在 x86 免费），写侧只在低频路径。
+3. **慢操作不阻塞快线程**：罕见重操作封装为命令，在属主线程检查点执行。
+
+盘点结论：90% 跨线程保护已由各模块自带小锁承担（quoter/tracker 自旋锁、
+bridge/orchestrator _lock、arb manager 三域 atomic_flag、GLFT seqlock、
+MidSlot 原子、CachedQuote 小锁、TradingState CAS），_cb_mtx 是冗余兜底层；
+真正裸奔的只有 RiskMonitor 停机域（本表 P1-1/P1-2）与少数复合不变量。
+
+### 跨线程写点清单（现状盘点）
+
+| 共享状态 | 写者/线程 | 现有保护 | 缺口 |
+|---|---|---|---|
+| FutuQuoter 槽位 | Md: refresh/cancelAll；Td: onOrder/onTrade/onEntrustAck | 自带全方法 RecursiveSpinLock | 无 |
+| UnifiedOrderTracker | Md: checkAutoCancel；Td: track/untrack/recordFill | 自带锁 + generation 号 | 无 |
+| SpreadOptimizer 参数 | tick 线程 drain 写 / Md 读 | F20 seqlock | 无 |
+| ArbExecutionBridge / CloseoutOrchestrator | Md: onTick；Td: fill/order 事件 | 各自 _lock | 无 |
+| RiskMonitor 频控环/zombie 闩锁/告警节流 | Md+Td 双写 | _rate_lock 等 atomic_flag | 无 |
+| **RiskMonitor 停机域**（_halt_category/_halt_timestamp/_halt_pnl_snapshot/_recovery_count/_was_loss_triggered/_closeout_state） | Md(checkRisk)、Td(onEntrust/onChannelLost)、arb 线程(handleRiskAlert EMERGENCY) | **裸奔** | **P1-1/P1-2** |
+| FutuPortfolio | Md: markToMarket/读快照；Td: onTradeFill/setShadow/resync | 部分内部递归锁 | 快照一致性未证明 |
+| Coordinator CachedQuote / _last_mid | Md 写 / Td 读 | RecursiveSpinLock / MidSlot 原子 | 无 |
+| 杂项 map（_halt_quoting_state=Md 专属 / _last_requote_ms=Td 专属 / _last_bilateral_log_ms=Md 专属） | 各自单线程 | 无需 | 保持归属即可 |
+
+### 修改清单（六个工作流，按依赖顺序）
+
+1. **WS-A 前置修复：停机域原子化（即 V9 报告 P1-1/P1-2）**
+   - `FutuRiskMonitor.h/cpp`：`_halt_category` 改 `std::atomic<RiskCategory>`；
+     `_halt_timestamp/_halt_pnl_snapshot/_recovery_count/_was_loss_triggered/
+     _closeout_state(retry_count 等)` 收进一个 `atomic_flag` 临界区
+     （复用 `_rate_lock` 成熟模式）；`getHaltCategory/checkAndRecover/canRecover`
+     读侧经同一临界区或原子 load。
+   - 硬前置理由：否则拆大锁后该域从"大锁兜底"变"真竞态"。
+
+2. **WS-B Portfolio 单写者改造（核心项）**
+   - 目标契约：持仓/成本记账的**写者只有 TdSpi**（onTradeFill/setShadow/resync），
+     MdSpi 只读一致性快照。
+   - TdSpi 写后对 per-contract 版本号做 relaxed store；MdSpi 的
+     `getContractSnapshot` 加版本校验构成轻量 seqlock（写中读到则重试一次，
+     稳态零重试）。模板 = `SpreadOptimizer::snapshotParams` 的 F20 实现。
+   - markToMarket（Md 写价格）与记账字段（Td 写数量/成本）拆为两个
+     cache-line 对齐子结构，消除伪共享。
+   - 附带收益：Md 流水线不再可能读到半笔记账的中间态持仓。
+
+3. **WS-C TradingState 单写者收敛（启用既有 C10 EventDispatcher 计划）**
+   - 低频处置类转移（closeout 进入、zombie halt、MARKET/TOXICITY 进入等）
+     改为事件投递 → SPSC ring → tick 线程唯一 TradingStateWriter 执行 CAS 转移。
+   - 恢复类语义敏感转移（resumeFromRisk/unblock 系列）保留原线程内 CAS 直写白名单。
+   - 完成 EventDispatcher.h 注释中"15 写点/6 类 → 1 集中写者"的既定收敛。
+
+4. **WS-D 成交路径保持同步（不迁移！）**
+   - B+ 事件驱动补挂 requoteAfterFill 是延迟敏感特性，留在 TdSpi 同步执行；
+     它已全部依赖小锁（quoter/CachedQuote/tracker/RiskMonitor 只读检查），
+     去大锁后天然无阻塞。仅审计其触达的 coordinator 单线程 map 归属不被破坏。
+
+5. **WS-E 罕见重操作命令化**
+   - on_channel_ready/on_channel_lost/on_session_begin/on_session_end/
+     zombie 升级兜底 cancelAll 这类跨模块序列不再要求与大锁互斥：
+     封装为 PendingCommand，入队（atomic flag + 小 ring）；
+   - 在 processTick 顶部与 processTradeFill 入口各加检查点
+     `drainPendingCommands()`：一次原子 load + 分支，无命令时 ~1ns；
+   - 通道恢复序列从"TdSpi 内联长事务"变为"下一 tick 边界执行"，
+     MdSpi/TdSpi 不再互相等待；会话切换（RtTicker 线程）同理收编。
+   - 语义注意：channel_ready 后的首 tick 前 drain 保证同步先于报价恢复，
+     时序与现状等价（现状也是恢复完成后才 resume）。
+
+6. **WS-F 渐进开关与移除**
+   - 新编译开关三态 `FUTU_CB_LOCK=big|none`（默认 big 保底，与历史基线一致；
+     本次 unlike P0-3 之处：**先有写点清单+每步 TSAN**，才允许切 none）；
+   - 全部 WS-A~E 合入并验证通过后，删 big 分支与 _cb_mtx 成员（一次性提交）。
+
+### 热路径成本预算（证明"不影响低延迟"）
+
+| 位置 | 新增成本 | 说明 |
+|---|---|---|
+| on_tick 入口命令检查点 | 1 次 atomic load（~1ns） | 无命令零分支预测损失 |
+| on_trade 入口命令检查点 | 同上 | |
+| Portfolio 快照读（seqlock 版本校验） | 2 次 acquire load，稳态零重试 | 替代现有内部递归锁，净减负 |
+| TradingState 事件投递 | 仅低频处置路径，SPSC push ~10ns | 快路径状态查询仍是纯 atomic load |
+| 停机域读 | atomic load / flag 临界区（低频） | checkAndRecover 每 tick 一次可接受 |
+
+净效果：tick-to-quote 主链路**零新增锁、零新增 RMW**；
+TdSpi fill 路径不再等待 MdSpi（消除最大尾延迟源）。
+
+### 明确不做（反模式）
+
+1. 不把 13 个回调 MPMC 队列化——破坏 tick-to-quote 同步语义与回测可复现性，
+   且引入 µs 级排队延迟，属负优化。
+2. 不做逐变量散锁（P0-3 失败路径重演）——只按属主域收编。
+3. 不引入 lock-free hash map 全家桶——现有 wt_hashmap 单属主化即可。
+4. 不在本轮动 arb 线程内部结构（R4b 另行处理）。
+
+### 实施顺序与验证
+
+1. WS-A 单独合入：TestUnits 双线程 hammer 用例（4 线程并发 halt/recover/closeout
+   转移 ×10^6 次，断言无 torn state）；_ec_5d 回测零回归。
+2. WS-B 合入：seqlock 单测 + 回测 A/B（预期逐比特一致——回测单线程零竞争）。
+3. WS-C/E 合入：TSAN 构建跑 TestUnits 全量 + 回测；事件时序用例
+   （channel_lost→cancelAll→ready→resume 序列断言）。
+4. WS-F 切 none：回测逐比特 A/B（必须与 big 完全一致）→ 生产灰度：
+   先观察一个交易日 p99/p999 quote-to-fill/fill-to-requote 分布对比再固化删除。
+5. 每一步均遵守本文件 §1 流程：方案先行、用户确认后动手。
+
+### 回退策略
+
+WS-F 之前任意步骤发现行为差异：编译开关切回 big 即回到当前基线；
+WS-F 删除 _cb_mtx 的提交单独成 commit，revert 即完全回退。

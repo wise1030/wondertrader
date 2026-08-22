@@ -256,7 +256,17 @@ public:
     }
 
     const SignalContext& getContext() const { return _ctx; }
-    SignalContext& getContext() { return _ctx; }
+
+    /// V8-A6: 毒性结果显式写入口 (SignalContext 单写者恢复)。
+    /// 此前 StrategyCoordinator 经非 const getContext() 反向裸写
+    /// _ctx.toxicity.* — 聚合器内部状态被外部修改, 单一真相源名存实亡。
+    void updateToxicity(double score, int toxic_side, bool detected)
+    {
+        _ctx.toxicity.toxicity_score = score;
+        _ctx.toxicity.toxic_side = toxic_side;
+        _ctx.toxicity.toxic_detected = detected;
+        _ctx.toxicity.valid = true;
+    }
 
     //==========================================================================
     // Lead-Lag Cross-Contract Data Feed
@@ -293,12 +303,8 @@ public:
         for (auto& pair : _sources)
             pair.second->reset();
         _prev_alpha = 0.0;
-        _tick_counter = 0;
-        _mid_history_for_ic.clear();
-        _mid_ma_short.clear();
-        _mid_ma_long.clear();
-        _ma_short_sum = 0.0;
-        _ma_long_sum = 0.0;
+        if (_weight_framework)
+            _weight_framework->resetTickState(); // V8-S1/S2: 簿记已迁入权重框架
         _dynamic_weights.fill(0.0);
         _weights_valid = false;
         _scale_trackers_initialized = false;
@@ -427,6 +433,11 @@ private:
         _ll_source = (ll_it != _sources.end() && ll_it->second)
             ? dynamic_cast<LeadLagSignalSource*>(ll_it->second.get())
             : nullptr;
+
+        // V8-A5: 信号装配掩码 (供权重归一化排除未启用信号)
+        _wtype_enabled.fill(false);
+        for (const auto& slot : _signal_slots)
+            _wtype_enabled[static_cast<size_t>(slot.wtype)] = true;
     }
 
     /// 注册一个加权信号槽位 — 新增信号源只需在 initializeSignalSources 中
@@ -527,55 +538,18 @@ private:
             slot_ok[idx] = ok;
         }
 
-        // 记录信号值用于 IC 跟踪
-        _tick_counter++;
+        // IC 簿记 + regime 检测 + 动态权重 (V8-S1/S2: 收拢进权重框架,
+        // 消除 Layer2 输入与权重框架的层次耦合; 逐语句搬迁同序同值)
         if (_weight_framework) {
-            for (auto& slot : _signal_slots) {
-                _weight_framework->recordSignal(slot.wtype, slot_vals[static_cast<size_t>(slot.wtype)]);
-            }
-
-            // 记录 horizon-tick 前的信号对应的未来回报
-            // 口径: future_return = mid[t] - mid[t-horizon]
-            // 旧代码用 1-tick 收益(mid[t]-mid[t-1])冒充 horizon 收益, IC 度量失真.
-            const uint32_t ic_horizon = _weight_framework->getConfig().ic_horizon;
-            _mid_history_for_ic.push_back(_ctx.mid_price);
-            if (_mid_history_for_ic.size() > static_cast<size_t>(ic_horizon) + 1)
-                _mid_history_for_ic.pop_front();
-            if (_tick_counter > ic_horizon && _mid_history_for_ic.size() > ic_horizon) {
-                double future_return = _ctx.mid_price - _mid_history_for_ic.front();
-                _weight_framework->recordReturn(future_return);
-            }
-
-            // 定期更新 IC
-            if (_tick_counter % _weight_framework->getConfig().ic_update_interval == 0) {
-                _weight_framework->updateIC();
-            }
-
-            // 计算动态权重
-            double signal_array[5] = {slot_vals[0], slot_vals[1], slot_vals[2], slot_vals[3], slot_vals[4]};
             // EC 跨期品种 → LeadLag regime factor 升权
             bool is_cross_term = (_sources.find(SignalType::LEAD_LAG) != _sources.end());
-            // Regime trend 检测: 维护短/长窗口 mid 滚动均值 (O(1))
-            // 旧代码 short_ma==long_ma=mid → ratio=0 → trend 恒 RANGING,
-            // 动量权重被 mom_ranging_factor(0.5) 永久减半.
-            _mid_ma_short.push_back(_ctx.mid_price);
-            _ma_short_sum += _ctx.mid_price;
-            if (_mid_ma_short.size() > MA_SHORT_WINDOW) {
-                _ma_short_sum -= _mid_ma_short.front();
-                _mid_ma_short.pop_front();
-            }
-            _mid_ma_long.push_back(_ctx.mid_price);
-            _ma_long_sum += _ctx.mid_price;
-            if (_mid_ma_long.size() > MA_LONG_WINDOW) {
-                _ma_long_sum -= _mid_ma_long.front();
-                _mid_ma_long.pop_front();
-            }
-            double short_ma = _ma_short_sum / _mid_ma_short.size();
-            double long_ma = _ma_long_sum / _mid_ma_long.size();
-            auto regime = MarketRegime::detect(
-                _ctx.volatility.vol_percentile, short_ma, long_ma, (_ctx.bid_depth + _ctx.ask_depth) / 2.0);
-            _dynamic_weights = _weight_framework->computeWeights(regime, signal_array, is_cross_term);
-            _weights_valid = true;
+            _weights_valid = _weight_framework->processTick(slot_vals,
+                                                            _wtype_enabled.data(),
+                                                            _ctx.mid_price,
+                                                            _ctx.volatility.vol_percentile,
+                                                            (_ctx.bid_depth + _ctx.ask_depth) / 2.0,
+                                                            is_cross_term,
+                                                            _dynamic_weights);
         }
 
         //==================================================================
@@ -705,6 +679,9 @@ private:
     };
     std::vector<SignalSlot> _signal_slots;
 
+    // V8-A5: 按 WeightedSignalType 索引的装配掩码 (initializeSignalSources 末尾构建)
+    std::array<bool, 5> _wtype_enabled{};
+
     // Pre-allocated vectors for zero-allocation hotpath
     std::vector<double> _valid_signals;
     std::vector<double> _valid_weights;
@@ -722,16 +699,8 @@ private:
     // perf#2/#6: array 替代 unordered_map, 消除每 tick 堆分配 + getDynamicWeight 的 hash find
     std::array<double, static_cast<size_t>(WeightedSignalType::COUNT)> _dynamic_weights{};
     bool _weights_valid = false;
-    uint64_t _tick_counter = 0;
-    // IC horizon 回报: mid[t-horizon] 历史 (长度 horizon+1)
-    std::deque<double> _mid_history_for_ic;
-    // Regime trend 检测: 短/长窗口 mid 均值 (O(1) 滚动和)
-    std::deque<double> _mid_ma_short;
-    std::deque<double> _mid_ma_long;
-    double _ma_short_sum = 0.0;
-    double _ma_long_sum = 0.0;
-    static constexpr size_t MA_SHORT_WINDOW = 20;
-    static constexpr size_t MA_LONG_WINDOW = 60;
+    // V8-S1/S2: IC/regime 簿记 (_tick_counter/_mid_history_for_ic/_mid_ma_*)
+    // 已迁入 AdaptiveWeightFramework (processTick/resetTickState)
 
     // Signal amplitude normalization (rolling p95 scale)
     // 确保 Mom/LL 等小幅信号不被 OFI/Trade 饱和信号淹没
