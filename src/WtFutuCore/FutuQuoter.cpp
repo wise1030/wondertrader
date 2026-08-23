@@ -15,10 +15,8 @@
 namespace futu
 {
 
-FutuQuoter::FutuQuoter() : _tracker(nullptr)
-{
-    RecursiveSpinGuard _g(_lock);
-}
+// V8-R6/P3: 构造函数内自我加锁无意义(对象尚未发布, 无并发可能), 已删除
+FutuQuoter::FutuQuoter() : _tracker(nullptr) {}
 
 void FutuQuoter::init(const QuoterConfig& cfg)
 {
@@ -825,21 +823,6 @@ bool FutuQuoter::isMyOrder(uint32_t localid) const
     return _order_id_to_level.find(localid) != _order_id_to_level.end();
 }
 
-QuoteLevel* FutuQuoter::getLevelByOrder(uint32_t localid)
-{
-    RecursiveSpinGuard _g(_lock);
-    auto it = _order_id_to_level.find(localid);
-    if (it != _order_id_to_level.end()) {
-        // Use is_bid to directly locate the correct level
-        uint8_t idx = it->second.level;
-        bool is_bid = it->second.is_bid;
-        if (is_bid && idx < _bid_levels.size())
-            return &_bid_levels[idx];
-        if (!is_bid && idx < _ask_levels.size())
-            return &_ask_levels[idx];
-    }
-    return nullptr;
-}
 
 ValidQuoteSnapshot FutuQuoter::getValidQuoteSnapshot() const
 {

@@ -61,7 +61,6 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
     auto& _contract_infos = s._contract_infos;
     auto& _trading_state = s._trading_state;
     auto& _violations_buf = s._violations_buf;
-    auto& _blocked_contracts = s._blocked_contracts;
     auto& _async_arb = s._async_arb;
     auto& _mon_bridge = s._mon_bridge;
 
@@ -370,7 +369,6 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
                     _trading_state.resumeFromRisk();
                     _trading_state.unblockLong();
                     _trading_state.unblockShort();
-                    _blocked_contracts.clear();
                     // A1: 同步重置协调器软风控倍数 — 本路径绕过 coordinator 的 checkRisk 自动恢复,
                     // 否则 _risk_spread_mult 残留, 恢复后报价宽度被永久放大.
                     if (_coordinator)
@@ -408,9 +406,7 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     auto& _contract_infos = s._contract_infos;
     auto& _portfolio = s._portfolio;
     auto& _risk_monitor = s._risk_monitor;
-    auto& _violations_buf = s._violations_buf;
     auto& _trading_state = s._trading_state;
-    auto& _blocked_contracts = s._blocked_contracts;
     auto& _coordinator = s._coordinator;
     auto& _liquidator = s._liquidator;
     auto& _order_router = s._order_router;
@@ -522,14 +518,16 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
                     "UftFutuMmStrategy[{}] No price yet, resuming quoting (risk will activate on first tick)", s.id());
             }
 
-            _risk_monitor->checkRiskLimits(_portfolio.get(), _violations_buf);
-            auto& violations = _violations_buf;
+            // V8-R6 收官: 通道恢复序列改用局部缓冲 —— 拆大锁后本序列可能由
+            // MdSpi 检查点 drain 执行, 与 TdSpi (processTradeFill/onEntrust)
+            // 共享 _violations_buf 即竞态。
+            std::vector<RiskViolation> violations;
+            _risk_monitor->checkRiskLimits(_portfolio.get(), violations);
             if (violations.empty()) {
                 // Use resumeFromRisk() instead of direct assignments
                 _trading_state.resumeFromRisk();
                 _trading_state.unblockLong();
                 _trading_state.unblockShort();
-                _blocked_contracts.clear();
                 _risk_monitor->resumeTrading();
                 _risk_monitor->resumeQuoting();
                 _risk_monitor->unblockLong();
@@ -610,7 +608,6 @@ void FutuRuntimeOps::onSessionBegin(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx,
     auto& _quoting_paused_since = s._quoting_paused_since;
     auto& _arb_bridge = s._arb_bridge;
     auto& _closeout_orch = s._closeout_orch;
-    auto& _blocked_contracts = s._blocked_contracts;
     auto& _async_arb = s._async_arb;
     auto& _config = s._config;
     auto& _stp = s._stp;
@@ -639,7 +636,6 @@ void FutuRuntimeOps::onSessionBegin(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx,
     _closeout_orch.resetSession();
 
     // 重置本地状态
-    _blocked_contracts.clear();
 
     // 启动异步套利执行器
     // useAsyncArbThread=true(实盘默认): 启动独立 arb 线程, pushTick 走 SPSC 队列 (~50ns)
@@ -777,7 +773,6 @@ void FutuRuntimeOps::onEntrust(
     auto& _portfolio = s._portfolio;
     auto& _async_arb = s._async_arb;
     auto& _arb_bridge = s._arb_bridge;
-    auto& _blocked_contracts = s._blocked_contracts;
     auto& _violations_buf = s._violations_buf;
     auto& _liquidator = s._liquidator;
     auto& _contract_infos = s._contract_infos;

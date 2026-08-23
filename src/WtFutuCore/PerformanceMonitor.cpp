@@ -167,18 +167,7 @@ LatencyStats PerformanceMonitor::getLatencyStats(LatencyType type) const
 
 ThroughputStats PerformanceMonitor::getThroughputStats() const
 {
-    ThroughputStats stats;
-    stats.ticks_processed = _throughput.ticks_processed;
-    stats.quotes_placed = _throughput.quotes_placed;
-    stats.orders_placed = _throughput.orders_placed;
-    stats.cancels_sent = _throughput.cancels_sent;
-    stats.fills_received = _throughput.fills_received;
-    stats.last_second_ticks = _throughput.last_second_ticks;
-    stats.last_second_quotes = _throughput.last_second_quotes;
-    stats.last_second_orders = _throughput.last_second_orders;
-    stats.last_second_cancels = _throughput.last_second_cancels;
-    stats.last_second_fills = _throughput.last_second_fills;
-    return stats;
+    return _throughput; // V8-R6: 原子字段经显式拷贝构造逐字段 load
 }
 
 void PerformanceMonitor::updatePerSecondCounters()

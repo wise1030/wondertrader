@@ -32,6 +32,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 NS_WTP_BEGIN
@@ -420,7 +421,46 @@ private:
     /// 套利执行桥 (套利下单编排/残腿对冲/快照同步, 架构重构 C4)
     ArbExecutionBridge _arb_bridge;
 
-    std::vector<RiskViolation> _violations_buf; // 风控违规复用缓冲 (仅 TdSpi 路径 RuntimeOps 使用;
+    //==========================================================================
+    // V8-R6/WS-E: 罕见重操作命令化 (channel/session 跨模块序列)
+    //   发布-单飞消费模型: 回调入口只 post + drain(自旋标志快速路径);
+    //   大锁默认模式下 post 后同回调内 claim 必然成功 => 行为与旧内联逐比特一致;
+    //   未来切 FUTU_CB_LOCK_BIG=0 时并发到达由 claim 串行化。
+    //   V8-R6 收官修订(属主域拆分):
+    //   - Channel 类命令属 Td 域 (触达的 _violations_buf 等均为 Td 专属/自锁状态):
+    //     发布者即 TdSpi 线程, 允许自 drain => 行情静默期无滞留;
+    //     Td 检查点 (on_trade/on_order/on_entrust) 兜底。
+    //   - Session 类命令属 Md 域 (onSessionBegin/End 触达 coordinator resetSession/
+    //     quote_chain 等 Md 属主无锁状态): 实盘发布者为 WtUftTicker 线程, 不得
+    //     自 drain, 仅由 on_tick (Md) 检查点消费 —— session 切换后必有 tick 流入,
+    //     无静默期滞留; 回测单线程下发布者即 Md 线程 (tid 相等) 自 drain,
+    //     与 big 模式逐比特一致。
+    struct PendingCommand
+    {
+        enum class Type : uint8_t
+        {
+            ChannelReady,
+            ChannelLost,
+            SessionBegin,
+            SessionEnd
+        };
+        Type type;
+        uint32_t uTDate;
+    };
+    void postCommand(PendingCommand::Type type, uint32_t uTDate);
+    /// session_domain=true 只消费 Session 类命令 (Md 检查点); false 只消费
+    /// Channel 类 (Td 检查点/发布者自 drain)。他域命令留队, 由属主检查点消费。
+    void drainPendingCommands(wtp::IUftStraCtx* ctx, bool session_domain);
+
+    std::mutex _cmd_mtx;
+    std::vector<PendingCommand> _pending_cmds;         // 仅 _cmd_mtx 内触碰
+    std::atomic<bool> _cmd_has_pending{false};          // 快速路径标志 (release/acquire)
+    std::atomic<uint8_t> _cmd_executing{0};             // 单飞 claim
+    std::atomic<std::thread::id> _md_tid{};             // 首个 on_tick 捕获 (回测=发布线程, 实盘=MdSpi)
+
+    std::vector<RiskViolation> _violations_buf; // 风控违规复用缓冲 (严格 TdSpi 专属: processTradeFill/onEntrust;
+                                                //   V8-R6 收官: onChannelReady 恢复序列已改局部缓冲 ——
+                                                //   拆大锁后该序列可能由 MdSpi 检查点 drain 执行。
                                                 //   coordinator 有独立成员供 MdSpi checkRisk, 双缓冲零共享)
 
     //==========================================================================
@@ -481,7 +521,9 @@ private:
     IUftStraCtx* _main_ctx = nullptr;
 
     // 风险控制状态（由 FutuRiskMonitor 管理）
-    std::unordered_map<std::string, bool> _blocked_contracts; // 单合约封锁
+    // V8-R6 收官: _blocked_contracts 已删除 —— 写-only 死字段 (全项目仅 3 处
+    // clear()、零读者), ticker/Td/channel 三线程并发 clear 在拆大锁后是形式 UB,
+    // 删除优于加锁。封锁语义由 TradingState long_blocked/short_blocked 承担。
 
     // 当前 tick 数据缓存（避免重复计算）
     uint64_t _current_tick_timestamp; // 当前 tick 时间戳

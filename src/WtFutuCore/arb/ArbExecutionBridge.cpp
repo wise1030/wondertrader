@@ -353,18 +353,15 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 if (result.rejected || result.rate_limited || result.self_trade_blocked || result.localids.empty())
                     return false;
             } else {
-                // Fallback: 直接调ctx API
-                if (is_buy) {
-                    ctx->stra_enter_long(code.c_str(), hedge_price, qty);
-                } else {
-                    ctx->stra_enter_short(code.c_str(), hedge_price, qty);
-                }
-                WTSLogger::info("OrphanLeg HEDGE {} {} {}@{} via ctx{}",
-                                is_buy ? "BUY" : "SELL",
-                                code,
-                                qty,
-                                hedge_price,
-                                urgent ? " [URGENT]" : "");
+                // V8-R6/P2-5: 删除 ctx 直调 fallback —— 该分支产生完全绕过
+                // Router/Tracker 的裸单(无来源标记/无在途统计/无自成交检查),
+                // 且 validateDeps 已保证 order_router 非空, 此分支不可达。
+                // 保留即地雷: 未来依赖变更后产生账本外订单。fail-fast + 触发重试。
+                WTSLogger::error("OrphanLeg hedge DROPPED: order_router null (unreachable, "
+                                 "deps validation guarantees non-null) — code={} qty={}",
+                                 code,
+                                 qty);
+                return false;
             }
 
             // 记录到风险监控

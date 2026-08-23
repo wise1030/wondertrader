@@ -391,7 +391,7 @@ public:
 
     inline bool isQuotingPaused() const { return _quoting_paused.load(std::memory_order_relaxed); }
 
-    inline RiskCategory getHaltCategory() const { return _halt_category; }
+    inline RiskCategory getHaltCategory() const { return _halt_category.load(std::memory_order_acquire); }
 
     /// 成本簿 stale 事件上报（EventNotifier/GUI 可见；按时间节流）
     void broadcastCostBasisStale(const std::string& code);
@@ -441,24 +441,42 @@ public:
     /// @return true if closeout triggered, false otherwise
     bool checkCloseout(uint32_t currentTime, uint32_t closeTime);
 
-    /// Get current closeout state
-    inline CloseoutSub getCloseoutSub() const { return _closeout_state.state; }
+    /// Get current closeout state (V8-R6/WS-A: 锁内快照 — Md/Td 双线程读写)
+    inline CloseoutSub getCloseoutSub() const
+    {
+        RecursiveSpinGuard _g(_halt_domain_lock);
+        return _closeout_state.state;
+    }
 
-    /// Get closeout state info
-    inline const CloseoutSubInfo& getCloseoutSubInfo() const { return _closeout_state; }
+    /// Get closeout state info (V8-R6/WS-A: 改按值返回锁内拷贝 — 此前返回内部引用,
+    /// 拆除回调大锁后即为撕裂视图; 调用方仅读字段, 值语义兼容)
+    inline CloseoutSubInfo getCloseoutSubInfo() const
+    {
+        RecursiveSpinGuard _g(_halt_domain_lock);
+        return _closeout_state;
+    }
 
     /// Get night session close time (HHMM, 0=no night session) -- Bug A close_time
     inline uint32_t getNightCloseTime() const { return _closeout_config.night_close_time; }
 
-    /// Check if closeout has been triggered
-    inline bool isCloseoutTriggered() const { return _closeout_state.state != CloseoutSub::IDLE; }
+    /// Check if closeout has been triggered (V8-R6/WS-A: 锁内读)
+    inline bool isCloseoutTriggered() const
+    {
+        RecursiveSpinGuard _g(_halt_domain_lock);
+        return _closeout_state.state != CloseoutSub::IDLE;
+    }
 
-    /// Check if closeout has been completed
-    inline bool isCloseoutCompleted() const { return _closeout_state.state == CloseoutSub::COMPLETED; }
+    /// Check if closeout has been completed (V8-R6/WS-A: 锁内读)
+    inline bool isCloseoutCompleted() const
+    {
+        RecursiveSpinGuard _g(_halt_domain_lock);
+        return _closeout_state.state == CloseoutSub::COMPLETED;
+    }
 
-    /// Check if currently in executor-managed active states
+    /// Check if currently in executor-managed active states (V8-R6/WS-A: 锁内读)
     inline bool isCloseoutFlattening() const
     {
+        RecursiveSpinGuard _g(_halt_domain_lock);
         return _closeout_state.state == CloseoutSub::DRAINING || _closeout_state.state == CloseoutSub::ASSESSING ||
                _closeout_state.state == CloseoutSub::EXECUTING;
     }
@@ -574,20 +592,29 @@ private:
     std::atomic<bool> _quoting_paused{false};
     std::atomic<uint64_t> _current_time{0};
 
-    // Risk category for halt (determines if recovery is possible)
-    RiskCategory _halt_category{RiskCategory::REVERSIBLE};
+    // V8-R6/WS-A: halt/closeout 状态域跨线程收编 (V9-P1-1/P1-2)
+    //   写者: Md(checkRisk)/Td(onEntrust,onChannelLost)/arb线程(handleRiskAlert
+    //   EMERGENCY —— 唯一绕开策略回调大锁 _cb_mtx 的写者, 此前 halt 域为现状真竞态;
+    //   _closeout_state 当前被 _cb_mtx 覆盖, 拆大锁后同样裸奔, 一并收编)。
+    //   方案: _halt_category 单字段原子化(高频读零锁); 其余多字段复合读写经
+    //   _halt_domain_lock 递归自旋锁(checkAndRecover→resumeTrading/canRecover、
+    //   mark*→transitionCloseoutSub 存在嵌套)。临界区内含低频日志/广播(可接受,
+    //   均为罕见事件路径); 无跨锁调用外部模块, 锁序安全(halt_lock→portfolio_lock 单向)。
+    std::atomic<RiskCategory> _halt_category{RiskCategory::REVERSIBLE};
 
-    // Recovery timestamps
+    mutable RecursiveSpinLock _halt_domain_lock;
+
+    // Recovery timestamps (受 _halt_domain_lock 保护)
     uint64_t _halt_timestamp{0};      ///< When trading was halted
     uint64_t _pause_timestamp{0};     ///< When quoting was paused
     uint64_t _last_recovery_check{0}; ///< Last time recovery was checked
 
-    // Recovery tracking
-    mutable uint32_t _recovery_count{0};     ///< Number of auto-recoveries this session
-    mutable double _halt_pnl_snapshot{0};    ///< PnL at halt time (for loss-based halt)
-    mutable bool _was_loss_triggered{false}; ///< Whether halt was triggered by daily loss
+    // Recovery tracking (受 _halt_domain_lock 保护)
+    uint32_t _recovery_count{0};     ///< Number of auto-recoveries this session
+    double _halt_pnl_snapshot{0};    ///< PnL at halt time (for loss-based halt)
+    bool _was_loss_triggered{false}; ///< Whether halt was triggered by daily loss
 
-    // Closeout state (收盘前平仓) - State Machine
+    // Closeout state (收盘前平仓) - State Machine (V8-R6/WS-A: 受 _halt_domain_lock 保护)
     CloseoutConfig _closeout_config;
     CloseoutSubInfo _closeout_state;
 

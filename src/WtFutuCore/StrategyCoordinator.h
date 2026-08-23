@@ -460,6 +460,16 @@ private:
 
     // v7.1: session 休息段状态
     bool _section_break_active = false;
+
+    // V8-R6/R6-b: 双边统计文件落盘积压 —— 周期 live 行不再逐条同步 open/write/close
+    // (MdSpi 热路径 µs 级抖动源), 改内存积压, 于 section-break/收盘 flush 定点
+    // (安静期) 一次性写盘。仅 MdSpi 线程触碰, 无需加锁。
+    std::vector<std::pair<uint32_t, std::string>> _bilateral_io_backlog;
+
+    // V8-R6/P2-2: MARKET 暂停边沿触发 —— 仅进入暂停的首 tick 撤一次全单
+    // (旧实现 qphase==MARKET 期间每 tick 重发 cancelAll, 首轮后槽内全为
+    //  pendingCancel, 后续每 tick 白白抢 quoter 自旋锁+遍历)
+    bool _market_pause_active = false;
 };
 
 } // namespace futu

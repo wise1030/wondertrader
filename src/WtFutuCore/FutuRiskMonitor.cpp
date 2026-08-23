@@ -462,7 +462,9 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
 void FutuRiskMonitor::haltTrading(RiskCategory category, double pnl_snapshot)
 {
     _trading_halted.store(true, std::memory_order_relaxed);
-    _halt_category = category;
+    // V8-R6/WS-A: halt 域多字段复合写入收编 (写者含 arb 线程 handleRiskAlert)
+    RecursiveSpinGuard _g(_halt_domain_lock);
+    _halt_category.store(category, std::memory_order_release);
     _halt_timestamp = _current_time.load(std::memory_order_relaxed);
     _halt_pnl_snapshot = pnl_snapshot;
     _was_loss_triggered = (category == RiskCategory::IRREVERSIBLE) && (pnl_snapshot < 0);
@@ -475,8 +477,9 @@ void FutuRiskMonitor::haltTrading(RiskCategory category, double pnl_snapshot)
 
 bool FutuRiskMonitor::resumeTrading()
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     // Only allow resume for reversible risks
-    if (_halt_category == RiskCategory::IRREVERSIBLE) {
+    if (_halt_category.load(std::memory_order_acquire) == RiskCategory::IRREVERSIBLE) {
         WTSLogger::warn("[RISK] Cannot resume trading: halt is IRREVERSIBLE (requires manual intervention)");
         return false;
     }
@@ -496,6 +499,7 @@ void FutuRiskMonitor::pauseQuoting()
         // 已经是paused状态，无需重复操作
         return;
     }
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     _pause_timestamp = _current_time.load(std::memory_order_relaxed);
     broadcastAlert("QUOTING_PAUSED", "Quoting paused due to risk limits");
 }
@@ -511,6 +515,7 @@ void FutuRiskMonitor::resumeQuoting()
         // 已经是resumed状态，无需重复操作
         return;
     }
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     _pause_timestamp = 0;
     broadcastAlert("QUOTING_RESUMED", "Quoting resumed after risk normalized");
 }
@@ -520,8 +525,10 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     if (!portfolio)
         return false;
 
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A (const: lock 为 mutable)
+
     // Irreversible risks cannot auto-recover
-    if (_halt_category == RiskCategory::IRREVERSIBLE)
+    if (_halt_category.load(std::memory_order_acquire) == RiskCategory::IRREVERSIBLE)
         return false;
 
     // Check max recovery count
@@ -604,6 +611,8 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
 
 bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A (递归锁: 内部 resumeTrading/canRecover 重入)
+
     uint64_t now = _current_time.load(std::memory_order_relaxed);
 
     // Throttle recovery checks
@@ -620,7 +629,8 @@ bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)
     bool recovered = false;
 
     // Resume trading if halted
-    if (_trading_halted.load(std::memory_order_relaxed) && _halt_category == RiskCategory::REVERSIBLE) {
+    if (_trading_halted.load(std::memory_order_relaxed) &&
+        _halt_category.load(std::memory_order_acquire) == RiskCategory::REVERSIBLE) {
         resumeTrading();
         _recovery_count++;
         WTSLogger::info(
@@ -652,18 +662,19 @@ bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)
 
 void FutuRiskMonitor::resetDaily()
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     // Preserve IRREVERSIBLE halt category across daily reset.
     // IRREVERSIBLE risks (e.g. daily loss) must not auto-recover on new day.
     // Only clearIrreversible() (called with human confirmation) can reset it.
     // v7.1: auto_clear_irreversible_on_reset=true 时日界自动清除
     //       (回测场景, 模拟隔夜人工复核; 生产保持 false)
-    RiskCategory saved_halt_category = _halt_category;
+    RiskCategory saved_halt_category = _halt_category.load(std::memory_order_acquire);
     bool was_irreversible = (saved_halt_category == RiskCategory::IRREVERSIBLE);
     if (was_irreversible && _recovery_config.auto_clear_irreversible_on_reset) {
         WTSLogger::warn("[RISK] resetDaily: auto-clearing IRREVERSIBLE halt at day boundary "
                         "(autoClearIrreversibleOnReset=true, simulated overnight manual review)");
         was_irreversible = false;
-        _halt_category = RiskCategory::REVERSIBLE;
+        _halt_category.store(RiskCategory::REVERSIBLE, std::memory_order_release);
         _was_loss_triggered = false;
         _halt_pnl_snapshot = 0;
         broadcastAlert("IRREVERSIBLE_CLEARED", "IRREVERSIBLE halt auto-cleared at day boundary (config-gated)");
@@ -700,13 +711,14 @@ void FutuRiskMonitor::resetDaily()
 
 bool FutuRiskMonitor::clearIrreversible()
 {
-    if (_halt_category != RiskCategory::IRREVERSIBLE) {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
+    if (_halt_category.load(std::memory_order_acquire) != RiskCategory::IRREVERSIBLE) {
         WTSLogger::debug("[RISK] clearIrreversible: not in IRREVERSIBLE state, nothing to clear");
         return false;
     }
 
     WTSLogger::info("[RISK] clearIrreversible: manually clearing IRREVERSIBLE halt (human confirmation)");
-    _halt_category = RiskCategory::REVERSIBLE;
+    _halt_category.store(RiskCategory::REVERSIBLE, std::memory_order_release);
     _trading_halted.store(false, std::memory_order_relaxed);
     _quoting_paused.store(false, std::memory_order_relaxed);
     _halt_timestamp = 0;
@@ -853,6 +865,7 @@ bool FutuRiskMonitor::checkAndHandleDeltaRateBreach()
 
 bool FutuRiskMonitor::transitionCloseoutSub(CloseoutSub next_state, uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     // same-state 静默短路 —— 调用方(StrategyCoordinator/UftFutuMmStrategy)在
     // closeout 窗口的 on_tick/on_calc 高频路径里反复调 markCloseoutFlattening,
     // 不应每次都报 warning("Invalid state transition: 2 -> 2")。同 state 视为
@@ -894,6 +907,7 @@ bool FutuRiskMonitor::transitionCloseoutSub(CloseoutSub next_state, uint64_t tim
 
 void FutuRiskMonitor::markCloseoutTriggered(uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A (递归: transition 内部重入)
     if (transitionCloseoutSub(CloseoutSub::TRIGGERED, timestamp)) {
         pauseQuoting();
         broadcastAlert("CLOSEOUT_TRIGGERED", fmt::format("Closeout state: TRIGGERED at {}", timestamp));
@@ -902,6 +916,7 @@ void FutuRiskMonitor::markCloseoutTriggered(uint64_t timestamp)
 
 void FutuRiskMonitor::markCloseoutDraining(uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     if (transitionCloseoutSub(CloseoutSub::DRAINING, timestamp)) {
         broadcastAlert("CLOSEOUT_DRAINING", fmt::format("Closeout state: DRAINING at {}", timestamp));
     }
@@ -909,6 +924,7 @@ void FutuRiskMonitor::markCloseoutDraining(uint64_t timestamp)
 
 void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     if (transitionCloseoutSub(CloseoutSub::COMPLETED, timestamp)) {
         // 标记夜盘 closeout 已完成，防止 reset 后重触发
         if (_closeout_state.is_night_closeout)
@@ -919,6 +935,7 @@ void FutuRiskMonitor::markCloseoutCompleted(uint64_t timestamp)
 
 void FutuRiskMonitor::markCloseoutFailed(uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     if (transitionCloseoutSub(CloseoutSub::FAILED, timestamp)) {
         if (_closeout_state.retry_count >= _closeout_state.max_retries) {
             broadcastAlert("CLOSEOUT_FAILED",
@@ -939,6 +956,7 @@ void FutuRiskMonitor::markCloseoutFailed(uint64_t timestamp)
 
 bool FutuRiskMonitor::checkCloseoutRetry(uint64_t current_time_ms)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A (递归: transition 内部重入)
     if (_closeout_state.state != CloseoutSub::FAILED)
         return false;
 
@@ -965,6 +983,7 @@ bool FutuRiskMonitor::checkCloseoutRetry(uint64_t current_time_ms)
 
 bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A (递归: markCloseoutTriggered 内部重入)
     if (_closeout_state.state == CloseoutSub::COMPLETED || _closeout_state.state == CloseoutSub::FAILED)
         return false;
 
@@ -1061,6 +1080,7 @@ bool FutuRiskMonitor::checkCloseout(uint32_t currentTime, uint32_t closeTime)
 // 拒绝,state 永久卡死,Delta 雪崩)。force=false(默认)保留状态机保护。
 void FutuRiskMonitor::resetCloseout(bool force)
 {
+    RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     if (force || _closeout_state.canTransitionTo(CloseoutSub::IDLE)) {
         _closeout_state.state = CloseoutSub::IDLE;
         _closeout_state.trigger_time = 0;

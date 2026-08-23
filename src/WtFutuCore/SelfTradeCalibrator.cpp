@@ -21,16 +21,19 @@ SelfTradeCalibrator::SelfTradeCalibrator() {}
 
 void SelfTradeCalibrator::reset()
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官
     _contract_states.clear();
 }
 
 void SelfTradeCalibrator::resetContract(const std::string& code)
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官
     _contract_states.erase(code);
 }
 
 void SelfTradeCalibrator::resetCalibration(const std::string& code)
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官
     auto it = _contract_states.find(code);
     if (it != _contract_states.end()) {
         // Clear fill history and reset cache
@@ -42,6 +45,7 @@ void SelfTradeCalibrator::resetCalibration(const std::string& code)
 
 void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t current_time, uint64_t decay_window_ms)
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官
     auto it = _contract_states.find(code);
     if (it == _contract_states.end())
         return;
@@ -97,6 +101,7 @@ void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t cur
 void SelfTradeCalibrator::recordFill(
     const std::string& code, double price, double qty, bool is_buy, double mid_price, double spread, uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官 (TdSpi 写入点)
     SelfFillRecord record;
     record.code = code;
     record.fill_time = timestamp;
@@ -129,6 +134,7 @@ void SelfTradeCalibrator::recordFill(
 
 void SelfTradeCalibrator::onTick(const std::string& code, double mid_price, uint64_t timestamp)
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官 (MdSpi 写入点)
     // Get or create contract state
     auto& state = _contract_states[code];
 
@@ -319,6 +325,7 @@ void SelfTradeCalibrator::pruneHistory(const std::string& code, uint64_t current
 
 CalibrationResult SelfTradeCalibrator::getCalibration(const std::string& code) const
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官 (TdSpi 读取点, 递归锁支持 analyzeFills 重入)
     auto it = _contract_states.find(code);
     if (it == _contract_states.end()) {
         return CalibrationResult();
@@ -336,6 +343,7 @@ CalibrationResult SelfTradeCalibrator::getCalibration(const std::string& code) c
 
 SelfTradeToxicityMetrics SelfTradeCalibrator::getToxicityMetrics(const std::string& code) const
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官 (递归: getCalibration 重入)
     SelfTradeToxicityMetrics metrics;
 
     auto calib = getCalibration(code);
@@ -385,6 +393,7 @@ bool SelfTradeCalibrator::isHighToxicity(const std::string& code) const
 
 const RingBuffer<SelfFillRecord, 128>* SelfTradeCalibrator::getFillHistory(const std::string& code) const
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官
     auto it = _contract_states.find(code);
     if (it != _contract_states.end()) {
         return &it->second.fill_history;
@@ -394,6 +403,7 @@ const RingBuffer<SelfFillRecord, 128>* SelfTradeCalibrator::getFillHistory(const
 
 uint32_t SelfTradeCalibrator::getSampleCount(const std::string& code) const
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官
     auto it = _contract_states.find(code);
     if (it != _contract_states.end()) {
         return static_cast<uint32_t>(it->second.fill_history.size());
@@ -407,6 +417,7 @@ uint32_t SelfTradeCalibrator::getSampleCount(const std::string& code) const
 
 FillRetreat SelfTradeCalibrator::getFillRetreat(const std::string& code, uint64_t current_time)
 {
+    RecursiveSpinGuard _g(_lock); // V8-R6 收官 (Md+Td 双调用点: PolicyChain / requoteAfterFill)
     FillRetreat retreat;
 
     auto it = _retreat_states.find(code);

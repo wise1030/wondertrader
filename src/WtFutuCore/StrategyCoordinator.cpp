@@ -291,12 +291,8 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
             _cfg.modules.toxicity_cooloff_ms = readUInt32(toxicity, "cooloffMs", _cfg.modules.toxicity_cooloff_ms);
         }
 
-        // SpreadOptimizer parameters: 已迁移到 GLFTParams::fromVariant
-        // SpreadOptimizer: 已迁移到 GLFTParams::fromVariant
+        // SpreadOptimizer 参数: 已迁移到 GLFTParams::fromVariant (V8-R6/P3 清理空壳 if 块)
         // alphaSensitivity 仍需保留在 ModuleParams 中
-        wtp::WTSVariant* spread = modules->get("spreadOptimizer");
-        if (spread) {
-        }
         // MarketState: 无消费者，已删除
 
         // AutoCancel parameters
@@ -553,7 +549,8 @@ ProcessingResult StrategyCoordinator::processTick(
     // Bug C: 夜盘 closeout 完成后, 报价暂停到夜盘收盘(每日开盘前)才恢复.
     // closeout 在 nightMinutesBefore 前完成, 此刻夜盘未收; on_session_begin 不在日盘
     // 开盘触发(仅进程启动), 故恢复点放此. 首个 >= night_close_time 的 tick 恢复报价.
-    if (_cfg.night_close_time > 0 && _trading_state && _trading_state->isCloseoutActive() &&
+    // V8-R6/P2-1: 补 _risk_monitor 空指针守卫 (与同函数其他分支防御风格一致)
+    if (_cfg.night_close_time > 0 && _trading_state && _trading_state->isCloseoutActive() && _risk_monitor &&
         _risk_monitor->getCloseoutSubInfo().night_closeout_done &&
         ((tc.time_hms >= 10000) ? (tc.time_hms / 100) : tc.time_hms) >= _cfg.night_close_time) {
         _trading_state->exitToQuoting();
@@ -883,13 +880,15 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
     // P1-6/U1: enter 用 setQuotingPhase (会被 RISK_HALTED 校验拒绝, 安全),
     //         exit 用 tryResumeFrom(MARKET) (仅 qphase==MARKET 时翻 NORMAL,
     //         避免在 HALT/ERROR/TOXICITY 期间被误翻).
+    bool market_pause_now = false;
     if (sig_ctx.shouldPause()) {
         if (_trading_state)
             _trading_state->setQuotingPhase(QuotingPhase::MARKET);
+        market_pause_now = (_trading_state && _trading_state->qphase == QuotingPhase::MARKET);
         // DIAG: 限频诊断日志，确认shouldPause()触发原因
+        // V8-R6/P3: 时间基准统一 replay 时钟 (tc.timestamp), 不再取墙钟
         {
-            uint64_t now_ms = TimeUtils::getLocalTimeNow();
-            if (now_ms - _last_pause_diag_ms > 5000) {
+            if (tc.timestamp - _last_pause_diag_ms > 5000) {
                 WTSLogger::warn("[DIAG] {} shouldPause=true: should_pause={} toxic_detected={} "
                                 "vol_tier={} realized_vol={:.6f} vol_percentile={:.1f}",
                                 tc.code,
@@ -898,7 +897,7 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
                                 (int)sig_ctx.volatility.vol_tier,
                                 sig_ctx.volatility.realized_vol,
                                 sig_ctx.volatility.vol_percentile);
-                _last_pause_diag_ms = now_ms;
+                _last_pause_diag_ms = tc.timestamp;
             }
         }
     } else {
@@ -906,9 +905,13 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
             _trading_state->tryResumeFrom(QuotingPhase::MARKET);
     }
 
-    if (_trading_state && _trading_state->qphase == QuotingPhase::MARKET && tc.quoter) {
+    // V8-R6/P2-2: 边沿触发 —— 仅进入 MARKET 暂停的首 tick 撤一次全单。
+    // 旧实现 qphase==MARKET 期间每 tick 重发 cancelAll: 首轮后槽内全为
+    // pendingCancel, 后续每 tick 白白抢 quoter 自旋锁+遍历 (纯热路径浪费)。
+    if (market_pause_now && !_market_pause_active && tc.quoter) {
         tc.quoter->cancelAll(ctx);
     }
+    _market_pause_active = market_pause_now;
 
     // 4. 更新毒性检测器 (使用 SignalContext 的信号)
     if (_cfg.use_toxicity_detector && _toxicity && sig_ctx.alpha.valid) {
@@ -961,9 +964,9 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
             // V8-A6: 经显式入口写入 (单写者恢复), 不再反向裸写聚合器内部状态
             aggregator->updateToxicity(tox.toxic_score, tox.toxic_side, true);
         } else {
-            // toxic_detected每tick重算，不复位锁存
-            // 与should_pause相同的锁存: 只设true不复位false
-            // 导致toxic_detected一旦被设就永久锁死
+            // V8-R6/P2-7 注释勘误: toxic_detected 每 tick 重算(非锁存),
+            // 无毒 tick 经 updateToxicity 显式复位 false。旧注释描述的
+            // "不复位锁存/永久锁死"是历史行为, 与当前代码相反, 防误导后续维护。
             aggregator->updateToxicity(tox.toxic_score, tox.toxic_side, false);
         }
     }
@@ -1371,12 +1374,27 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
                      decision.strategy.block_add_long,
                      decision.strategy.block_add_short);
 
+    // V8-R6/P2-6: best_bid/ask 用最新盘口刷新 (缓存值来自上一 quote tick, 成交后
+    // 盘口已动 —— 对手价保护/价格保护基于陈旧 best 会错位)。upper/lower 保留缓存:
+    // 期货涨跌停价盘内不变 (V8 复核裁定)。
+    double fresh_best_bid = q.best_bid;
+    double fresh_best_ask = q.best_ask;
+    if (_portfolio) {
+        ContractState cs_buf;
+        if (_portfolio->getContractSnapshot(code, cs_buf)) {
+            if (cs_buf.bid1 > 0)
+                fresh_best_bid = cs_buf.bid1;
+            if (cs_buf.ask1 > 0)
+                fresh_best_ask = cs_buf.ask1;
+        }
+    }
+
     // V8-P0-2: requoteAfterFill 补挂单同样计入频控 (实盘跑 TdSpi 事件驱动,
     // 批量接口内部自旋锁保证多线程计数安全)
     {
         uint32_t orders_placed = quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
             latest_mid, new_l0_bid, new_l0_ask, q.spread_mult, allow_bid, allow_ask,
-            q.timestamp, q.upper_limit, q.lower_limit, q.best_bid, q.best_ask,
+            q.timestamp, q.upper_limit, q.lower_limit, fresh_best_bid, fresh_best_ask,
             decision.risk, decision.strategy
         });
         if (orders_placed > 0 && _risk_monitor)
@@ -1408,6 +1426,7 @@ void StrategyCoordinator::resetSession()
     }
     _quote_chain.toxicity().reset();
     _tick_count = 0;
+    _market_pause_active = false; // V8-R6 收官: 边沿触发标志跨会话复位
     for (auto& [code, slot] : _last_mid) { if (slot) slot->v.store(0.0, std::memory_order_relaxed); }
 }
 
@@ -1451,6 +1470,15 @@ void StrategyCoordinator::flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hh
             appendBilateralLine(_cfg.bilateral_stats_log_dir, tdate, line);
         }
     }
+
+    // V8-R6/R6-b: 定点(安静期)排空周期行积压 —— 移出 tick 热路径的补偿写入
+    for (const auto& [bdate, bline] : _bilateral_io_backlog)
+        appendBilateralLine(_cfg.bilateral_stats_log_dir, bdate, bline);
+    if (!_bilateral_io_backlog.empty()) {
+        WTSLogger::info("[BILATERAL_STATS] flushed {} periodic lines at section boundary",
+                        _bilateral_io_backlog.size());
+        _bilateral_io_backlog.clear();
+    }
 }
 
 void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const TickContext& tc)
@@ -1480,7 +1508,8 @@ void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const
 
     last = now_ms;
     WTSLogger::info("[BILATERAL_STATS] {}", line);
-    appendBilateralLine(_cfg.bilateral_stats_log_dir, tradingDateOf(tc.date, cur_hhmm), line);
+    // V8-R6/R6-b: 文件写入改内存积压 (定点排空), 控制台日志保持周期实时
+    _bilateral_io_backlog.emplace_back(tradingDateOf(tc.date, cur_hhmm), line);
 }
 
 void StrategyCoordinator::seedBilateralStatsFromFile(uint32_t tdate)

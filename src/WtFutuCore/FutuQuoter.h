@@ -229,9 +229,8 @@ public:
     /// Get all active ask levels
     const std::vector<QuoteLevel>& getAskLevels() const { return _ask_levels; }
 
-    /// Get modifiable bid levels (for direct updates)
-    std::vector<QuoteLevel>& getBidLevelsMut() { return _bid_levels; }
-    std::vector<QuoteLevel>& getAskLevelsMut() { return _ask_levels; }
+    // V8-R6/P3: getBidLevelsMut/getAskLevelsMut/getLevelByOrder 已删除 ——
+    // 内部可变引用逃生口全项目零调用(逐项 grep 复核), 保留即绕过 _lock 的竞态地雷。
 
     /// Total bid quantity outstanding
     double totalBidQty() const;
@@ -241,9 +240,6 @@ public:
 
     /// Check if a given order ID belongs to this quoter - O(1) via tracker
     bool isMyOrder(uint32_t localid) const;
-
-    /// Get the quote level for a given order ID
-    QuoteLevel* getLevelByOrder(uint32_t localid);
 
     //==========================================================================
     // 双边报价统计接口（R3 v2 - Per-Quoter 值成员）

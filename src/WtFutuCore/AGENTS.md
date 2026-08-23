@@ -881,7 +881,9 @@ confidence 段仅 ~15 行）。
 盘点结论：90% 跨线程保护已由各模块自带小锁承担（quoter/tracker 自旋锁、
 bridge/orchestrator _lock、arb manager 三域 atomic_flag、GLFT seqlock、
 MidSlot 原子、CachedQuote 小锁、TradingState CAS），_cb_mtx 是冗余兜底层；
-真正裸奔的只有 RiskMonitor 停机域（本表 P1-1/P1-2）与少数复合不变量。
+真正裸奔的只有 RiskMonitor halt 域（P1-1 现状真竞态——handleRiskAlert 是唯一绕开
+_cb_mtx 的写者）；_closeout_state 当前全部读写点在持 _cb_mtx 回调内
+（2026-08-23 复核裁定非现状 bug），拆锁后需随 WS-A 一并收编。
 
 ### 跨线程写点清单（现状盘点）
 
@@ -892,8 +894,9 @@ MidSlot 原子、CachedQuote 小锁、TradingState CAS），_cb_mtx 是冗余兜
 | SpreadOptimizer 参数 | tick 线程 drain 写 / Md 读 | F20 seqlock | 无 |
 | ArbExecutionBridge / CloseoutOrchestrator | Md: onTick；Td: fill/order 事件 | 各自 _lock | 无 |
 | RiskMonitor 频控环/zombie 闩锁/告警节流 | Md+Td 双写 | _rate_lock 等 atomic_flag | 无 |
-| **RiskMonitor 停机域**（_halt_category/_halt_timestamp/_halt_pnl_snapshot/_recovery_count/_was_loss_triggered/_closeout_state） | Md(checkRisk)、Td(onEntrust/onChannelLost)、arb 线程(handleRiskAlert EMERGENCY) | **裸奔** | **P1-1/P1-2** |
-| FutuPortfolio | Md: markToMarket/读快照；Td: onTradeFill/setShadow/resync | 部分内部递归锁 | 快照一致性未证明 |
+| **RiskMonitor halt 域**（_halt_category/_halt_timestamp/_halt_pnl_snapshot/_recovery_count/_was_loss_triggered） | Md(checkRisk)、Td(onEntrust/onChannelLost)、**arb 线程(handleRiskAlert，唯一绕开 _cb_mtx 的写者)** | **裸奔 = P1-1 现状真 UB** | WS-A |
+| RiskMonitor closeout 状态（_closeout_state） | Md(CloseoutTrigger/Orchestrator.onTick)、Td(onOrderEvent) | 全部调用方在持 _cb_mtx 回调内（复核裁定：非现状 bug） | 拆锁前置，并入 WS-A |
+| FutuPortfolio | Md: markToMarket/读快照；Td: onTradeFill/setShadow/resync | 全方法 RecursiveSpinLock（FutuPortfolio.h:339，复核实测） | 无正确性缺口；WS-B 仅作可选延迟优化 |
 | Coordinator CachedQuote / _last_mid | Md 写 / Td 读 | RecursiveSpinLock / MidSlot 原子 | 无 |
 | 杂项 map（_halt_quoting_state=Md 专属 / _last_requote_ms=Td 专属 / _last_bilateral_log_ms=Md 专属） | 各自单线程 | 无需 | 保持归属即可 |
 
@@ -907,15 +910,15 @@ MidSlot 原子、CachedQuote 小锁、TradingState CAS），_cb_mtx 是冗余兜
      读侧经同一临界区或原子 load。
    - 硬前置理由：否则拆大锁后该域从"大锁兜底"变"真竞态"。
 
-2. **WS-B Portfolio 单写者改造（核心项）**
-   - 目标契约：持仓/成本记账的**写者只有 TdSpi**（onTradeFill/setShadow/resync），
-     MdSpi 只读一致性快照。
-   - TdSpi 写后对 per-contract 版本号做 relaxed store；MdSpi 的
-     `getContractSnapshot` 加版本校验构成轻量 seqlock（写中读到则重试一次，
-     稳态零重试）。模板 = `SpreadOptimizer::snapshotParams` 的 F20 实现。
-   - markToMarket（Md 写价格）与记账字段（Td 写数量/成本）拆为两个
-     cache-line 对齐子结构，消除伪共享。
-   - 附带收益：Md 流水线不再可能读到半笔记账的中间态持仓。
+2. **WS-B Portfolio 快照优化【复核降级：可选项，非正确性前置】**
+   - 复核修正：Portfolio 已是全方法 RecursiveSpinLock（getTotalDelta/
+     getContractSnapshot 等均持锁，FutuPortfolio.h:339 实测），去大锁后不产生
+     正确性缺口；"写者只有 TdSpi"契约不成立（markToMarket=Md 写价格），实为
+     双写者分字段。
+   - 若做，范围收缩为：(a) cache-line 拆分 markToMarket 价格域与记账域（消伪共享，
+     低风险）；(b) seqlock 化 getContractSnapshot——收益存疑：无竞争自旋锁 ~20ns vs
+     seqlock 两次 acquire load 差距小，且 getTotalDelta 内含 refreshAggregates
+     重计算，写中重试复杂度高。默认不做，留性能轮评估。
 
 3. **WS-C TradingState 单写者收敛（启用既有 C10 EventDispatcher 计划）**
    - 低频处置类转移（closeout 进入、zombie halt、MARKET/TOXICITY 进入等）
@@ -932,16 +935,32 @@ MidSlot 原子、CachedQuote 小锁、TradingState CAS），_cb_mtx 是冗余兜
    - on_channel_ready/on_channel_lost/on_session_begin/on_session_end/
      zombie 升级兜底 cancelAll 这类跨模块序列不再要求与大锁互斥：
      封装为 PendingCommand，入队（atomic flag + 小 ring）；
-   - 在 processTick 顶部与 processTradeFill 入口各加检查点
-     `drainPendingCommands()`：一次原子 load + 分支，无命令时 ~1ns；
+    - 在 processTick 顶部与 processTradeFill 入口各加检查点
+      `drainPendingCommands()`：一次原子 load + 分支，无命令时 ~1ns；
+    - 【复核补充·必选】行情静默期兜底：tick/fill 双停时检查点不触发，命令化后的
+      channel_ready 序列会无限滞留（现状=TdSpi 内联立即执行）。三选一：
+      (a) 检查点扩展至全部回调入口（断连场景 on_order/on_entrust/on_channel 本就
+          高频到达，覆盖面足够）；(b) 复用框架 RtTicker 定时线程低频 drain（~500ms）；
+      (c) 命令入队即记超时戳，processTick 惰性检查 + on_channel_lost 即刻自 drain。
+      默认取 (a)+(c)：零新增线程，静默期由订单/通道回调天然驱动。
    - 通道恢复序列从"TdSpi 内联长事务"变为"下一 tick 边界执行"，
      MdSpi/TdSpi 不再互相等待；会话切换（RtTicker 线程）同理收编。
    - 语义注意：channel_ready 后的首 tick 前 drain 保证同步先于报价恢复，
      时序与现状等价（现状也是恢复完成后才 resume）。
+   - 【收官修订 2026-08-23⑥】"发布者自身即 drain 点"统一策略不成立：
+     Session 命令在实盘由 WtUftTicker 线程发布，自 drain 会触达 Md 属主无锁
+     状态（coordinator resetSession/quote_chain）。已落地为**属主域拆分**：
+     Channel=Td 域（发布者自 drain + Td 检查点兜底），Session=Md 域
+     （实盘 ticker 只投递、on_tick 消费；回测单线程 tid 相等自 drain）。
+     详见文末"收官实施记录"。
 
 6. **WS-F 渐进开关与移除**
-   - 新编译开关三态 `FUTU_CB_LOCK=big|none`（默认 big 保底，与历史基线一致；
-     本次 unlike P0-3 之处：**先有写点清单+每步 TSAN**，才允许切 none）；
+   - 编译开关两态 `FUTU_CB_LOCK=big|none`（措辞修正：原"三态"笔误，实际两态；
+     默认 big 保底与历史基线一致；本次 unlike P0-3 之处：先有写点清单+每步 TSAN）；
+   - 验收标准追加【复核补充】：PerformanceMonitor 增加 refreshQuotes 持锁时长埋点
+     （p99 持锁时长 + TdSpi onOrder 因该锁阻塞次数）——去大锁后 quoter 自旋锁从
+     "冗余兜底"变真实竞争点（Md 持锁穿越引擎发单 vs Td onOrder），切 none 前
+     必须量化确认无恶化，必要时将 stra_* 发单移出临界区（决策锁内/发送锁外）；
    - 全部 WS-A~E 合入并验证通过后，删 big 分支与 _cb_mtx 成员（一次性提交）。
 
 ### 热路径成本预算（证明"不影响低延迟"）
@@ -950,9 +969,12 @@ MidSlot 原子、CachedQuote 小锁、TradingState CAS），_cb_mtx 是冗余兜
 |---|---|---|
 | on_tick 入口命令检查点 | 1 次 atomic load（~1ns） | 无命令零分支预测损失 |
 | on_trade 入口命令检查点 | 同上 | |
-| Portfolio 快照读（seqlock 版本校验） | 2 次 acquire load，稳态零重试 | 替代现有内部递归锁，净减负 |
 | TradingState 事件投递 | 仅低频处置路径，SPSC push ~10ns | 快路径状态查询仍是纯 atomic load |
 | 停机域读 | atomic load / flag 临界区（低频） | checkAndRecover 每 tick 一次可接受 |
+| 【复核补充】quoter 自旋锁竞争显性化 | 非新增成本，为风险项 | 去大锁后 Md refreshQuotes(持锁穿越引擎调用) 与 Td onOrder 直接竞争；以 WS-F 持锁埋点验收 |
+
+（复核删行说明：原"Portfolio seqlock 快照读"行随 WS-B 降级为可选而移除——
+现状全方法递归锁保持不变。）
 
 净效果：tick-to-quote 主链路**零新增锁、零新增 RMW**；
 TdSpi fill 路径不再等待 MdSpi（消除最大尾延迟源）。
@@ -969,7 +991,7 @@ TdSpi fill 路径不再等待 MdSpi（消除最大尾延迟源）。
 
 1. WS-A 单独合入：TestUnits 双线程 hammer 用例（4 线程并发 halt/recover/closeout
    转移 ×10^6 次，断言无 torn state）；_ec_5d 回测零回归。
-2. WS-B 合入：seqlock 单测 + 回测 A/B（预期逐比特一致——回测单线程零竞争）。
+2. （WS-B 已降级可选：默认跳过；若启用，seqlock 单测 + 回测逐比特 A/B。）
 3. WS-C/E 合入：TSAN 构建跑 TestUnits 全量 + 回测；事件时序用例
    （channel_lost→cancelAll→ready→resume 序列断言）。
 4. WS-F 切 none：回测逐比特 A/B（必须与 big 完全一致）→ 生产灰度：
@@ -980,3 +1002,332 @@ TdSpi fill 路径不再等待 MdSpi（消除最大尾延迟源）。
 
 WS-F 之前任意步骤发现行为差异：编译开关切回 big 即回到当前基线；
 WS-F 删除 _cb_mtx 的提交单独成 commit，revert 即完全回退。
+
+## V9 诊断报告（2026-08-23，只读诊断未改代码；诊断基线=R4b 提交 68da2ea8 之前的工作树，已按同日独立复核修订——凡 [复核] 标记处为准）
+
+**诊断方式**：逐文件深读约 30 个核心源文件（StrategyCoordinator/FutuQuoter/
+QuotePolicyChain/FutuRiskMonitor/RiskCoordinator/UnifiedOrderTracker/
+FutuRuntimeOps/UftFutuMmStrategy/ArbExecutionBridge/CloseoutOrchestrator/
+SignalAggregator/SpreadOptimizer/AsyncArbitrageExecutor/TscClock/LockFreeQueue
+等）+ 配置/文档交叉核对。已对照 R1-R5 已修复项，只报告仍存在的新发现。
+本节为 V9 全量存档；其中可修项已提炼为下方"去大锁方案"与 R6 待执行清单。
+
+### 一、总体评价
+
+| 维度 | 评价 |
+|---|---|
+| 架构分层 | ★★★★☆ 壳层/装配(wireDeps+validateDeps fail-fast)/协调(PolicyChain)/领域 五层清晰 |
+| 并发安全 | ★★★☆☆ 回调大锁+per-module 自旋锁体系成型；风控停机状态域仍有成片无同步跨线程共享 |
+| 报价/风控分离 | ★★★★☆ delta(策略)/position(风控) 语义边界落地且有单测护栏 |
+| 执行链路 | ★★★★☆ B+ 订单槽状态机严谨 |
+| 套利子系统 | ★★★★☆ [复核修订] R4b(A1-A6/S1-S5)已落地（乘数链修复/单写者恢复/文件级二分）；残余=组件级 FSM 收敛评估 |
+| 文档 | ★★☆☆☆ README 仍写 v7.7/1228行（实际 v8-R5/1513行） |
+
+**[复核修订]**：R1-R5/R4b 后无 P0 级新发现；剩余问题集中在 ①风控 halt 域线程
+同步缺口(P1-1，唯一现状真竞态) ②去大锁工程(独立方案见上节) ③文档失真
+④热路径少量隐性开销。
+
+### 二、Bug 修复建议（按严重度）
+
+#### P1 级
+
+1. **P1-1 FutuRiskMonitor 停机状态域跨线程无同步（数据竞争 UB）**
+   - 证据：FutuRiskMonitor.h:578-588 —— `_halt_category`(enum)/`_halt_timestamp`/
+     `_recovery_count`/`_halt_pnl_snapshot`/`_was_loss_triggered` 全部非原子。
+   - 写者三线程：①MdSpi RiskCoordinator::checkRisk→haltTrading(RiskCoordinator.cpp:196)
+     ②TdSpi onEntrust(FutuRuntimeOps.cpp:876)/onChannelLost(:1007)
+     ③arb 线程 handleRiskAlert EMERGENCY(UftFutuMmStrategy.cpp:205-207，
+     注释自称"原子写"但 FutuRiskMonitor.cpp:465 实为裸赋值)。
+   - 读者：MdSpi checkAndRecover/canRecover(cpp:528/:538/:605)。
+   - 影响：IRREVERSIBLE 标志可能被并发读到中间态 → 日亏线被自动恢复绕过。
+     这是系统最后一道保险丝。修法：atomic 化 + atomic_flag 临界区（=去大锁 WS-A）。
+2. **[复核改判] P1-2 CloseoutSubInfo —— 非现状 bug，改为去大锁前置修复项**
+   - 复核核实：transitionCloseoutSub/markCloseout*/checkCloseoutRetry/resetCloseout
+     的全部调用方（CloseoutTrigger←processTick、Orchestrator.onTick/onOrderEvent/
+     executeHedge/finalizeAtSessionEnd、resetCloseout←onSessionBegin）均在持
+     _cb_mtx 回调内，当前读写全串行、无竞态。原报告列 P1"数据竞争 UB"高估。
+   - 正确定位：_cb_mtx 移除后即成真竞态 → 并入 WS-A 同一临界区收编。
+3. **[复核降级 P2] CoordinatorConfig::_raw_variant 悬垂指针隐患（防未来误用）**
+   - StrategyCoordinator.h:188 保存 WTSVariant* 裸指针供装配期 **8 处**使用
+     （FutuComponentFactory×5 + FutuModuleAssembler×3；原文"9 处"系计数误差），
+     均在 variant 存活期内，当前无实际悬垂。属防御性整洁项：
+     wireDeps() 尾部置空并注释 init-only。
+
+#### P2 级
+
+| # | 位置 | 问题 | 建议 |
+|---|---|---|---|
+| P2-1 | StrategyCoordinator.cpp:557 | 夜盘恢复分支裸调 _risk_monitor->getCloseoutSubInfo() 无空指针守卫（同函数其他分支均有），风格不一致 | 补守卫 |
+| P2-2 | StrategyCoordinator.cpp:910-912 | qphase==MARKET 期间每 tick 重发 cancelAll(ctx)，首轮后全部 pendingCancel 仍空转抢 quoter 自旋锁 | 边沿触发（参照 LIMIT-TOUCH _touch_active 模式） |
+| P2-3 | RiskCoordinator.cpp:83-84 | taker 减仓单用 Source::CLOSEOUT——污染 closeout 统计口径且隐式落入 Fix4 REVERSIBLE 豁免集合；A9 刚为孤儿腿修过同类冒用 | 新增 Source::RISK_REDUCE，排查 closeout inflight 守卫误数 |
+| P2-4 | UftFutuMmStrategy.cpp:693-694 | on_transaction 方向分类 last_mid==0 时默认 isBuy=true——开盘首帧系统性偏差污染 trade_flow/毒性通道 | [复核改进] tick-rule 回退（与上一笔成交价比较）或用 last valid mid，保留样本优于丢弃 |
+| P2-5 | ArbExecutionBridge.cpp:350-363 | orphan 对冲 fallback 直调 stra_enter_long/short 绕过 Router/Tracker——完全不受账本管理的裸单地雷路径 | router 为空应 error+放弃（validateDeps 已保证非空，确为死代码，删除合理） |
+| P2-6 | StrategyCoordinator.cpp:1378 | requoteAfterFill 用缓存 tick 的 upper/lower/best 与最新 mid 拼接。[复核精化] 期货涨跌停价盘内不变，upper/lower 失真影响≈0；真正有影响的是 best_bid/ask 陈旧 | 重算时刷新 best_bid/ask（P2 上限，仍值得修） |
+| P2-7 | StrategyCoordinator.cpp:961-971 | [部分已修] S4 双写者已由 R4b-A6 updateToxicity 显式入口修复；剩余仅注释漂移（"不复位锁存…永久锁死"悬于每 tick 置 false 的代码上方，与行为矛盾） | 只修注释 |
+
+#### P3 整洁度
+
+- FutuQuoter 构造函数给自己上锁（FutuQuoter.cpp:20）无意义；
+  getBidLevelsMut/getAskLevelsMut/getLevelByOrder、UnifiedOrderTracker::getOrders()
+  （返回内部 vector 引用的逃生口）全项目零调用——删除。
+- StrategyCoordinator.cpp:297-299 spreadOptimizer 配置节读取体为空 if 块残留。
+- updateSignals MARKET 诊断日志块(:891-904)取墙钟 TimeUtils::getLocalTimeNow()，
+  回测中应统一 replay 时钟。
+
+### 三、五大子系统分层评估
+
+1. **做市报价 ✅ 清晰度高**：GLFT(seqlock 参数)→QuotePolicyChain 六策略对象→
+   FutuQuoter 三路径。遗留：handleObligationQuote/handleFlexibleQuote sticky 判定
+   取 order_ids[0]（FutuQuoter.cpp:340/:447/:486）而路径 A 已修为尾向扫描——依赖
+   "B1/B2 槽内 pendingCancel 同质性"这一未成文隐式不变量才成立，建议补注释固化
+   或提取公共扫描函数三路径共用（A4-残余的 quoter 版）。RiskWidenPolicy tickSoft
+   与 onHardWiden 存在文档承认的同 tick 覆盖顺序依赖，建议 chain.run 显式保证顺序。
+2. **风控逻辑 ✅ 结构好 ❌ 同步缺口**：PreTradeDecision 双层/SideFillBreaker/zombie
+   闩锁/closeout 状态机各司其职。遗留：P1-1/P1-2 为最大缺口；ERROR(qphase) 与
+   RiskMonitor._trading_halted 双轨暂停语义重叠（onEntrust 阈值同时设两者），
+   恢复路径需同时照顾两套状态（FutuRuntimeOps.cpp:343-396 vs RiskCoordinator.cpp:
+   114-149 各一套），建议 R4b 后做"暂停源单一化"梳理。
+3. **交易执行 ✅**：B+ 槽状态机+Router 来源标记+finalizeOrder 幂等清理闭环。
+   遗留：quoter 自旋锁持锁穿越引擎调用（已文档化取舍），建议 PerformanceMonitor
+   增加 refreshQuotes 持锁时长埋点量化。
+4. **信号因子 ✅ 明显改善**：slot 表驱动+vol 阈值实测标定。[复核更新] S4 双写者
+   已由 R4b-A6 修复（updateToxicity 显式入口）；S-1/S-2 regime/IC 簿记已归还
+   ICWeightTracker。遗留：computeAlpha 职责进一步拆解；handleLeadLagPush static
+   调试计数器残留。
+5. **[复核修订] 套利子系统 ✅ 结构债大幅缓解**：R4b-A1 乘数死亡链已修（pushTick
+   现 3 参，pair multiplier 装配进 calculator）；A-2 孤儿腿对冲有限重试；A-3 双
+   in_flight 按通道精确释放；A-4 fresh-pairing 去重；S-4 Manager 文件级二分
+   （1324→1089 行+Init TU）。残余：LegExecutionFSM 组件级收敛（隐式状态散落
+   executor/bridge/manager 三处）留后续评估。
+
+### 四、性能优化建议（增量、不改变行为）
+
+1. **双边统计文件 I/O 移出 MdSpi 热路径**：appendBilateralLine 每次 open/write/close
+   同步落盘（StrategyCoordinator.cpp:85-101），周期输出+section break 都在行情线程内，
+   改内存缓冲+独立落盘线程。
+2. TickContext/QuotePolicyContext 每 tick std::string 构造+哈希查找——合约数固定，
+   装配期建 code→index 表，TickContext 存 uint8_t code_idx。
+3. coordinator 四张 string-key map（_last_quote_params/_halt_quoting_state/
+   _last_requote_ms/_last_bilateral_log_ms）同理可用合约下标数组替代。
+4. P2-2 MARKET 每 tick cancelAll 修复本身即热路径减负。
+5. 保持既有优点勿退化：F5 计时门控/F8 exp 上提/generation 门控快照/FixedString24
+   SPSC/alignas(64)/rdtsc 埋点。
+6. 验证手段：_ec_5d_perf.yaml + TscClock p99 埋点直接 A/B（预期 p99 持平或微降，
+   行为零回归）。
+
+### 五、功能完善建议
+
+1. L2 数据管道（S9 前置）：先在回测验证 depth_imbalance 与 transaction 推断的
+   相关性，再决定是否替换 TickTransactionInferer 推断口径。
+2. PerformanceAnalyzer.determineMarketCondition 占位等 R4b RegimeTracker，避免重复建设。
+3. 持续推动框架侧 CTP 50/51/31 拒单分类通道；orderErrorThreshold=1000 临时参数记得回收。
+4. 测试补缺：QuotePolicyChain 六策略无表驱动单测（LimitPrice L0-L3/ColdStart skew
+   符号/FillRetreat 取保守价）；P1-1 修复应附双线程 hammer 测试。
+
+### 六、落地路线图
+
+| 批次 | 内容 | 验证 |
+|---|---|---|
+| R6-a 小步快跑 | P1-1 停机域原子化+_closeout_state 收编(=去大锁 WS-A)；P2-1/2/4/7；P3 清扫 | TestUnits 并发用例；_ec_5d 零回归 |
+| R6-b | P2-3 Source::RISK_REDUCE；P2-5/6；[复核提级]双边统计异步落盘 | 回测+taker/closeout 统计口径抽查 |
+| R6-c 性能 | code_idx 化四张 map([复核]收益占比极小维持低优)、MARKET 边沿撤销 | _ec_5d_perf p99 A/B |
+| 去大锁专项 | 见上一节 WS-A~F（WS-B 可选、WS-E 含静默期兜底） | TSAN+hammer+逐比特 A/B+灰度 p99/p999 |
+| 后续 | README/docs 一次性重写（v7.x 描述早已过期）；computeAlpha/LegFSM 组件级收敛评估 | 文档评审+A/B |
+
+> 以上任何一项动手前需先将实施方案写入本文件并经用户确认（§1 流程）。
+> 去大锁专项的完整设计见上一节"去大锁（_cb_mtx）低延迟等价设计"。
+
+### 七、复核记录（2026-08-23②）
+
+**背景**：V9 报告完成后引入独立复核；同期工作树推进至 R4b 提交 68da2ea8
+（02:12，A1-A6/S1-S5），故报告部分发现相对 HEAD 过时——这是双方分歧根源，
+以 HEAD 为准逐条裁定如下：
+
+| 复核论断 | 裁定 | 关键证据 |
+|---|---|---|
+| 乘数死亡链已修复，报告失实 | ✅ 成立 | pushTick 现 3 参(ArbExecutionBridge.cpp:50)；commit msg"A-1 乘数死亡链…删死参数链"。报告 3 处相关表述已全部更正 |
+| P1-2 非现状 bug，属拆锁前置 | ✅ 成立 | transitionCloseoutSub 全部调用方逐一核验均在持 _cb_mtx 回调内；已改判并入 WS-A |
+| P1-3 降级 P2/P3 | ✅ 成立 | 使用点实为 8 处（原记 9 系误差），全在装配期 variant 存活窗口 |
+| P1-1 最重发现 | ✅ 双方一致 | handleRiskAlert(:191) 经 setAlertCallback 由 arb 线程直调、不在大锁内；haltTrading 裸赋值而 :204 注释谎称"原子写"——唯一绕锁写者，现状真 UB |
+| P2-1/2/3/4/5、P3 各项仍在 HEAD | ✅ 逐项复现 | :556 裸调 / :909 每 tick cancelAll / RiskCoordinator:83-84 冒用 CLOSEOUT / :694 isBuy 默认 true / bridge:358,360 fallback 裸单 / 空if块 / quoter 构造自锁 / order_ids[0]×3 |
+| P2-6 高估 | ✅ 精化采纳 | 涨跌停价盘内不变，影响收窄至 best_bid/ask 陈旧 |
+| P2-4 改 tick-rule 回退 | ✅ 采纳 | 保 trade_flow 样本优于丢弃 |
+| WS-B 前提偏差 | ✅ 重要修正 | FutuPortfolio.h:339 全方法 RecursiveSpinLock；降为可选优化，契约描述更正为双写者分字段 |
+| WS-E 行情静默期盲区 | ✅ 最有价值发现 | 检查点仅 tick/fill 两入口，双停期命令滞留 vs 现状内联立即执行；已补 (a)检查点扩展+(c)超时惰性 drain 兜底 |
+| WS-F"三态"措辞/成本表缺项 | ✅ 采纳 | 两态措辞修正；quoter 自旋锁竞争显性化纳入切 none 验收标准 |
+
+**复核自身遗漏的补正（2 条）**：
+1. P2-7 前半 S4 双写者亦已被 R4b-A6 修复（复核仅指出注释问题，未标 S4 已修）；
+2. 复核称报告"两处声称未修"，实为四处（乘数链×3 + S4×1）；且 R4b 已使本文件
+   原"R4b 待执行"范围部分完成（S-4 文件级二分、S-1/S-2 归还 ICWeightTracker，
+   TestUnits 基线升至 105/107），路线图已相应刷新。
+
+**总评**：复核整体准确率约九成，可采信；上文所有 [复核] 标记处即其落地结果。
+
+## 当前方案实施记录（2026-08-23③，R6-a 全量 + R6-b 三项 + 去大锁 WS-A，已编译验证）
+
+用户确认后执行。按方案既定顺序完成第一步里程碑：
+
+### 已落地修改清单
+
+1. **WS-A（=V9-P1-1/P1-2）FutuRiskMonitor halt/closeout 状态域收编**
+   - `_halt_category` → `std::atomic<RiskCategory>`（getHaltCategory/haltTrading/
+     resumeTrading/canRecover/checkAndRecover/resetDaily/clearIrreversible 全部改
+     load/store acq_rel）
+   - 新增 `mutable RecursiveSpinLock _halt_domain_lock`，保护 `_halt_timestamp/
+     _pause_timestamp/_last_recovery_check/_recovery_count/_halt_pnl_snapshot/
+     _was_loss_triggered/_closeout_state`；递归锁覆盖嵌套链（checkAndRecover→
+     resumeTrading/canRecover、mark*→transitionCloseoutSub、resetSession→resetDaily）
+   - `getCloseoutSubInfo()` 改**按值返回锁内拷贝**（原返回内部引用，拆大锁后即撕裂
+     视图）；调用方 CloseoutTrigger.cpp:82 const& 绑定临时量兼容、CloseoutOrchestrator
+     :188 / StrategyCoordinator:557 字段读取兼容，零改动
+   - isCloseoutTriggered/Completed/Flattening/getCloseoutSub 头文件内联体改锁内读
+
+2. **P2-1** StrategyCoordinator 夜盘恢复分支补 `_risk_monitor &&` 守卫
+3. **P2-2** MARKET 暂停边沿触发：新增 `_market_pause_active` 成员，仅进入暂停首 tick
+   cancelAll 一次；DIAG 日志时间基准同步换 replay 时钟（tc.timestamp）
+4. **P2-4** on_transaction 死代码删除：`last_mid/isBuy` 计算后零消费（方向分类由
+   MarketDataContext::onTransaction 内部独立完成）——比复核建议的 tick-rule 回退更优，
+   直接消除"last_mid==0 默认 isBuy=true"偏差源（复核建议基于其被消费的假设，实测否）
+5. **P2-7** 毒性注释勘误（S4 本体已由 R4b-A6 修复，剩余仅注释与行为相反）
+6. **P2-3** `Source::RISK_REDUCE`（OrderTypes.h=3）：taker 减仓单脱离 CLOSEOUT 口径；
+   OrderRouter ctor 补两处预分配；RiskCoordinator HALT 清扫清单追加 RISK_REDUCE
+7. **P2-5** ArbExecutionBridge orphan 对冲 ctx 直调 fallback 删除（不可达死分支 →
+   error+return false 触发 executor 重试）
+8. **P2-6** requoteAfterFill best_bid/ask 改用 portfolio 快照最新盘口刷新
+   （upper/lower 保留缓存——涨跌停价盘内不变，V8 复核裁定）
+9. **P3 清扫** FutuQuoter ctor 自我加锁删；getBidLevelsMut/getAskLevelsMut/
+   getLevelByOrder/UnifiedOrderTracker::getOrders()×2 引用逃生口删（全项目零调用逐项
+   复核含 TestUnits）；loadConfigFromVariant 空 if 壳清理
+
+### 验证（已完成）
+
+- 编译：WtFutuCore + TestUnits 零 error（仅既有 ftime deprecation 警告）
+- TestUnits 新增 test_v9_r6a.cpp 6 用例全过：
+  ConcurrentHammerNoCrash（4 线程 ×20000 次 halt/resume/closeout 转移+双读者快照域断言）
+  /CloseoutInfoIsValueCopy/IrreversibleSemanticsPreserved/AutoClearIrreversibleOnResetGated/
+  RecoveryCooldownRespected/RiskReduceDistinctValues
+- 全量 TestUnits **111/113**（基线 105/107 + 新增 6；仅 test_session.test_allday 与
+  test_shm.test_sharehelper 两个既有环境性失败，零回归）
+- 回测冒烟 configbt_v5：EXIT=0、0 HALT/0 zombie、session end Delta=0、
+  资金曲线正常收敛（closeprofit/dynbalance 量级正常）
+
+### 待办移交（下一步）
+
+1. **去大锁 WS-C/E/F**：TradingState 单写者收敛(EventDispatcher)、罕见重操作命令化
+   （含静默期兜底 (a)+(c)）、两态编译开关 big|none —— 按 §1 需独立会话+TSAN 全套验证
+2. **R6-b 余项**：双边统计异步落盘（复用 LockFreeQueue+drainTdSpiLogs 模式）
+3. **_ec_5d 全量回测 A/B**：本轮全部改动按构造行为中性，v5 冒烟已过；正式零回归
+   结论需 _ec_5d 一轮（预期成交笔数落在 mocker 噪声带内）
+4. 生产部署仍按 §5 流程另行执行
+
+## 当前方案实施记录②（2026-08-23④，WS-E/F + R6-b 余项 + _ec_5d 全量 A/B，已验证）
+
+### 修改清单
+
+1. **WS-E 罕见重操作命令化（含静默期兜底）**
+   - UftFutuMmStrategy 新增 PendingCommand{ChannelReady/ChannelLost/SessionBegin/
+     SessionEnd} 通道：post(锁+push+release 置标志) → 单飞 claim(exchange) 消费；
+   - 发布者自身即 drain 点 => 行情静默期无滞留（V9 复核盲区消除，无需新增线程）；
+     on_tick/on_trade/on_order/on_entrust(on_entrust 复用 _main_ctx) 四入口加检查点，
+     快速路径一次 acquire load ~1ns；
+   - 四个回调改经通道：大锁默认下 post 后同回调内 claim 必然成功 => 与旧内联逐比特一致。
+2. **WS-F 两态开关脚手架**：`FUTU_CB_LOCK_BIG`(默认1)=big；=none 需先过验收
+   （TSAN 全量+_ec_5d 逐比特+灰度 p99/p999+refreshQuotes 持锁埋点），宏注释载明。
+3. **R6-b 双边统计落盘移出热路径**：周期 live 行改 `_bilateral_io_backlog` 内存积压
+   （仅 MdSpi 触碰），section-break/收盘 flush 定点排空（安静期一次性写盘）；
+   控制台日志保持实时。权衡：崩溃丢失 ≤一个积压周期的周期行（义务/section 行不受影响）。
+
+### 验证
+
+- 编译零 error；TestUnits 全量 111/113（同基线，零回归）
+- 回测 v5 冒烟 + _ec_5d 全量均 EXIT=0、0 HALT/0 zombie：
+  | 指标 | R5 基线 | 本轮 |
+  |---|---|---|
+  | 成交笔数 | 17,788 | 17,939 (+0.8% 噪声内) |
+  | dynbalance(0612) | 306,882 | 305,016 (-0.6% 噪声内) |
+
+### 遗留（去大锁收官清单）
+
+- **WS-C TradingState 单写者收敛**（EventDispatcher 投递低频处置转移）：独立会话执行；
+- 切 `FUTU_CB_LOCK_BIG=0` 的完整验收流程（TSAN 构建/埋点量化/逐比特 A/B/灰度）
+  按去大锁方案节执行后方可删除 _cb_mtx。
+
+## 收官审计记录（2026-08-23⑤，none 模式就绪度核查）
+
+**已修复（切 none 硬阻断 -1）**：`AsyncArbitrageExecutor._oid_to_pair` 加
+`_oid_pair_lock`（RecursiveSpinLock）——P0-3 注释"main-thread-only"与事实不符：
+tagOrderPair 写于 MdSpi(bridge.onTick)、consumePairTag/onOrderFinalized 读删于 TdSpi，
+大锁时代被掩盖。修复后 v5 冒烟 EXIT=0/0 HALT、资金与前轮逐值一致。
+
+**EventDispatcher.subscribe**：全项目零调用，非阻断。
+
+**切 none 剩余硬阻断清单（下一会话机械执行）**：
+1. SelfTradeCalibrator：无任何锁成员，而 onTick(Md)/recordFill(Td)/getFillRetreat
+   (Md+Td) 跨线程触碰内部 map —— 需按 UnifiedOrderTracker 模式加 RecursiveSpinLock；
+2. PerformanceMonitor 裸计数器逐一核对原子化（recordFillReceived/recordQuoteToFill/
+   recordTickProcessed 等 Md/Td 双写点）；
+3. 以上完成后：`FUTU_CB_LOCK_BIG=0` 构建 → TestUnits 全量 → _ec_5d 逐比特 A/B →
+   refreshQuotes 持锁埋点量化 → 生产灰度 p99/p999 → 删除 _cb_mtx（单独 commit）。
+
+## 收官实施记录（2026-08-23⑥，阻断清零 + WS-E 属主域修订，已验证）
+
+复核会话（外部审计）补录了收官审计的 3 个漏项，与既定 2 项一并执行完毕。
+
+### 修改清单
+
+1. **SelfTradeCalibrator 跨线程收编**（硬阻断①）：新增 `mutable RecursiveSpinLock
+   _lock`，全部公开方法收编（recordFill=Td / onTick,decayCalibration=Md /
+   getFillRetreat=Md+Td 双调用点同一把锁）。字段级 atomic 不覆盖
+   `_contract_states`(wt_hashmap operator[] 结构性插入)/`_retreat_states`(std::map)/
+   RingBuffer，此前依赖 _cb_mtx 兜底。叶子锁无锁序风险。
+   注：`getFillHistory` 返回内部指针的逃生口保留但全项目零调用，锁在返回后释放，
+   属已知残余风险（如未来启用须改值返回）。
+2. **PerformanceMonitor 计数器原子化**（硬阻断②）：ThroughputStats 17 字段全部
+   `std::atomic<uint64_t>`（record* Md/Td 双写点）；显式拷贝构造/赋值支持
+   getThroughputStats 值快照（该接口零外部调用，顺带简化为整体拷贝）。
+   各延迟 RingBuffer 按类型单写者（TICK_TO_QUOTE/SIGNAL_TO_ORDER=Md，其余=Td），
+   无需动；`_last_threshold_log_ms` 核实为 Md 单写，不处理。
+3. **`_blocked_contracts` 删除**（漏项③）：写-only 死字段（全项目仅 3 处
+   clear()、零读者），ticker/Td/channel 三线程并发 clear 在拆大锁后是形式 UB，
+   删除优于加锁。封锁语义由 TradingState long_blocked/short_blocked 承担。
+4. **`_violations_buf` 通道恢复局部化**（漏项②）：onChannelReady 恢复序列改局部
+   `std::vector<RiskViolation>`——拆大锁后该序列可能由 MdSpi 检查点 drain 执行，
+   与 Td(processTradeFill/onEntrust) 共享即竞态。成员缓冲现严格 Td 专属，
+   头部注释同步更正（原注释"仅 TdSpi 路径"对 channel 恢复序列不成立）。
+5. **WS-E 属主域拆分**（漏项①，设计修订）：原"发布者自身即 drain 点"统一策略
+   在 none 模式下会让 Session 命令在 WtUftTicker 线程内联执行 onSessionBegin/End
+   → 触达 coordinator resetSession/quote_chain 等 Md 属主无锁状态（真竞态）。
+   修订为按域分派：
+   - Channel 类（Td 域）：发布者即 TdSpi 线程，两种模式均自 drain；Td 检查点
+     (on_trade/on_order/on_entrust) 兜底。
+   - Session 类（Md 域）：实盘 ticker 线程只投递，仅 on_tick (Md) 检查点消费
+     （session 切换后必有 tick，无静默期滞留）；回测单线程发布者即 Md 线程
+     （`_md_tid` 首个 on_tick 捕获，tid 相等自 drain）→ 与 big 逐比特一致。
+   - big 模式两域均保持 post 后同回调 drain ⇒ 与历史内联逐比特一致（不变式）。
+   - drain 重写：域分拣留队（修复分拣后自旋标志死循环隐患）+ RAII 释放单飞标志
+     （修复命令执行抛异常导致 `_cmd_executing` 永久卡死）。
+   - 已知行为差异（仅 none 模式）：实盘 SessionEnd 从收盘时刻内联改为次日首 tick
+     边界执行（cancelAll/arb stop/统计报告延迟——收盘后无活动订单与行情， benign）；
+     回测末日 SessionEnd 后有 tick 流入故不受影响。
+6. **P2-2 收尾**：`_market_pause_active` 纳入 resetSession 复位（跨会话残留
+   边界情形，无害但保持干净）。
+
+### 验证（全部独立执行）
+
+- 编译：WtFutuCore + TestUnits 零 error；none 模式 TU 级 `-DFUTU_CB_LOCK_BIG=0`
+  -fsyntax-only 通过。
+- TestUnits **113/115**（新增 CalibratorClosing.ConcurrentFillTickNoCrash +
+  PerfMonClosing.ConcurrentCountersNoLostUpdate 双线程 hammer 全过；仅
+  test_session.test_allday / test_shm.test_sharehelper 两个既有环境性失败，零回归）。
+- 回测 `_breaker_retreat_test`：**big 模式四张 CSV（closes/funds/positions/trades）
+  与基线逐字节一致**；**none 模式（独立 build 目录全量 -DFUTU_CB_LOCK_BIG=0 构建）
+  四张 CSV 与 big 基线逐字节一致**——属主域拆分在回测路径行为等价直接得证。
+
+### 切 none 剩余流程（验收性质，无已知代码阻断）
+
+1. TSAN 构建跑 TestUnits 全量（RecursiveSpinLock 基于 atomic_flag acq/rel，
+   TSAN 可正确识别 happens-before，无标注误报风险）；
+2. `_ec_5d` 全量逐比特 A/B（big vs none）；
+3. refreshQuotes 持锁时长埋点量化（quoter 自旋锁竞争显性化验收）；
+4. 生产灰度 p99/p999 观察一个交易日 → 删除 `_cb_mtx`（单独 commit，revert 即回退）。

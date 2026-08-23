@@ -183,6 +183,7 @@ void AsyncArbitrageExecutor::updateTickSize(const std::string& code, double tick
 
 void AsyncArbitrageExecutor::tagOrderPair(uint32_t localid, const std::string& pair_id)
 {
+    RecursiveSpinGuard _g(_oid_pair_lock); // V8-R6: Md 写/Td 读跨线程收编
     if (pair_id.empty())
         return;
     _oid_to_pair[localid] = pair_id;
@@ -190,6 +191,7 @@ void AsyncArbitrageExecutor::tagOrderPair(uint32_t localid, const std::string& p
 
 bool AsyncArbitrageExecutor::consumePairTag(uint32_t localid, std::string& out_pair_id) const
 {
+    RecursiveSpinGuard _g(_oid_pair_lock);
     auto it = _oid_to_pair.find(localid);
     if (it == _oid_to_pair.end())
         return false;
@@ -199,6 +201,7 @@ bool AsyncArbitrageExecutor::consumePairTag(uint32_t localid, std::string& out_p
 
 void AsyncArbitrageExecutor::onOrderFinalized(uint32_t localid)
 {
+    RecursiveSpinGuard _g(_oid_pair_lock);
     _oid_to_pair.erase(localid);
 }
 

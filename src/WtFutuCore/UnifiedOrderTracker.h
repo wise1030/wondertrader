@@ -504,16 +504,8 @@ public:
         return nullptr;
     }
 
-    inline std::vector<UnifiedOrderInfo>& getOrders()
-    {
-        RecursiveSpinGuard _g(_lock);
-        return _orders;
-    }
-    inline const std::vector<UnifiedOrderInfo>& getOrders() const
-    {
-        RecursiveSpinGuard _g(_lock);
-        return _orders;
-    }
+    // V8-R6/P3: getOrders() 引用逃生口已删除 —— 返回内部 vector 引用却即刻释放锁,
+    // 全项目零调用(逐项 grep 复核), 属竞态地雷 API。
     inline uint32_t getOrderCount() const
     {
         RecursiveSpinGuard _g(_lock);

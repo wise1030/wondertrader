@@ -16,15 +16,17 @@ namespace futu
 OrderRouter::OrderRouter()
 {
     RecursiveSpinGuard _g(_lock);
-    // Pre-allocate rate counters for all 3 sources
+    // Pre-allocate rate counters for all sources
     _rate_counters[static_cast<int>(Source::ARBITRAGE)] = RateCounter{};
     _rate_counters[static_cast<int>(Source::HEDGING)] = RateCounter{};
     _rate_counters[static_cast<int>(Source::CLOSEOUT)] = RateCounter{};
+    _rate_counters[static_cast<int>(Source::RISK_REDUCE)] = RateCounter{}; // V8-R6/P2-3
 
     // Pre-allocate active order lists with reasonable capacity
     _active_orders[static_cast<int>(Source::ARBITRAGE)].reserve(16);
     _active_orders[static_cast<int>(Source::HEDGING)].reserve(8);
     _active_orders[static_cast<int>(Source::CLOSEOUT)].reserve(8);
+    _active_orders[static_cast<int>(Source::RISK_REDUCE)].reserve(8); // V8-R6/P2-3
 }
 
 void OrderRouter::setRateLimit(Source src, uint32_t limit, uint32_t window_ms)

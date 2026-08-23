@@ -63,14 +63,20 @@
 #include <chrono>
 
 //==========================================================================
-// V8-R4/P0-3: 回调大锁 -- FUTU_CALLBACK_LOCK=0 细粒度编译开关已正式删除。
-// 依据: 生产基线恒为 1; =0 模式存在至少 6 处已证实的假无锁
-// (SelfTradeCalibrator map 并发插入/PerformanceMonitor 裸计数/
-// consumePairTag 锁外/EventDispatcher subscribe 等, 见 DIAGNOSTIC_REPORT_V8
-// P0-3), 保留开关 = 保留误开启即 data race 的认知陷阱。
-// 若未来需要细粒度并发, 须先建立跨线程写点清单并逐项 seqlock/atomic 化。
+// V8-R4/P0-3 + V8-R6/WS-F: 回调串行化两态编译开关 (默认 big 与历史基线一致)。
+// 历史: P0-3 曾删除 FUTU_CALLBACK_LOCK=0 细粒度开关 (=0 存在 ≥6 处假无锁);
+// R6 起在 WS-A(停机域收编)/WS-E(命令化单飞)/写点清单完备的前提下恢复两态,
+// 切 none 前必须: 全量 TestUnits TSAN 构建 + _ec_5d 逐比特 A/B + 灰度 p99/p999
+// 验收 (含 refreshQuotes 持锁时长埋点, 见去大锁方案节) —— 缺一不可。
 //==========================================================================
+#ifndef FUTU_CB_LOCK_BIG
+#define FUTU_CB_LOCK_BIG 1
+#endif
+#if FUTU_CB_LOCK_BIG
 #define FUTU_CB_LOCK_GUARD() std::lock_guard<std::recursive_mutex> _cb_lock(_cb_mtx)
+#else
+#define FUTU_CB_LOCK_GUARD()
+#endif
 
 namespace futu
 {
@@ -425,16 +431,30 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 
 void UftFutuMmStrategy::on_session_begin(IUftStraCtx* ctx, uint32_t uTDate)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
-    // 5A-3: 会话开始处理外移 (FutuRuntimeOps)
-    FutuRuntimeOps::onSessionBegin(*this, ctx, uTDate);
+    FUTU_CB_LOCK_GUARD();
+    // V8-R6/WS-E: 命令化 —— big 下 post 后同回调内 drain, 与旧内联逐比特一致。
+    // none 下 Session 属 Md 域: 仅发布者即 Md 线程(回测单线程)时自 drain;
+    // 实盘 ticker 线程只投递, 由下一 on_tick 检查点在 Md 属主线程执行
+    // (session 切换后必有 tick 流入, 无静默期滞留)。
+    postCommand(PendingCommand::Type::SessionBegin, uTDate);
+#if FUTU_CB_LOCK_BIG
+    drainPendingCommands(ctx, true);
+#else
+    if (std::this_thread::get_id() == _md_tid.load(std::memory_order_acquire))
+        drainPendingCommands(ctx, true);
+#endif
 }
 
 void UftFutuMmStrategy::on_session_end(IUftStraCtx* ctx, uint32_t uTDate)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
-    // 5A-3: 会话结束处理外移 (FutuRuntimeOps)
-    FutuRuntimeOps::onSessionEnd(*this, ctx, uTDate);
+    FUTU_CB_LOCK_GUARD();
+    postCommand(PendingCommand::Type::SessionEnd, uTDate);
+#if FUTU_CB_LOCK_BIG
+    drainPendingCommands(ctx, true);
+#else
+    if (std::this_thread::get_id() == _md_tid.load(std::memory_order_acquire))
+        drainPendingCommands(ctx, true);
+#endif
 }
 
 //============================================================
@@ -581,7 +601,12 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
 
 void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD();
+    // V8-R6/WS-E: 首个 tick 捕获 Md 属主 tid (回测=回放线程; 实盘=MdSpi),
+    // 供 none 模式 Session 命令发布者自 drain 判定。
+    if (_md_tid.load(std::memory_order_relaxed) == std::thread::id{})
+        _md_tid.store(std::this_thread::get_id(), std::memory_order_release);
+    drainPendingCommands(ctx, true); // V8-R6/WS-E Md 检查点: Session 域 (快速路径 ~1ns)
 
     // V8-P0-1: 热参数 drain -- watcher 线程只写共享内存+置脏, 此处(_cb_mtx 内)
     // 统一应用; 嵌套 recursive_mutex 安全, 复用 on_params_updated 的
@@ -689,9 +714,9 @@ void UftFutuMmStrategy::on_transaction(IUftStraCtx* ctx, const char* stdCode, WT
     double price = trans.price;
     uint64_t timestamp = trans.action_time;
 
-    // 根据 price vs mid 判断方向
-    double last_mid = _coordinator ? _coordinator->getLastMid(stdCode) : 0.0;
-    bool isBuy = (last_mid > 0) ? (price >= last_mid) : true;
+    // V8-R6/P2-4: 删除死代码 —— last_mid/isBuy 此前计算后零消费(方向分类由
+    // MarketDataContext::onTransaction 内部独立完成), 且 last_mid==0 时默认
+    // isBuy=true 的系统性偏差曾污染下游口径的隐患随删除一并消除。
 
     // 更新 SpreadOptimizer 的成交数据 (P0-2.1: Legacy onFill removed)
     if (_config.modules.use_spread_optimizer) {
@@ -719,7 +744,8 @@ void UftFutuMmStrategy::on_transaction(IUftStraCtx* ctx, const char* stdCode, WT
 void UftFutuMmStrategy::on_trade(
     IUftStraCtx* ctx, uint32_t localid, const char* stdCode, bool isLong, uint32_t offset, double vol, double price)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD();
+    drainPendingCommands(ctx, false); // V8-R6/WS-E Td 检查点: Channel 域
     // 5A-3: 成交处理外移 (FutuRuntimeOps, friend+别名, 零逻辑改动)
     FutuRuntimeOps::processTradeFill(*this, ctx, localid, stdCode, isLong, offset, vol, price);
 }
@@ -734,7 +760,8 @@ void UftFutuMmStrategy::on_order(IUftStraCtx* ctx,
                                  double price,
                                  bool isCanceled)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD();
+    drainPendingCommands(ctx, false); // V8-R6/WS-E Td 检查点: Channel 域
     // 5A-3: 外移 FutuRuntimeOps
     FutuRuntimeOps::onOrderEvent(*this, ctx, localid, stdCode, isLong, offset, totalQty, leftQty, price, isCanceled);
 }
@@ -777,16 +804,18 @@ void UftFutuMmStrategy::on_position(
 
 void UftFutuMmStrategy::on_channel_ready(IUftStraCtx* ctx)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
-    // 5A-3: 通道恢复序列外移 (FutuRuntimeOps, friend+别名, 零逻辑改动)
-    FutuRuntimeOps::onChannelReady(*this, ctx);
+    FUTU_CB_LOCK_GUARD();
+    // V8-R6/WS-E: 命令化 —— Channel 属 Td 域, 发布者即 TdSpi 线程,
+    // 两种模式均允许自 drain (行情静默期无滞留)。
+    postCommand(PendingCommand::Type::ChannelReady, 0);
+    drainPendingCommands(ctx, false);
 }
 
 void UftFutuMmStrategy::on_channel_lost(IUftStraCtx* ctx)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
-    // 5A-3: 外移 FutuRuntimeOps
-    FutuRuntimeOps::onChannelLost(*this, ctx);
+    FUTU_CB_LOCK_GUARD();
+    postCommand(PendingCommand::Type::ChannelLost, 0);
+    drainPendingCommands(ctx, false);
 }
 
 void UftFutuMmStrategy::finalizeOrder(uint32_t localid)
@@ -795,9 +824,86 @@ void UftFutuMmStrategy::finalizeOrder(uint32_t localid)
     FutuRuntimeOps::finalizeOrder(*this, localid);
 }
 
+//==========================================================================
+// V8-R6/WS-E: 罕见重操作命令通道
+//==========================================================================
+
+void UftFutuMmStrategy::postCommand(PendingCommand::Type type, uint32_t uTDate)
+{
+    {
+        std::lock_guard<std::mutex> _g(_cmd_mtx);
+        _pending_cmds.push_back({type, uTDate});
+    }
+    _cmd_has_pending.store(true, std::memory_order_release);
+}
+
+void UftFutuMmStrategy::drainPendingCommands(wtp::IUftStraCtx* ctx, bool session_domain)
+{
+    auto isSessionCmd = [](PendingCommand::Type t) {
+        return t == PendingCommand::Type::SessionBegin || t == PendingCommand::Type::SessionEnd;
+    };
+    // 快速路径: 无待处理命令时一次 acquire load 即返回 (~1ns, 热路径零负担)
+    if (!_cmd_has_pending.load(std::memory_order_acquire))
+        return;
+    // 单飞 claim: 他线程执行中 => 本域新命令由其在循环内收走或其后的同域
+    // 检查点兜底, 此处直接返回
+    if (_cmd_executing.exchange(1, std::memory_order_acq_rel) != 0)
+        return;
+    // RAII: 命令执行抛异常也必须释放单飞标志, 否则后续 drain 永久失效
+    struct ExecGuard
+    {
+        std::atomic<uint8_t>& f;
+        ~ExecGuard() { f.store(0, std::memory_order_release); }
+    } _exec_guard{_cmd_executing};
+
+    // 按属主域分拣: 循环收走本域命令直至清空; 他域命令留队, 由其属主
+    // 检查点消费 (Md 检查点=Session 域, Td 检查点/发布者=Channel 域)。
+    for (;;) {
+        std::vector<PendingCommand> batch;
+        {
+            std::lock_guard<std::mutex> _g(_cmd_mtx);
+            std::vector<PendingCommand> remain;
+            remain.reserve(_pending_cmds.size());
+            for (const auto& c : _pending_cmds) {
+                if (isSessionCmd(c.type) == session_domain)
+                    batch.push_back(c);
+                else
+                    remain.push_back(c);
+            }
+            _pending_cmds.swap(remain);
+        }
+        if (batch.empty())
+            break;
+        for (const auto& cmd : batch) {
+            switch (cmd.type) {
+            case PendingCommand::Type::ChannelReady:
+                FutuRuntimeOps::onChannelReady(*this, ctx);
+                break;
+            case PendingCommand::Type::ChannelLost:
+                FutuRuntimeOps::onChannelLost(*this, ctx);
+                break;
+            case PendingCommand::Type::SessionBegin:
+                FutuRuntimeOps::onSessionBegin(*this, ctx, cmd.uTDate);
+                break;
+            case PendingCommand::Type::SessionEnd:
+                FutuRuntimeOps::onSessionEnd(*this, ctx, cmd.uTDate);
+                break;
+            }
+        }
+    }
+    // 退出前重算标志: 执行期间到达的本域/他域命令都不丢失唤醒
+    {
+        std::lock_guard<std::mutex> _g(_cmd_mtx);
+        _cmd_has_pending.store(!_pending_cmds.empty(), std::memory_order_release);
+    }
+}
+
 void UftFutuMmStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* message)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD();
+    // on_entrust 无 ctx 入参 (框架契约), 复用 on_init 缓存的主 ctx
+    if (_main_ctx)
+        drainPendingCommands(_main_ctx, false); // V8-R6/WS-E Td 检查点: Channel 域
     // 5A-3: 外移 FutuRuntimeOps
     FutuRuntimeOps::onEntrust(*this, _main_ctx, localid, bSuccess, message);
 }

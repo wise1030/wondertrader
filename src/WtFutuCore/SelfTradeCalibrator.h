@@ -19,6 +19,7 @@
 #include "FutuConfig.h"
 #include "../Includes/FasterDefs.h"
 #include "../Share/RingBuffer.hpp"
+#include "SpinLockGuard.h"
 
 namespace futu
 {
@@ -239,6 +240,15 @@ public:
     void decayCalibration(const std::string& code, uint64_t current_time, uint64_t decay_window_ms = 30000);
 
 private:
+    // V8-R6 收官: 跨线程收编 —— recordFill/getCalibration (TdSpi: 成交/补挂路径) 与
+    // onTick/decayCalibration/getFillRetreat (MdSpi: processQuoting/checkRisk) 双线程
+    // 触碰 _contract_states (wt_hashmap operator[] 结构性插入) / _retreat_states
+    // (std::map 同) / RingBuffer, 字段级 atomic 不覆盖容器结构。拆回调大锁
+    // (FUTU_CB_LOCK_BIG=0) 的硬阻断项, 按 UnifiedOrderTracker 模式全方法收编。
+    // 叶子锁: 临界区内不调用任何外部模块, 无锁序风险; getFillRetreat 为
+    // Md+Td 双调用点, 必须同一把锁。
+    mutable RecursiveSpinLock _lock;
+
     SelfTradeCalibratorConfig _config;
 
     // Fill history per contract (using RingBuffer for performance)

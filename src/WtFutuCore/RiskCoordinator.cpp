@@ -79,9 +79,13 @@ bool RiskCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx, uint64_t exchange_
                         cand.max_position,
                         cand.target);
 
+        // V8-R6/P2-3: taker 减仓改用专用 Source::RISK_REDUCE —— 此前冒用 CLOSEOUT:
+        //   (a) 污染 closeout 订单统计口径; (b) CloseoutOrchestrator::onOrderEvent
+        //   的 is_closeout_order 判定把 taker 单事件误判为 closeout 单, FLATTENING
+        //   期间消耗 closeout retry 预算; (c) 隐式落入 Fix4 REVERSIBLE 豁免集合。
         OrderSubmitResult rr = cand.is_long
-            ? _deps.order_router->submitSell(ctx, cand.code.c_str(), cand.price, cand.qty, Source::CLOSEOUT, 1)
-            : _deps.order_router->submitBuy(ctx, cand.code.c_str(), cand.price, cand.qty, Source::CLOSEOUT, 1);
+            ? _deps.order_router->submitSell(ctx, cand.code.c_str(), cand.price, cand.qty, Source::RISK_REDUCE, 1)
+            : _deps.order_router->submitBuy(ctx, cand.code.c_str(), cand.price, cand.qty, Source::RISK_REDUCE, 1);
 
         if (rr.rate_limited) {
             WTSLogger::warn("[TAKER_REDUCE] {} rate limited, will retry next cooldown", cand.code);
@@ -202,6 +206,8 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
                 _deps.order_router->cancelAllBySource(ctx, Source::CLOSEOUT);
                 _deps.order_router->cancelAllBySource(ctx, Source::HEDGING);
                 _deps.order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
+                // V8-R6/P2-3: 在途 taker 减仓单一并清扫 (HALT 后残留的对手价 FAK 单)
+                _deps.order_router->cancelAllBySource(ctx, Source::RISK_REDUCE);
             }
 
             // IRREVERSIBLE → 全组合强平(对手价FAK) — P0-1: 统一 RiskLiquidator 原语;

@@ -23,6 +23,7 @@
 #include "SpreadArbitrageTypes.h"
 #include "SelfTradePrevention.h"
 #include "../../Includes/FasterDefs.h"
+#include "../SpinLockGuard.h"
 
 #include <thread>
 #include <atomic>
@@ -431,6 +432,10 @@ private:
     //   read in consumePairTag (in on_trade), erased in onOrderFinalized.
     //==========================================================================
     wtp::wt_hashmap<uint32_t, std::string> _oid_to_pair;
+    // V8-R6 收官审计: P0-3 时代"main-thread-only 无需锁"的注释与事实不符 ——
+    // tagOrderPair 写于 MdSpi(bridge.onTick), consumePairTag/onOrderFinalized
+    // 读删于 TdSpi(on_trade/on_order)。大锁时代被 _cb_mtx 掩盖; 切 none 即竞态。
+    mutable RecursiveSpinLock _oid_pair_lock;
 };
 
 } // namespace futu

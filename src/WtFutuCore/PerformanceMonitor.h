@@ -79,26 +79,54 @@ struct LatencyStats
 /// Throughput metrics
 struct ThroughputStats
 {
-    uint64_t ticks_processed{0};
-    uint64_t quotes_placed{0};
-    uint64_t orders_placed{0};
-    uint64_t cancels_sent{0};
-    uint64_t fills_received{0};
+    // V8-R6 收官: 全部字段原子化 —— record*(Md: tick/quote; Td: fill/order 补挂路径)
+    // 双线程写, 拆回调大锁 (FUTU_CB_LOCK_BIG=0) 的硬阻断项。统计口径允许字段间
+    // 微撕裂 (监控用途), 单字段不再 torn/lost-update。
+    std::atomic<uint64_t> ticks_processed{0};
+    std::atomic<uint64_t> quotes_placed{0};
+    std::atomic<uint64_t> orders_placed{0};
+    std::atomic<uint64_t> cancels_sent{0};
+    std::atomic<uint64_t> fills_received{0};
 
-    uint64_t last_second_ticks{0};
-    uint64_t last_second_quotes{0};
-    uint64_t last_second_orders{0};
-    uint64_t last_second_cancels{0};
-    uint64_t last_second_fills{0};
+    std::atomic<uint64_t> last_second_ticks{0};
+    std::atomic<uint64_t> last_second_quotes{0};
+    std::atomic<uint64_t> last_second_orders{0};
+    std::atomic<uint64_t> last_second_cancels{0};
+    std::atomic<uint64_t> last_second_fills{0};
 
-    uint64_t prev_cumulative_ticks{0};
-    uint64_t prev_cumulative_quotes{0};
-    uint64_t prev_cumulative_orders{0};
-    uint64_t prev_cumulative_cancels{0};
-    uint64_t prev_cumulative_fills{0};
+    std::atomic<uint64_t> prev_cumulative_ticks{0};
+    std::atomic<uint64_t> prev_cumulative_quotes{0};
+    std::atomic<uint64_t> prev_cumulative_orders{0};
+    std::atomic<uint64_t> prev_cumulative_cancels{0};
+    std::atomic<uint64_t> prev_cumulative_fills{0};
 
-    uint64_t start_time_ms{0};
-    uint64_t last_update_ms{0};
+    std::atomic<uint64_t> start_time_ms{0};
+    std::atomic<uint64_t> last_update_ms{0};
+
+    // 原子成员使隐式拷贝失效 —— 显式定义按值快照拷贝 (getThroughputStats 返回值用)
+    ThroughputStats() = default;
+    ThroughputStats(const ThroughputStats& o) { *this = o; }
+    ThroughputStats& operator=(const ThroughputStats& o)
+    {
+        ticks_processed = o.ticks_processed.load(std::memory_order_relaxed);
+        quotes_placed = o.quotes_placed.load(std::memory_order_relaxed);
+        orders_placed = o.orders_placed.load(std::memory_order_relaxed);
+        cancels_sent = o.cancels_sent.load(std::memory_order_relaxed);
+        fills_received = o.fills_received.load(std::memory_order_relaxed);
+        last_second_ticks = o.last_second_ticks.load(std::memory_order_relaxed);
+        last_second_quotes = o.last_second_quotes.load(std::memory_order_relaxed);
+        last_second_orders = o.last_second_orders.load(std::memory_order_relaxed);
+        last_second_cancels = o.last_second_cancels.load(std::memory_order_relaxed);
+        last_second_fills = o.last_second_fills.load(std::memory_order_relaxed);
+        prev_cumulative_ticks = o.prev_cumulative_ticks.load(std::memory_order_relaxed);
+        prev_cumulative_quotes = o.prev_cumulative_quotes.load(std::memory_order_relaxed);
+        prev_cumulative_orders = o.prev_cumulative_orders.load(std::memory_order_relaxed);
+        prev_cumulative_cancels = o.prev_cumulative_cancels.load(std::memory_order_relaxed);
+        prev_cumulative_fills = o.prev_cumulative_fills.load(std::memory_order_relaxed);
+        start_time_ms = o.start_time_ms.load(std::memory_order_relaxed);
+        last_update_ms = o.last_update_ms.load(std::memory_order_relaxed);
+        return *this;
+    }
 
     void reset()
     {

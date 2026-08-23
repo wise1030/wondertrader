@@ -9,9 +9,11 @@ namespace futu {
 /// Order source classification for priority routing
 enum class Source : uint8_t
 {
-    ARBITRAGE = 0, ///< 套利下单
-    HEDGING = 1,   ///< 对冲下单
-    CLOSEOUT = 2   ///< 平仓/强平 (highest priority)
+    ARBITRAGE = 0,   ///< 套利下单
+    HEDGING = 1,     ///< 对冲下单
+    CLOSEOUT = 2,    ///< 收盘平仓
+    RISK_REDUCE = 3  ///< V8-R6/P2-3: 风控主动减仓 (taker 紧急减仓; 此前冒用 CLOSEOUT
+                     ///< 污染 closeout 统计口径且隐式落入 Fix4 REVERSIBLE 豁免集合)
 };
 
 /// Get numeric priority for a source (higher = more important)
