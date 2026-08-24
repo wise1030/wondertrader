@@ -63,9 +63,10 @@ TEST(HotParamFile, ParsesValidValuesAndIgnoresUnknownKeys)
 }
 
 // 越界拒收 (负值 / 超上界)
+// 加固(2026-08-24)后 phi 合法域 [0.01,2.0]: 3.0 拒收 (旧表 {0.0001,1} 下 2.0 曾拒收)
 TEST(HotParamFile, RejectsOutOfRangeValues)
 {
-    std::string path = writeTmpYaml("base_spread: -1\nphi: 2.0\nbase_qty: 5\n");
+    std::string path = writeTmpYaml("base_spread: -1\nphi: 3.0\nbase_qty: 5\n");
     std::vector<std::pair<uint32_t, double>> out;
     ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(path.c_str(), out));
     // 仅 base_qty 存活

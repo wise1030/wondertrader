@@ -1331,3 +1331,185 @@ tagOrderPair 写于 MdSpi(bridge.onTick)、consumePairTag/onOrderFinalized 读�
 2. `_ec_5d` 全量逐比特 A/B（big vs none）；
 3. refreshQuotes 持锁时长埋点量化（quoter 自旋锁竞争显性化验收）；
 4. 生产灰度 p99/p999 观察一个交易日 → 删除 `_cb_mtx`（单独 commit，revert 即回退）。
+
+## 当前方案（2026-08-24，热参数加固：边界表对齐 + applyAll 交叉复查 + 启动漂移摘要，用户已确认执行）
+
+**背景**：配置一致性分析确认——26 个热参数的稳态权威是 hotparams.yaml（实盘 ~1s 内覆盖
+config/coordinator 同名键；重启时共享内存旧值经 initial applyAll 立即生效，期间对 config.yaml
+同名键的修改无效，UftFutuMmStrategy.cpp:374-386 注释明示）；回测不跑 watcher、热参完全不生效。
+三处误配风险：
+① **边界口径不一致**——loader error 级 baseSpread(0,20]/baseQty(0,100]/levelStep(0,100]/
+maxDelta(0,1e8]（FutuConfigLoader.cpp:210/227/258/263），而热参边界表 base_spread{0,1000}/
+base_qty{0,100000}/level_step{0,1000}/max_delta{0,1e6} 全部更宽；protect_ticks 热路径允许
+0=静默关闭价格软保护；sticky_threshold 允许 0=每 tick churn 风暴；
+② **交叉校验只跑启动期一次**（权重和±0.1 / maxDelta<maxPosition / full_side_depth≥obligationMinQty
+/ min≤max spread_mult），热更路径零复查；
+③ **漂移无感知**——hotparams 与 config 漂移后，回测验证的参数组合≠实盘运行组合（watcher 仅实盘
+启动），排障易看错文件。
+
+**修改清单**：
+
+1. `FutuHotParamManager.cpp` 边界表收紧（原则：loader error 级→热路径拒收；warn 口径保持宽松
+   交给交叉复查；逐行注释标明来源）：
+   - base_spread {0.5,20}（validator checkRange [0.5,20]；原 {0,1000}）
+   - base_qty {1e-6,100}（loader error (0,100]；原 {0,100000}）
+   - level_step {1e-6,100}（loader error (0,100]；原 {0,1000}）
+   - max_delta {1e-6,1e8}（loader error (0,1e8]；0=静默关组合 skew+WIDEN util 分母；原 {0,1e6}）
+   - phi {0.01,2.0}（validator [0.01,2]；原 {0.0001,1} 上界过紧下界过松）
+   - delta_skew_threshold {0,0.9}（validator [0,0.9]；原 {0,1}）
+   - sticky_threshold {0.01,10}（loader warn (0,10]；0=churn 风暴防呆；原 {0,1e6}）
+   - protect_ticks {0.5,1e4}（<半 tick 软保护无意义；关闭应走 price_protection 开关；原 {0,1e4}）
+   - 其余（权重×5/alpha_sensitivity/improve_retreat_ratio/spread_mult 等）保持宽松。
+2. `FutuHotParamManager.h/.cpp` 新增可测纯函数 `crossCheckIssues(HotCrossCheckInput)`
+   （返回 warn 级问题字符串列表）+ `applyAll` 末尾组装输入调用并逐条 warn "[HOTPARAM-CHECK]"。
+   检查项：五路权重和偏离 1.0 超 ±0.1；full_side_depth（与 loader 同公式）< obligationMinQty；
+   portfolio_max_delta > 任一合约 maxPosition（语义边界口径，经 portfolio 快照取 max_position，
+   applyAll 低频路径拷贝可接受）；min_spread_mult > max_spread_mult（GLFT clamp 区间倒置）；
+   confidence_weight_min > confidence_weight_max（插值反向）。
+3. `FutuHotParamManager.h/.cpp` 新增静态纯函数 `collectDriftLines`（-1=文件不可载，>=0=差异键数，
+   输出人类可读差异行）+ 成员 `logDriftSummary(filepath, strategy_id)`；
+   `UftFutuMmStrategy::on_init` 在 initial applyAll 之后**无条件**调用（回测也打印——watcher 不跑、
+   热参不生效，差异键即回测/实盘行为分叉点）。差异键逐条 warn "[HOTPARAM-DRIFT]
+   'x' config_default=A hotparams=B"，汇总一条含生效语义说明。
+4. `src/TestUnits/test_hot_param_manager.cpp`：RejectsOutOfRangeValues 用例 phi:2.0 改 phi:3.0
+   （新边界下 2.0 合法入界，3.0 才拒收）。
+5. 新增 `src/TestUnits/test_hot_param_hardening.cpp`（CMake GLOB 自动收录）：边界收紧表驱动
+   （拒收/放行两侧：base_spread 30/0.4 拒 3.5 收；protect_ticks 0/0.3 拒 0.5/1 收；
+   sticky_threshold 0 拒 0.02 收；phi 0.005 拒 2.0 收；max_delta 0/1e9 拒 50 收；
+   delta_skew_threshold 0.95 拒 0.9 收；base_qty 150 拒）+ crossCheckIssues 五检查项正反例 +
+   collectDriftLines 差异计数与不可载文件返回 -1。
+6. `README.md` §4.17 热参数小节补三道加固描述；§6 配置体系补"热参与配置文件一致性约定"
+   （26 键稳态以 hotparams.yaml 为准、config 为出厂基线、回测不加载热参）。
+
+**明确不做**：不改任何 yaml 数值（当前 hotparams 与 config 一致）；不给 watcher 加 config 文件
+重载能力；交叉复查不做阻断/拒应用（保持 warn 级，避免热调参被误卡死）。
+
+**验证**：make WtFutuCore + TestUnits 全量（基线 113/115，2 个既有环境性失败）→ 新用例全过 →
+回测冒烟 configbt_v5（EXIT=0/0 HALT/资金收敛；预期日志出现 drift check passed 0/26 且
+0 条 HOTPARAM-CHECK 告警 = 行为中性证明）。
+
+### 实施记录（2026-08-24，已完成，验证通过）
+
+修改清单 1-6 全部落地。验证结果：
+
+- 编译：WtFutuCore + TestUnits 零 error（仅既有 ftime deprecation 警告）。
+- TestUnits：**129/131**（基线 113/115 + 新增 test_hot_param_hardening 16 用例；仅
+  test_session.test_allday / test_shm.test_sharehelper 两个既有环境性失败，零回归）。
+  注意事项：CMake `file(GLOB)` 在 configure 期求值，新增测试文件后需重跑 `cmake .` 再 make
+  （本轮首次构建即因漏此步误报"零新增用例"）。中途修正：DetectsSoftLimitAboveHardCap 子用例
+  预期写错——实现语义为"超过任一合约硬顶即告警"（保守正确，与 per-contract 校验口径一致），
+  测试已按此修正。
+- 回测冒烟 configbt_v5：EXIT=0、0 HALT/0 zombie、session end Delta=0、`HOTPARAM-CHECK` 0 条
+  （应用值通过全部交叉复查 = 行为中性证明）。
+- **漂移检测上线即发现真实漂移**（机制价值的直接证据）：dist/WtBtFutu 副本
+  `[HOTPARAM-DRIFT] 'base_spread' config_default=2.5 hotparams=2.0 / 'base_qty' 3.0 vs 2.0 /
+  'max_delta' 50 vs 30` ——configbt_v5.yaml 为旧参数组合而 dist/hotparams.yaml 与 src 权威一致。
+  此前该漂移完全不可见；正对应"回测不吃热参 ⇒ 差异键=回测/实盘行为分叉点"的告警语义。
+  该差异属回测配置副本固有状态（v5 冒烟用），不调整；正式回归用 _ec_5d 时注意观察同类输出。
+- 部署：新 libWtFutuCore.so 已 cp 至 dist/WtBtFutu/uft/（首轮冒烟曾跑旧库，日志无 drift 行
+  即为此故，二次部署后复验通过）。
+
+## 当前方案（2026-08-24②，业务(GLFT)/风控复核修复包，用户已确认全部问题，方案待确认后执行）
+
+**背景**：应用户要求对 GLFT 业务链与风控链做全面复核（SpreadOptimizer.cpp 逐行 +
+RiskCoordinator/RiskMonitor/QuotePolicyChain/Assembler 消费点交叉验证），产出 P1/P2/P4、
+R1-R6、M1-M4、B1-B5 共 15 项发现，用户裁决全部接受。按风险与行为影响切四个批次，
+每批独立 commit + 独立验证，便于回退与归因。
+
+---
+
+### 批次 A：纯清理 / 零行为（先合）
+
+**A1 (R2) 删除 checkSoftLimits 死方法**
+- `FutuRiskMonitor.h:344` 声明、`.cpp:341-357` 定义全删（零调用已 grep 复核；
+  WIDEN 软响应唯一活路径 = RiskCoordinator.tickSoft :180-183）
+- `README.md` §4.11 流程图行"checkSoftLimits / RiskWidenPolicy.tickSoft"勘误为仅 tickSoft
+
+**A2 (P2) SpreadOptimizer EMA 段整洁化**
+- 删 `prev` 死变量(:91)；消除 `new_smoothed` 自赋值绕行(:95/:99)
+- 首 tick 魔数 `<0.5`(:102) 改显式成员 `bool _mult_initialized{false}`（h 加字段）
+
+**A3 (M4) fastPow 负底数护栏**
+- `x < 0 → return 0.0` + 注释（当前两条调用路径均有 ≥0 守卫 :271/:295，防御未来新调用点 NaN）
+
+**A4 (R4/R6/B1/B3/B4 文档联动，无代码行为)**
+- `coordinator.yaml`：toxicityDetector 节注记"三层响应联动"（GLFT 加宽 toxicity_spread_factor /
+  本节 is_toxic 停边+cooloffMs / GLFT pause mult≥max×0.9）；selfTradeCalibrator 节注记
+  retreat_ticks 与 quoting.improveRetreatRatio 为两个无关机制
+- `QuotePolicyChain.h` 头注释：补 chain.run 固定顺序保证说明 + "风控响应与业务调整混链"边界声明
+- `SpreadOptimizer.h` GLFTParams 注释：phi 实际角色=波动率加价系数（库存厌恶由 delta_skew_* 承担）
+
+### 批次 B：新配置键（默认值=现行为，回测预期逐比特一致）
+
+**B1 (R1) sticky_threshold 一参两用拆分**
+- `UnifiedOrderTracker.h`：cfg 字段改名 `stale_extension_ticks`（默认 2.0 = 现 sticky(1.0)×2 保行为）；
+  删死接口 exceedsStickyThreshold/checkPriceDeviation（零调用已复核）；cpp:459 消费点同步更名
+- `FutuModuleAssembler.cpp:301`：改读新键 `modules.autoCancel.staleExtensionTicks`（缺省 2.0）
+- `coordinator.yaml` autoCancel 节加键+注释；QuoterConfig.sticky_threshold 语义收窄为"顶单黏性"专用
+
+**B2 (M1) 合约级 maxDelta 纳入热参（26→27）**
+- `FutuHotParamManager.h`：枚举尾部追加 `HP_CONTRACT_MAX_DELTA`（保持既有索引稳定；名字寻址共享内存安全）；
+  paramNames/hot_defaults/bounds 表同步 + static_assert 自适应
+- `.cpp` registerParams 默认取 anchor 合约 ci.max_delta；applyAll 经新增
+  `FutuPortfolio::setContractMaxDelta(double)`（锁内遍历置 ContractState.contract_max_delta）
+  ——下游 PreTradeDecision/computeInventoryStrategyInputs 读快照自动生效
+- crossCheck 输入加 contract_max_delta，复用"软限>硬顶 warn"检查
+- `hotparams.yaml` 加 `contract_max_delta: 30`（=现配 → 零行为）；README 全部"26 参数"表述更新
+
+**B3 (M2) signal 层窗口可配化**
+- SignalAggregatorConfig 加 rolling_window(500)/rolling_interval(20)/ic_update_interval(50)，
+  fromVariant 读 model.*，构造透传 RollingScaleTracker/AdaptiveWeightFramework::Config
+- PerformanceAnalyzerConfig 加 adverse_eval_ticks(10)/adverse_timeout_ms(30000)；
+  createPerformanceAnalyzer 读 modules.performanceAnalyzer.*（yaml 新节）
+
+**B4 (P4) 毒性加宽门槛参数化**
+- GLFTParams.toxicity_min_score 默认 0.05，fromVariant 键 toxicityMinScore；:56 硬编码改参数
+
+**B5 (M3) alpha 时效老化（默认关）**
+- coordinator signalAggregator 加 `alphaMaxAgeMs`（默认 0=关闭保行为）；
+  update() 内 book timestamp 可得时，age 超限 → alpha.valid=false+confidence=0
+
+### 批次 C：行为变化（需 _ec_5d A/B 归因）
+
+**C1 (P1) 组合 skew 量纲统一到 ticks**
+- `computePortfolioDeltaSkew(totalDelta)` → 签名加 half_spread_ticks，返回 ×half_spread_ticks
+  （half≤0 返 0）；调用点 :146 同步；权重语义注释固化为"两维同量纲(ticks)，权重=稳定相对力度"
+- 行为影响：组合分量随 spread 宽度伸缩（此前恒 ~0-2 tick 绝对值）——宽价差环境下组合 skew 变强
+- 新增 `src/TestUnits/test_skew_dimensionality.cpp`：同 util 跨 half_spread 线性比例 /
+  权重相加后 clamp 不越界 / 阈值死区不变 / 与 contract 分量相对关系符合"contract 主导"注释
+
+**C2 pending 投影口径对齐（skew 用已实现口径）**
+- 语义固化："skew=已实现库存响应；force_obligation/qty 衰减=前瞻含在途"（义务需要提前性，skew 不需要）
+- `PortfolioContext`(SpreadOptimizer.h:155) 加 contract_realized_delta_util(+valid)；
+  StrategyCoordinator processQuoting 从 tc.cs(delta()/contract_max_delta) 填充
+- SpreadOptimizer :136(cross_authorized)/:144(contract skew) 切换 realized 口径（穿越授权同步收紧，
+  注释说明理由：主动减仓动作不应被未成交挂单预授权）
+- force_obligation 路径（computeInventoryStrategyInputs→StrategyInputs）不动
+- 测试扩展 test_skew_dimensionality.cpp：pending 高位时 realized skew 不变、obligation 输入仍含 pending
+
+### 批次 D：恢复路径单一化（B2 双轨，独立会话式验证）
+
+**D1 ERROR 单轨化**
+- `FutuRuntimeOps::onEntrust` 阈值分支：删除 haltTrading 调用，仅 setQuotingPhase(ERROR)+cancelAll+计数
+  （ERROR 的指数退避自探恢复 handleQuotingAutoResume 不变；halted/recovery_budget 不再被该路径消耗）
+- 消费方矩阵审计（实施时落档）：requoteAfterFill(!isTradingHalted 但 canQuote=false 双保险仍闭)、
+  processTradeFill 四道闸（qphase!=RISK_HALTED 时 halt 恢复机制自然跳过）、
+  RiskCoordinator 已-halt 分支（halted 未设不触发）
+- 契约单测：ERROR 态下 canQuote()==false 且 isTradingHalted()==false（固化单轨语义）
+- 回测 v5+_ec_5d 零回归预期（mocker 下 error 路径几乎不触发）
+
+---
+
+### 验证与提交纪律
+
+| 批次 | 单测 | 回测判据 |
+|---|---|---|
+| A | 全量基线（129/131+新增） | v5 冒烟 CSV 逐比特一致（无行为路径） |
+| B | 热参新键 bounds/drift 用例扩展 | v5 冒烟逐比特一致（新键默认=旧值） |
+| C | test_skew_dimensionality 全过 | v5 冒烟 0 HALT/zombie/error；_ec_5d 全量 A/B 归因记录（skew 组成变化属预期，成交笔数/dynbalance 变化须解释） |
+| D | 契约用例 | v5 + _ec_5d 零回归 |
+
+每批独立 commit；C 批部署顺序 = 先回测归因评审再谈生产。
+
+**明确不做**：GLFT 结构重构（phi 更名等语义保留原键名）；B1/B3/B4 的结构性拆链（维持既有裁决）；
+hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。

@@ -120,6 +120,49 @@ public:
     /// @return false=文件解析失败; true=out 收录全部合法 (idx,value) (可为空)
     static bool parseHotParamFile(const char* filepath, std::vector<std::pair<uint32_t, double>>& out);
 
+    //==========================================================================
+    // 加固 (2026-08-24): 边界对齐后的交叉复查与启动漂移摘要
+    //==========================================================================
+
+    /// applyAll 后交叉复查的纯数值输入 (与模块解耦, 便于单测)
+    struct HotCrossCheckInput
+    {
+        // 五路信号权重
+        double ofi_weight;
+        double trade_weight;
+        double book_imbalance_weight;
+        double momentum_weight;
+        double lead_lag_weight;
+        // 挂单结构 (base_qty/level_qty_multiplier 可热变; 其余为结构性配置不变)
+        double base_qty;
+        double level_qty_multiplier;
+        uint32_t num_levels;
+        uint32_t obligation_level;
+        double scout_qty;
+        double obligation_min_qty;
+        // 组合软限 vs 合约硬顶 (语义边界复查)
+        double portfolio_max_delta;
+        const std::vector<double>* contract_max_positions; ///< 各合约 maxPosition (>0 项), 可为 null
+        // GLFT 区间一致性
+        double max_spread_mult;
+        double min_spread_mult;
+        double confidence_weight_min;
+        double confidence_weight_max;
+    };
+
+    /// 交叉复查 (warn 级, 不阻断): 返回问题描述列表, 空列表=通过。
+    /// 口径与 FutuConfigLoader / FutuConfigValidator 启动期校验一致。
+    static std::vector<std::string> crossCheckIssues(const HotCrossCheckInput& in);
+
+    /// 对比 hotparams 文件与注册默认值(config/coordinator), 返回差异行 (供单测)。
+    /// @return -1=文件不可加载; >=0=差异键数 (out_lines 每差异键一行)
+    static int32_t collectDriftLines(
+        const char* filepath, const double* default_vals, std::vector<std::string>& out_lines);
+
+    /// 启动期漂移摘要: 打印 hotparams.yaml 与 config/coordinator 同名键的差异。
+    /// 回测同样调用 —— watcher 不跑、热参不生效, 差异键即回测/实盘行为分叉点。
+    void logDriftSummary(const char* filepath, const char* strategy_id) const;
+
     double hotVal(HotParamIndex idx) const
     {
         return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val;

@@ -385,6 +385,10 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
         WTSLogger::info("UftFutuMmStrategy[{}] initial hot params synced from shared memory", id());
     }
 
+    // 加固(2026-08-24): 启动期热参漂移摘要 —— 对比 hotparams.yaml 与 config/coordinator 同名键。
+    // 无条件调用(回测也打印): watcher 不跑、热参不生效, 差异键即回测/实盘行为分叉点。
+    _hot_mgr.logDriftSummary("hotparams.yaml", id());
+
     // 启动 hotparams.yaml 文件监视器 (修改后自动写入共享内存并触发热更新)
     // 仅在实盘模式启用 (回测无共享内存)
     // V8-P0-1: watcher 只写共享内存+置脏标志, 参数应用由 on_tick 在
