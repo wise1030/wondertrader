@@ -98,6 +98,10 @@ coordinator:
       warmupTicks: 20
 
     # --- 毒性检测器 (VPIN + OFI + 自成交校准) ---
+    # A4(2026-08-24②) 三层响应联动说明 —— 同一毒性分数驱动三处动作, 调参须整体评估:
+    #   L1 加宽: modules.spreadOptimizer.toxicitySpreadFactor (score>0.05 时 spread_mult 放大)
+    #   L2 停边: QuotePolicyChain::ToxicityPolicy (is_toxic -> 单/双边停报 + cooloffMs 冷却)
+    #   L3 停报: GLFT pause 条件 (spread_mult >= maxSpreadMult × pauseSpreadMultRatio)
     toxicityDetector:
       enabled: true                # 模块级开关 (唯一位置: modules.<name>.enabled)
       # V8-R2 归一化后各分数严格 [0,1]: alpha_toxicity=归一(ofi/trade)权重加权和,
@@ -121,7 +125,8 @@ coordinator:
     # 注意: baseSpread 不在此配置 - 它从 config.yaml 的 quoting.baseSpread 加载
     #       (FutuComponentFactory::createSpreadOptimizer 用参数传入 GLFTParams, 不读本节点)
     spreadOptimizer:
-      phi: 0.20                    # 库存厌恶系数
+      phi: 0.20                    # 波动率加价系数 (A4 澄清: 名义源自 GLFT 库存厌恶项, 实际用于 base spread 的 vol 加成;
+                                   #   库存厌恶由 deltaSkewFactor/inventorySkewGain 承担。键名保留兼容)
       deltaSkewThreshold: 0.3      # Delta 偏斜触发
       deltaSkewFactor: 1.5         # 偏斜强度
       deltaSkewPower: 1.5
@@ -148,6 +153,8 @@ coordinator:
       contractSkewWeight: 1.0      # 单合约偏斜权重
 
     # --- 自成交校准器 ---
+    # A4(2026-08-24②) 命名辨析: 本节 retreatTicks(成交后退价重挂) 与 config.yaml
+    #   quoting.improveRetreatRatio(顶单黏性的改善侧容忍倍数) 是【两个无关机制】, 勿混调。
     selfTradeCalibrator:
       toxicityWindowMs: 5000
       adverseThreshold: 0.6

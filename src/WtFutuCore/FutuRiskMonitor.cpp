@@ -335,26 +335,10 @@ bool FutuRiskMonitor::checkRateLimits()
            _trade_times.size() < _rate_limits.max_trades_per_sec;
 }
 
-// R2.2: 策略性软响应 — delta utilization 软警告区间 (breach 前的渐进式加宽 spread).
-//   设计哲学: WIDEN_SPREAD 是策略行为 (调整报价), 不是硬风控;
-//   在 util 0.8/0.9 时触发, 避免 breach 后才响应 (那时已需要 BLOCK/PAUSE).
-RiskAction FutuRiskMonitor::checkSoftLimits(const FutuPortfolio* portfolio) const
-{
-    if (!portfolio)
-        return RiskAction::NONE;
-    const auto& params = portfolio->getParams();
-    if (params.portfolio_max_delta <= 0)
-        return RiskAction::NONE;
-
-    double absDelta = std::abs(portfolio->getTotalDelta());
-    double util = absDelta / params.portfolio_max_delta;
-
-    if (util >= _rate_limits.position_warning_l2)
-        return RiskAction::WIDEN_SPREAD; // L2: case 内设 ×2.0
-    if (util >= _rate_limits.position_warning_l1)
-        return RiskAction::WIDEN_SPREAD; // L1: case 内设 ×1.5
-    return RiskAction::NONE;
-}
+// R2.2 checkSoftLimits 已删 (2026-08-24② A1): 零调用死方法。
+//   WIDEN_SPREAD 软响应唯一活路径 = RiskCoordinator::checkRisk 的
+//   quote_chain->riskWiden().tickSoft(cur_util, l1, l2, halted) (每 tick 无状态重算,
+//   阈值同源 RateLimits.position_warning_l1/l2)。
 
 RiskAction FutuRiskMonitor::determineAction(const std::vector<RiskViolation>& violations) const
 {

@@ -21,7 +21,10 @@ struct GLFTParams
     double depth_sensitivity; ///< How order book depth affects spread
 
     // Inventory skew parameters (unified with delta)
-    double phi; ///< Inventory penalty coefficient (used in base spread vol contribution)
+    // A4(2026-08-24②) 角色澄清: phi 名义源自经典 GLFT 的库存厌恶项, 在本实现中
+    //   实际充当【波动率加价系数】(computeBaseSpread: spread += phi × percentile/scale × vol_scale);
+    //   库存厌恶的真实承担者是 delta_skew_factor / inventory_skew_gain。键名保留兼容。
+    double phi; ///< Volatility markup coefficient in base spread (legacy name from GLFT inventory penalty)
 
     // Delta skew parameters
     double delta_skew_threshold; ///< Portfolio delta skew trigger threshold (utilization, default 0.3)
@@ -251,6 +254,7 @@ private:
     std::string _code;
     mutable double _smoothed_spread_mult = 1.0;
     mutable double _last_output_spread_mult = 0.0; // B-1 fix: 上tick最终输出值，用于变化率限制
+    mutable bool _mult_initialized = false;        // A2(2026-08-24②): 首 tick 跳过速率限幅（替代原魔数判定）
 };
 
 } // namespace futu

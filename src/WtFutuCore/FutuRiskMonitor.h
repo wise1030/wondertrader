@@ -339,9 +339,8 @@ public:
     /// 零堆分配版本: 复用调用方缓冲 (热路径每 tick 调用)
     void checkRiskLimits(const FutuPortfolio* portfolio, std::vector<RiskViolation>& violations);
 
-    /// R2.2: 策略性软响应检查 (util 0.8/0.9 → WIDEN_SPREAD, 不产生硬 violation)
-    /// 由 Coordinator 在 checkRiskLimits 之前调用, soft action 不阻断 hard check
-    RiskAction checkSoftLimits(const FutuPortfolio* portfolio) const;
+    // R2.2 checkSoftLimits 已删 (2026-08-24② A1): 零调用死方法, WIDEN 软响应唯一活路径
+    //   = RiskCoordinator::checkRisk 的 quote_chain->riskWiden().tickSoft (每 tick 无状态重算)
 
     /// Pre-trade check: returns PreTradeDecision = RiskVerdict (风控闸门) + StrategyInputs (策略输入).
     /// 分层: 风控(halt_quoting/drain)基于净头寸 vs maxPosition;

@@ -9,8 +9,12 @@ namespace futu
 
 // perf#9: 常用幂次特化, 避免 libm pow (~40ns/次). power 来自配置,
 // 默认 1.5; == 比较安全 (配置加载的字面量精确表示).
+// 加固(2026-08-24② A3): x<0 时非整数幂 = NaN -- 现有两条调用路径均有 x>=0 守卫
+// (contract util>=0 :271 / portfolio excess>=0 :297), 此处兜底防御未来新调用点.
 static inline double fastPow(double x, double power)
 {
+    if (x < 0.0)
+        return 0.0;
     if (power == 1.5)
         return x * std::sqrt(x);
     if (power == 2.0)
@@ -86,21 +90,18 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
 
     // B-1 fix: 限制每tick最大变化率，防止毒性开关导致spread_mult震荡
     // 上行最大+10%/tick，下行最大-15%/tick（下行允许更快收缩以恢复报价竞争力）
+    // 速率基准 = 上一 tick 的最终输出值 (_last_output_spread_mult), 而非本轮 EMA 值
+    // 首 tick (_last_output 初值 0): 跳过限幅直接采用 EMA 值 (原 `<0.5` 魔数等价改写)
     constexpr double max_up_rate = 0.10;
     constexpr double max_down_rate = 0.15;
-    double prev = _smoothed_spread_mult; // EMA后的值（赋值前）
-    // 注意: 此时 _smoothed_spread_mult 已更新，但 spread_mult 还是旧值
-    // 需要用上一次的 _smoothed_spread_mult 作为基准
-    // 重新计算: prev_smoothed 是赋值前的值
-    double new_smoothed = _smoothed_spread_mult;
-    // 用上一次输出的 spread_mult 作为基准（即上一tick的最终值）
-    double max_up = _last_output_spread_mult * (1.0 + max_up_rate);
-    double max_down = _last_output_spread_mult * (1.0 - max_down_rate);
-    _smoothed_spread_mult = std::max(max_down, std::min(max_up, new_smoothed));
+    const double ema_value = _smoothed_spread_mult; // EMA 后、限幅前
+    const double max_up = _last_output_spread_mult * (1.0 + max_up_rate);
+    const double max_down = _last_output_spread_mult * (1.0 - max_down_rate);
+    _smoothed_spread_mult = std::max(max_down, std::min(max_up, ema_value));
 
-    // 首tick初始化
-    if (_last_output_spread_mult < 0.5) {
-        _smoothed_spread_mult = new_smoothed;
+    if (!_mult_initialized) {
+        _mult_initialized = true;
+        _smoothed_spread_mult = ema_value;
     }
 
     spread_mult = _smoothed_spread_mult;

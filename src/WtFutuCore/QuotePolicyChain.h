@@ -8,6 +8,14 @@
  *   GLFT → RiskWiden → ArbCloseSync → Toxicity → LimitPrice → ColdStart
  *        → FillRetreat → 缓存+发布
  *
+ * A4(2026-08-24②) 边界声明:
+ *   - 本链混合了【风控响应】(RiskWiden/Toxicity/LimitPrice) 与【业务调整】
+ *     (ArbCloseSync/ColdStart/FillRetreat), 边界由 chain.run 的固定顺序维护,
+ *     非类型系统强制 —— 新增策略对象必须评估对既有顺序依赖的影响。
+ *   - 已知同 tick 覆盖顺序依赖: RiskWiden.tickSoft 无条件重算会覆盖本 tick
+ *     更早写入的 hard 闩锁; 因 hard 闩锁(onHardWiden, 由 RiskCoordinator 在
+ *     tickSoft 之后调用)总是后写, 旧语义得以保留 —— run() 不得重排前两阶段。
+ *
  * 等价性关键:
  *   - RiskWidenPolicy._mult 保留旧 _risk_spread_mult 全部写入语义
  *     (soft 每 tick 无条件覆盖 / hard max 闩锁 / 恢复清零);
