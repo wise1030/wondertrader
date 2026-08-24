@@ -268,6 +268,16 @@ public:
     ///   沿用旧语义: 写后不置聚合脏标, 最晚下一 tick onTick 置脏后收敛)
     void smoothUpdateHedgeRatio(const std::string& code, double beta, long sample_count);
 
+    /// B2(2026-08-24②): 单合约 delta 软限热更新 —— 应用到全部合约
+    ///   (差异化 per-contract 配置需重启; 消费方 PreTradeDecision/computeInventoryStrategyInputs
+    ///    经 ContractState 快照自动生效)
+    void setContractMaxDelta(double v)
+    {
+        RecursiveSpinGuard _g(_lock);
+        for (auto& c : _contracts)
+            c.contract_max_delta = v;
+    }
+
     //==========================================================================
     // Market Data Updates
     //==========================================================================

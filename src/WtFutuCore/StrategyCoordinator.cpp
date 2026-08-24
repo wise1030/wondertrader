@@ -300,8 +300,9 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
         if (autoCancel) {
             _cfg.modules.auto_cancel_max_age_ms =
                 readUInt32(autoCancel, "maxAgeMs", _cfg.modules.auto_cancel_max_age_ms);
-            _cfg.modules.auto_cancel_price_deviation =
-                readDouble(autoCancel, "priceDeviation", _cfg.modules.auto_cancel_price_deviation);
+            // B1: 新键 staleExtensionTicks (原 priceDeviation 键删除——其消费者为死接口)
+            _cfg.modules.stale_extension_ticks =
+                readDouble(autoCancel, "staleExtensionTicks", _cfg.modules.stale_extension_ticks);
             _cfg.modules.cancel_retry_interval_ms =
                 readUInt32(autoCancel, "cancelRetryIntervalMs", _cfg.modules.cancel_retry_interval_ms);
             _cfg.modules.cancel_max_retries =
@@ -1058,11 +1059,17 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
         }
 
         // v7.1: 带符号 delta 利用率注入 skew (正=多 负=空, 取较大侧)
+        //   —— projected 口径 (含同向 pending×hr), 消费方 = force_obligation/qty 衰减
         if (cs && cs->contract_max_delta > 0) {
             p_ctx.contract_delta_util = (decision.strategy.long_delta_util >= decision.strategy.short_delta_util)
                                             ? decision.strategy.long_delta_util
                                             : -decision.strategy.short_delta_util;
             p_ctx.contract_delta_util_valid = true;
+            // C2(2026-08-24②): skew 改用已实现口径 (不含 pending 投影) ——
+            //   语义原则: skew 响应已实现库存, 义务/数量响应前瞻库存(含在途);
+            //   穿越授权同步收紧 (主动减仓不被未成交挂单预授权)
+            p_ctx.contract_realized_delta_util = cs->delta() / cs->contract_max_delta;
+            p_ctx.contract_realized_delta_util_valid = true;
         }
     }
 

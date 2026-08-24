@@ -66,6 +66,7 @@ enum HotParamIndex : uint32_t
     HP_IMPROVE_RETREAT_RATIO,
     HP_PROTECT_TICKS,
     HP_MAX_PRICE_DEVIATION,
+    HP_CONTRACT_MAX_DELTA, ///< B2(2026-08-24②): 单合约 delta 软限(应用于全部合约; 差异化配置需重启)
     HP_COUNT
 };
 
@@ -96,11 +97,13 @@ public:
     /// @param glft_defaults 从首个 SpreadOptimizer 读取的默认 GLFT 参数
     /// @param sig_defaults  从首个 SignalAggregator 读取的默认权重
     /// @param alpha_sensitivity coordinator 模块的 alpha 灵敏度
+    /// @param contract_max_delta B2: 单合约 delta 软限默认值 (anchor 合约配置值)
     void registerParams(wtp::IUftStraCtx* ctx,
                         const FutuMmConfig& config,
                         const GLFTParams& glft_defaults,
                         const SignalAggregatorConfig& sig_defaults,
-                        double alpha_sensitivity);
+                        double alpha_sensitivity,
+                        double contract_max_delta);
 
     /// 应用全部热参数到各模块 (on_params_updated 委托)
     void applyAll(const Targets& t, const char* strategy_id);
@@ -142,6 +145,7 @@ public:
         double obligation_min_qty;
         // 组合软限 vs 合约硬顶 (语义边界复查)
         double portfolio_max_delta;
+        double contract_max_delta; ///< B2: 单合约 delta 软限 (热参数)
         const std::vector<double>* contract_max_positions; ///< 各合约 maxPosition (>0 项), 可为 null
         // GLFT 区间一致性
         double max_spread_mult;
@@ -199,6 +203,7 @@ public:
             "improve_retreat_ratio",
             "protect_ticks",
             "max_price_deviation",
+            "contract_max_delta",
         };
         return names;
     }

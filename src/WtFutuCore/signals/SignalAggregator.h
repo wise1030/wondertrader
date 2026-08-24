@@ -65,6 +65,14 @@ struct SignalAggregatorConfig
     double book_imbalance_threshold = 0.2;
     double momentum_ema_alpha = 0.1;
 
+    // B3(2026-08-24②): 归一化/IC 簿记节律可配 (原编译期常量)
+    uint32_t rolling_window = 500;    ///< p95 幅度归一化滚动窗口
+    uint32_t rolling_interval = 20;   ///< p95 重算间隔 (tick)
+    uint32_t ic_update_interval = 50; ///< IC 更新间隔 (tick)
+
+    // B5(2026-08-24②): alpha 时效老化 (0=关闭保行为; 仅作用于持久化 last-value 的 LEAD_LAG 通道)
+    uint32_t lead_lag_max_age_ms = 0;
+
     uint32_t warmup_ticks = 50;
 
     static SignalAggregatorConfig fromVariant(wtp::WTSVariant* v)
@@ -108,6 +116,7 @@ struct SignalAggregatorConfig
             if (ll) {
                 c.use_lead_lag = true;
                 c.lead_lag_window = FutuConfig::readUInt32(ll, "window", 50);
+                c.lead_lag_max_age_ms = FutuConfig::readUInt32(ll, "maxAgeMs", 0); // B5: 0=关闭
             }
         }
 
@@ -134,6 +143,10 @@ struct SignalAggregatorConfig
             } else {
                 WTSLogger::warn("SignalAggregator: model.weights not configured, using default weights");
             }
+            // B3: 归一化/IC 簿记节律 (缺省=原编译期常量)
+            c.rolling_window = FutuConfig::readUInt32(model, "rollingWindow", 500);
+            c.rolling_interval = FutuConfig::readUInt32(model, "rollingInterval", 20);
+            c.ic_update_interval = FutuConfig::readUInt32(model, "icUpdateInterval", 50);
             c.strong_threshold = FutuConfig::readDouble(model, "strongThreshold", 0.7);
         } else {
             WTSLogger::warn("SignalAggregator: model section missing, using default linear weights");
@@ -195,6 +208,7 @@ public:
         wcfg.base_book = cfg.book_imbalance_weight;
         wcfg.base_mom = cfg.momentum_weight;
         wcfg.base_ll = cfg.lead_lag_weight;
+        wcfg.ic_update_interval = cfg.ic_update_interval; // B3: 节律可配
         _weight_framework = std::make_unique<AdaptiveWeightFramework>(wcfg);
     }
 
@@ -410,6 +424,7 @@ private:
         if (_cfg.use_lead_lag) {
             LeadLagSignalSource::Config ll_cfg;
             ll_cfg.window = _cfg.lead_lag_window;
+            ll_cfg.max_age_ms = _cfg.lead_lag_max_age_ms; // B5: 时效老化 (0=关)
             auto src = std::make_unique<LeadLagSignalSource>(ll_cfg);
             // LL 不做幅度归一化 — LL 信号特性与其他信号不同:
             // 大部分 tick 是重复值(anchor tick 频率低), p95 归一化会爆炸.
@@ -713,7 +728,8 @@ private:
             return;
         for (uint8_t i = 0; i < static_cast<uint8_t>(WeightedSignalType::COUNT); i++) {
             auto type = static_cast<WeightedSignalType>(i);
-            _scale_trackers.emplace(type, RollingScaleTracker(500, 20, 0.95, 0.01));
+            // B3: 窗口/间隔可配 (原 500/20 常量)
+            _scale_trackers.emplace(type, RollingScaleTracker(_cfg.rolling_window, _cfg.rolling_interval, 0.95, 0.01));
         }
         _scale_trackers_initialized = true;
     }

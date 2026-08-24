@@ -449,16 +449,16 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(const std:
         // 价格偏离检查已移至 FutuQuoter.refreshQuotes 的粘性报价逻辑
         // FutuQuoter 比较 newPrice vs placePrice，更准确感知 skew/spread 变化
         //
-        // 优化：如果价格仍在有效范围内（偏离小于 2 * sticky_threshold），
+        // 优化：如果价格仍在有效范围内（偏离小于 stale_extension_ticks），
         //       不立即撤单，给订单更多成交机会
+        // (B1: 原隐式 sticky_threshold×2 显式化为独立键, 默认 2.0 行为保持)
         // ============================================================
         uint64_t age = currentTime - order.place_time;
         if (age > _cfg.max_age_ms) {
             // 价格有效性检查：如果价格仍在合理范围内，延迟撤单
             double price_deviation = std::abs(order.price - currentMid) / tickSize;
-            double extended_threshold = _cfg.sticky_threshold * 2.0; // 扩展阈值
 
-            if (price_deviation <= extended_threshold) {
+            if (price_deviation <= _cfg.stale_extension_ticks) {
                 // 价格仍在有效范围内，延长订单寿命（给 50% 额外时间）
                 uint64_t extended_age = _cfg.max_age_ms + (_cfg.max_age_ms / 2);
                 if (age <= extended_age) {

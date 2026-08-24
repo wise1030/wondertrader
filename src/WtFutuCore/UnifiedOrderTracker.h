@@ -178,8 +178,10 @@ struct UnifiedTrackerConfig
 {
     uint32_t max_orders;
     uint32_t max_age_ms;
-    double price_deviation;
-    double sticky_threshold;
+    // B1(2026-08-24②): 原 price_deviation/sticky_threshold 删除 —— 前者消费者为死接口,
+    //   后者与 QuoterConfig.sticky_threshold(顶单黏性)同名异义易混调。
+    //   tracker 侧唯一用途 = STALE 订单延寿判定阈值(ticks), 独立成键。
+    double stale_extension_ticks;
     uint32_t max_cancel_rate;
     uint32_t pending_cancel_timeout_ms; ///< B+: 撤单重试间隔 (默认 300ms, 超时重发而非遗忘)
     uint32_t cancel_max_retries;        ///< B+: 撤单最大重试次数, 达到后置 IS_ZOMBIE (默认 3)
@@ -190,7 +192,7 @@ struct UnifiedTrackerConfig
     double stp_min_price_gap;
 
     UnifiedTrackerConfig()
-        : max_orders(20), max_age_ms(10000), price_deviation(3.0), sticky_threshold(2.0), max_cancel_rate(10),
+        : max_orders(20), max_age_ms(10000), stale_extension_ticks(2.0), max_cancel_rate(10),
           pending_cancel_timeout_ms(300), cancel_max_retries(3), stp_enabled(true), stp_allow_same_price(false),
           stp_min_price_gap(1.0)
     {}
@@ -560,35 +562,9 @@ public:
     // Price Deviation Check
     //==========================================================================
 
-    inline bool checkPriceDeviation(uint32_t orderId, double currentMid, double tickSize)
-    {
-        RecursiveSpinGuard _g(_lock);
-        UnifiedOrderInfo* order = getOrderByOrderId(orderId);
-        if (!order || order->isPendingCancel())
-            return false;
-        if (order->place_mid <= 0 || currentMid <= 0 || tickSize <= 0)
-            return false;
-
-        double deviation = std::abs(currentMid - order->place_mid) / tickSize;
-        if (deviation > _cfg.price_deviation) {
-            // B+: pendingCancel 仍计入全源 pending, 不再扣减
-            order->setPendingCancel(CancelReason::PRICE_DEVIATION);
-            return true;
-        }
-        return false;
-    }
-
-    inline bool exceedsStickyThreshold(uint32_t orderId, double currentMid, double tickSize) const
-    {
-        RecursiveSpinGuard _g(_lock);
-        auto it = _order_index.find(orderId);
-        if (it == _order_index.end())
-            return true;
-        const UnifiedOrderInfo& order = _orders[it->second];
-        if (order.place_mid <= 0 || currentMid <= 0 || tickSize <= 0)
-            return true;
-        return std::abs(currentMid - order.place_mid) / tickSize > _cfg.sticky_threshold;
-    }
+    // B1(2026-08-24②): checkPriceDeviation/exceedsStickyThreshold 已删 —— 零调用死接口,
+    //   报价黏性/价格偏离主判定在 FutuQuoter::checkStickyUpdate (sticky_threshold 专属 quoter)。
+    //   tracker 侧仅保留 STALE 延寿判定, 使用独立键 stale_extension_ticks (原 sticky_threshold×2)。
 
     //==========================================================================
     // Auto-Cancel Checks

@@ -56,8 +56,9 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
 
     // 2a. 毒性扩大 spread (全市场毒性，来自 PredictiveToxicity)
     //     仅当 toxicity_score 足过最小阈值时才应用，过滤噪声
+    //     B4: 门槛参数化 (原硬编码 0.05), 键 toxicityMinScore
     bool toxic_active = false;
-    if (ctx.toxicity.valid && ctx.toxicity.toxic_detected && ctx.toxicity.toxicity_score > 0.05) {
+    if (ctx.toxicity.valid && ctx.toxicity.toxic_detected && ctx.toxicity.toxicity_score > params.toxicity_min_score) {
         double tox_mult = 1.0 + ctx.toxicity.toxicity_score * params.toxicity_spread_factor;
         spread_mult *= tox_mult;
         result.toxicity_adjustment = tox_mult - 1.0;
@@ -128,23 +129,28 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     //==========================================================================
     // 4. Delta Skew (统一 delta 口径, 2026-08-19 语义边界原则)
     //    - 单合约 delta skew: 防止单合约头寸过度累积
-    //      (输入 = (delta+同向pending×hr)/contract_max_delta, 由风控前置计算注入)
+    //      (C2: 输入 = position×hedge_ratio/contract_max_delta 已实现口径,
+    //       pending 投影仅用于 force_obligation/qty 衰减 —— skew 响应已实现库存)
     //    - 组合 delta skew: 防止组合整体头寸过度累积
     //==========================================================================
     double half_spread = result.base_spread / 2.0;
 
-    // v7.1 连续控制: delta_util ≥ 1.0 时授权减仓侧穿越 mid
-    bool cross_authorized = pCtx && pCtx->contract_delta_util_valid && std::abs(pCtx->contract_delta_util) >= 1.0;
+    // v7.1 连续控制: 已实现 delta_util ≥ 1.0 时授权减仓侧穿越 mid
+    //   (C2: 从 projected 切换到 realized —— 主动减仓不被未成交挂单预授权)
+    bool cross_authorized = pCtx && pCtx->contract_realized_delta_util_valid &&
+                            std::abs(pCtx->contract_realized_delta_util) >= 1.0;
 
     double totalDelta = pCtx ? pCtx->total_delta : 0;
 
-    // 单合约 skew: 统一 delta 口径 (单一路径, legacy 双路径已删除);
+    // 单合约 skew: C2 起统一已实现口径 (单一路径);
     //       未注入 (contract_max_delta<=0) 时单合约 skew 为 0, 仅组合维度生效
     double contract_skew =
-        (pCtx && pCtx->contract_delta_util_valid)
-            ? computeContractDeltaSkew(pCtx->contract_delta_util, half_spread, params.skew_cross_max_ticks)
+        (pCtx && pCtx->contract_realized_delta_util_valid)
+            ? computeContractDeltaSkew(pCtx->contract_realized_delta_util, half_spread, params.skew_cross_max_ticks)
             : 0.0;
-    double portfolio_skew = computePortfolioDeltaSkew(totalDelta);
+    // C1(2026-08-24②): 组合分量量纲统一到 ticks (×half_spread) ——
+    //   此前返回无纲量被隐式当 ticks 用, 与 contract 分量(ticks)相加时相对力度随价差宽度漂移。
+    double portfolio_skew = computePortfolioDeltaSkew(totalDelta, half_spread);
 
     // v3 双维 skew：从"取较大者"改为加权求和（权重在 GLFTParams）
     // - portfolio_skew_weight=0.5: portfolio 维度（控总敞口，温和影响）
@@ -285,10 +291,12 @@ SpreadOptimizer::computeContractDeltaSkew(double signed_delta_util, double half_
     return direction * norm * half_spread_ticks;
 }
 
-double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta) const
+double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta, double half_spread_ticks) const
 {
     const GLFTParams params = snapshotParams(); // F20
     if (params.portfolio_max_delta <= 0)
+        return 0.0;
+    if (half_spread_ticks <= 0)
         return 0.0;
 
     double util = std::abs(totalDelta) / params.portfolio_max_delta;
@@ -296,8 +304,10 @@ double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta) const
         return 0.0;
 
     double excess = util - params.delta_skew_threshold;
-    double direction = (totalDelta > 0) ? -1.0 : 1.0;
-    return direction * params.delta_skew_factor * fastPow(excess, params.delta_skew_power);
+    double direction = (totalDelta > 0) ? -1.0 : +1.0;
+    // C1(2026-08-24②): ×half_spread_ticks 归一到 ticks —— 与单合约分量同量纲,
+    //   加权权重(portfolioSkewWeight/contractSkewWeight)自此为稳定的相对力度语义。
+    return direction * params.delta_skew_factor * fastPow(excess, params.delta_skew_power) * half_spread_ticks;
 }
 
 } // namespace futu

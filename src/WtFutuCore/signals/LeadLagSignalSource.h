@@ -53,7 +53,9 @@ public:
 
         // V8-S6: lag_ms 安慰剂键删除 — 从未实现 (没有任何时间偏移逻辑消费它),
         // 保留会给人"领先滞后延迟可调"的错觉。真正的时延语义归 R4b 信号重设计。
-        Config() : window(50), weight(0.3), scale_factor(3000.0) {}
+        // B5(2026-08-24②): alpha 时效老化 (0=关闭保行为) —— 超龄 last-value 置 invalid
+        uint32_t max_age_ms;
+        Config() : window(50), weight(0.3), scale_factor(3000.0), max_age_ms(0) {}
     };
 
     // V8-S2: _current_mid/_current_timestamp 原未初始化即被读 (calculateSignal
@@ -80,6 +82,15 @@ public:
         // This method just stores current contract's mid
         _current_mid = book.getMidPrice();
         _current_timestamp = book.getTimestamp();
+
+        // B5(2026-08-24②): alpha 时效老化 —— LL 是唯一持久化 last-value 的通道,
+        //   anchor 长时间无 tick 时旧 alpha 会持续参与加权。超龄置 invalid,
+        //   下次 updateLeadContract→calculateSignal 自愈恢复 valid。
+        if (_cfg.max_age_ms > 0 && _result.valid && _result.timestamp > 0 && _current_timestamp > _result.timestamp &&
+            (_current_timestamp - _result.timestamp) > static_cast<uint64_t>(_cfg.max_age_ms))
+        {
+            _result.valid = false;
+        }
 
         // LL 持久化: 非 anchor tick 保留上次 calculateSignal 的结果
         // 原: result 保持上次的 valid/alpha (calculateSignal 只在 updateLeadContract 调)

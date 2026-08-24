@@ -47,3 +47,6 @@ sticky_threshold: 1.0
 improve_retreat_ratio: 2.0
 protect_ticks: 1.0
 max_price_deviation: 20.0
+
+# --- B2(2026-08-24②): 单合约 delta 软限 (应用于全部合约; 合约间差异化配置需重启) ---
+contract_max_delta: 30

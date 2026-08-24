@@ -53,6 +53,7 @@ FutuHotParamManager::HotCrossCheckInput makeDefaultInput()
     in.obligation_min_qty = 10.0;
     // 软限 vs 硬顶 / GLFT 区间
     in.portfolio_max_delta = 30.0;
+    in.contract_max_delta = 30.0;
     in.contract_max_positions = nullptr;
     in.max_spread_mult = 3.0;
     in.min_spread_mult = 1.0;
@@ -143,6 +144,35 @@ TEST(HotParamBounds, LevelStepAndBaseQtyLoaderRanges)
     // level_step loader error (0,100]; base_qty loader error (0,100]
     ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("level_step: 0\nlevel_step: 200\nbase_qty: 150\n").c_str(), out));
     EXPECT_TRUE(out.empty());
+}
+
+TEST(HotParamBounds, ContractMaxDeltaSameAsPortfolioDelta)
+{
+    std::vector<std::pair<uint32_t, double>> out;
+    // B2 新键: 同 max_delta 口径 (loader error (0,1e8])
+    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("contract_max_delta: 0\n").c_str(), out));
+    EXPECT_TRUE(out.empty());
+    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("contract_max_delta: 1000000000\n").c_str(), out));
+    EXPECT_TRUE(out.empty());
+    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("contract_max_delta: 30\n").c_str(), out));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].first, static_cast<uint32_t>(HP_CONTRACT_MAX_DELTA));
+}
+
+TEST(HotParamCrossCheck, DetectsContractSoftLimitAboveHardCap)
+{
+    auto in = makeDefaultInput();
+    std::vector<double> positions = {50.0};
+    in.contract_max_positions = &positions;
+    in.contract_max_delta = 80.0; // > maxPosition(50)
+    auto issues = FutuHotParamManager::crossCheckIssues(in);
+    ASSERT_EQ(issues.size(), 1u);
+    EXPECT_NE(issues[0].find("contract_max_delta"), std::string::npos);
+
+    // 等于硬顶不告警
+    in.contract_max_delta = 50.0;
+    issues = FutuHotParamManager::crossCheckIssues(in);
+    EXPECT_TRUE(issues.empty());
 }
 
 //==========================================================================

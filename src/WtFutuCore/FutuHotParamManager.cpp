@@ -26,7 +26,8 @@ void FutuHotParamManager::registerParams(wtp::IUftStraCtx* ctx,
                                          const FutuMmConfig& _config,
                                          const GLFTParams& glft_defaults,
                                          const SignalAggregatorConfig& sig_defaults,
-                                         double alpha_sensitivity)
+                                         double alpha_sensitivity,
+                                         double contract_max_delta)
 {
     // 报价基础参数
     HotParamEntry hot_defaults[] = {
@@ -56,6 +57,7 @@ void FutuHotParamManager::registerParams(wtp::IUftStraCtx* ctx,
         {"improve_retreat_ratio", _config.quoting.improve_retreat_ratio, nullptr},
         {"protect_ticks", _config.quoting.protect_ticks, nullptr},
         {"max_price_deviation", _config.quoting.max_price_deviation, nullptr},
+        {"contract_max_delta", contract_max_delta, nullptr},
     };
     static_assert(sizeof(hot_defaults) / sizeof(hot_defaults[0]) == HP_COUNT, "hot_defaults size mismatch");
 
@@ -133,6 +135,8 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
         PortfolioParams pp = t.portfolio->getParams(); // 拷贝
         pp.portfolio_max_delta = hotVal(HP_MAX_DELTA);
         t.portfolio->setParams(pp); // 通过非const方法写回
+        // B2: 单合约 delta 软限热更新 (应用于全部合约; 差异化配置需重启)
+        t.portfolio->setContractMaxDelta(hotVal(HP_CONTRACT_MAX_DELTA));
     }
     // 同步到 Coordinator (软风控 WIDEN_SPREAD 的 portfolio delta util 基准)
     if (t.coordinator) {
@@ -178,6 +182,7 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
         cc.scout_qty = t.config->quoting.scout_qty;
         cc.obligation_min_qty = t.config->quoting.obligation_min_qty;
         cc.portfolio_max_delta = hotVal(HP_MAX_DELTA);
+        cc.contract_max_delta = hotVal(HP_CONTRACT_MAX_DELTA);
         cc.max_spread_mult = hotVal(HP_MAX_SPREAD_MULT);
         cc.min_spread_mult = hotVal(HP_MIN_SPREAD_MULT);
         cc.confidence_weight_min = hotVal(HP_CONFIDENCE_WEIGHT_MIN);
@@ -281,6 +286,7 @@ bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<st
         /* improve_retreat_ratio */ {0.0, 1000.0},
         /* protect_ticks */ {0.5, 10000.0},     // <半 tick 无意义; 0=静默关价格软保护(关闭走 price_protection 开关)
         /* max_price_deviation */ {0.0, 1000000.0},
+        /* contract_max_delta */ {1e-6, 1e8},   // B2: 同 max_delta 口径 (loader error (0,1e8]; 0=静默关单合约 skew/义务/穿越)
     };
     static_assert(sizeof(bounds) / sizeof(bounds[0]) == HP_COUNT, "bounds table size mismatch");
 
@@ -393,6 +399,23 @@ std::vector<std::string> FutuHotParamManager::crossCheckIssues(const HotCrossChe
                          mp);
                 issues.emplace_back(buf);
                 break; // 同一问题一次告警即可
+            }
+        }
+    }
+
+    // 3b. 单合约软限 vs 硬顶 (B2 热参数; 同 3 的语义边界口径)
+    if (in.contract_max_positions) {
+        for (size_t i = 0; i < in.contract_max_positions->size(); ++i) {
+            const double mp = (*in.contract_max_positions)[i];
+            if (mp > 0 && in.contract_max_delta > mp) {
+                snprintf(buf,
+                         sizeof(buf),
+                         "contract_max_delta(%.0f) > contract maxPosition(%.0f): 单合约软限高于风控硬顶, "
+                         "调节到达前即被硬停",
+                         in.contract_max_delta,
+                         mp);
+                issues.emplace_back(buf);
+                break;
             }
         }
     }

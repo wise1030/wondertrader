@@ -130,7 +130,10 @@ struct ModuleParams
 
     // AutoCancel (仍需保留)
     uint32_t auto_cancel_max_age_ms = 10000;
-    double auto_cancel_price_deviation = 3.0;
+    // B1(2026-08-24②): 原 auto_cancel_price_deviation 删除 —— 其唯一消费者
+    //   tracker::checkPriceDeviation 为零调用死接口; STALE 延寿判定改用独立键,
+    //   默认 2.0 = 原隐式值 quoter.sticky_threshold(1.0)×2, 行为保持。
+    double stale_extension_ticks = 2.0;
     // B+: 撤单重试 (pending_cancel_timeout_ms 语义已改为重试间隔)
     uint32_t cancel_retry_interval_ms = 300; ///< 撤单 ack 超时重发间隔 (ms)
     uint32_t cancel_max_retries = 3;         ///< 撤单最大重试次数, 达到后 zombie 升级

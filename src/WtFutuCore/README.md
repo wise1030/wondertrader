@@ -193,7 +193,7 @@ src/WtFutuCore/
 ├── config/
 │   ├── config.yaml              Runner 主配置（身份/合约/业务参数，不含模块开关）
 │   ├── coordinator.yaml         模块开关唯一权威 + 信号/毒性/GLFT/autoCancel 参数
-│   ├── hotparams.yaml           26 个热参数运行时文件（watcher 1Hz 轮询）
+│   ├── hotparams.yaml           27 个热参数运行时文件（watcher 1Hz 轮询）
 │   └── spread_arbitrage.yaml    套利子系统配置
 ├── docs/                        设计文档（DEEP_ANALYSIS_V5~V7、DIAGNOSTIC_REPORT_V8、
 │                                ARB_SELF_CLOSE_DESIGN、MM_SOFT_RISK_V3、REFACTOR_ROADMAP…）
@@ -1187,7 +1187,7 @@ spread_multiplier 在 [1.5,3.0] 区间放宽；suppress 双向 z>±3.0。现状�
 | config.yaml | Runner 主配置（basefiles/parsers/traders/env/strategies）：策略身份+合约+业务参数。**不承载任何模块开关** |
 | coordinator.yaml | **模块开关唯一权威**（7 个根级 use* 开关）+ taker 减仓/requote/section-break/双边统计/pipeline 参数 + modules.*（signalAggregator/toxicityDetector/spreadOptimizer/selfTradeCalibrator/selfTradePrevention/autoCancel/correlationManager） |
 | spread_arbitrage.yaml | 套利子系统全局/pairs/risk_limits/statistical |
-| hotparams.yaml | 26 个热参数运行时文件 |
+| hotparams.yaml | 27 个热参数运行时文件 |
 
 **FutuConfigLoader.h/.cpp**：解析 config.yaml params 子树进 FutuMmConfig+ContractInfo 列表。
 fail-fast 校验（V8-R6）：contracts 缺失/非数组/为空→error+false（拒绝零合约空跑）；anchorCode 空
@@ -1242,12 +1242,12 @@ AsyncArbitrageExecutor。
 
 **FutuHotParamManager.h/.cpp + FutuHotParamWatcher.h/.cpp —— 热参数机制**
 
-26 参数索引表（HP_BASE_SPREAD…HP_MAX_PRICE_DEVIATION），registerParams 以各模块当前值为默认经
+27 参数索引表（HP_BASE_SPREAD…HP_MAX_PRICE_DEVIATION、HP_CONTRACT_MAX_DELTA），registerParams 以各模块当前值为默认经
 `ctx->sync_param(name,default)` 注册进引擎共享内存。链路：
 
 ```
 hotparams.yaml (snake_case, watcher 1Hz 轮询)
-  → parseHotParamFile(纯函数): strtod 全串校验拒收 "abc"/布尔/空串 + 26 参数边界表
+  → parseHotParamFile(纯函数): strtod 全串校验拒收 "abc"/布尔/空串 + 27 参数边界表
     (越界/NaN/inf warn+跳过保留旧值; 未知键忽略)
   → syncFromFile: 逐项与共享内存现值比对去重, 变更才写+审计日志 old->new,
     变更数>0 置 _pending_apply(release)      [watcher 线程只碰共享内存]
@@ -1258,15 +1258,16 @@ hotparams.yaml (snake_case, watcher 1Hz 轮询)
       max_delta(portfolio+coordinator)/sticky/improve_retreat/protect_ticks/max_price_deviation
 ```
 
-26 参数：base_spread/base_qty/level_qty_multiplier/level_step/max_delta/alpha_sensitivity/
+27 参数：base_spread/base_qty/level_qty_multiplier/level_step/max_delta/alpha_sensitivity/
 ofi_weight/trade_weight/book_imbalance_weight/momentum_weight/lead_lag_weight/strong_threshold/
 confidence_weight_min/confidence_weight_max/phi/delta_skew_threshold/delta_skew_factor/
 max_spread_mult/min_spread_mult/depth_sensitivity/toxicity_spread_factor/
-low_confidence_spread_factor/sticky_threshold/improve_retreat_ratio/protect_ticks/max_price_deviation。
+low_confidence_spread_factor/sticky_threshold/improve_retreat_ratio/protect_ticks/max_price_deviation/
+contract_max_delta(B2: 单合约 delta 软限, 应用于全部合约; 差异化需重启)。
 watcher start 的首轮成功判定="解析失败才算失败"（空 hotparams.yaml 合法，修复旧逻辑致 watcher
 不启动的潜伏 bug）。回测侧引擎无 start_watching 故策略自带轮询是两模式都可靠的通道。
 
-**热参加固三道防线（2026-08-24）**——26 个热参数稳态权威是 hotparams.yaml（实盘 ~1s 覆盖
+**热参加固三道防线（2026-08-24）**——27 个热参数稳态权威是 hotparams.yaml（实盘 ~1s 覆盖
 config/coordinator 同名键；重启时共享内存旧值经 initial applyAll 立即生效），回测不加载热参：
 
 1. **边界表对齐**：拒收域收紧至 FutuConfigLoader error 级 / validator 口径——base_spread [0.5,20]、
@@ -1431,7 +1432,8 @@ coordinator:
         maxSpreadMult 3.0 / skewCrossMaxTicks 3.0 / portfolioSkewWeight 0.5 ...
     selfTradeCalibrator: retreatTicks 3 / retreatCooldownMs 5000 / adverseThreshold 0.6
     selfTradePrevention: enabled true / stpMinPriceGap 1.0
-    autoCancel(B+): maxAgeMs 10000 / priceDeviation 3.0 /
+    autoCancel(B+): maxAgeMs 10000 / staleExtensionTicks 2.0(B1: STALE 延寿阈值,
+        原 priceDeviation 键删除——其消费者为死接口) /
         cancelRetryIntervalMs 300 / cancelMaxRetries 3
     correlationManager: windowSize 100 / minCorrelation 0.5 / spreadZThreshold 2.0
 ```
@@ -1457,13 +1459,13 @@ spread_arbitrage:
 
 | 参数范围 | 稳态权威 | 说明 |
 |---|---|---|
-| 26 个热参数（见 §4.17） | **hotparams.yaml > 共享内存残留 > config.yaml/coordinator.yaml** | 实盘启动后 ~1s 内文件值覆盖一切；重启时共享内存旧值立即生效，期间 config 同名键改动无效 |
+| 27 个热参数（见 §4.17） | **hotparams.yaml > 共享内存残留 > config.yaml/coordinator.yaml** | 实盘启动后 ~1s 内文件值覆盖一切；重启时共享内存旧值立即生效，期间 config 同名键改动无效 |
 | 其余全部参数 | config.yaml / coordinator.yaml | 运行中改文件不生效，须重启 |
 | 回测 | 一律 config/coordinator | watcher 不启动、热参完全不生效 |
 
 运维约定：
 
-- 26 键日常调参**只改 hotparams.yaml**（运行目录副本），config/coordinator 视为出厂基线；
+- 27 键日常调参**只改 hotparams.yaml**（运行目录副本），config/coordinator 视为出厂基线；
   两边都改容易漂移——漂移键启动日志会以 `[HOTPARAM-DRIFT]` 逐条列出；
 - **回测不吃热参**：若存在 `[HOTPARAM-DRIFT]` 差异键，回测验证的参数组合≠实盘运行组合，
   A/B 结论失真，须先对齐再回归；

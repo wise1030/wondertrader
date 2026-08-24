@@ -367,7 +367,16 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
     }
 
     // 热参数注册已拆分至 FutuHotParamManager (架构重构 C2)
-    _hot_mgr.registerParams(ctx, _config, glft_defaults, sig_defaults, coord_mp.alpha_sensitivity);
+    // B2: 合约级 maxDelta 默认取 anchor 合约配置值 (热更新应用于全部合约)
+    double contract_max_delta_default = 0.0;
+    for (const auto& ci : _contract_infos) {
+        if (ci.code == _config.anchor_code) {
+            contract_max_delta_default = ci.max_delta;
+            break;
+        }
+    }
+    _hot_mgr.registerParams(ctx, _config, glft_defaults, sig_defaults, coord_mp.alpha_sensitivity,
+                            contract_max_delta_default);
 
     WTSLogger::info("UftFutuMmStrategy[{}] hot-update params registered (defaults from coordinator.yaml)", id());
 

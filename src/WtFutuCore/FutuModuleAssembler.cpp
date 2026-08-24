@@ -297,8 +297,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         UnifiedTrackerConfig tracker_cfg;
         tracker_cfg.max_orders = _config.order_control.max_orders;
         tracker_cfg.max_age_ms = mp.auto_cancel_max_age_ms;
-        tracker_cfg.price_deviation = mp.auto_cancel_price_deviation;
-        tracker_cfg.sticky_threshold = _config.quoting.sticky_threshold;
+        // B1: STALE 延寿阈值独立键 (原 sticky_threshold×2 隐式值显式化, 默认 2.0 行为保持)
+        tracker_cfg.stale_extension_ticks = mp.stale_extension_ticks;
         // B+: 撤单重试间隔/最大次数 (替代旧"超时强制遗忘"语义)
         tracker_cfg.pending_cancel_timeout_ms = mp.cancel_retry_interval_ms;
         tracker_cfg.cancel_max_retries = mp.cancel_max_retries;

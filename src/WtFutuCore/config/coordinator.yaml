@@ -173,7 +173,9 @@ coordinator:
     # --- 自动撤单策略 ---
     autoCancel:
       maxAgeMs: 10000              # 订单最大存活时间 (ms)
-      priceDeviation: 3.0          # 价格偏离阈值 (ticks)
+      # B1(2026-08-24②): 原 priceDeviation 键删除(其消费者为死接口);
+      #   STALE 延寿判定改用独立键 —— 原隐式值 = quoter.stickyThreshold×2 = 2.0, 行为保持。
+      staleExtensionTicks: 2.0     # STALE 订单延寿价格偏离阈值 (ticks; 超过则不延寿直接撤)
       # B+: 撤单确认重试 (替代旧"超时5s强制遗忘"——2026-08-19 僵尸单事故根源)
       cancelRetryIntervalMs: 300   # 撤单 ack 超时重发间隔 (ms)
       cancelMaxRetries: 3          # 最大重试次数, 达到后 zombie 升级 (halt合约+cancelAll兜底)

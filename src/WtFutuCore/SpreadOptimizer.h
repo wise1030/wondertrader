@@ -71,6 +71,9 @@ struct GLFTParams
     double portfolio_skew_weight; ///< portfolio delta skew 权重 (default 0.5)
     double contract_skew_weight;  ///< contract delta skew 权重 (default 1.0)
 
+    // B4(2026-08-24②): 毒性加宽最小门槛 (原硬编码 0.05)
+    double toxicity_min_score; ///< toxicity_score 低于此值不加宽 spread (default 0.05, 过滤噪声)
+
     GLFTParams()
         : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5), phi(0.20), delta_skew_threshold(0.3),
           delta_skew_factor(1.5), portfolio_max_delta(0), max_spread_mult(3.0), min_spread_mult(1.0),
@@ -80,7 +83,7 @@ struct GLFTParams
           low_confidence_threshold(0.3), vol_scale(5.0), depth_normalization(100.0), no_depth_spread_mult(1.5),
           depth_sensitivity_scale(0.2), pause_spread_mult_ratio(0.9), delta_skew_power(1.5),
           vol_percentile_scale(50.0), inventory_skew_gain(1.0), skew_cross_max_ticks(3.0), portfolio_skew_weight(0.5),
-          contract_skew_weight(1.0)
+          contract_skew_weight(1.0), toxicity_min_score(0.05)
     {}
 
     static GLFTParams fromVariant(wtp::WTSVariant* v, double base_spread, double tick_size, double portfolio_max_delta)
@@ -112,6 +115,7 @@ struct GLFTParams
         p.skew_cross_max_ticks = FutuConfig::readDouble(v, "skewCrossMaxTicks", 3.0);
         p.portfolio_skew_weight = FutuConfig::readDouble(v, "portfolioSkewWeight", 0.5);
         p.contract_skew_weight = FutuConfig::readDouble(v, "contractSkewWeight", 1.0);
+        p.toxicity_min_score = FutuConfig::readDouble(v, "toxicityMinScore", 0.05);
         return p;
     }
 };
@@ -165,11 +169,16 @@ struct PortfolioContext
     double contract_max_delta;    ///< 单合约 Delta 软限制（用于归一化 inventory skew）
     double contract_delta_util;   ///< 带符号 delta 利用率 (delta+同向pending×hr)/contract_max_delta, 正=多 负=空
     bool contract_delta_util_valid; ///< contract_delta_util 是否有效 (统一口径 skew 开关)
+    // C2(2026-08-24②): 已实现口径 position×hedge_ratio/contract_max_delta —— 消费方: skew/穿越授权。
+    //   语义原则: skew 响应已实现库存, 义务/数量响应前瞻库存(含在途)。
+    double contract_realized_delta_util;
+    bool contract_realized_delta_util_valid;
     std::vector<RelatedInventory> related;
 
     PortfolioContext()
         : total_delta(0), total_exposure(0), current_multiplier(1), current_hedge_ratio(1), current_price(1),
-          contract_max_delta(0), contract_delta_util(0), contract_delta_util_valid(false)
+          contract_max_delta(0), contract_delta_util(0), contract_delta_util_valid(false),
+          contract_realized_delta_util(0), contract_realized_delta_util_valid(false)
     {}
     void clear()
     {
@@ -178,6 +187,8 @@ struct PortfolioContext
         contract_max_delta = 0;
         contract_delta_util = 0;
         contract_delta_util_valid = false;
+        contract_realized_delta_util = 0;
+        contract_realized_delta_util_valid = false;
     }
     void addRelated(const std::string& c, double inv, double corr, double hr, double mult, double px)
     {
@@ -246,7 +257,7 @@ public:
     /// 归一化库存 skew (tick 单位, delta 口径). skew_norm=delta_util^power×gain, 1.0=贴mid;
     /// delta_util≥1.0 时授权穿越 mid, 上限 1+cross_max/half_spread.
     double computeContractDeltaSkew(double signed_delta_util, double half_spread_ticks, double cross_max_ticks) const;
-    double computePortfolioDeltaSkew(double totalDelta) const;
+    double computePortfolioDeltaSkew(double totalDelta, double half_spread_ticks) const; ///< C1: ×half_spread 归一到 ticks
 
 private:
     mutable std::atomic<uint64_t> _params_seq{0}; // F20: seqlock 版本号 (奇=写进行中)

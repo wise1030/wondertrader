@@ -11,7 +11,8 @@
  *   - contract_max_delta=0 时策略输入全零, 风控闸门不受影响
  *   - maxPosition 硬停 (halt_quoting) 与策略软限相互独立
  *   - SpreadOptimizer 单路径 skew: contractDelta 参数不再驱动 skew,
- *     仅 pCtx->contract_delta_util 生效; util≥1.0 授权穿越 half_spread
+ *     仅 pCtx->contract_realized_delta_util 生效 (C2: 已实现口径, 不含 pending 投影);
+ *     util≥1.0 授权穿越 half_spread
  */
 #include "../WtFutuCore/FutuRiskMonitor.h"
 #include "../WtFutuCore/FutuPortfolio.h"
@@ -124,6 +125,9 @@ PortfolioContext makePCtx(double signed_util)
 {
     PortfolioContext ctx;
     ctx.contract_max_delta = 30;
+    // C2: skew/穿越消费 realized 口径; projected 同值注入 (本测试无 pending 差异场景)
+    ctx.contract_realized_delta_util = signed_util;
+    ctx.contract_realized_delta_util_valid = true;
     ctx.contract_delta_util = signed_util;
     ctx.contract_delta_util_valid = true;
     return ctx;
