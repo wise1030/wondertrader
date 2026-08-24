@@ -1544,3 +1544,17 @@ hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。
 - C1/C2 改变 GLFT skew 数学——生产部署前建议再积累一轮 _ec_5d 观察窗口（本轮单次 A/B 通过）
 - TOXIC 2770→983 归因（R6 系回归排查）
 - README §4.11 已随 A 批勘误 checkSoftLimits；热参表述已全部更新为 27
+
+## 文档重写记录（2026-08-24③，docs-only 零代码）
+
+应用户要求"模块文档尽可能详细（可对照逐行检查代码）+ 配置全字段说明（含热更）"：
+- `README.md` 重写为 840 行代码级架构手册：五层架构/线程模型与锁层级/单 tick 数据流/
+  20 个模块小节全部带 `文件:行号` 锚点（GLFT 公式逐步/风控闸门公式表/checkRisk 十步/
+  onEntrust D1 后形态/B+ 槽状态机/热参链路 ASCII 图等）；§5 设计裁决十条；§8 限制勘误九条
+- 新增 `CONFIG.md` 464 行：加载链路总览；主配置(replayer/env/uft/strategy.params 含
+  contracts/quoting/portfolio/risk.frequency/closeout/order_control/performance 全字段)、
+  coordinator.yaml 六节、hotparams.yaml 27 参数总表+热更链路专节+注意事项、logcfgbt、
+  spread_arbitrage.yaml、死键清单(6 项)、排障速查表
+- 素材来源：4 个并行研究代理（配置体系/编排层成功，定价与风控两代理多次空返回后改由
+  主会话定向 grep+精读 SpreadOptimizer.cpp 全文/TradingState.h 全文补齐）
+- 行号基于当时 HEAD；文档尾注声明漂移免责。零源码改动，无需回测验证。
