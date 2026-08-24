@@ -21,6 +21,9 @@ public:
     RiskAction getActionByCode(const std::string& code) const override;
     double getWidenFactorByCode(const std::string& code) const override;
 
+    /// B20: clear all latched state (called on session begin)
+    void reset() override;
+
 private:
     struct FillRecord {
         double time = 0;
@@ -43,7 +46,6 @@ private:
     std::map<std::string, std::deque<FillRecord>> m_fillHistory;
     std::map<std::string, double> m_lastAdverseTime;
     std::map<std::string, int32_t> m_consecutiveAdverse;
-    double m_curTime = 0;
     double m_globalWidenFactor = 1.0;
     double m_globalActionEndTime = 0;
 };
@@ -57,6 +59,9 @@ public:
     RiskAction getAction() const override { return m_action; }
 
     void setPortfolioPnl(double pnl) { m_portfolioPnl = pnl; }
+
+    /// B20: clear the panic latch (called on session begin)
+    void reset() override;
 
 private:
     std::string m_name;

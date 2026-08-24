@@ -7,16 +7,25 @@ namespace wt_option {
 
 void PositionOffsetMgr::onPositionUpdate(bool isLong, double prevol, double preavail,
                                            double newvol, double newavail) {
+    // A1 fix: WT's on_position reports ABSOLUTE volumes (prev/new snapshots),
+    // not deltas — the old `prevol + newvol` double-counted.
+    // NOTE: the callback does not expose a today/prev split of availability,
+    // so we conservatively book ALL available volume as close-today (matches
+    // intraday MM reality on SHFE) and keep closePrev at 0 until a richer
+    // position-detail source exists. getOrderBreakdown stays correct for the
+    // combined view used by the offset guard.
+    int32_t vol = static_cast<int32_t>(newvol);
+    int32_t avail = static_cast<int32_t>(newavail);
     if (isLong) {
-        m_brokerLongVol = static_cast<int32_t>(prevol + newvol);
-        m_brokerLongAvail = static_cast<int32_t>(preavail + newavail);
-        m_brokerLongPrevAvail = static_cast<int32_t>(preavail);
-        m_brokerLongTodayAvail = static_cast<int32_t>(newavail);
+        m_brokerLongVol = vol;
+        m_brokerLongAvail = avail;
+        m_brokerLongTodayAvail = avail;
+        m_brokerLongPrevAvail = 0;
     } else {
-        m_brokerShortVol = static_cast<int32_t>(prevol + newvol);
-        m_brokerShortAvail = static_cast<int32_t>(preavail + newavail);
-        m_brokerShortPrevAvail = static_cast<int32_t>(preavail);
-        m_brokerShortTodayAvail = static_cast<int32_t>(newavail);
+        m_brokerShortVol = vol;
+        m_brokerShortAvail = avail;
+        m_brokerShortTodayAvail = avail;
+        m_brokerShortPrevAvail = 0;
     }
 }
 
@@ -44,25 +53,16 @@ void PositionOffsetMgr::onOrderCancelled(bool isBuy, uint32_t qty, bool isCloseT
 
 void PositionOffsetMgr::onFill(bool isBuy, uint32_t fillQty, bool isCloseToday) {
     int32_t q = static_cast<int32_t>(fillQty);
+    // Unfreeze the frozen closeable bucket this fill consumed
     if (isBuy) {
-        if (isCloseToday) {
-            m_localLongVol += 0;
-            m_frozenShortToday = std::max(0, m_frozenShortToday - q);
-        } else {
-            m_localLongVol += 0;
-            m_frozenShortPrev = std::max(0, m_frozenShortPrev - q);
-        }
+        if (isCloseToday) m_frozenShortToday = std::max(0, m_frozenShortToday - q);
+        else              m_frozenShortPrev = std::max(0, m_frozenShortPrev - q);
+        m_localLongVol += q;
     } else {
-        if (isCloseToday) {
-            m_localShortVol += 0;
-            m_frozenLongToday = std::max(0, m_frozenLongToday - q);
-        } else {
-            m_localShortVol += 0;
-            m_frozenLongPrev = std::max(0, m_frozenLongPrev - q);
-        }
+        if (isCloseToday) m_frozenLongToday = std::max(0, m_frozenLongToday - q);
+        else              m_frozenLongPrev = std::max(0, m_frozenLongPrev - q);
+        m_localShortVol += q;
     }
-    if (isBuy) m_localLongVol += q;
-    else       m_localShortVol += q;
 }
 
 int32_t PositionOffsetMgr::getCloseableToday(bool isBuy) const {

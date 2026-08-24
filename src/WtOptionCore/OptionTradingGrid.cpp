@@ -16,6 +16,8 @@
 #include "../Share/fmtlib.h"
 #include "../WTSTools/WTSLogger.h"
 
+#include <fstream>
+
 namespace wt_option {
 
 OptionTradingGrid::OptionTradingGrid(OptionGridPtr grid)
@@ -40,6 +42,25 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     if (m_spPositionRisk) {
         auto rd = m_spPositionRisk->get(od->getCode());
         // OTD uses position provider; RiskData binding happens via setPositionProvider
+    }
+
+    // B03 fix: inject static contract facts (tick size / multiplier) from the
+    // option product's comm info. setupGrid has no IBaseDataMgr in live mode,
+    // so OptionData used to be stuck at tickSize=1.0 — rounding every quote
+    // onto invalid price lattices for ag(0.5)/IO(0.2) etc.
+    // NOTE: must run BEFORE the OQM is created (it copies tick_size).
+    if (m_hftCtx && (od->getTickSize() <= 0 || od->getMultiplier() <= 1.0)) {
+        auto ed = od->getExpiryData();
+        if (ed && !ed->getOptionProduct().empty()) {
+            std::string commKey = m_exchange + "." + ed->getOptionProduct();
+            WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(commKey.c_str());
+            if (commInfo) {
+                if (od->getTickSize() <= 0 && commInfo->getPriceTick() > 0)
+                    od->setTickSize(commInfo->getPriceTick());
+                if (commInfo->getVolScale() > 1.0)
+                    od->setMultiplier(commInfo->getVolScale());
+            }
+        }
     }
 
     // 3. Bind executors (wrap with code capture for per-contract dispatch)
@@ -72,10 +93,25 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     // 4b. Create per-contract OptionQuoteManager (Phase 2)
     OptionQuoteManager::Config omCfg = m_optionOqmCfg;
     omCfg.exchange = m_exchange;
-    omCfg.tick_size = od->getTickSize();
+    omCfg.tick_size = od->getTickSize();  // now carries the real tick (B03)
+    omCfg.right_flag = (od->getRight() == OR_Call) ? 1 : 0;  // B3
     auto om = std::make_shared<OptionQuoteManager>(code, omCfg, m_hftCtx);
     if (m_quoteStats) om->setQuoteStatistics(m_quoteStats);
+    if (m_preTradeFn) om->setPreTradeCheckFn(m_preTradeFn);   // A2
+    // B23 fix: wire the clock — TTL / min_intra_update / reject-retry timing
+    // were all dead because m_getTime was never set
+    om->setGetTimeFn([ctx = m_hftCtx]() -> double {
+        return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
+    });
+    // B11 fix: give OTD a live position source so QM_CLOSE/auto-close work
+    if (m_positionSource)
+        otd->setPositionProvider([src = m_positionSource, code]() -> int32_t {
+            return src(code);
+        });
     otd->setQuoteManager(om);
+    // B5: FIFO PnL mode for this contract's tracker
+    if (m_fifoPnl)
+        otd->getPnlTracker()->setFifoMode(true);
 
     // 5. Enable + setActive(false) — wait for channel_ready
     otd->enable();
@@ -242,8 +278,16 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
         futOmCfg.tick_size = utd->getTickSize();
         auto futOm = std::make_shared<OptionQuoteManager>(hedgeCode, futOmCfg, m_hftCtx);
         if (m_quoteStats) futOm->setQuoteStatistics(m_quoteStats);
+        if (m_preTradeFn) futOm->setPreTradeCheckFn(m_preTradeFn);   // A2
+        // B23 fix: wire the clock for the future OQM as well
+        futOm->setGetTimeFn([ctx = m_hftCtx]() -> double {
+            return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
+        });
         utd->setQuoteManager(futOm);
     }
+    // B5: FIFO PnL mode for the hedge tracker too
+    if (m_fifoPnl)
+        utd->getPnlTracker()->setFifoMode(true);
     utd->enable();
     utd->setActive(false);
 
@@ -262,6 +306,46 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
         "OTG::__createExpiryTradingData exp={} hedge={}", ed->getExpiry(), hedgeCode);
 
     return etd;
+}
+
+// ============================================================================
+// onSessionBegin - B07: reset lifetime counters of every OQM
+// ============================================================================
+void OptionTradingGrid::onSessionBegin()
+{
+    for (auto& pair : m_tblUnderlyingTradingData) {
+        auto utd = pair.second;
+        if (utd && utd->getQuoteManager())
+            utd->getQuoteManager()->resetCounters();
+    }
+    for (const auto& od : m_spGrid->getAllOptions()) {
+        if (!od) continue;
+        auto otd = od->getTradingData();
+        if (otd && otd->getQuoteManager())
+            otd->getQuoteManager()->resetCounters();
+    }
+}
+
+// ============================================================================
+// dumpCountersCsv - C5: append every OQM's lifetime counters to path
+// ============================================================================
+void OptionTradingGrid::dumpCountersCsv(const std::string& path) const
+{
+    std::ofstream ofs(path, std::ios::app);
+    if (!ofs.is_open()) return;
+    ofs << "#code,cancels,newOrders,fills,rejects,lateFills,position\n";
+    ofs.close();
+    for (auto& pair : m_tblUnderlyingTradingData) {
+        auto utd = pair.second;
+        if (utd && utd->getQuoteManager())
+            utd->getQuoteManager()->dumpCountersCsv(path);
+    }
+    for (const auto& od : m_spGrid->getAllOptions()) {
+        if (!od) continue;
+        auto otd = od->getTradingData();
+        if (otd && otd->getQuoteManager())
+            otd->getQuoteManager()->dumpCountersCsv(path);
+    }
 }
 
 } // namespace wt_option

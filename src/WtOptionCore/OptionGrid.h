@@ -81,6 +81,7 @@ public:
         double ask = 0;
         double bidQty = 0;
         double askQty = 0;
+        uint32_t expireDate = 0;   // B28: exact expiry YYYYMMDD (0 = unknown)
     };
     void onTick(const std::string& stdCode, const TickDataRef& tick);
 

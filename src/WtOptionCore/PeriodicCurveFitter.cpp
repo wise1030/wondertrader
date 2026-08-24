@@ -55,20 +55,7 @@ bool dp_comp(const IVolCurve::datapoint_t& p1, const IVolCurve::datapoint_t& p2)
     return LT(p1.first, p2.first);
 }
 
-// threshold table for good-points minimum (populated by constructor)
-std::map<int32_t, double>& s_threshTable() { static std::map<int32_t, double> t; return t; }
-double evalThresh(int32_t days) {
-    auto& t = s_threshTable();
-    if (t.empty()) return 15;
-    auto it = t.lower_bound(days);
-    if (it == t.end())   return t.rbegin()->second;
-    if (it == t.begin()) return it->second;
-    auto lo = std::prev(it);
-    double x0 = lo->first, x1 = it->first;
-    double y0 = lo->second, y1 = it->second;
-    if (x1 == x0) return y1;
-    return y0 + (y1 - y0) * (days - x0) / (x1 - x0);
-}
+// threshold table is now a per-instance member (m_threshTable) — B30 fix
 
 // find_range: returns the two map iterators bracketing `key` from below/above
 template<typename Map>
@@ -128,9 +115,22 @@ PeriodicCurveFitter::PeriodicCurveFitter(OptionGrid* grid
     if (vol_fitting_good_points_thresh.empty())
         throw std::runtime_error("vol_fitting_good_points_thresh is empty!");
     for (const auto& v : vol_fitting_good_points_thresh) {
-        s_threshTable()[v.first] = v.second;
+        m_threshTable[v.first] = v.second;
     }
-    // m_volFittingGoodPointsThreshCurve left null; doFit uses m_threshTable.
+}
+
+// ----------------------------------------------------------------------------
+double PeriodicCurveFitter::evalThresh(int32_t days) const {
+    const auto& t = m_threshTable;
+    if (t.empty()) return 15;
+    auto it = t.lower_bound(days);
+    if (it == t.end())   return t.rbegin()->second;
+    if (it == t.begin()) return it->second;
+    auto lo = std::prev(it);
+    double x0 = lo->first, x1 = it->first;
+    double y0 = lo->second, y1 = it->second;
+    if (x1 == x0) return y1;
+    return y0 + (y1 - y0) * (days - x0) / (x1 - x0);
 }
 
 // Internal threshold table is now in the anonymous namespace above (populated by constructor).
@@ -154,6 +154,9 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
         for (const auto& strike : strikes) {
             const OptionDataPtr& call = strike->call();
             const OptionDataPtr& put  = strike->put();
+            // B02 fix: single-sided strikes are normal during dynamic discovery —
+            // dereferencing a null leg here segfaulted the timer fit path
+            if (!call || !put) continue;
             double stk = strike->getStrikePrice();
             double call_midpx = call->getMid();
             double put_midpx  = put->getMid();
@@ -207,35 +210,22 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
         m_spBlackPricer->setATMVol(exp, atm_vol);
 
         // collect stkvol points (relative to atm)
+        // B10 fix: the original two-pointer dance did `--begin` (UB) when
+        // strike_vol had a single element. A strike is an upside point when
+        // K > fwd, downside otherwise — a single forward pass suffices.
         IVolCurve::dataset_t stkvol_points;
-        auto i_strike      = strike_vol.begin();
-        auto i_strike_next = strike_vol.begin();
-        if (i_strike_next != strike_vol.end()) ++i_strike_next;
         bool has_upside_point = false;
         bool has_downside_point = false;
-        while (i_strike_next != strike_vol.end()) {
-            if (i_strike_next->first > atm_forward) {
+        for (const auto& kv : strike_vol) {
+            if (kv.first > atm_forward) {
                 has_upside_point = true;
-                double strike_pos = i_strike_next->first - atm_forward;
-                double sv = i_strike_next->second / atm_vol;
-                stkvol_points.push_back({strike_pos, sv});
-            }
-            ++i_strike; ++i_strike_next;
-        }
-        if (i_strike != strike_vol.end()) --i_strike;
-        if (i_strike_next != strike_vol.end()) --i_strike_next; 
-        // (mirror original pointer arithmetic; safe since we already advanced)
-        while (i_strike_next != strike_vol.begin()) {
-            if (i_strike != strike_vol.end() && i_strike->first <= atm_forward) {
+                double sv = kv.second / atm_vol;
+                stkvol_points.push_back({kv.first - atm_forward, sv});
+            } else {
                 has_downside_point = true;
-                double strike_pos = i_strike->first - atm_forward;
-                double sv = i_strike->second / atm_vol;
-                stkvol_points.push_back({strike_pos, sv});
+                double sv = kv.second / atm_vol;
+                stkvol_points.push_back({kv.first - atm_forward, sv});
             }
-            if (i_strike == strike_vol.begin()) break;
-            --i_strike;
-            if (i_strike_next == strike_vol.begin()) break;
-            --i_strike_next;
         }
 
         // collect stkfwd points
@@ -319,6 +309,20 @@ void PeriodicCurveFitter::updateFitData(const PeriodicCurveFitter::FitData& fd)
         // NOTE: original mutated fd.stkvol_points (non-const ref). We treat
         // FitData as mutable here to preserve the in-place decay behaviour.
         FitData& fd_mut = const_cast<FitData&>(fd);
+
+        // B05(stale-wing) fix: previously an unmatched prev point (strike no
+        // longer quoted) was carried into the new dataset FOREVER with a frozen
+        // vol, polluting the wings as the ATM moved. Bound the carry to the
+        // span of live points so far-away zombies age out of the fit set.
+        double spanLo = 0.0, spanHi = 0.0;
+        const bool haveLive = !fd_mut.stkvol_points.empty();
+        if (haveLive) {
+            spanLo = fd_mut.stkvol_points.front().first;
+            spanHi = fd_mut.stkvol_points.back().first;   // caller sorts before calling
+        }
+        const double margin = haveLive ? 0.5 * (spanHi - spanLo) : 0.0;
+
+        std::vector<IVolCurve::datapoint_t> carried;
         for (const auto& p0 : stkvol_points_prev) {
             double stk0 = p0.first + atmf_prev;
             double vol0 = p0.second * atmv_prev;
@@ -328,13 +332,20 @@ void PeriodicCurveFitter::updateFitData(const PeriodicCurveFitter::FitData& fd)
                 if (EQ(stk0, stk1)) { pt = &p1; break; }
             }
             if (!pt) {
-                fd_mut.stkvol_points.push_back({stk0, vol0 / fd.atm_vol});
+                // carry only if within the live fit window (+50% margin)
+                if (haveLive && p0.first >= spanLo - margin && p0.first <= spanHi + margin) {
+                    carried.push_back({p0.first, vol0 / fd.atm_vol});
+                }
             } else {
                 double vol1 = pt->second * fd.atm_vol;
                 double voln = (1 - frac) * vol0 + frac * vol1;
                 pt->second = voln / fd.atm_vol;
             }
         }
+        for (auto& c : carried)
+            fd_mut.stkvol_points.push_back(std::move(c));
+        if (!carried.empty())
+            std::sort(fd_mut.stkvol_points.begin(), fd_mut.stkvol_points.end(), dp_comp);
     }
     fd_prev = fd;
 }

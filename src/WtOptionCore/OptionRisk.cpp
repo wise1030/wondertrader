@@ -19,8 +19,8 @@
 #include "OptionExpiryGreeks.h"
 #include "OptionRiskData.h"
 #include "OptionGrid.h"
+#include "../WTSTools/WTSLogger.h"
 
-#include <iostream>
 #include <memory>
 
 namespace wt_option {
@@ -123,38 +123,49 @@ const OptionExpiryGreeksPtr& OptionRisk::getExpiryGreeks(uint32_t exp)
 }
 
 OptionRisk::HedgeDataPtr OptionRisk::registerHedgeInstrument(const std::string& code,
-                                                              uint32_t exp)
+                                                              uint32_t exp,
+                                                              double multiplier)
 {
     for (const HedgeDataPtr& hd : m_hedgeDataList)
     {
         if (hd->code == code && hd->expiry == exp)
             return hd;
     }
-    std::cout << "OptionRisk::registerHedgeInstrument " << code << std::endl;
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OptionRisk::registerHedgeInstrument {} (exp={}, mult={})", code, exp, multiplier);
     auto hd = std::make_shared<HedgeData>();
     hd->code          = code;
     hd->expiry        = exp;
     hd->position      = 0;
     hd->deltaPosition = 0.0;
-    hd->multiplier    = 1.0;
+    hd->multiplier    = multiplier;   // B18: real contract multiplier (was hardcoded 1.0)
     m_hedgeDataList.push_back(hd);
     return hd;
 }
 
 void OptionRisk::setHedgePosition(const std::string& code, int32_t position)
 {
+    bool found = false;
+    // B18 fix: update EVERY hedge entry with this code — each expiry registers
+    // its own HedgeData; the early-return left all but the first stale.
     for (HedgeDataPtr& hd : m_hedgeDataList)
     {
         if (hd->code == code)
         {
+            found = true;
+            if (hd->position == position) continue;
             hd->position = position;
             hd->deltaPosition = hd->multiplier * position;
             // Notify expiry greeks of position change
             auto it = m_expiryTable.find(hd->expiry);
             if (it != m_expiryTable.end() && it->second)
                 it->second->__onHedgePositionChange();
-            return;
         }
+    }
+    if (!found)
+    {
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "OptionRisk::setHedgePosition: unknown hedge code {}", code);
     }
 }
 

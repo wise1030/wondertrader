@@ -33,11 +33,12 @@ DayResult ExpirationSimulator::checkExpiration(uint32_t curDate, double spotPric
     DayResult result;
     result.date = curDate;
 
-    // 1. Trading PnL from fills
+    // 1. Trading PnL from fills (cash-flow convention: buying = -premium paid)
+    // B06 fix: signs were inverted (buy added +cost to PnL)
     double tradingPnl = 0;
     for (const auto& fill : m_fills) {
         double dir = fill.isBuy ? 1.0 : -1.0;
-        tradingPnl += dir * fill.price * fill.qty * m_multiplier;
+        tradingPnl -= dir * fill.price * fill.qty * m_multiplier;
         tradingPnl -= fill.fee;
     }
 
@@ -57,19 +58,21 @@ DayResult ExpirationSimulator::checkExpiration(uint32_t curDate, double spotPric
             // Check if option expired today
             int32_t dte = ed->daysToExpiry();
             if (dte <= 0) {
-                // Settlement: intrinsic value
+                // Settlement: long position receives intrinsic value
+                // B06 fix: sign was inverted (-pos → +pos)
                 double intrinsic = 0;
                 if (od->getRight() == OR_Call) {
                     intrinsic = std::max(0.0, spotPrice - od->getStrike());
                 } else {
                     intrinsic = std::max(0.0, od->getStrike() - spotPrice);
                 }
-                settlementPnl += -pos * intrinsic * m_multiplier;
+                settlementPnl += pos * intrinsic * m_multiplier;
             } else {
-                // Close value: mark to mid
+                // Close value: mark to mid (long receives mid)
+                // B06 fix: sign was inverted
                 double mid = od->getMid();
                 if (mid > 0) {
-                    closePnl += -pos * mid * m_multiplier;
+                    closePnl += pos * mid * m_multiplier;
                 }
             }
         }

@@ -184,6 +184,11 @@ public:
 
     // GVV curve blend weight (0=use fitted curve only, 1=use GVV parametric only)
     double volcurve_weight = 0.0;
+
+    /// B4: cross-expiry risk term switch (delta_risk2/vega_risk2 covariance
+    /// correction). Default ON matches the post-P0-D behavior; set false to
+    /// roll back to per-expiry-only risk for A/B comparison.
+    bool use_cross_expiry_corr = true;
 };
 using CompositeOptionPricerConfigPtr = std::shared_ptr<CompositeOptionPricerConfig>;
 

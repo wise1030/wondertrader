@@ -95,10 +95,15 @@ private:
     int32_t getTraceLevel() const { return m_traceLevel; }
 
 private:
+    // B30: per-instance threshold table (was a function-local static shared by
+    // all fitter instances — multiple strategies in one process overwrote each other)
+    double evalThresh(int32_t days) const;
+
     OptionGrid*                     m_spGrid = nullptr;
     std::shared_ptr<OptionPricer2>  m_spBlackPricer;
     double                          m_tvLastFit = 0.0;
     std::map<uint32_t, FitData>     m_fit_data_prev;
+    std::map<int32_t, double>       m_threshTable;
 
     double                          m_volFittingStartTime;
     double                          m_volFittingEndTime;

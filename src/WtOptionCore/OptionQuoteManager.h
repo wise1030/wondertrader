@@ -62,6 +62,15 @@ public:
         bool cautious_flipping = false;        // block orders that would flip position
         double scale_factor = 1.0;             // runtime order size multiplier (0-1)
         bool enable_ioc = false;                // IOC orders for quick close
+
+        // --- A4: exchange quoting style (quantbox QuoteOrderManager absorption) ---
+        enum QuoteStyle { QS_PAIRED = 0, QS_BUYSELL = 1 };
+        QuoteStyle quote_style = QS_PAIRED;
+        // SHFE/INE: close-side orders are capped by closeable volume
+        bool enable_offset_guard = false;
+
+        // B3: right flag for OptionsShortLimitFilter (0=Put, 1=Call, 2=N/A)
+        uint8_t right_flag = 2;
     };
 
     using GetTimeFn = std::function<double()>;
@@ -90,9 +99,31 @@ public:
     void setTickTimestampUs(uint64_t ts) { m_tickTimestampUs = ts; }
     void setCurrentTime(uint32_t hhmm, uint32_t secInMin) { m_timeHHMM = hhmm; m_secInMin = secInMin; }
 
+    /// A2: pre-trade limit checker (RiskLimitsEx integration), runs BEFORE the
+    /// filter chain. Return false to block the side. qty may be adjusted down.
+    using PreTradeCheckFn = std::function<bool(const std::string& code, bool isBuy,
+                                                double price, uint32_t& qty,
+                                                int32_t currentPosition,
+                                                std::string& reason)>;
+    void setPreTradeCheckFn(PreTradeCheckFn fn) { m_preTradeCheck = std::move(fn); }
+
+    /// A4: injectable single-leg sender (default: stra_buy/stra_sell via ctx).
+    /// Injectable for unit tests.
+    using SendSingleFn = std::function<uint32_t(bool isBuy, double price, uint32_t qty)>;
+    void setSendSingleFn(SendSingleFn fn) { m_sendSingle = std::move(fn); }
+
     // --- Runtime param adjustment ---
     void setScaleFactor(double scale);
     void setMaxPosition(uint32_t maxPos) { m_cfg.max_position = maxPos; }
+
+    /// B07: clear lifetime counters (cancel/new/fill/reject + hard-flat latch).
+    /// MUST be called at each session begin — otherwise MaxCancel /
+    /// MaxNewOrders / hard_flat_after_n_fills eventually lock all quoting.
+    void resetCounters();
+
+    /// C5: append one CSV line with this contract's lifetime counters.
+    /// Called at session end for exchange-report reconciliation.
+    void dumpCountersCsv(const std::string& path) const;
 
     // --- Active state ---
     bool isActive() const { return m_active; }
@@ -121,17 +152,23 @@ private:
     // --- Send via WT API ---
     std::pair<uint32_t, uint32_t> sendQuote(double bidP, uint32_t bidQ,
                                               double askP, uint32_t askQ);
+    uint32_t sendSingle(bool isBuy, double price, uint32_t qty);  // A4
     bool sendCancelById(uint32_t localid);
     void sendCancelAll();
+    void applyOffsetGuard(uint32_t& qty, bool isBuy);             // A1 guard
 
     // --- Cancel helpers ---
-    void cancelSide(bool isBuy);
+    int32_t cancelSide(bool isBuy);   // returns cancels actually sent this call (B22a)
     void cancelByPrice(bool isBuy, double price);
     void rebuildOrderMarketTracker();
+
+    PreTradeCheckFn m_preTradeCheck;   // A2
+    SendSingleFn m_sendSingle;         // A4 test seam
 
     // --- Incremental diffing ---
     int32_t getMissingPriceLevelSize(double price, uint32_t desiredSize, bool isBuy) const;
     void updateSide(bool isBuy, const PriceSize& desired);
+    void trackOrder(bool isBuy, double px, uint32_t sz, uint32_t localid);  // B21
 
     // --- STP ---
     bool is_crossed(double bidP, double askP) const;
@@ -142,6 +179,8 @@ private:
 
     // --- Per-contract order state ---
     struct OrderState {
+        enum class Phase : uint8_t { New, Live, CancelPending, Dead };
+
         uint32_t localid = 0;
         bool isBuy = false;
         double price = 0;
@@ -150,6 +189,18 @@ private:
         bool active = false;
         bool cancelPending = false;
         double issueTime = 0;
+        bool acknowledged = false;  // B24: set on first exchange ack
+        Phase phase = Phase::New;   // C4: explicit lifecycle phase
+
+        static const char* phaseName(Phase p) {
+            switch (p) {
+            case Phase::New: return "New";
+            case Phase::Live: return "Live";
+            case Phase::CancelPending: return "CancelPending";
+            case Phase::Dead: return "Dead";
+            }
+            return "?";
+        }
     };
 
     std::string m_code;

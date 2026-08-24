@@ -28,7 +28,6 @@ set(OPTION_CORE_SOURCES
     OptionTradingGrid.cpp
 
     # Pricing
-    OptionPricer.cpp
     OptionPricer2.cpp
     CompositeOptionPricer.cpp
     GammaScalpOptionPricer.cpp
@@ -119,10 +118,8 @@ set(OPTION_CORE_HEADERS
     IOptionGridListener.h
     IOptionDataListener.h
     IOptionPricer.h
-    OptionPricer.h
     OptionPricer2.h
     IVolCurve.h
-    ConstantVolCurve.h
     LinearVolCurve.h
     GvvVolCurve.h
     PeriodicCurveFitter.h
@@ -141,7 +138,6 @@ set(OPTION_CORE_HEADERS
     check_markets.h
     Scanners/IScanModule.h
     ComboOrders.h
-    ScannerInfo.h
     Scanners/MMScanner.h
     Scanners/ButterflyScanner.h
     Scanners/VolSpreadScanner.h

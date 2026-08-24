@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 
 namespace wt_option {
 
@@ -50,10 +51,22 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
 
     if (!m_active && !cancel_only) return 0;
 
+    // A3: reject-retry backoff. While a full rejection is pending its 400ms
+    // backoff, suppress automatic resends (diffing alone would refill the
+    // rejected level instantly, defeating the retry mechanism). When due,
+    // consume the latch so this pass proceeds as the retry attempt.
+    if (!cancel_only && m_retryPending) {
+        if (m_getTime && getRetryDelayRemaining() > 0)
+            return 0;
+        m_retryPending = false;
+    }
+
     if (cancel_only) {
-        cancelSide(true);
-        cancelSide(false);
-        return m_numCancel;
+        // B22a fix: return the number of cancels issued THIS call, not the
+        // lifetime counter (m_numCancel grew monotonically and instantly
+        // exhausted the TPS budget on the first cancel-only cycle)
+        int32_t cancels = cancelSide(true) + cancelSide(false);
+        return cancels;
     }
 
     // Enhancement: Avoid-trade with per-side comparison (incremental)
@@ -137,6 +150,31 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
         for (const auto& o : m_askOrders) if (o.cancelPending) { hasPendingCancels = true; break; }
 
     // Enhancement: Risk filter chain
+    // A2: pre-trade limit checker (RiskLimitsEx) runs BEFORE the filter chain
+    if (m_preTradeCheck && !hasPendingCancels) {
+        std::string reason;
+        if (!newBid.empty() && !blockBid) {
+            uint32_t q = bidQty;
+            if (!m_preTradeCheck(m_code, true, newBid.px(), q, m_position, reason)) {
+                blockBid = true;
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "OQM: {} bid blocked by pre-trade limits: {}", m_code, reason);
+            } else if (q != bidQty) {
+                bidQty = q;   // checker truncated
+            }
+        }
+        if (!newAsk.empty() && !blockAsk) {
+            uint32_t q = askQty;
+            if (!m_preTradeCheck(m_code, false, newAsk.px(), q, m_position, reason)) {
+                blockAsk = true;
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "OQM: {} ask blocked by pre-trade limits: {}", m_code, reason);
+            } else if (q != askQty) {
+                askQty = q;
+            }
+        }
+    }
+
     if (m_filterChain && !hasPendingCancels) {
         if (!newBid.empty() && !blockBid) {
             FilterContext fctx;
@@ -145,12 +183,15 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
             fctx.price = newBid.px();
             fctx.qty = bidQty;
             fctx.currentPosition = m_position;
-            fctx.potentialPosition = m_position;
+            fctx.potentialPosition = potentialPos;  // B34a: pass computed potential, not raw current
             fctx.numCancels = m_numCancel;
             fctx.numNewOrders = m_numNewOrders;
             fctx.numFills = m_numFill;
+            fctx.rightFlag = m_cfg.right_flag;      // B3
             if (m_filterChain->execute(fctx) == FilterResult::REJECTED) {
                 blockBid = true;
+            } else {
+                bidQty = fctx.qty;  // B08 fix: adopt MODIFIED (truncated) qty
             }
         }
         if (!newAsk.empty() && !blockAsk) {
@@ -160,14 +201,26 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
             fctx.price = newAsk.px();
             fctx.qty = askQty;
             fctx.currentPosition = m_position;
-            fctx.potentialPosition = m_position;
+            fctx.potentialPosition = potentialPos;  // B34a
             fctx.numCancels = m_numCancel;
             fctx.numNewOrders = m_numNewOrders;
             fctx.numFills = m_numFill;
+            fctx.rightFlag = m_cfg.right_flag;      // B3
             if (m_filterChain->execute(fctx) == FilterResult::REJECTED) {
                 blockAsk = true;
+            } else {
+                askQty = fctx.qty;  // B08 fix
             }
         }
+    }
+
+    // A1: SHFE/INE close-side offset guard — cap close-direction quantity by
+    // the closeable total so we never try to close more than we hold.
+    if (m_cfg.enable_offset_guard && m_positionOffset) {
+        if (!blockAsk && askQty > 0 && m_position > 0)
+            applyOffsetGuard(askQty, false);   // selling to reduce longs
+        if (!blockBid && bidQty > 0 && m_position < 0)
+            applyOffsetGuard(bidQty, true);    // buying to reduce shorts
     }
 
     // === Incremental per-side update ===
@@ -214,6 +267,35 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
 // ============================================================================
 // updateSide - incremental per-side update (diff desired vs current)
 // ============================================================================
+
+// ============================================================================
+// trackOrder - record a newly sent order, superseding any active order at the
+// same price. B21 fix: in quote-API mode the exchange replaces the resting
+// quote and sendQuote returns a NEW localid — the old OrderState used to stay
+// active under its stale id, desynchronizing the market tracker and
+// avoid_trade logic.
+// ============================================================================
+
+void OptionQuoteManager::trackOrder(bool isBuy, double px, uint32_t sz, uint32_t localid)
+{
+    if (localid == 0) return;
+    auto& orders = isBuy ? m_bidOrders : m_askOrders;
+    for (auto& o : orders) {
+        if (o.active && o.localid != localid &&
+            std::abs(o.price - px) < 1e-6) {
+            o.active = false;  // superseded (late acks for this id are ignored)
+            o.phase = OrderState::Phase::Dead;
+        }
+    }
+    double now = m_getTime ? m_getTime() : 0;
+    OrderState st;
+    st.localid = localid; st.isBuy = isBuy; st.price = px; st.qty = sz;
+    st.filled = 0; st.active = true; st.cancelPending = false;
+    st.issueTime = now; st.acknowledged = false;
+    st.phase = OrderState::Phase::New;   // C4: Live on first ack
+    orders.push_back(std::move(st));
+    m_numNewOrders++;
+}
 
 void OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
 {
@@ -271,28 +353,23 @@ void OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
             }
         }
 
-        // Send new quote/order
-        if (isBuy) {
-            auto ids = sendQuote(desired.px(), static_cast<uint32_t>(desired.sz()), 0, 0);
-            if (ids.first != 0) {
-                double now = m_getTime ? m_getTime() : 0;
-                m_bidOrders.push_back({ids.first, true, desired.px(),
-                    static_cast<uint32_t>(desired.sz()), 0, true, false, now});
-                m_numNewOrders++;
-            }
-        } else {
-            auto ids = sendQuote(0, 0, desired.px(), static_cast<uint32_t>(desired.sz()));
-            if (ids.second != 0) {
-                double now = m_getTime ? m_getTime() : 0;
-                m_askOrders.push_back({ids.second, false, desired.px(),
-                    static_cast<uint32_t>(desired.sz()), 0, true, false, now});
-                m_numNewOrders++;
-            }
+        // Send new quote/order (A4: style-aware single leg)
+        {
+            uint32_t id = sendSingle(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()));
+            if (id != 0)
+                trackOrder(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()), id);
         }
     } else {
         // missing < 0: too much size at this price -> need to cancel some
-        // For single-level quote API: cancel and resend with smaller size
-        if (canCancel() && !m_cfg.enable_quote_api) {
+        if (m_cfg.enable_quote_api && m_cfg.quote_style == OptionQuoteManager::Config::QS_PAIRED) {
+            // Paired quote API on a replacing exchange: just resend with new
+            // size (auto-replaces) — B21: track the NEW localid
+            uint32_t id = sendSingle(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()));
+            if (id != 0)
+                trackOrder(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()), id);
+        } else if (canCancel()) {
+            // Buy/Sell mode or non-replacing venue: cancel same-price orders,
+            // then resend with correct size
             for (auto& o : orders) {
                 if (o.active && !o.cancelPending &&
                     std::abs(o.price - desired.px()) < 1e-6) {
@@ -300,32 +377,9 @@ void OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
                     o.cancelPending = true;
                 }
             }
-            // Resend with correct size
-            if (isBuy) {
-                auto ids = sendQuote(desired.px(), static_cast<uint32_t>(desired.sz()), 0, 0);
-                if (ids.first != 0) {
-                    double now = m_getTime ? m_getTime() : 0;
-                    m_bidOrders.push_back({ids.first, true, desired.px(),
-                        static_cast<uint32_t>(desired.sz()), 0, true, false, now});
-                    m_numNewOrders++;
-                }
-            } else {
-                auto ids = sendQuote(0, 0, desired.px(), static_cast<uint32_t>(desired.sz()));
-                if (ids.second != 0) {
-                    double now = m_getTime ? m_getTime() : 0;
-                    m_askOrders.push_back({ids.second, false, desired.px(),
-                        static_cast<uint32_t>(desired.sz()), 0, true, false, now});
-                    m_numNewOrders++;
-                }
-            }
-        }
-        // With quote API: just resend with new size (auto-replaces)
-        if (m_cfg.enable_quote_api) {
-            if (isBuy) {
-                sendQuote(desired.px(), static_cast<uint32_t>(desired.sz()), 0, 0);
-            } else {
-                sendQuote(0, 0, desired.px(), static_cast<uint32_t>(desired.sz()));
-            }
+            uint32_t id = sendSingle(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()));
+            if (id != 0)
+                trackOrder(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()), id);
         }
     }
 }
@@ -361,13 +415,20 @@ void OptionQuoteManager::onOrderStatusChange(uint32_t localid, bool isLong,
 
     for (auto& o : orders) {
         if (o.localid == localid) {
-            // Detect: this is first status change for a newly sent order (qty was 0)
-            if (o.qty == 0 && totalQty > 0) wasNewOrder = true;
+            // B24 fix: qty is initialized with the target size at send time, so
+            // `o.qty == 0` never fired — onOrderSent/latency stats were dead.
+            wasNewOrder = !o.acknowledged;
+            o.acknowledged = true;
+            if (o.phase == OrderState::Phase::New)
+                o.phase = OrderState::Phase::Live;   // C4
 
             if (isCanceled || leftQty == 0) {
                 o.active = false;
                 o.cancelPending = false;
+                o.phase = OrderState::Phase::Dead;   // C4
                 if (isCanceled) m_numCancel++;
+            } else if (o.cancelPending) {
+                o.phase = OrderState::Phase::CancelPending;  // C4
             }
             o.qty = static_cast<uint32_t>(totalQty);
             o.filled = static_cast<uint32_t>(totalQty - leftQty);
@@ -520,6 +581,25 @@ double OptionQuoteManager::getRetryDelayRemaining() const {
 }
 
 // ============================================================================
+// resetCounters - B07: session lifecycle must clear lifetime counters,
+// otherwise MaxCancel/MaxNewOrders/hard_flat thresholds permanently lock
+// quoting after a few hours of market making.
+// ============================================================================
+
+void OptionQuoteManager::resetCounters() {
+    m_numCancel = 0;
+    m_numFill = 0;
+    m_numNewOrders = 0;
+    m_numReject = 0;
+    m_numLateFills = 0;
+    m_hardFlatMode = false;
+    m_rejectRetryCount = 0;
+    m_retryPending = false;
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OQM: {} counters reset (session begin)", m_code);
+}
+
+// ============================================================================
 // Private helpers
 // ============================================================================
 
@@ -528,6 +608,51 @@ std::pair<uint32_t, uint32_t> OptionQuoteManager::sendQuote(
 {
     if (!m_ctx) return {0, 0};
     return m_ctx->stra_quote(m_code.c_str(), bidP, bidQ, askP, askQ, "OptionMM");
+}
+
+// A4: style-aware single-leg issuer
+uint32_t OptionQuoteManager::sendSingle(bool isBuy, double price, uint32_t qty)
+{
+    if (qty == 0 || price <= 0) return 0;
+    if (m_sendSingle)
+        return m_sendSingle(isBuy, price, qty);
+    if (!m_ctx) return 0;
+    if (m_cfg.quote_style == OptionQuoteManager::Config::QS_BUYSELL) {
+        auto ids = isBuy
+            ? m_ctx->stra_buy(m_code.c_str(), price, qty, "OptionMM")
+            : m_ctx->stra_sell(m_code.c_str(), price, qty, "OptionMM");
+        return ids.empty() ? 0 : ids[0];
+    }
+    // Paired API used single-sided (bid-only or ask-only)
+    auto ids = sendQuote(isBuy ? price : 0.0, isBuy ? qty : 0,
+                         isBuy ? 0.0 : price, isBuy ? 0 : qty);
+    return isBuy ? ids.first : ids.second;
+}
+
+// A1: close-side offset guard — cap by closeable total (today+prev combined;
+// WT on_position does not expose the today/prev split, so we guard against the
+// conservative combined figure and let the framework's action policy split).
+void OptionQuoteManager::applyOffsetGuard(uint32_t& qty, bool isBuy)
+{
+    int32_t closeable = m_positionOffset->getCloseableTotal(isBuy);
+    if ((int32_t)qty <= closeable) return;
+
+    uint32_t capped = closeable > 0 ? (uint32_t)closeable : 0;
+    WTSLogger::log_by_cat("strategy", LL_WARN,
+        "OQM offset-guard {}: close-direction {} {} -> capped to closeable {}",
+        m_code, isBuy ? "buy" : "sell", qty, capped);
+    qty = capped;
+}
+
+// C5: session-end counter dump for exchange-report reconciliation
+void OptionQuoteManager::dumpCountersCsv(const std::string& path) const
+{
+    std::ofstream ofs(path, std::ios::app);
+    if (!ofs.is_open()) return;
+    // code,cancels,newOrders,fills,rejects,lateFills,position
+    ofs << m_code << ',' << m_numCancel << ',' << m_numNewOrders << ','
+        << m_numFill << ',' << m_numReject << ',' << m_numLateFills << ','
+        << m_position << '\n';
 }
 
 bool OptionQuoteManager::sendCancelById(uint32_t localid) {
@@ -543,16 +668,19 @@ void OptionQuoteManager::sendCancelAll() {
     m_orderMarketTracker.clear();
 }
 
-void OptionQuoteManager::cancelSide(bool isBuy) {
+int32_t OptionQuoteManager::cancelSide(bool isBuy) {
     auto& orders = isBuy ? m_bidOrders : m_askOrders;
+    int32_t sent = 0;  // B22a: count cancels issued THIS call
     for (auto& o : orders) {
         if (o.active && !o.cancelPending) {
             if (canCancel()) {
                 sendCancelById(o.localid);
                 o.cancelPending = true;
+                sent++;
             }
         }
     }
+    return sent;
 }
 
 void OptionQuoteManager::cancelByPrice(bool isBuy, double price) {

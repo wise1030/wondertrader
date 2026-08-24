@@ -27,7 +27,7 @@ void ToxicitySignal::onFill(const std::string& code, bool isBuy, double qty, dou
     if (!m_enabled) return;
     auto& hist = m_fillHistory[code];
     FillRecord rec;
-    rec.time = m_curTime;
+    rec.time = m_signalTime;
     rec.isBuy = isBuy;
     rec.price = price;
     hist.push_back(rec);
@@ -56,15 +56,14 @@ void ToxicitySignal::onFill(const std::string& code, bool isBuy, double qty, dou
     }
     m_consecutiveAdverse[code] = adverseCount;
 
-    if (adverseCount >= m_maxAdverseFills && m_curTime > 0) {
-        m_lastAdverseTime[code] = m_curTime;
+    if (adverseCount >= m_maxAdverseFills && m_signalTime > 0) {
+        m_lastAdverseTime[code] = m_signalTime;
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "Toxicity {} adverse_fills={}", code, adverseCount);
     }
 }
 
 void ToxicitySignal::checkExpiry(double now) {
-    m_curTime = now;
     // Expire old fill records
     for (auto& [code, hist] : m_fillHistory) {
         while (!hist.empty() && (now - hist.front().time) > m_windowSec) {
@@ -83,7 +82,11 @@ void ToxicitySignal::checkExpiry(double now) {
 }
 
 void ToxicitySignal::onBatchEnd() {
-    checkExpiry(m_curTime);
+    // B05 fix: use host-driven clock (was: checkExpiry(m_curTime) with
+    // m_curTime stuck at 0 — windows/recovery never expired)
+    const double now = m_signalTime;
+    if (now <= 0) return;  // no clock yet, nothing to expire
+    checkExpiry(now);
 
     // Check global fill rate
     int32_t totalRecentFills = 0;
@@ -92,11 +95,19 @@ void ToxicitySignal::onBatchEnd() {
     }
     if (totalRecentFills > m_maxFillRatePerMin) {
         m_globalWidenFactor = m_widenFactor;
-        m_globalActionEndTime = m_curTime + m_recoverySec;
+        m_globalActionEndTime = now + m_recoverySec;
     }
-    if (m_curTime > m_globalActionEndTime) {
+    if (now > m_globalActionEndTime) {
         m_globalWidenFactor = 1.0;
     }
+}
+
+void ToxicitySignal::reset() {
+    m_fillHistory.clear();
+    m_lastAdverseTime.clear();
+    m_consecutiveAdverse.clear();
+    m_globalWidenFactor = 1.0;
+    m_globalActionEndTime = 0;
 }
 
 RiskAction ToxicitySignal::getAction() const {
@@ -145,6 +156,12 @@ void PnlLimitSignal::onBatchEnd() {
         }
         m_action = RiskAction::Panic;
     }
+}
+
+void PnlLimitSignal::reset() {
+    // B20 fix: panic latch no longer survives across sessions
+    m_action = RiskAction::None;
+    m_portfolioPnl = 0;
 }
 
 // ============================================================================

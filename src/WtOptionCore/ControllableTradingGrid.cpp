@@ -404,8 +404,12 @@ int32_t ControllableTradingGrid::rankOption(
     if (our_mkt.hasAsks())
         our_ask_spread = our_mkt.getBestAsk().px() - theo;
     if (our_mkt.hasBids() || our_mkt.hasAsks()) {
+        // B25 fix: our_bid_spread can be NEGATIVE when our bid is above theo
+        // (aggressive MM quoting) — fabs() the spread and clamp the quotient,
+        // otherwise delta/1e-10 overflows int32 (UB).
         double our_spread = std::min(our_bid_spread, our_ask_spread);
-        rank += static_cast<int32_t>(std::fabs(delta) / std::max(FP_EPSILON, our_spread));
+        double tightness = std::fabs(delta) / std::max(FP_EPSILON, std::fabs(our_spread));
+        rank += static_cast<int32_t>(std::min(tightness, 1000.0));
     }
 
     // Factor 7: near-expiry urgency
@@ -473,8 +477,10 @@ int32_t ControllableTradingGrid::rankFuture(
     if (our_mkt.hasAsks())
         our_ask_spread = our_mkt.getBestAsk().px() - theoMid;
     if (our_mkt.hasBids() || our_mkt.hasAsks()) {
+        // B25 fix: same overflow guard as rankOption (delta=1 for futures)
         double our_spread = std::min(our_bid_spread, our_ask_spread);
-        rank += static_cast<int32_t>(std::fabs(delta) / std::max(FP_EPSILON, our_spread));
+        double tightness = std::fabs(delta) / std::max(FP_EPSILON, std::fabs(our_spread));
+        rank += static_cast<int32_t>(std::min(tightness, 1000.0));
     }
 
     // Factor 7: make all futures important
@@ -531,8 +537,9 @@ void ControllableTradingGrid::drainPendingQuotes() {
             if (!m_otg) continue;
             auto utd = m_otg->getUnderlyingTradingData(pq.code);
             if (!utd || !utd->getQuoteManager()) continue;
-            // In panic mode, futures still process normally (for hedging).
-            int32_t txns = utd->updateOrders(pq.isCancel || cancelOnly);
+            // B12 fix: futures stay live in cancel-only mode — they are the
+            // hedge leg. Only an explicit pq.isCancel pulls future quotes.
+            int32_t txns = utd->updateOrders(pq.isCancel);
             m_txCount += txns;
         } else {
             auto od = m_grid->get(pq.code);
@@ -545,6 +552,27 @@ void ControllableTradingGrid::drainPendingQuotes() {
     }
 
     m_pendingQuotes.clear();
+
+    // A3: reject-retry closure (quantbox DefaultOrderManager::retryUpdateOrders).
+    // After the 400ms backoff, re-drive affected contracts directly — bypasses
+    // check_markets, which cannot see "order was rejected" as a change.
+    for (const auto& od : m_grid->getAllOptions()) {
+        if (!od) continue;
+        auto otd = od->getTradingData();
+        if (!otd || !otd->getQuoteManager()) continue;
+        const auto& qm = otd->getQuoteManager();
+        if (qm->isRetryPending() && qm->getRetryDelayRemaining() <= 0)
+            otd->updateOrders(false);
+    }
+    if (m_otg) {
+        for (auto& pair : m_otg->getAllUnderlyingTradingData()) {
+            auto utd = pair.second;
+            if (!utd || !utd->getQuoteManager()) continue;
+            const auto& qm = utd->getQuoteManager();
+            if (qm->isRetryPending() && qm->getRetryDelayRemaining() <= 0)
+                utd->updateOrders(false);
+        }
+    }
 
     // B16: Log drop count and retain dropped quotes for next cycle retry.
     // Dropped quotes are saved in m_droppedQuotes during the loop above,

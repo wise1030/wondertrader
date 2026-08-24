@@ -9,6 +9,7 @@
 #include "../Share/TimeUtils.hpp"
 #include "../WTSTools/WTSLogger.h"
 #include "../Includes/WTSDataDef.hpp"
+#include "../Includes/WTSContractInfo.hpp"
 #include <cstring>
 
 namespace wt_option {
@@ -30,6 +31,9 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     ev.tick.tradeVolume = t->volume();
     ev.tick.actionTime = t->actiontime();
     ev.tick.updateTime = TimeUtils::getLocalTimeNow();
+    // B28: capture exact expiry date from contract info when available
+    auto* ci = t->getContractInfo();
+    ev.tick.expireDate = (ci && ci->getExpireDate() > 0) ? ci->getExpireDate() : 0;
     return ev;
 }
 
@@ -74,12 +78,17 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     return ev;
 }
 
-OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_position(const char* stdCode, bool isLong, double newvol) {
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_position(const char* stdCode, bool isLong,
+                                                                                             double prevol, double preavail,
+                                                                                             double newvol, double newavail) {
     AsyncEvent ev;
     ev.type = Position;
     ev.setCode(stdCode);
     ev.position.isLong = isLong;
+    ev.position.prevol = prevol;
+    ev.position.preavail = preavail;
     ev.position.newvol = newvol;
+    ev.position.newavail = newavail;
     return ev;
 }
 
@@ -190,12 +199,14 @@ void OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
     _worker_cv.notify_one();
 }
 
-void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLong, double newvol)
+void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLong,
+                                                  double prevol, double preavail,
+                                                  double newvol, double newavail)
 {
     if (!_worker_running) return;
     {
         std::lock_guard<std::mutex> lock(_trader_mtx);
-        _trader_queue.push_back(AsyncEvent::make_position(stdCode, isLong, newvol));
+        _trader_queue.push_back(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
@@ -257,10 +268,16 @@ void OptionAsyncEventProcessor::worker_loop()
         // 2. Drain MD overflow (rare, under mutex)
         {
             std::lock_guard<std::mutex> lock(_md_overflow_mtx);
-            for (auto& oev : _md_overflow) {
+            size_t consumed = 0;
+            for (; consumed < _md_overflow.size(); ++consumed) {
                 if (events.size() >= 1024) break;
-                events.push_back(std::move(oev));
+                events.push_back(std::move(_md_overflow[consumed]));
             }
+            // B32 fix: events that do not fit were silently destroyed by
+            // clear() — account them as drops so saturation is observable.
+            if (consumed < _md_overflow.size())
+                _queue_drops.fetch_add(_md_overflow.size() - consumed,
+                                       std::memory_order_relaxed);
             _md_overflow.clear();
         }
 
@@ -305,7 +322,9 @@ void OptionAsyncEventProcessor::worker_loop()
             // Process in priority order: session → channel → position → trade → order → timer
             for (auto* ev : bk_sess)  if (_cbs.on_session)  _cbs.on_session(ev->session.tdate, ev->session.isBegin);
             for (auto* ev : bk_chan)  if (_cbs.on_channel) _cbs.on_channel(ev->channel.isReady);
-            for (auto* ev : bk_pos)   if (_cbs.on_position) _cbs.on_position(ev->getCode(), ev->position.isLong, ev->position.newvol);
+            for (auto* ev : bk_pos)   if (_cbs.on_position) _cbs.on_position(ev->getCode(), ev->position.isLong,
+                                                                             ev->position.prevol, ev->position.preavail,
+                                                                             ev->position.newvol, ev->position.newavail);
             for (auto* ev : bk_trade) if (_cbs.on_trade)   _cbs.on_trade(ev->getCode(), ev->trade.localid, ev->trade.isBuy, ev->trade.vol, ev->trade.price);
             for (auto* ev : bk_order) if (_cbs.on_order)   _cbs.on_order(ev->getCode(), ev->order.localid, ev->order.isBuy, ev->order.totalQty, ev->order.leftQty, ev->order.price, ev->order.isCanceled);
             for (auto* ev : bk_timer) if (_cbs.on_timer)   _cbs.on_timer(ev->timer.date, ev->timer.time);

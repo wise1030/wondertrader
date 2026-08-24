@@ -420,7 +420,9 @@ bool OptionPricer2::computeImpliedValues(OptionGrid* grid)
         for (const auto& o : grid->getAllOptions()) {
             opts.push_back(o.get());
         }
-        #pragma omp parallel for schedule(dynamic, 4)
+        // B34b fix: gate the IV parallel section on use_parallel_for like the
+        // pricing loop — it used to run multi-threaded even with the option off
+        #pragma omp parallel for schedule(dynamic, 4) if (m_config.use_parallel_for)
         for (long long i = 0; i < (long long)opts.size(); ++i) {
             __doImpliedVec(opts, (size_t)i);
         }

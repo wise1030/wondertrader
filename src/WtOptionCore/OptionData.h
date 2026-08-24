@@ -97,6 +97,9 @@ public:
     double getTickSize() const { return m_info.tickSize; }
     double getFee() const { return m_info.fee; }
     void setFee(double f) { m_info.fee = f; }
+    // B03: static contract facts injected by OTG when bdMgr is unavailable
+    void setTickSize(double t) { if (t > 0) m_info.tickSize = t; }
+    void setMultiplier(double m) { if (m > 0) m_info.multiplier = m; }
 
     // Market data
     const OptionMarket& getMarket() const { return m_market; }

@@ -38,8 +38,16 @@ public:
     virtual void onBatchStart(SignalContext& ctx) { (void)ctx; }
     virtual void onBatchEnd() {}
 
+    // Host-driven clock (seconds-of-day). Must be refreshed by the strategy
+    // before each batch / before dispatching fills, so that time-based logic
+    // inside signals (EMA decay, window expiry, recovery timers) works.
+    // B05 fix: previously signals had no time source and degenerated.
+    void setSignalTime(double t) { m_signalTime = t; }
+    double getSignalTime() const { return m_signalTime; }
+
 protected:
     bool m_enabled = true;
+    double m_signalTime = 0;
 };
 
 class IAlphaSignal : public ISignal {
@@ -60,6 +68,8 @@ public:
     virtual double getWidenFactor() const { return 1.0; }
     virtual RiskAction getActionByCode(const std::string& code) const { (void)code; return RiskAction::None; }
     virtual double getWidenFactorByCode(const std::string& code) const { (void)code; return 1.0; }
+    /// B20: clear latched state (session begin)
+    virtual void reset() {}
 };
 
 } // namespace wt_option

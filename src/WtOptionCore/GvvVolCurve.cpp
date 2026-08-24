@@ -20,6 +20,7 @@
 #include "GvvVolCurve.h"
 #include "BlackImpliedCalculator.h"  // wt_option::Brent
 #include "OptionData.h"
+#include "../WTSTools/WTSLogger.h"
 
 #include <iostream>
 #include <cmath>
@@ -167,7 +168,16 @@ double GvvVolCurve::eval(double x) const
         return vol / m_atmvol; // normalized by m_atmvol
     }
     catch (...) {
-        return GVV_MINATMVOL / m_atmvol;
+        // B31 fix: root-not-bracketed used to collapse the wing to
+        // MINATMVOL/atmvol (~1% absolute vol) with no log. Fall back to the
+        // ATM value instead and warn (throttled).
+        static uint64_t s_warnCount = 0;
+        if (s_warnCount++ < 20 || s_warnCount % 1000 == 0) {
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "GvvVolCurve::eval solve failed (x={:.4f}) -> fallback ATM, count={}",
+                x, s_warnCount);
+        }
+        return 1.0;
     }
 }
 

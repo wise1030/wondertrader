@@ -219,6 +219,16 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
     OptionDataPtr od = createOption(stdCode);
     if (od) {
         od->updateMarket(mkt);
+
+        // B28 fix: backfill exact expiry date from tick contract info.
+        // The async path used to lose this, freezing expiry at the YYYYMM15
+        // approximation (±14 days error in maturity/theta/discount).
+        if (tick.expireDate > 0) {
+            auto ed = od->getExpiryData();
+            if (ed && m_currentDate != 0) {
+                ed->updateDaysToExpiration(m_currentDate, tick.expireDate);
+            }
+        }
     }
 }
 
@@ -686,11 +696,16 @@ double OptionGrid::__getBestSyntheticPrice(const ExpiryDataPtr& ed) {
     if (ed->isForwardReady()) {
         uint64_t now = static_cast<uint64_t>(time * 1e6);
         uint64_t lastValid = ed->getLastValidForwardTime();
-        if (lastValid == 0) {
-            // First degradation: start the timer, keep sticky
+        // B29 fix: time-of-day clock wraps at midnight (night sessions).
+        // Unsigned underflow used to produce ~1.8e19 and instantly kill the
+        // sticky forward once per night session. Treat a backwards jump as a
+        // new session: restart the freshness timer.
+        int64_t dt = static_cast<int64_t>(now) - static_cast<int64_t>(lastValid);
+        if (lastValid == 0 || dt < 0) {
+            // First degradation (or session rollover): start the timer, keep sticky
             ed->setLastValidForwardTime(now);
             return ed->getForward();
-        } else if (now - lastValid > m_forwardStaleTimeoutUs) {
+        } else if (static_cast<uint64_t>(dt) > m_forwardStaleTimeoutUs) {
             // Timeout expired: forward is no longer valid
             ed->setForwardReady(false);
             return NAN;

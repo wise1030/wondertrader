@@ -42,6 +42,7 @@ struct TickData {
     double tradeVolume = 0;
     uint32_t actionTime = 0;
     uint64_t updateTime = 0;
+    uint32_t expireDate = 0;   // B28: exact expiry YYYYMMDD (0 = unknown)
 };
 
 struct SessionEvent {
@@ -57,7 +58,9 @@ struct AsyncCallbacks {
                        double totalQty, double leftQty, double price, bool isCanceled)> on_order;
     std::function<void(uint32_t curDate, uint32_t curTime)> on_timer;
     std::function<void(uint32_t tdate, bool isBegin)> on_session;
-    std::function<void(const std::string& code, bool isLong, double newvol)> on_position;
+    std::function<void(const std::string& code, bool isLong,
+                       double prevol, double preavail,
+                       double newvol, double newavail)> on_position;
     std::function<void(bool isReady)> on_channel;
     std::function<void()> on_batch_complete;
 };
@@ -81,7 +84,9 @@ public:
     void enqueue_order(uint32_t localid, const char* stdCode, bool isBuy,
                        double totalQty, double leftQty, double price, bool isCanceled);
     void enqueue_session(uint32_t tdate, bool isBegin);
-    void enqueue_position(const char* stdCode, bool isLong, double newvol);
+    void enqueue_position(const char* stdCode, bool isLong,
+                          double prevol, double preavail,
+                          double newvol, double newavail);
     void enqueue_channel(bool isReady);
 
     uint64_t totalEvents() const { return _total_events.load(std::memory_order_relaxed); }
@@ -98,7 +103,7 @@ public:
         struct { uint32_t localid; bool isBuy; double vol; double price; } trade;
         struct { uint32_t localid; bool isBuy; double totalQty; double leftQty; double price; bool isCanceled; } order;
         struct { bool isBegin; uint32_t tdate; } session;
-        struct { bool isLong; double newvol; } position;
+        struct { bool isLong; double prevol; double preavail; double newvol; double newavail; } position;
         struct { bool isReady; } channel;
         char code[32];
 
@@ -115,9 +120,11 @@ public:
         static AsyncEvent make_trade(const char* stdCode, uint32_t id, bool buy, double v, double p);
         static AsyncEvent make_order(const char* stdCode, uint32_t id, bool buy,
                                       double tq, double lq, double p, bool canc);
-        static AsyncEvent make_session(uint32_t tdate, bool isBegin);
-        static AsyncEvent make_position(const char* stdCode, bool isLong, double newvol);
-        static AsyncEvent make_channel(bool isReady);
+    static AsyncEvent make_session(uint32_t tdate, bool isBegin);
+    static AsyncEvent make_position(const char* stdCode, bool isLong,
+                                    double prevol, double preavail,
+                                    double newvol, double newavail);
+    static AsyncEvent make_channel(bool isReady);
     };
 
     // === MD queue: SPSC (single producer = MD thread) ===

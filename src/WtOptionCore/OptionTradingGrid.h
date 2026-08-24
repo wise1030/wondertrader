@@ -72,6 +72,22 @@ public:
     void setHedgeOverride(uint32_t exp, const std::string& hedgeCode) { m_hedgeOverrides[exp] = hedgeCode; }
     void setQuoteStatistics(wt_option::QuoteStatistics* qs) { m_quoteStats = qs; }
 
+    /// B11: position source for OTD::getPosition(). Injected by the strategy
+    /// (reads its worker-thread-owned position map). Without it, QM_AUTO↔
+    /// QM_CLOSE and auto-close logic see a permanent zero.
+    using PositionSourceFn = std::function<int32_t(const std::string& code)>;
+    void setPositionSourceFn(PositionSourceFn fn) { m_positionSource = std::move(fn); }
+
+    /// A2: pre-trade limit checker applied to every OQM at creation time
+    void setPreTradeCheckFn(OptionQuoteManager::PreTradeCheckFn fn) { m_preTradeFn = std::move(fn); }
+    /// B5: FIFO PnL matching mode for newly created trackers
+    void setFifoPnlMode(bool on) { m_fifoPnl = on; }
+
+    /// B07: reset all OQM lifetime counters (call on session begin)
+    void onSessionBegin();
+    /// C5: dump all OQM lifetime counters to CSV (call on session end)
+    void dumpCountersCsv(const std::string& path) const;
+
     // --- OptionRisk ---
     const OptionRiskPtr& getPositionRisk() const { return m_spPositionRisk; }
     void setPositionRisk(OptionRiskPtr risk) { m_spPositionRisk = std::move(risk); }
@@ -112,6 +128,9 @@ private:
     OptionQuoteManager::Config m_optionOqmCfg;
     OptionQuoteManager::Config m_futureOqmCfg;
     wt_option::QuoteStatistics* m_quoteStats = nullptr;  // non-owning
+    PositionSourceFn m_positionSource;                    // B11
+    OptionQuoteManager::PreTradeCheckFn m_preTradeFn;     // A2
+    bool m_fifoPnl = false;                               // B5
 
     // Trading object tables
     typedef std::map<std::string, UnderlyingTradingDataPtr> UnderlyingTable;

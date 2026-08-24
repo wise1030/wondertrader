@@ -24,6 +24,7 @@ void FillPriceChecker::onFill(const std::string& code, uint32_t localid, double 
         WTSLogger::log_by_cat("strategy", LL_ERROR,
             "FillPriceChecker PANIC: {} fill={} issue={} pct={:.4f} >= {:.4f}",
             code, fillPx, issuePx, pct, m_cfg.panicThreshold);
+        m_panicked = true;  // B13: latch until explicitly cleared
         if (m_panicCb) m_panicCb(code, fillPx, issuePx, pct);
     } else if (pct >= m_cfg.warningThreshold) {
         WTSLogger::log_by_cat("strategy", LL_WARN,

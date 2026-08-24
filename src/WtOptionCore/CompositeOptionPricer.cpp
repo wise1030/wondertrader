@@ -967,7 +967,10 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
         enable_ask = true;
         if (erc.enable_auto_close && otd) {
             int32_t pos = otd->getPosition();
-            if (pos != 0)
+            // B11b fix: enter CLOSE when |pos| exceeds the threshold
+            // (thresh==0 → any non-zero position, preserving old semantics)
+            double close_thresh = erc.close_pos_thresh;
+            if (pos != 0 && std::abs(pos) > close_thresh)
                 otd->setQuoteMode(QM_CLOSE);
         }
     } else if (qmode == QM_CLOSE) {
@@ -977,9 +980,12 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
             enable_bid = true;
             enable_ask = true;
         } else {
-            double close_thresh = erc.close_pos_thresh;
-            if (pos < -close_thresh) enable_bid = true;
-            if (pos > close_thresh) enable_ask = true;
+            // B11b fix: quote ONLY the position-reducing side.
+            // Old logic required |pos| > close_thresh to enable either side,
+            // which dead-locked flat-ish positions (no quotes -> pos can never
+            // reach 0 -> stuck in CLOSE forever).
+            if (pos < 0) enable_bid = true;   // short: buy to reduce
+            else        enable_ask = true;    // long: sell to reduce
         }
     }
 
@@ -1331,8 +1337,11 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
     if (it == m_tolerance_params.end()) return;
 
     // Check all options are priced
+    // B01 fix: single-sided strikes are normal during dynamic discovery —
+    // call()/put() must be null-checked before dereference (segfault risk)
     for (const auto& stk : grid->getAllStrikes()) {
-        if (!stk->call()->values(0).isPriced() || !stk->put()->values(0).isPriced()) {
+        if (!stk->call() || !stk->put() ||
+            !stk->call()->values(0).isPriced() || !stk->put()->values(0).isPriced()) {
             m_bShouldComputeRiskShiftsVega = true;
             break;
         }
@@ -1525,12 +1534,16 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
         black_values.adj().vega_risk = vega_adj;
     }
 
-    // covariance adjustment
-    double I_v = black_values.adj().vega_risk2;
-    double I_d = black_values.adj().delta_risk2;
+    // B4: cross-expiry terms are feature-flagged so the risk口径 can be
+    // rolled back to per-expiry-only for A/B comparison.
+    double I_v = m_config.use_cross_expiry_corr ? black_values.adj().vega_risk2 : 0.0;
+    double I_d = m_config.use_cross_expiry_corr ? black_values.adj().delta_risk2 : 0.0;
     double h = 0;
     if (I_v * I_d > 0)
         h = I_v * I_d * sign(I_d);
+
+    const double xdelta_risk2 = m_config.use_cross_expiry_corr ? black_values.adj().delta_risk2 : 0.0;
+    const double xvega_risk2  = m_config.use_cross_expiry_corr ? black_values.adj().vega_risk2 : 0.0;
 
     double markup = __getOptionCosts(option, black_values.theo());
     double cov = (markup != 0) ? h / markup : 0;
@@ -1538,8 +1551,8 @@ void CompositeOptionPricer::risk_adjustment(OptionData* option) {
 
     black_values.adj().total_risk = black_values.adj().delta_risk
         + black_values.adj().vega_risk
-        + black_values.adj().delta_risk2
-        + black_values.adj().vega_risk2
+        + xdelta_risk2
+        + xvega_risk2
         - cov;
 }
 

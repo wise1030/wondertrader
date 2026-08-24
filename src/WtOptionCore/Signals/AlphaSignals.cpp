@@ -45,7 +45,7 @@ void VegaFlowSignal::onTradeTick(const std::string& code, double price, double s
     auto ed = od->getExpiryData();
     double maturity = ed ? ed->getMaturity() : 0.25;
     double ve = s * std::sqrt(size) * v.greeks().vega() * maturity;
-    m_ema.update(0, ve);
+    m_ema.update(m_signalTime, ve);  // B19 fix: was update(0,...) — decay never applied
 }
 
 double VegaFlowSignal::getVegaAdjust(const OptionData* od, const SignalContext& ctx) const {
@@ -83,7 +83,7 @@ void DeltaFlowSignal::onTradeTick(const std::string& code, double price, double 
     auto ed = od->getExpiryData();
     double maturity = ed ? ed->getMaturity() : 0.25;
     double de = s * std::sqrt(size) * v.greeks().delta() / maturity;
-    m_ema.update(0, de);
+    m_ema.update(m_signalTime, de);  // B19 fix: was update(0,...) — decay never applied
 }
 
 double DeltaFlowSignal::getDeltaAdjust(const OptionData* od, const SignalContext& ctx) const {

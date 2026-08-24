@@ -23,6 +23,8 @@ struct FilterContext {
     int32_t numNewOrders = 0;
     int32_t numFills = 0;
 
+    uint8_t rightFlag = 2;   // B3: 0=Put, 1=Call, 2=N/A(future)
+
     std::string rejectReason;
 };
 
@@ -97,6 +99,28 @@ public:
 private:
     int32_t m_hardFlatLimit;
     int32_t m_rejectLimit;
+};
+
+/// B3 (absorbed from quantbox TdOptionsRiskControl): cap the NET SHORT count
+/// of calls / puts aggregated over the whole option product. The aggregate is
+/// supplied lazily via provider so the filter stays decoupled from OptionRisk.
+/// Supports MODIFY (truncate to allowed) like InstrMaxPositionFilter.
+class OptionsShortLimitFilter : public IRiskFilter {
+public:
+    using NetShortProvider = std::function<int32_t(bool isCall)>;
+
+    OptionsShortLimitFilter(int32_t maxShortCall, int32_t maxShortPut,
+                            NetShortProvider provider)
+        : m_maxShortCall(maxShortCall), m_maxShortPut(maxShortPut),
+          m_provider(std::move(provider)) {}
+
+    FilterResult process(FilterContext& ctx) override;
+    const char* name() const override { return "OptionsShortLimit"; }
+
+private:
+    int32_t m_maxShortCall;   // <=0 disables
+    int32_t m_maxShortPut;
+    NetShortProvider m_provider;
 };
 
 using RiskFilterChainPtr = std::shared_ptr<RiskFilterChain>;

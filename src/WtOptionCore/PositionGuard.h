@@ -13,6 +13,16 @@ public:
         int32_t tolerance = 0;
         double alertCooldownSec = 10.0;
         bool disableOnBreach = true;
+        // C1: broker staleness — freeze new-opening trades when the broker
+        // position feed is older than this (0 = disabled)
+        double staleFreezeSec = 10.0;
+        // C1: clamp internal position to broker when |diff| exceeds this
+        // (0 = disabled; broker wins, discrepancy still alerted)
+        int32_t clampLimit = 0;
+        // C2: optimistic-reconciliation undo window (quantbox PositionTracker).
+        // A broker-vs-internal adjustment made here is rolled back if a fill
+        // arrives within this window (the fill likely explains the diff).
+        double undoWindowSec = 2.0;
         Config() = default;
     };
 
@@ -25,7 +35,9 @@ public:
     void onFill(bool isBuy, uint32_t qty);
     void onBrokerPosition(bool isLong, double vol);
 
-    bool isOK() const { return !m_disabled; }
+    bool isOK() const { return !m_disabled && !isBrokerStale(); }
+    /// C1: true when broker feed went quiet beyond staleFreezeSec
+    bool isBrokerStale() const;
     int32_t getDiff() const { return m_internalPos - m_brokerPos; }
     int32_t getInternalPos() const { return m_internalPos; }
     int32_t getBrokerPos() const { return m_brokerPos; }
@@ -43,6 +55,13 @@ private:
     double m_lastAlertTime = 0;
     GetTimeFn m_getTime;
     DiscrepancyCallback m_callback;
+
+    // C1/C2 state
+    double m_lastBrokerUpdate = 0;      // timestamp of last broker report
+    int32_t  m_pendingAdjust = 0;       // C2: adjustment awaiting undo window
+    double   m_pendingAdjustTime = 0;
+
+    void applyUndoIfDue(double now);
 };
 
 using PositionGuardPtr = std::shared_ptr<PositionGuard>;

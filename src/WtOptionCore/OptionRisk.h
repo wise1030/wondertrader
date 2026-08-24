@@ -119,7 +119,8 @@ public:
     double raw_delta() const       { return totalDelta(); }
 
     // ---- Hedge instrument registration (public for post-construction wiring) ----
-    HedgeDataPtr registerHedgeInstrument(const std::string& code, uint32_t exp);
+    HedgeDataPtr registerHedgeInstrument(const std::string& code, uint32_t exp,
+                                         double multiplier = 1.0);
     /// Update a hedge's position externally (replaces IPositionListener push).
     void setHedgePosition(const std::string& code, int32_t position);
 

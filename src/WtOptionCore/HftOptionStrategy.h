@@ -26,6 +26,7 @@
 #include "RiskLimitsEx.h"
 #include "QuoteStatistics.h"
 #include "GammaScalpOptionPricer.h"
+#include "OrderAnomalyGuard.h"
 
 #include <string>
 #include <memory>
@@ -213,6 +214,26 @@ private:
     std::unordered_map<std::string, wt_option::PositionOffsetMgrPtr> _positionOffsets; // Per-contract offset managers
     wt_option::QuoteStatistics _quoteStats;                          // Quote statistics (session-level)
     uint64_t _tickTimestampUs = 0;                                   // Last tick arrival time (for latency measurement)
+
+    // B2: exchange-report anomaly protection (IssuedOrderTracker absorption)
+    wt_option::OrderAnomalyGuard _anomalyGuard;
+
+    // B1: estimated-margin guard (config-driven; exchange does not publish
+    // margins via commInfo, so rates are calibrated in config)
+    struct MarginConfig {
+        bool enabled = false;
+        double futRate = 0.10;          // per-unit notional rate for futures leg
+        double optShortRate = 0.12;     // per-unit UNDERLYING notional rate for short options
+        double maxMargin = 0;           // account limit (0 = disabled)
+        double warnRatio = 0.9;
+        double checkPeriodSec = 5.0;
+    } _marginCfg;
+    double _lastMarginCheckTime = 0;
+    std::atomic<bool> _limitsBreached{false};   // Greeks/daily-loss/margin breach latch
+    bool _fifoPnlMode = false;                  // B5
+
+    void checkMarginLimits(double nowSec);       // B1
+    void checkRiskLimitsEx();                    // A2 (Greeks / daily loss)
 
     // Option contracts to subscribe (from config)
     std::vector<std::string> _optionCodes;

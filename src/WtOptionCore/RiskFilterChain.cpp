@@ -1,6 +1,10 @@
 #include "RiskFilterChain.h"
 #include "../WTSTools/WTSLogger.h"
 
+#include <cstdlib>
+#include <cmath>
+#include <cstdio>
+
 namespace wt_option {
 
 void RiskFilterChain::add(std::unique_ptr<IRiskFilter> f) {
@@ -50,9 +54,10 @@ FilterResult MaxPositionFilter::process(FilterContext& ctx) {
     int32_t signedQty = ctx.isBuy ? static_cast<int32_t>(ctx.qty) : -static_cast<int32_t>(ctx.qty);
     int32_t finalPos = ctx.potentialPosition + signedQty;
 
-    bool positionIncreases = false;
-    if (ctx.currentPosition >= 0 && signedQty > 0) positionIncreases = true;
-    if (ctx.currentPosition <= 0 && signedQty < 0) positionIncreases = true;
+    // B26 fix: the old same-direction test missed position FLIPS
+    // (e.g. long 10 selling 100 → net short 90 bypassed the limit entirely).
+    // Risk increases whenever the absolute exposure grows.
+    bool positionIncreases = std::abs(finalPos) > std::abs(ctx.currentPosition);
 
     if (!positionIncreases) return FilterResult::APPROVED;
 
@@ -112,6 +117,42 @@ FilterResult MaxNewOrdersFilter::process(FilterContext& ctx) {
             "MaxNewOrders HARD FLAT: {} newOrders={}", ctx.code, ctx.numNewOrders);
     }
     return FilterResult::APPROVED;
+}
+
+// === OptionsShortLimitFilter (B3) ===
+// Selling increases net-short; buying decreases it. The provider returns the
+// current NET SHORT count (positive number) for the call/put side.
+FilterResult OptionsShortLimitFilter::process(FilterContext& ctx) {
+    if (!m_provider) return FilterResult::APPROVED;
+
+    bool isCall = (ctx.rightFlag == 1);
+    if (ctx.rightFlag != 0 && ctx.rightFlag != 1)
+        return FilterResult::APPROVED;   // futures / unknown — not applicable
+
+    const int32_t limit = isCall ? m_maxShortCall : m_maxShortPut;
+    if (limit <= 0) return FilterResult::APPROVED;   // disabled
+
+    const int32_t cur = m_provider(isCall);
+    const int32_t add = ctx.isBuy ? -static_cast<int32_t>(ctx.qty)
+                                  : static_cast<int32_t>(ctx.qty);
+    const int32_t next = cur + add;
+    if (next <= limit) return FilterResult::APPROVED;
+
+    const int32_t allowed = limit - cur;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "short %s net %d + %d > limit %d",
+             isCall ? "call" : "put", cur, add, limit);
+    ctx.rejectReason = buf;
+    if (allowed <= 0) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "OptionsShortLimit REJECT {}: {}", ctx.code, ctx.rejectReason);
+        return FilterResult::REJECTED;
+    }
+    // Truncate to what still fits below the cap
+    ctx.modifiedQty = static_cast<uint32_t>(allowed);
+    WTSLogger::log_by_cat("strategy", LL_WARN,
+        "OptionsShortLimit MODIFY {} {} -> qty={}", ctx.code, ctx.rejectReason, allowed);
+    return FilterResult::MODIFIED;
 }
 
 } // namespace wt_option

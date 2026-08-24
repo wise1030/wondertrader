@@ -40,6 +40,12 @@ public:
     void onFill(const OptionOrder& order, const FillEvent& fill) override;
     bool checkDone(bool timeout) override;
 
+    // B04: lightweight fill routing entry — the strategy matches fills by
+    // localid and calls this. Returns true if the id belongs to one of our legs.
+    // Fixes: onFill() was never invoked (empty routing loop), so leg2 was
+    // never sent and scanner fills stayed unhedged.
+    bool onLegFill(uint32_t localid, uint32_t fillQty);
+
     // Check timeout - returns true if timed out and needs cancel
     bool checkTimeout();
 
@@ -51,6 +57,7 @@ public:
 
 private:
     void sendLeg2();
+    void hedge(uint32_t qty);  // B27: top-up hedge for incremental leg1 fills
 
     ComboExecContext* m_execCtx;
     double m_tickSize;
@@ -67,6 +74,8 @@ private:
     double m_leg1Price = 0, m_leg2Price = 0;
     uint32_t m_leg1LocalId = 0, m_leg2LocalId = 0;
     uint32_t m_totalSize = 0;
+    uint32_t m_leg1Filled = 0;     // B27: cumulative leg1 fills
+    uint32_t m_leg2Committed = 0;  // B27: hedge qty already ordered
 };
 
 // ============================================================================
@@ -87,6 +96,9 @@ public:
     SendResult sendOrders() override;
     void onFill(const OptionOrder& order, const FillEvent& fill) override;
     bool checkDone(bool timeout) override;
+
+    // B04: lightweight fill routing entry (see SpreadComboOrder)
+    bool onLegFill(uint32_t localid, uint32_t fillQty);
 
     bool checkTimeout();
     void cancelAll();
@@ -114,8 +126,9 @@ private:
         uint32_t localId = 0;
         bool sent = false;
         bool filled = false;
-        uint32_t filledQty = 0;
+        uint32_t filledQty = 0;     // cumulative fills received
         uint32_t desiredQty = 0;
+        uint32_t committedQty = 0;  // cumulative qty actually ordered
     };
     std::vector<LegExec> m_legExecs;
 };

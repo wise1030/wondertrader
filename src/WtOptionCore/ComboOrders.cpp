@@ -63,6 +63,12 @@ ComboOrder::SendResult SpreadComboOrder::sendOrders()
 void SpreadComboOrder::sendLeg2()
 {
     if (m_leg2Sent || !m_execCtx || !m_execCtx->sendOrder) return;
+    hedge(m_totalSize);
+}
+
+void SpreadComboOrder::hedge(uint32_t qty)
+{
+    if (qty == 0 || !m_execCtx || !m_execCtx->sendOrder) return;
 
     // Price improvement: +1 tick on hedge leg for better fill probability
     double improvedPrice = m_leg2Price;
@@ -72,13 +78,15 @@ void SpreadComboOrder::sendLeg2()
         improvedPrice += (m_leg2IsBuy ? 1 : -1) * m_tickSize;
     }
 
-    m_leg2LocalId = m_execCtx->sendOrder(m_leg2Code, m_leg2IsBuy, improvedPrice, m_totalSize);
-    if (m_leg2LocalId > 0) {
+    uint32_t id = m_execCtx->sendOrder(m_leg2Code, m_leg2IsBuy, improvedPrice, qty);
+    if (id > 0) {
         m_leg2Sent = true;
+        m_leg2LocalId = id;
+        m_leg2Committed += qty;  // B27: track cumulative hedge commitment
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "SpreadComboOrder {} leg2 sent: {} {} {}@{} (improved from {})",
             m_name, m_leg2Code, m_leg2IsBuy ? "BUY" : "SELL",
-            m_totalSize, improvedPrice, m_leg2Price);
+            qty, improvedPrice, m_leg2Price);
     } else {
         WTSLogger::log_by_cat("strategy", LL_ERROR,
             "SpreadComboOrder {} leg2 send FAILED: {}", m_name, m_leg2Code);
@@ -86,29 +94,42 @@ void SpreadComboOrder::sendLeg2()
         if (m_leg1LocalId > 0 && m_execCtx->cancelOrder)
             m_execCtx->cancelOrder(m_leg1LocalId);
         m_done = true;
+        m_active = false;
     }
+}
+
+bool SpreadComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
+{
+    bool matched = false;
+    if (m_leg1Sent && localid == m_leg1LocalId) {
+        matched = true;
+        m_leg1Filled += fillQty;  // B27: accumulate partial fills
+        uint32_t need = (m_leg1Filled > m_leg2Committed)
+            ? (m_leg1Filled - m_leg2Committed) : 0;
+        if (need > 0 && !m_done) {
+            if (!m_leg2Sent) {
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "SpreadComboOrder {}: leg1 fill {}/{}, sending hedge",
+                    m_name, m_leg1Filled, m_totalSize);
+                hedge(need);   // B27 fix: size hedge to ACTUAL filled qty
+            } else {
+                hedge(need);   // B27 fix: top-up for late leg1 fills
+            }
+        }
+    } else if (m_leg2Sent && localid == m_leg2LocalId) {
+        matched = true;
+    }
+
+    if (matched && checkDone(false)) {
+        m_done = true;
+        m_active = false;
+    }
+    return matched;
 }
 
 void SpreadComboOrder::onFill(const OptionOrder& order, const FillEvent& fill)
 {
-    if (order.getOrderId() == m_leg1LocalId && !m_leg2Sent) {
-        // Leg1 filled - send leg2 with actual fill quantity
-        uint32_t fillQty = fill.fillQty;
-        if (fillQty > 0 && fillQty != m_totalSize) {
-            // Partial fill - adjust leg2 size to actual fill
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "SpreadComboOrder {} leg1 partial fill {}/{}, adjusting leg2",
-                m_name, fillQty, m_totalSize);
-            m_totalSize = fillQty;  // Adjust hedge size
-        }
-        sendLeg2();
-    }
-
-    // Check if done
-    if (checkDone(false)) {
-        m_done = true;
-        m_active = false;
-    }
+    onLegFill(order.getOrderId(), fill.fillQty);
 }
 
 bool SpreadComboOrder::checkDone(bool timeout)
@@ -234,6 +255,7 @@ void SynComboOrder::sendNextLeg()
     leg.localId = m_execCtx->sendOrder(leg.code, leg.isBuy, price, leg.desiredQty);
     if (leg.localId > 0) {
         leg.sent = true;
+        leg.committedQty = leg.desiredQty;  // B27: track actual commitment
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "SynComboOrder {} leg{} sent: {} {} {}@{}",
             m_name, m_nextLegToSend, leg.code,
@@ -248,36 +270,63 @@ void SynComboOrder::sendNextLeg()
     }
 }
 
-void SynComboOrder::onFill(const OptionOrder& order, const FillEvent& fill)
+bool SynComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
 {
-    // Find which leg filled
+    bool matched = false;
     for (int i = 0; i < (int)m_legExecs.size(); i++) {
-        if (m_legExecs[i].localId == order.getOrderId() && !m_legExecs[i].filled) {
-            m_legExecs[i].filled = true;
-            m_legExecs[i].filledQty = fill.fillQty;
+        auto& leg = m_legExecs[i];
+        if (leg.localId != localid || !leg.sent)
+            continue;
+        matched = true;
 
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "SynComboOrder {} leg{} filled: {} qty={}",
-                m_name, i, m_legExecs[i].code, fill.fillQty);
+        // B27 fix: accumulate fills; a leg completes only when fully filled
+        leg.filledQty += fillQty;
+        if (leg.filledQty >= leg.desiredQty)
+            leg.filled = true;
 
-            // Adjust next leg's quantity based on actual fill
-            if (i + 1 < (int)m_legExecs.size()) {
-                // For future hedge: adjust by option/future ratio
-                if (i == 1) {  // put filled -> send future with ratio
-                    m_legExecs[2].desiredQty = fill.fillQty / m_optFutRatio;
-                } else {
-                    m_legExecs[i + 1].desiredQty = fill.fillQty;
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "SynComboOrder {} leg{} filled: {} qty={}/{}",
+            m_name, i, leg.code, leg.filledQty, leg.desiredQty);
+
+        // Size the next leg from cumulative fills
+        if (i + 1 < (int)m_legExecs.size()) {
+            auto& nxt = m_legExecs[i + 1];
+            // Future hedge: round UP so the delta hedge is never short (B27)
+            uint32_t need = (i == 1)
+                ? (leg.filledQty + m_optFutRatio - 1) / m_optFutRatio
+                : leg.filledQty;
+            if (need > nxt.committedQty) {
+                nxt.desiredQty = std::max(nxt.desiredQty, need);
+                if (!nxt.sent) {
+                    m_nextLegToSend = i + 1;
+                    sendNextLeg();
+                } else if (!m_done && m_execCtx && m_execCtx->sendOrder) {
+                    // B27: top-up an already-sent hedge with the shortfall
+                    uint32_t extra = need - nxt.committedQty;
+                    double price = nxt.price + (nxt.isBuy ? 1 : -1) * m_tickSize;
+                    uint32_t id = m_execCtx->sendOrder(nxt.code, nxt.isBuy, price, extra);
+                    if (id > 0) {
+                        nxt.committedQty += extra;
+                        WTSLogger::log_by_cat("strategy", LL_INFO,
+                            "SynComboOrder {} leg{} top-up {} extra={} (committed={})",
+                            m_name, i + 1, nxt.code, extra, nxt.committedQty);
+                    }
                 }
-                sendNextLeg();
             }
-            break;
         }
+        break;
     }
 
-    if (checkDone(false)) {
+    if (matched && checkDone(false)) {
         m_done = true;
         m_active = false;
     }
+    return matched;
+}
+
+void SynComboOrder::onFill(const OptionOrder& order, const FillEvent& fill)
+{
+    onLegFill(order.getOrderId(), fill.fillQty);
 }
 
 bool SynComboOrder::checkDone(bool timeout)
