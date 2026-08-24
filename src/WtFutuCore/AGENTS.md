@@ -1513,3 +1513,34 @@ R1-R6、M1-M4、B1-B5 共 15 项发现，用户裁决全部接受。按风险与
 
 **明确不做**：GLFT 结构重构（phi 更名等语义保留原键名）；B1/B3/B4 的结构性拆链（维持既有裁决）；
 hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。
+
+### 实施记录（2026-08-24②，A/B/C/D 四批全部完成，验证通过，4 commits）
+
+| 批次 | commit | 验证 |
+|---|---|---|
+| 热参加固(前任务补记) | 0930d76d | TestUnits 129 过; v5 冒烟健康 |
+| A 清理 | fd237a68 | 129 过; v5×3 轮健康 |
+| B+C 配置面+skew修正 | fd060419 | **140→137 过**(含 SkewDimensionality 6 用例); v5 冒烟; _ec_5d A/B |
+| D ERROR 单轨化 | d963a44e | **140 过**(+ErrorSingleTrack 3 契约用例); v5 冒烟 Delta=0 |
+
+**_ec_5d A/B 归因记录（C 批行为变化评估）**：
+- trades: B/C 版 17,794 vs preBC 对照 17,942（差 -0.8%，mocker 噪声带 ±1.5% 内）
+- is_toxic 事件：两二进制**完全相同 =983** —— B/C 对毒性链路零影响 ✓
+- dynbalance(0612): 322,653；HALT/zombie/breaker 全程 0；session end Delta=0 ×3
+- C1/C2 在本数据集上成交/资金影响落入噪声带（skew 差异未放大为可观测行为差）
+
+**重要勘误（验证方法论）**：
+1. **UFT 回测不存在逐比特判据**——`UftMocker.cpp:34` extern 复用 HftMocker 的 splitVolume
+   （每次调用 srand(time(NULL)) 重播种），成交拆分序列随真实墙钟变化。此前"已知外部限制"
+   只记录了 HftMocker 路径，实际 UFT 同样中招。v5/_ec_5d 的 CSV md5 对比一律无效，
+   判据改为统计带（笔数 ±1.5%）+ 健康度（0 HALT/zombie/error、Delta=0、资金收敛）。
+2. **策略类 debug 日志路由在 Runner.log 非 Strategy_uft.log**（[TOXIC]/SIGNAL_DECOMP/
+   HOTPARAM-* 均在 Runner.log），计数时勿看错文件。
+3. TOXIC 计数与 R5 簿记(2,770)的差异（现 983）：经 preBC 对照二进制证明与本修复包无关，
+   源头在 R6 系已提交变更（最可疑=P2-4 on_transaction 死代码删除改变 trade_flow 输入），
+   留待独立归因，不阻塞本包。
+
+**遗留移交**：
+- C1/C2 改变 GLFT skew 数学——生产部署前建议再积累一轮 _ec_5d 观察窗口（本轮单次 A/B 通过）
+- TOXIC 2770→983 归因（R6 系回归排查）
+- README §4.11 已随 A 批勘误 checkSoftLimits；热参表述已全部更新为 27
