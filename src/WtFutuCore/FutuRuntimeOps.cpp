@@ -862,13 +862,18 @@ void FutuRuntimeOps::onEntrust(
         _quoting_paused_since =
             _exchange_time_ms > 0 ? _exchange_time_ms.load(std::memory_order_acquire) : TimeUtils::getLocalTimeNow();
 
-        WTSLogger::error("UftFutuMmStrategy[{}] Trading HALTED due to consecutive order errors (count={}/threshold={})",
+        // D1(2026-08-24②): 暂停源单一化 —— 下单错误风暴只走 qphase=ERROR 单轨
+        //   (指数退避自探恢复), 不再叠加 haltTrading(REVERSIBLE):
+        //   1) 恢复预算(max_recovery_count=3/session)不被下单错误消耗 —— 该预算留给
+        //      真正的风控 halt(delta-rate/exposure/block_side);
+        //   2) 消除 ERROR 与 _trading_halted 双轨重叠(V9 §三.2 立案项):
+        //      报价阻断由 canQuote()(QUOTING&&NORMAL) 单一判定, requoteAfterFill 的
+        //      !isTradingHalted()+canQuote() 双保险在纯 ERROR 态下依然闭合。
+        WTSLogger::error("UftFutuMmStrategy[{}] Quoting ERROR-PAUSED due to consecutive order errors "
+                         "(count={}/threshold={}) -> exponential-backoff auto-resume",
                          s.id(),
                          _order_error_count,
                          _config.order_control.order_error_threshold);
-
-        if (_risk_monitor)
-            _risk_monitor->haltTrading(RiskCategory::REVERSIBLE);
 
         if (_main_ctx) {
             for (auto& [code, quoter] : _quoters)
