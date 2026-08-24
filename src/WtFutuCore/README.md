@@ -831,7 +831,12 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner \
 5. **WtUftEngine on_session_end 生产不触发**（WtUftTicker.cpp:183）：双边统计已绕开（定点 flush+seed 续算）。
 6. **实盘 on_entrust 仅失败触发**（TraderAdapter.cpp:1335）：成功回报不存在，依赖该事件的逻辑在实盘恒空。
 7. **框架已打补丁（越界记录）**：UftStraContext DATA_SIZE_STEP 8000→200000；WtUftRunner 补 initEvtNotifier() 调用；libWtMsgQue.so 需置于 runner 工作目录。
-8. **TOXIC 计数簿记漂移**：R5 簿记 2,770 → 现 983（preBC 对照二进制证明与本修复包无关，源头 R6 系，最可疑 P2-4 改变 trade_flow 输入；留独立归因）。
+8. **TOXIC 计数口径（已结案 2026-08-24③）**：正确指标 = Runner.log 中 **warning 级抑制行**
+   （"Both-side toxic / Aggressive buy/sell flow, pausing …"，grep 排除 `is_toxic=`）；
+   debug 级 `[TOXIC] … is_toxic=true` 是评分评估行**不是抑制事件**。同一二进制跨轮波动
+   实测 2,370↔2,770（阈值 0.75 落在分数密集区，mocker 成交随机性经自成交反馈通道即可
+   翻转数百事件）——该指标解读须按 O(±15%) 噪声带。R5 簿记 2,770 已被第二轮复现精确
+   匹配（单边 284 亦与 R2 记录吻合），**无 R6 系回归**。
 9. **去大锁收官清单**（WS-C/none 切换验收）：TSAN 全量→_ec_5d 逐比特 A/B(big vs none)→refreshQuotes 持锁埋点→灰度 p99/p999→删 _cb_mtx（单独 commit）。
 
 ---

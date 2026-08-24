@@ -1536,13 +1536,18 @@ hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。
    判据改为统计带（笔数 ±1.5%）+ 健康度（0 HALT/zombie/error、Delta=0、资金收敛）。
 2. **策略类 debug 日志路由在 Runner.log 非 Strategy_uft.log**（[TOXIC]/SIGNAL_DECOMP/
    HOTPARAM-* 均在 Runner.log），计数时勿看错文件。
-3. TOXIC 计数与 R5 簿记(2,770)的差异（现 983）：经 preBC 对照二进制证明与本修复包无关，
-   源头在 R6 系已提交变更（最可疑=P2-4 on_transaction 死代码删除改变 trade_flow 输入），
-   留待独立归因，不阻塞本包。
+ 3. **TOXIC 计数差异已结案（2026-08-24③，勘误本条早前假设）**：983 是**错误口径**
+    （debug 级 `is_toxic=true` 评分评估行）；正确指标 = warning 级抑制行（"Both-side
+    toxic / Aggressive buy/sell flow, pausing …"，排除 `is_toxic=`）。同一二进制
+    两轮 _ec_5d 实测 2,370 ↔ **2,770（与 R5 簿记精确一致）**、单边 284 与 R2 记录吻合
+    ——阈值 0.75 落在分数密集区（R2 已记录 0.65-0.85 密集带），mocker 成交随机性经
+    自成交反馈通道即可翻转数百事件 ⇒ 该指标天然 O(±15%) 波动。**无 R6 系回归，
+    P2-4 嫌疑排除**。后续引用 TOXIC 抑制数一律用 warning 行口径并注明波动带。
 
-**遗留移交**：
-- C1/C2 改变 GLFT skew 数学——生产部署前建议再积累一轮 _ec_5d 观察窗口（本轮单次 A/B 通过）
-- TOXIC 2770→983 归因（R6 系回归排查）
+**遗留移交（更新）**：
+- C1/C2 改变 GLFT skew 数学——生产部署前建议再积累一轮 _ec_5d 观察窗口（本轮单次 A/B 通过；
+  2026-08-24③ 已补第二轮：17,816 笔/2,770 抑制/Delta=0，两轮均健康）
+- ~~TOXIC 2770→983 归因~~（已结案，见上）
 - README §4.11 已随 A 批勘误 checkSoftLimits；热参表述已全部更新为 27
 
 ## 文档重写记录（2026-08-24③，docs-only 零代码）
