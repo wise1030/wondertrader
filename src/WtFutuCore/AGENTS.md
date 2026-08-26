@@ -1614,4 +1614,14 @@ hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。
 
 ### 验证
 
-- 编译 + TestUnits + 回测冒烟 + 远程部署夜盘验证：见本节后续追加。
+- TestUnits 140/142（2 失败为既有环境基线 test_session.test_allday /
+  test_shm.test_sharehelper）；`_breaker_retreat_test.yaml` 冒烟 0 error
+  （报价/撤挂/closeout/双边统计 flush 全链路正常）。
+- Release 构建部署远程（md5 双侧一致 3f7c7aa4...），16:07 重启后进程正常、
+  0 error；夜盘 21:00 实盘验证项：① CTP-50 拒单归零（平昨优先生效）；
+  ② 双边覆盖率回升；③ 开盘撤单超时误升 zombie 消失；④ ARB 告警节流入日志。
+- **部署事故教训（16:07）**：scp 原地覆写运行中进程已映射的 libWtFutuCore.so
+  → 旧进程 21 秒内刷 36.9 万行 segmentation violation（换页失效崩溃循环）。
+  后果无害（20s 后即被 wt_restart 替换），但规范动作应为：先 scp 到
+  `libWtFutuCore.so.new` 再 `mv -f`（rename 原子替换，旧 inode 继续映射），
+  或先停进程再替换。
