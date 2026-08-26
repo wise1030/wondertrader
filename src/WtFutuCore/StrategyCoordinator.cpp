@@ -1043,13 +1043,20 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
         if (cs && cs->max_position > 0) {
             bool& last_halted = _halt_quoting_state[tc.code];
             if (decision.risk.halt_quoting && !last_halted) {
-                WTSLogger::error("[RISK] {} HALT_QUOTING: net position {:.0f} exceeds maxPosition {:.0f} "
+                // 2026-08-26: halt_quoting 有两个触发源 (zombie 撤单闩锁 / maxPosition
+                // 硬闸门), 原日志一律打印 "exceeds maxPosition" 造成误诊 (如 net -9
+                // "exceeds" 60)。日志显式标注触发源, 数值原样输出供核对。
+                const char* trigger = _risk_monitor->isZombieHalted(tc.code)
+                                          ? "zombie-cancel-latch"
+                                          : "maxPosition";
+                WTSLogger::error("[RISK] {} HALT_QUOTING [{}]: net position {:.0f} (maxPosition {:.0f}) "
                                  "-> ALL quoting paused for this contract (risk control)",
                                  tc.code,
+                                 trigger,
                                  cs->position,
                                  cs->max_position);
             } else if (!decision.risk.halt_quoting && last_halted) {
-                WTSLogger::info("[RISK] {} HALT_QUOTING lifted: net position {:.0f} within maxPosition {:.0f} "
+                WTSLogger::info("[RISK] {} HALT_QUOTING lifted: net position {:.0f} (maxPosition {:.0f}) "
                                 "-> quoting resumed",
                                 tc.code,
                                 cs->position,

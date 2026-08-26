@@ -196,11 +196,31 @@ void UftFutuMmStrategy::setEventNotifier(wtp::EventNotifier* notifier)
 
 void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
 {
-    WTSLogger::warn("[ARB_RISK] pair={} level={} type={}: {}",
-                    alert.pair_id,
-                    static_cast<int>(alert.level),
-                    static_cast<int>(alert.type),
-                    alert.message);
+    // 2026-08-26: WARNING 级持续态告警 (相关性破裂等) 按 pair+type 60s 节流 --
+    // 原实现每 tick 打一行, 2026-08-26 单日 3.4 万行; 附带 value/threshold 便于核对。
+    // CRITICAL/EMERGENCY 不节流。EMERGENCY 处置逻辑 (halt+disable) 不受影响。
+    bool throttled = false;
+    if (alert.level == RiskAlert::Level::WARNING) {
+        const int64_t now_ms = TimeUtils::getLocalTimeNow();
+        const std::string key = fmt::format("{}#{}", alert.pair_id, static_cast<int>(alert.type));
+        SpinLockGuard _g(_arb_alert_lock);
+        int64_t& last = _arb_alert_last_ms[key];
+        if (now_ms - last < 60000)
+            throttled = true;
+        else
+            last = now_ms;
+    }
+
+    if (!throttled) {
+        WTSLogger::warn("[ARB_RISK] pair={} level={} type={} val={:.4f}/thr={:.4f}: {}{}",
+                        alert.pair_id,
+                        static_cast<int>(alert.level),
+                        static_cast<int>(alert.type),
+                        alert.value,
+                        alert.threshold,
+                        alert.message,
+                        (alert.level == RiskAlert::Level::WARNING) ? " (throttled 60s)" : "");
+    }
 
     // V8-R4/A8: EMERGENCY 此前只日志+广播, 套利组合止损线是"假保险丝" --
     // 达阈后 MM 照常报价、arb 照常开新仓, 兜底只剩做市侧另一套日亏线。
@@ -220,7 +240,8 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
     }
 
     // 转发到 EventNotifier (运维侧订阅 nanomsg topic="ARB_RISK")
-    if (_event_notifier) {
+    // 节流命中的 WARNING 不外发, 避免运维通道同步被刷爆
+    if (_event_notifier && !throttled) {
         std::string msg = fmt::format("[L{}] pair={} type={} val={:.2f}/thr={:.2f}: {}",
                                       static_cast<int>(alert.level),
                                       alert.pair_id,

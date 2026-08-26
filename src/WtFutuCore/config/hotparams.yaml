@@ -43,7 +43,8 @@ toxicity_spread_factor: 1.0
 low_confidence_spread_factor: 2.0
 
 # --- 报价粘性/保护参数 ---
-sticky_threshold: 1.0
+sticky_threshold: 2.0        # 2026-08-25 应急: 1.0->2.0 降重挂频率 (membin 20万容量/日超限崩溃缓解;
+                             #   框架容量守卫补丁落地后可调回)
 improve_retreat_ratio: 2.0
 protect_ticks: 1.0
 max_price_deviation: 20.0

@@ -262,6 +262,13 @@ public:
         SpinLockGuard _g(_zombie_halt_lock);
         _zombie_halt.clear();
     }
+    /// 查询合约是否处于 zombie 闩锁 (2026-08-26: HALT_QUOTING 日志区分触发源 --
+    /// zombie 闩锁与 maxPosition 硬闸门共用 halt_quoting 标志, 日志需可分辨)
+    bool isZombieHalted(const std::string& code) const
+    {
+        SpinLockGuard _g(_zombie_halt_lock);
+        return _zombie_halt.count(code) > 0;
+    }
     /// B+ 修复(P2-3): 释放无存活 zombie 单合约的闩锁 -- zombie 被 cancelAll 兜底
     /// 杀掉且回报清账后 (存活集合不再含该合约) 自动恢复报价, 无需等通道重连。
     /// 由 processAutoCancel 每 tick 以 tracker 的存活集合驱动。

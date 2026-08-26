@@ -841,6 +841,25 @@ confidence 段仅 ~15 行）。
   WTSContractInfo.hpp:184）匹配入参，策略传 stdCode（"SHFE.ao.ao2609" 三段式）**永不匹配、
   静默全不撤**；回测 `UftMocker::stra_cancel_all` 用 `_code`（stdCode）匹配能撤到。
   策略层调用 stra_cancel_all 兜底时必须传 fullCode 格式或空串（全撤）。
+- **CTP-50 拒单循环复发（2026-08-26，上述"柜台账户资源类拒单"条目的实盘实证）**：
+  actpolicy.yaml ao 组平今优先 + TraderAdapter 今仓可用缓存与柜台不一致（共享账户
+  并发交易/缓存滞后）→ 卖单反复 closetoday 被拒（当日 317 次），且规则链在缓存高估时
+  不降级平昨。每次拒单触发策略层全合约暂停报价 20-60s，双边覆盖率崩塌至 1.6%/0%。
+  **当日处置（配置级）**：actpolicy.yaml ao 组改平昨优先（平昨可用量 ~700 手充足，
+  规避今仓缓存误差）。**根治仍待框架**：CTP-50/51 拒单负反馈修正持仓可用缓存
+  + 自动降级另一开平标志重报。
+
+- **membin 容量无写保护 → 跨映射越界 + 换日 memset 崩溃（2026-08-24 生产事故，待框架修复）**：
+  `UftStraContext::on_order`（UftStraContext.cpp:622）追加订单只 `_size++`，不检查
+  `_capacity`（200000）。做市单日订单量超容量后，写越出 20MB mmap 映射，落入相邻映射
+  静默损坏其他 membin（当日 position.membin 头部被覆写：capacity=0x40000000）；
+  换交易日 `load_local_data` 走 `memset(_orders, 0, 100*_size)`（_size=383758 → 38MB
+  写入 20MB 映射）→ SIGSEGV，且每次重启必崩（文件内 _size 持久损坏）。
+  当日应急：备份后删除 order.membin 重启恢复。**正确修复点（框架层）**：
+  ① on_order 追加前做容量守卫（满则扩容文件或跳过持久化+告警）；
+  ② load_local_data 对 `_size > _capacity` 做钳制/校验，不信任文件内计数；
+  ③ DATA_SIZE_STEP 按做市实际单日订单量（实测已达 38 万）重新标定。
+  复发风险：只要单日订单再超 20 万，下次换日（20:40）必复崩。
 
 ## 框架层已打补丁（越界修改记录，2026-08-03，GUI 监控接入需要）
 
@@ -1563,3 +1582,36 @@ hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。
 - 素材来源：4 个并行研究代理（配置体系/编排层成功，定价与风控两代理多次空返回后改由
   主会话定向 grep+精读 SpreadOptimizer.cpp 全文/TradingState.h 全文补齐）
 - 行号基于当时 HEAD；文档尾注声明漂移免责。零源码改动，无需回测验证。
+
+## 当前方案实施记录（2026-08-26，生产运行诊断 + 小修包，用户已确认执行）
+
+### 诊断摘要（当日 Runner/Trader 日志全量分析）
+
+- 应急参数（requote 500ms/sticky 2.0/base_qty 10）生效：全日订单 4,982 笔
+  （对比 08-25 41 万爆容），membin 容量风险消除。
+- **P0 CTP-50 拒单循环 317 次** → 每次触发全合约暂停报价 20-60s → 双边覆盖率
+  ao2610 仅 1.63%、ao2609 全天 0%（失效主因 no_ask=597，卖层被 closetoday 拒穿）。
+- ZOMBIE 撤单升级 63 笔（开盘高峰 CTP 撤单应答 >300ms，重试 3 次在真实撤响前耗尽）；
+  HALT_QUOTING 日志误印 "exceeds maxPosition"（实际触发源为 zombie 闩锁）。
+- 相关性破裂告警单日 3.4 万行刷屏（WARNING 级每 tick 重复，估值器输入待查）。
+- 正常项：夜盘 closeout 00:58 正确触发（但 20 手 clip 过冲 31→-9）；日盘 closeout
+  14:58 正确触发并完成（昨日 15:50 迟到系昨日卡死进程假象）；休市启停各窗口正确；
+  skew/spread_mult 语义合理（库存驱动减仓 30→10 有效）；alpha 量纲正确（tick 级，
+  conf 均值 0.24 偏低，预测性待离线 IC 分析）。
+
+### 修改清单
+
+- `dist/actpolicy.yaml`（远程，配置级）：ao 组平昨 > 平今 > 开仓（备份
+  actpolicy.yaml.bak_20260826）。
+- `config/coordinator.yaml`：`cancelRetryIntervalMs` 300→1000（开盘高峰撤单
+  应答容忍，3 次重试总窗口 3s）。
+- `FutuRiskMonitor.h`：新增 `isZombieHalted(code)` 只读访问器（自旋锁保护）。
+- `StrategyCoordinator.cpp`：HALT_QUOTING 日志显式标注触发源
+  `[zombie-cancel-latch]` / `[maxPosition]`，消除误诊。
+- `UftFutuMmStrategy.h/.cpp`：handleRiskAlert 对 WARNING 级告警按 pair+type
+  60s 节流（CRITICAL/EMERGENCY 不节流，EMERGENCY halt 处置不变），告警行补
+  value/threshold；节流命中不外发 EventNotifier。
+
+### 验证
+
+- 编译 + TestUnits + 回测冒烟 + 远程部署夜盘验证：见本节后续追加。

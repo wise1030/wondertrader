@@ -34,7 +34,9 @@ coordinator:
   takerReduceCooldownMs: 30000     # 每合约限频(ms)
 
   # --- v7.1 成交后立即重挂 (做市义务: 单边成交侵蚀深度->撤剩余单重新挂单) ---
-  requoteAfterFillMinIntervalMs: 200   # 每合约成交重挂最小间隔(ms, 0=禁用)
+  requoteAfterFillMinIntervalMs: 500   # 每合约成交重挂最小间隔(ms, 0=禁用)
+                                       #   2026-08-25 应急: 200->500 降报单量 (membin 容量崩溃缓解,
+                                       #   框架容量守卫补丁落地后可调回)
 
   # --- v7.1 session 休息段 (每节收盘前 N 分钟撤单+暂停报价/套利; 最后一节归 closeout) ---
   sectionBreakSecondsBefore: 10        # 每节收盘前 N 秒撤单停报 (0=禁用, 默认10s); EC(FD0900) 作用于 10:15/11:30
@@ -177,7 +179,8 @@ coordinator:
       #   STALE 延寿判定改用独立键 —— 原隐式值 = quoter.stickyThreshold×2 = 2.0, 行为保持。
       staleExtensionTicks: 2.0     # STALE 订单延寿价格偏离阈值 (ticks; 超过则不延寿直接撤)
       # B+: 撤单确认重试 (替代旧"超时5s强制遗忘"——2026-08-19 僵尸单事故根源)
-      cancelRetryIntervalMs: 300   # 撤单 ack 超时重发间隔 (ms)
+      cancelRetryIntervalMs: 1000  # 撤单 ack 超时重发间隔 (ms; 2026-08-26 300→1000: 开盘高峰
+                                   # CTP 应答 >300ms 致 3 次重试在真实撤响前耗尽, 当日 63 笔误升 zombie)
       cancelMaxRetries: 3          # 最大重试次数, 达到后 zombie 升级 (halt合约+cancelAll兜底)
 
     # --- 相关性管理器 ---

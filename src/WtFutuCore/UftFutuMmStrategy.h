@@ -34,6 +34,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_set>
+#include <unordered_map>
 
 NS_WTP_BEGIN
 class WTSVariant;
@@ -377,6 +378,13 @@ private:
 
     /// R1: EventNotifier 指针 (WtUftRunner 注入; RiskMonitor 直达 + ArbManager 回调转发)
     wtp::EventNotifier* _event_notifier = nullptr;
+
+    // 2026-08-26: arb 告警节流 —— 持续态 WARNING (如相关性破裂) 由 arb 评估循环
+    // 每 tick 触发一次, 2026-08-26 实测单日 3.4 万行刷爆日志且监控失效。
+    // 按 pair+type 键控 60s 节流; CRITICAL/EMERGENCY 不节流 (实时性优先)。
+    // 回调来源: live=arb 线程 / sync 模式=策略线程, 自旋锁保护。
+    std::unordered_map<std::string, int64_t> _arb_alert_last_ms;
+    std::atomic_flag _arb_alert_lock = ATOMIC_FLAG_INIT;
 
     /// 收盘平仓编排器 (closeout 驱动职责, 架构重构 C3)
     CloseoutOrchestrator _closeout_orch;
