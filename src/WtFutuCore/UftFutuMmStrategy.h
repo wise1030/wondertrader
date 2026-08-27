@@ -179,10 +179,12 @@ struct FutuMmConfig
         uint32_t sweep_threshold_ms; // 距收盘多少ms进入SWEEP
         uint32_t sweep_ticks;        // SWEEP档越过对手价tick数
         bool use_fak;                // 是否使用FAK下单
+        bool close_only;             // V10-R7e/P1-2e: close-only 模式 (remaining 截到 anchor 实际仓位, 不翻向开仓)
         Closeout()
             : minutes_before(5), flatten_position(true), max_retries(3), retry_interval_ms(5000), close_time(150000),
               night_close_time(0), night_minutes_before(5), drain_timeout_ms(3000), depth_ratio_passive(0.3),
-              depth_ratio_mid(0.5), depth_ratio_aggr(0.8), sweep_threshold_ms(5000), sweep_ticks(3), use_fak(true)
+              depth_ratio_mid(0.5), depth_ratio_aggr(0.8), sweep_threshold_ms(5000), sweep_ticks(3), use_fak(true),
+              close_only(false)
         {}
     } closeout;
 

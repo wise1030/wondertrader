@@ -78,6 +78,9 @@ struct ActiveOrderInfo
     /// V10-P1-2b: pending_cancel 标记时刻 (replay ms) —— 供 getActiveCountBySource
     /// 的"撤单确认宽限期"计数使用 (撤单可能被静默吞掉, 撤出后短窗内单子仍假定存活).
     uint64_t pending_cancel_ts = 0;
+    /// V10-R7e/P2-14: 撤单重发次数 / 升级告警已发标志 (zombie 语义)
+    uint8_t cancel_retries = 0;
+    bool cancel_escalated = false;
 };
 
 /// Order submission result
@@ -174,6 +177,12 @@ public:
 
     /// 撤单确认宽限期 (ms): closeout 结算/DRAIN 门禁的 pending_cancel 计数窗口。
     static constexpr uint64_t PENDING_CANCEL_GRACE_MS = 2000;
+
+    /// V10-R7e/P2-14: 撤单侧 B+ 化 —— pending_cancel 超宽限期未终态的条目重发撤单
+    /// (B+ 已实证引擎 doCancel 同步失败可被静默吞掉, tracker 侧有重试而 router 侧
+    /// 此前"标记即完事"), 重发刷新 pending_cancel_ts; 超过 max_retries 后 error 升级
+    /// 一次 (cancel_escalated 防刷屏)。@return 实际重发的撤单数
+    size_t escalateStaleCancels(wtp::IUftStraCtx* ctx, uint64_t now_ms, uint8_t max_retries = 3);
 
     //==========================================================================
     // Self-Trade Prevention

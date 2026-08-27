@@ -1247,6 +1247,13 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
     if (_risk_monitor)
         _risk_monitor->retainZombieHalts(_order_tracker->getAliveZombieContracts());
 
+    // V10-R7e/P2-14: Router 撤单侧 B+ 化 —— 非做市单 (arb/hedge/closeout) 的
+    // pending_cancel 超宽限未终态时重发撤单 (tracker 的 B+ 重试只覆盖 MM 单);
+    // 3 次后 error 升级一次, 与 MM zombie 语义对齐。静默撤单失败在回测 mocker
+    // 不可复现, 靠本重试+通道恢复对账兜底。
+    if (_order_router)
+        _order_router->escalateStaleCancels(ctx, tc.timestamp);
+
     if (!actions.empty()) {
         for (const auto& action : actions) {
             // B+: STALE 等动作 tracker 在发出时已标记 pendingCancel(含撤单时刻);

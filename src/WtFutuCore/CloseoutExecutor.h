@@ -84,6 +84,9 @@ struct CloseoutExecConfig
     uint32_t sweep_ticks = 3;           ///< SWEEP: opponent price + N ticks
     bool use_fak = true;                ///< Use FAK for all orders
     uint32_t max_batch_size = 20;       ///< Absolute cap on single batch qty (lots)
+    /// V10-R7e/P1-2e: close-only 模式 —— remaining 向零截到 |anchor 实际仓位|/hedge,
+    /// 宁可留尾不翻向开仓 (默认 false = 组合净额口径, 现行为)
+    bool close_only = false;
     /// V10-P1-2a: 批次结算静止窗 (ms) —— inflight 计数归零后须持续该时长才允许下一轮
     /// 派发。消除 "订单终态回报先于成交回报被处理" 的 stale-delta 复用窗口
     /// (2026-08-26 实盘 clip 过冲 31→-9 的向量 a)。代码默认, 不接 yaml。
@@ -200,6 +203,9 @@ private:
     /// Record the previous round's fill (called at start of each round)
     void updateRoundFill(const MarketSnapshot& snap);
 
+    /// V10-R7e/P1-2e: close_only 模式下把 remaining 向零截到 |anchor 实际仓位|/hedge
+    void applyCloseOnlyCap(wtp::IUftStraCtx* ctx, double& remaining);
+
     /// Mark completed
     void complete();
 
@@ -224,6 +230,8 @@ private:
     double _total_filled = 0;
     double _inflight_qty = 0; ///< Qty submitted but not yet confirmed filled/cancelled
     uint64_t _settle_quiet_since = 0; ///< V10-P1-2a: router 计数归零的起始时刻 (0=未归零)
+    bool _drain_cancel_sent = false;    ///< V10-P1-2c: 超时清扫撤单已发出
+    uint64_t _drain_force_deadline = 0; ///< V10-P1-2c: 2x 超时硬截止
 
     uint64_t _start_ts = 0;
     uint64_t _drain_start_ts = 0;

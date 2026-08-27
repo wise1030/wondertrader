@@ -389,6 +389,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         exec_cfg.sweep_threshold_ms = _config.closeout.sweep_threshold_ms;
         exec_cfg.sweep_ticks = _config.closeout.sweep_ticks;
         exec_cfg.use_fak = _config.closeout.use_fak;
+        exec_cfg.close_only = _config.closeout.close_only; // V10-R7e/P1-2e
         _closeout_executor->setConfig(exec_cfg);
     }
     WTSLogger::info("CloseoutExecutor: initialized (drain={}ms, sweep_ticks={}, fak={})",

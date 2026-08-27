@@ -298,6 +298,44 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
     return n;
 }
 
+size_t OrderRouter::escalateStaleCancels(wtp::IUftStraCtx* ctx, uint64_t now_ms, uint8_t max_retries)
+{
+    if (!ctx || now_ms == 0)
+        return 0;
+    RecursiveSpinGuard _g(_lock);
+    size_t resent = 0;
+    for (auto& kv : _active_orders) {
+        for (auto& info : kv.second) {
+            if (!info.pending_cancel || info.pending_cancel_ts == 0)
+                continue;
+            if (now_ms <= info.pending_cancel_ts || now_ms - info.pending_cancel_ts <= PENDING_CANCEL_GRACE_MS)
+                continue;
+            if (info.cancel_retries >= max_retries) {
+                if (!info.cancel_escalated) {
+                    info.cancel_escalated = true;
+                    WTSLogger::error("[ROUTER] Cancel ZOMBIE: order {} {} x{} pending-cancel unresolved after {} "
+                                     "retries — residual exposure possible, reconcile on channel-ready",
+                                     info.localid,
+                                     info.code,
+                                     info.qty,
+                                     max_retries);
+                }
+                continue;
+            }
+            orderApiCall([&] { return ctx->stra_cancel(info.localid); });
+            info.pending_cancel_ts = now_ms; // 刷新宽限窗
+            ++info.cancel_retries;
+            ++resent;
+            WTSLogger::warn("[ROUTER] Cancel retry #{}: order {} {} (pending-cancel >{}ms)",
+                            info.cancel_retries,
+                            info.localid,
+                            info.code,
+                            PENDING_CANCEL_GRACE_MS);
+        }
+    }
+    return resent;
+}
+
 bool OrderRouter::checkSelfTrade(const char* code, bool is_buy, double price) const
 {
     RecursiveSpinGuard _g(_lock);

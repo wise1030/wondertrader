@@ -165,6 +165,7 @@ WtBtRunner/WtUftRunner -c <主配置.yaml>
 | depthRatioPassive/Mid/Aggressive | double | 0.3/0.5/0.8 | 同左 | 渐进平仓三档深度比率（盘口占比） |
 | sweepThresholdMs / sweepTicks | uint32 | 5000/3 | 同左 | 扫单判定（时间窗内价格移动超 ticks 判扫单→升档） |
 | useFak | bool | true | true | 平仓用 FAK 单 |
+| closeOnly | bool | false | false | V10-R7e/P1-2e: close-only 模式 —— remaining 向零截到 anchor 实际仓位/hedge，宁可留尾不翻向开仓（默认 false=组合净额口径，允许 close+open）；结算门禁含撤单宽限计数+200ms 静止窗，DRAIN 超时先撤三源再等待（2× 硬截止） |
 
 #### order_control 根级键
 

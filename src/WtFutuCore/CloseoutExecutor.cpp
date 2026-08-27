@@ -36,6 +36,8 @@ void CloseoutExecutor::start(wtp::IUftStraCtx* ctx, const char* code, uint64_t c
     _rounds.clear();
     _consecutive_zero_fills = 0;
     _settle_quiet_since = 0; // V10-P1-2a
+    _drain_cancel_sent = false;     // V10-P1-2c
+    _drain_force_deadline = 0;      // V10-P1-2c
 
     // Drain start timestamp: captured on first handleDraining call from snap.timestamp_ms
     // (must be in same time domain as snap.timestamp_ms = ms-from-midnight)
@@ -57,6 +59,8 @@ void CloseoutExecutor::reset()
     _total_filled = 0;
     _inflight_qty = 0;
     _settle_quiet_since = 0; // V10-P1-2a
+    _drain_cancel_sent = false;   // V10-P1-2c
+    _drain_force_deadline = 0;    // V10-P1-2c
     _sweep_done = false;
     _prev_round_pos = 0;
     _prev_round_ts = 0;
@@ -134,11 +138,31 @@ bool CloseoutExecutor::handleDraining(wtp::IUftStraCtx* ctx, const MarketSnapsho
     }
 
     // Timeout check
+    // V10-P1-2c: 超时不再"强行续跑"—— 首次超时对三源在途单发撤单清扫后继续
+    // DRAIN 等待结算 (宽限计数使等待有界 ~PENDING_CANCEL_GRACE_MS); 旧实现直接
+    // 进 ASSESS/EXECUTE, 旧单后续成交不参与 remaining 核销 → 代际重叠过冲向量。
     if (elapsed >= _cfg.drain_timeout_ms) {
-        WTSLogger::warn("CloseoutExecutor[{}] DRAIN timeout after {}ms, {} orders still active — proceeding anyway",
-                        (void*)this,
-                        elapsed,
-                        _tracker ? _tracker->getOrderCount() : -1);
+        if (!_drain_cancel_sent) {
+            WTSLogger::warn("CloseoutExecutor[{}] DRAIN timeout after {}ms — issuing cancel sweep, "
+                            "keep draining until settled",
+                            (void*)this,
+                            elapsed);
+            if (_router) {
+                _router->cancelAllBySource(ctx, Source::ARBITRAGE);
+                _router->cancelAllBySource(ctx, Source::HEDGING);
+                _router->cancelAllBySource(ctx, Source::CLOSEOUT);
+            }
+            _drain_cancel_sent = true;
+            _drain_force_deadline = _drain_start_ts + 2ULL * _cfg.drain_timeout_ms;
+            return false; // keep draining (bounded by force deadline below)
+        }
+        if (_drain_force_deadline == 0 || now_ms < _drain_force_deadline)
+            return false; // still waiting for cancels to settle
+
+        WTSLogger::error("CloseoutExecutor[{}] DRAIN force-proceed at 2x timeout ({}ms) with orders "
+                         "still active — overlap risk acknowledged",
+                         (void*)this,
+                         elapsed);
         _phase = CloseoutSub::ASSESSING;
         return true;
     }
@@ -166,6 +190,7 @@ void CloseoutExecutor::handleAssessing(wtp::IUftStraCtx* ctx, const MarketSnapsh
     }
 
     _remaining = -net_delta / _hedge_ratio;
+    applyCloseOnlyCap(ctx, _remaining);
     _total_to_hedge = std::abs(_remaining);
 
     if (std::abs(_remaining) < 0.5) {
@@ -238,6 +263,7 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx, const MarketSnapsh
     // --- Recompute remaining from fresh net delta ---
     double net_delta = _portfolio->getNetDelta();
     _remaining = -net_delta / _hedge_ratio;
+    applyCloseOnlyCap(ctx, _remaining);
 
     // --- Check completion ---
     if (std::abs(_remaining) < 0.5) {
@@ -364,6 +390,31 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx, const MarketSnapsh
 //==========================================================================
 // Core logic
 //==========================================================================
+
+void CloseoutExecutor::applyCloseOnlyCap(wtp::IUftStraCtx* ctx, double& remaining)
+{
+    if (!_cfg.close_only || !ctx || _hedge_ratio == 0)
+        return;
+    // V10-R7e/P1-2e: 锚定实际仓位 —— 组合 remaining 折叠了非 anchor 合约 delta,
+    // |remaining|>|anchor 持仓| 时会 close+open 翻向 (08-26 "31→-9" 的向量 d)。
+    // close_only: remaining 向零截到 |anchor 持仓|/hedge; 反号 = 该方向无可平量。
+    double anchor_pos = ctx->stra_get_local_position(_code);
+    double anchor_remaining = -anchor_pos / _hedge_ratio;
+    if (remaining * anchor_remaining <= 0) {
+        remaining = 0;
+        return;
+    }
+    double capped = (remaining > 0) ? std::min(remaining, anchor_remaining)
+                                    : std::max(remaining, anchor_remaining);
+    if (std::abs(capped) < std::abs(remaining) - 1e-9)
+        WTSLogger::warn("CloseoutExecutor[{}] close_only cap: remaining {:.2f} -> {:.2f} "
+                        "(anchor_pos={:.1f})",
+                        (void*)this,
+                        remaining,
+                        capped,
+                        anchor_pos);
+    remaining = capped;
+}
 
 double CloseoutExecutor::computeUrgency(uint64_t now_ms) const
 {

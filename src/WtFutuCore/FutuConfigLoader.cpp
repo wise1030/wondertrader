@@ -150,6 +150,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
         _config.closeout.sweep_threshold_ms = readUInt32(cfgCloseout, "sweepThresholdMs", 5000);
         _config.closeout.sweep_ticks = readUInt32(cfgCloseout, "sweepTicks", 3);
         _config.closeout.use_fak = readBool(cfgCloseout, "useFak", true);
+        _config.closeout.close_only = readBool(cfgCloseout, "closeOnly", false); // V10-R7e/P1-2e
     }
     _config.closeout.close_time = 150000;  // 默认值，on_init 中会从 anchor_code 更新
     _config.closeout.night_close_time = 0; // 默认无夜盘，on_init 中会从 anchor_code 更新

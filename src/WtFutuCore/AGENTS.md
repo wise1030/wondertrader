@@ -1920,3 +1920,61 @@ v5 冒烟同步健康（247→340 同向变化，closeprofit 转正）；生产�
 
 **明确不做（本轮）**：LeadLag anchor 陈旧度量域重设计（B5 aging 启用前置，需独立
 定义）；MarketDataContext net-flow 间隙处理（5s 时间窗自然老化已覆盖）。
+
+## 当前方案（2026-08-27④，V10-R7e closeout 专项 + Router B+ 化，用户已确认）
+
+1. **[P1-2c] DRAIN 超时不重叠续跑**：handleDraining 超时分支改造 —— 首次超时对
+   ARBITRAGE/HEDGING/CLOSEOUT 三源 cancelAllBySource 后**继续 DRAIN 等待结算**
+   （宽限计数使等待有界 ~2s）；超过 2×drain_timeout 硬截止才强制进入 ASSESS
+   （error 日志，保活性）。新成员 _drain_cancel_sent/_drain_force_deadline。
+2. **[P1-2e] close-only 开关 + 锚定仓位**：CloseoutExecConfig.close_only（默认 false=
+   现组合口径）；handleAssessing/handleExecuting 在 remaining 计算后经
+   `stra_get_local_position(_code)` 取 anchor 实际仓位，close_only 时 remaining 向零
+   截到 min(|remaining|, |anchor|/hedge)（同号才截，反号视为无可平量）——"宁可留尾
+   不翻向开仓"。配置链：FutuMmConfig.closeout.closeOnly → loader 键 closeout.closeOnly
+   → assembler exec_cfg。
+3. **[P2-14] Router 撤单侧 B+ 化**：ActiveOrderInfo.cancel_retries/cancel_escalated；
+   新方法 escalateStaleCancels(ctx, now_ms, max_retries=3) —— pending_cancel 超
+   PENDING_CANCEL_GRACE_MS 未终态的重发撤单（刷新 pc_ts），3 次后 error 升级一次
+   （zombie 语义，无 tracker 集成）；coordinator processAutoCancel 每 tick 调用
+   （_order_router 已在 deps）。
+
+### 验证
+
+make+TestUnits 全量（基线 156/158）→ v5 冒烟（closeout 全链路健康、
+0 HALT/zombie/error、资金收敛）→ 行为影响面：默认 close_only=false 零变化；
+DRAIN 超时路径 mocker 不触发；escalate 仅在撤单静默失败时激活（回测不可复现，
+靠单测+实盘观察）。
+
+### R7-e 实施记录（2026-08-27④，已完成，验证通过）
+
+1. **[P1-2c]** handleDraining 超时分支改造：首次超时三源 cancelAllBySource 后继续
+   DRAIN（_drain_cancel_sent 置位 + _drain_force_deadline = start+2×timeout）；
+   硬截止前每 tick 复查 drain_ok（宽限计数口径），截止才 error 强制 ASSESS ——
+   超时代际重叠向量闭合，活性由 2× 硬截止保证。
+2. **[P1-2e]** CloseoutExecConfig.close_only（默认 false）+ applyCloseOnlyCap
+   （assessing/executing 两处调用）：ctx->stra_get_local_position(_code) 取 anchor
+   实际仓位，remaining 同号向零截 min(|rem|,|anchor|/hedge)，反号=0（该方向无可平）
+   —— "31→-9" 的 close+open 翻向向量闭合；配置链 closeout.closeOnly 全通
+   （FutuMmConfig → loader → assembler），CONFIG.md 键文档补齐。
+3. **[P2-14]** OrderRouter::escalateStaleCancels(ctx, now, max_retries=3)：
+   pending_cancel 超宽限未终态重发撤单（刷新 pc_ts），3 次后 error 升级一次
+   （cancel_escalated 防刷屏）；ActiveOrderInfo 增 cancel_retries/cancel_escalated；
+   coordinator processAutoCancel 每 tick 调用（zombie 语义对齐 MM 侧）。
+
+**验证**：全量 TestUnits **156/158**（仅 2 个既有环境性失败，零回归）；
+v5 冒烟 EXIT=0、0 HALT/zombie/error、8 会话 CLOSEOUT 全部 COMPLETED、
+trades 338 vs R7-d 340（噪声带——默认路径零行为漂移实证：close_only=false、
+mocker 无撤单失败/DRAIN 超时，新路径均未触发）。
+
+**R7 批次收官状态**：R7-a(35ced523)/R7-b(4adeea8b)/R7-c(ffc1ad9d)/R7-d(75d509f5)/
+R7-e(本提交) 全部完成。dist/WtBtFutu 已部署含全部批次的 Debug 回测版。
+**生产 Release 部署清单（按 §5 流程另行执行）**：
+1. R7-d 信号行为变化（间隙守卫）建议随观察窗口上线（同 momentum window 先例）；
+2. R7-e close_only 建议生产先保持 false（与回测验证面一致），翻向过冲风险若再现
+   再评估开启；
+3. escalateStaleCancels/撤单宽限/结算静止窗为实盘独有路径，上线后观察
+   "[ROUTER] Cancel retry/ZOMBIE" 与 closeout DRAIN 时长日志。
+**遗留（后续会话）**：去大锁 WS-C + 切 none 四步验收（TSAN 通道已就绪 R7-b）；
+sticky 判定三路径统一；路径A qty=0 腿语义裁决；框架层限制持续推动
+（CTP-50 分类/membin/stra_cancel_all 口径）。
