@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <fstream>
@@ -222,7 +223,19 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
         if (!v)
             return defVal;
         wtp::WTSVariant* node = v->get(key);
-        return node ? node->asDouble() : defVal;
+        // V10-P2-18: 字符串标量全串 strtod + finite 守卫 (".nan"→atof→0.0 静默穿透);
+        // 数值标量 finite 守卫 (NaN 穿透旧双向范围比较)
+        if (!node)
+            return defVal;
+        if (node->type() == wtp::WTSVariant::VT_String)
+        {
+            const char* s = node->asCString();
+            char* end = nullptr;
+            double sv = std::strtod(s, &end);
+            return (end != s && *end == '\0' && std::isfinite(sv)) ? sv : defVal;
+        }
+        double val = node->asDouble();
+        return std::isfinite(val) ? val : defVal;
     };
     auto readString = [](wtp::WTSVariant* v, const char* key, const char* defVal) -> std::string {
         if (!v)
@@ -1408,7 +1421,11 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     {
         uint32_t orders_placed = quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
             latest_mid, new_l0_bid, new_l0_ask, q.spread_mult, allow_bid, allow_ask,
-            q.timestamp, q.upper_limit, q.lower_limit, fresh_best_bid, fresh_best_ask,
+            // V10-P2-1: 用新鲜 replay 时钟 now_ms 作新单 place_time 基准 —— 原传
+            // q.timestamp(CachedQuote 缓存的上一报价 tick 时刻), 安静盘口数分钟后
+            // 触发的事件驱动补挂会把新单标成"数分钟前下单"→下一 tick 即判 STALE
+            // 撤单→终态再触发补挂, 形成挂撤 churn 循环 (虚增撤单率+撞 CTP 流控)。
+            now_ms, q.upper_limit, q.lower_limit, fresh_best_bid, fresh_best_ask,
             decision.risk, decision.strategy
         });
         if (orders_placed > 0 && _risk_monitor)

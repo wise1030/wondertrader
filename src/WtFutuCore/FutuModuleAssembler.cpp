@@ -126,7 +126,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     //     useMarketMaking / useSpreadArbitrage / useAsyncArbThread
     //     usePerformanceMonitor / usePerformanceAnalyzer
     //     use_signal_aggregator / useHedging
-    //   3 个模块级开关(toxicityDetector/spreadOptimizer/adaptiveParam) 只读
+  //   2 个模块级开关(toxicityDetector/spreadOptimizer; adaptiveParam 已于 V8-R3 整体删除) 只读
     //   modules.<name>.enabled, 由 StrategyCoordinator::loadConfigFromVariant 解析.
     //   下方 coordBool 找不到键时使用编译期默认(见 Modules 构造函数).
     //==========================================================================

@@ -757,7 +757,7 @@ Fix4 裁决：CLOSEOUT 相位豁免 REVERSIBLE halt（保证收盘减仓不被�
 
 ### 4.20 性能与监控
 
-- **PerformanceMonitor**：rdtsc 埋点（_tsc_tick0 on_tick 入口）；RingBuffer p99/p999 分位数；checkThresholds 1s 节拍分级告警（warn/critical ns 阈值）；ThroughputStats 全 atomic。
+- **PerformanceMonitor**：rdtsc 埋点（_tsc_tick0 on_tick 入口）；RingBuffer p99 分位数(P999 别名已删, Percentile 仅 P50/P90/P95/P99)；checkThresholds 1s 节拍分级告警（warn/critical ns 阈值）；ThroughputStats 全 atomic。
 - **PerformanceAnalyzer**：绩效统计（spread_at_trade 兜底查配置 tick_size×2，R7）；时钟统一 replay `_exchange_time_ms`（R3-残余修复量纲）。
 - **BilateralStats**：双边报价统计——周期行内存积压 `_bilateral_io_backlog`（MdSpi 专属免锁），section-break/closeout TRIGGERED 定点排空落盘（R6-b 移出热路径）；当日文件 seed 重启续算（框架 session_end 生产不触发，见 §8）。
 - **MonitorBridge**：WtMonSvr GUI 数据桥（框架层 initEvtNotifier 补丁依赖，§8）。

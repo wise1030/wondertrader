@@ -94,7 +94,19 @@ double readDouble(WTSVariant* cfg, const char* key, double defVal)
     if (!cfg)
         return defVal;
     WTSVariant* node = cfg->get(key);
-    return node ? node->asDouble() : defVal;
+    // V10-P2-18: 字符串标量全串 strtod + finite 守卫 (".nan"→atof→0.0 静默穿透);
+    // 数值标量 finite 守卫 (NaN 穿透旧双向范围比较)
+    if (!node)
+        return defVal;
+    if (node->type() == WTSVariant::VT_String)
+    {
+        const char* s = node->asCString();
+        char* end = nullptr;
+        double sv = std::strtod(s, &end);
+        return (end != s && *end == '\0' && std::isfinite(sv)) ? sv : defVal;
+    }
+    double val = node->asDouble();
+    return std::isfinite(val) ? val : defVal;
 }
 
 // 读取 uint32_t 参数
@@ -198,14 +210,17 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
 {
     // 2026-08-26: WARNING 级持续态告警 (相关性破裂等) 按 pair+type 60s 节流 --
     // 原实现每 tick 打一行, 2026-08-26 单日 3.4 万行; 附带 value/threshold 便于核对。
-    // CRITICAL/EMERGENCY 不节流。EMERGENCY 处置逻辑 (halt+disable) 不受影响。
+    // V10-P1-1b: 节流扩展至 CRITICAL 10s —— drawdown 长停 [0.8x,1.0x]xstop 区间时
+    // updateAlerts 每 arb 周期全量重建 STOP_LOSS CRITICAL, 不节流将以 ~200 行/秒
+    // 重演刷屏事故 (只换等级)。EMERGENCY 不节流, halt+disable 处置不变。
+    uint64_t throttle_window_ms = arbAlertThrottleWindowMs(alert.level);
     bool throttled = false;
-    if (alert.level == RiskAlert::Level::WARNING) {
+    if (throttle_window_ms > 0) {
         const int64_t now_ms = TimeUtils::getLocalTimeNow();
         const std::string key = fmt::format("{}#{}", alert.pair_id, static_cast<int>(alert.type));
         SpinLockGuard _g(_arb_alert_lock);
         int64_t& last = _arb_alert_last_ms[key];
-        if (now_ms - last < 60000)
+        if (now_ms - last < static_cast<int64_t>(throttle_window_ms))
             throttled = true;
         else
             last = now_ms;
@@ -219,7 +234,7 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
                         alert.value,
                         alert.threshold,
                         alert.message,
-                        (alert.level == RiskAlert::Level::WARNING) ? " (throttled 60s)" : "");
+                        (throttle_window_ms > 0) ? fmt::format(" (throttled {}ms)", throttle_window_ms).c_str() : "");
     }
 
     // V8-R4/A8: EMERGENCY 此前只日志+广播, 套利组合止损线是"假保险丝" --
@@ -721,7 +736,7 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
 
 void UftFutuMmStrategy::on_order_queue(IUftStraCtx* ctx, const char* stdCode, WTSOrdQueData* newOrdQue)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
     // Level2: 更新 MarketDataContext
     auto it = _market_data.find(stdCode);
     if (it != _market_data.end())
@@ -730,7 +745,7 @@ void UftFutuMmStrategy::on_order_queue(IUftStraCtx* ctx, const char* stdCode, WT
 
 void UftFutuMmStrategy::on_order_detail(IUftStraCtx* ctx, const char* stdCode, WTSOrdDtlData* newOrdDtl)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
     // Level2: 更新 MarketDataContext
     auto it = _market_data.find(stdCode);
     if (it != _market_data.end())
@@ -739,7 +754,7 @@ void UftFutuMmStrategy::on_order_detail(IUftStraCtx* ctx, const char* stdCode, W
 
 void UftFutuMmStrategy::on_transaction(IUftStraCtx* ctx, const char* stdCode, WTSTransData* newTrans)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
     if (!newTrans)
         return;
 
@@ -803,7 +818,7 @@ void UftFutuMmStrategy::on_order(IUftStraCtx* ctx,
 void UftFutuMmStrategy::on_position(
     IUftStraCtx* ctx, const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CALLBACK_LOCK=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
     // 框架回调：本地持仓更新（不是账户持仓）
     // 注意：框架的 UftStraContext::on_position 账户持仓回调被注释掉了
     // 这里收到的是本地持仓文件的缓存数据，参数含义：

@@ -249,7 +249,7 @@ bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<st
         return false;
     }
 
-    // V8-P0-1: 26 参数边界表 -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
+    // V8-P0-1: 27 参数边界表 -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
     // 加固(2026-08-24): 收紧至与 FutuConfigLoader error 级 / FutuConfigValidator 同口径 --
     //   此前 base_spread{0,1000}/base_qty{0,1e5}/level_step{0,1000}/max_delta{0,1e6} 均宽于
     //   loader 拒启范围, protect_ticks/sticky_threshold 允许 0 (静默关软保护/churn 风暴)。

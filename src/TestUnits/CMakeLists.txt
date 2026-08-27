@@ -41,6 +41,16 @@ LINK_DIRECTORIES(${LNKS})
 ADD_EXECUTABLE(TestUnits ${SRCS})
 TARGET_LINK_LIBRARIES(TestUnits ${LIBS})
 
+# V10-P2-20: 与 WtFutuCore 同开关的 TSAN/warnings 通道
+IF(WT_FUTU_TSAN AND NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    TARGET_COMPILE_OPTIONS(TestUnits PRIVATE -fsanitize=thread -g -O1 -fno-omit-frame-pointer)
+    SET_TARGET_PROPERTIES(TestUnits PROPERTIES LINK_FLAGS "-fsanitize=thread")
+    MESSAGE(STATUS "TestUnits: ThreadSanitizer instrumentation ON")
+ENDIF()
+IF(WT_FUTU_WARN AND NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    TARGET_COMPILE_OPTIONS(TestUnits PRIVATE -Wall -Wextra -Wno-unused-parameter)
+ENDIF()
+
 IF (MSVC)
 ELSE (GNUCC)
 	SET_TARGET_PROPERTIES(TestUnits PROPERTIES

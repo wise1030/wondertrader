@@ -11,6 +11,8 @@
 #include "../../Includes/WTSVariant.hpp"
 #include "../../WTSUtils/WTSCfgLoader.h"
 #include "../../WTSTools/WTSLogger.h"
+#include <cmath>
+#include <cstdlib>
 
 namespace futu
 {
@@ -42,7 +44,19 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
         if (!v)
             return defVal;
         WTSVariant* node = v->get(key);
-        return node ? node->asDouble() : defVal;
+        // V10-P2-18: 字符串标量全串 strtod + finite 守卫 (".nan"→atof→0.0 静默穿透);
+        // 数值标量 finite 守卫 (NaN 穿透旧双向范围比较)
+        if (!node)
+            return defVal;
+        if (node->type() == WTSVariant::VT_String)
+        {
+            const char* s = node->asCString();
+            char* end = nullptr;
+            double sv = std::strtod(s, &end);
+            return (end != s && *end == '\0' && std::isfinite(sv)) ? sv : defVal;
+        }
+        double val = node->asDouble();
+        return std::isfinite(val) ? val : defVal;
     };
     auto readUInt32 = [](WTSVariant* v, const char* key, uint32_t defVal) -> uint32_t {
         if (!v)

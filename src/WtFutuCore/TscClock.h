@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <x86intrin.h>
@@ -40,21 +41,23 @@ public:
         if (!detectInvariantTsc()) {
             WTSLogger::error("[TscClock] non-invariant TSC detected, tick-to-trade latency histogram UNRELIABLE "
                              "(ns/tick 保持兜底 {:.3f})",
-                             _ns_per_tick);
-            _calibrated = false;
+                             _ns_per_tick.load(std::memory_order_relaxed));
+            _calibrated.store(false, std::memory_order_release);
             return false;
         }
         doCalibrate();
-        _calibrated = true;
+        _calibrated.store(true, std::memory_order_release);
         _last_calib_ms = steadyNowMs();
         return true;
     }
 
     /// 低频重校准 (V8-R4: 长时间运行的频率漂移兜底)。
     /// 仅在非热路径调用 (内部 10ms sleep); 距上次校准 < interval_ms 时跳过。
+    /// V10-P2-21: 校准态/系数原子化 —— 全仓现状无调用方(接口休眠), 原子化后未来
+    /// 接线不再引入 MdSpi toNs 读者与校准线程之间的 torn-double 竞态。
     static void maybeRecalibrate(uint64_t interval_ms = 60000)
     {
-        if (!_calibrated)
+        if (!_calibrated.load(std::memory_order_acquire))
             return;
         uint64_t now_ms = steadyNowMs();
         if (now_ms - _last_calib_ms < interval_ms)
@@ -66,10 +69,10 @@ public:
     /// TSC 差值 → ns
     static inline uint64_t toNs(uint64_t ticks)
     {
-        return static_cast<uint64_t>(static_cast<double>(ticks) * _ns_per_tick);
+        return static_cast<uint64_t>(static_cast<double>(ticks) * _ns_per_tick.load(std::memory_order_relaxed));
     }
 
-    static inline bool calibrated() { return _calibrated; }
+    static inline bool calibrated() { return _calibrated.load(std::memory_order_acquire); }
 
 private:
     static bool detectInvariantTsc()
@@ -102,9 +105,11 @@ private:
                 .count());
     }
 
-    static inline double _ns_per_tick = 0.4; // 未校准时的保守默认 (~2.5GHz)
-    static inline bool _calibrated = false;
-    static inline uint64_t _last_calib_ms = 0;
+    // V10-P2-21: 原子化。未校准兜底 0.4 ns/tick 隐含 ~2.5GHz 主频 —— 现代 3GHz+
+    // 机器会低估延迟 ~30%, 仅作量级参考 (精度以 calibrate() 成功为准)。
+    static inline std::atomic<double> _ns_per_tick{0.4};
+    static inline std::atomic<bool> _calibrated{false};
+    static inline uint64_t _last_calib_ms = 0; // 仅校准调用方触碰, 不跨线程并发读, 保持标量
 };
 
 } // namespace futu

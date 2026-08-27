@@ -203,7 +203,7 @@ WtBtRunner/WtUftRunner -c <主配置.yaml>
 | takerReduceThreshold | double | 1.1 | 1.3 | 启动 | util=\|净头寸\|/maxPosition 超此值→taker 减仓；0=禁用(:321) |
 | takerReduceTargetUtil | double | 0.8 | 0.8 | 启动 | 减仓目标利用率(:322) |
 | takerReduceCooldownMs | uint32 | 30000 | 30000 | 启动 | 每合约限频 ms(:323) |
-| requoteAfterFillMinIntervalMs | uint32 | 200 | 200 | 启动 | 成交后重挂最小间隔 ms；0=禁用(:326) |
+| requoteAfterFillMinIntervalMs | uint32 | 500 | 500 | 启动 | 成交后重挂最小间隔 ms；0=禁用；2026-08-26 应急 500 |
 | sectionBreakSecondsBefore | uint32 | 10 | 10 | 启动 | 每节收盘前 N 秒撤单停报（旧分钟键×60 兼容 :331-335） |
 | bilateralStatsLogIntervalSec | uint32 | 300 | 300 | 启动 | 双边统计周期输出间隔 s；0=禁用(:338) |
 | bilateralStatsLogDir | string | ./Logs | ./Logs | 启动 | 双边统计持久化目录（相对 CWD） |
@@ -297,7 +297,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | selfTradePrevention.priceAdjustTicks | 1.0 | 1.0 | 价格调整 ticks |
 | autoCancel.maxAgeMs | 10000 | 10000 | 订单最大存活 ms→进入 auto-cancel 流程。热参无此键（结构参数不热更） |
 | autoCancel.staleExtensionTicks | 2.0 | 2.0 | **B1 新键**：STALE 延寿价格偏离阈值(ticks)——偏离≤此值的挂单不被 auto-cancel 判死（原 sticky×2 隐式值显式化；旧 priceDeviation 键删除=死接口清理） |
-| autoCancel.cancelRetryIntervalMs | 300 | 300 | B+ 撤单 ack 超时重发间隔 ms |
+| autoCancel.cancelRetryIntervalMs | 1000 | 1000 | B+ 撤单 ack 超时重发间隔 ms |
 | autoCancel.cancelMaxRetries | 3 | 3 | 最大重试次数，达到→IS_ZOMBIE 升级 |
 | correlationManager.windowSize/minCorrelation/spreadZThreshold | 100/0.5/2.0 | 同左 | CorrelationManager.h:57-59 |
 
@@ -334,7 +334,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | depth_sensitivity | 0.5 | GLFTParams | [0,1000] | GLFTParams |
 | toxicity_spread_factor | 1.0 | GLFTParams | [0,100] | GLFTParams |
 | low_confidence_spread_factor | 2.0 | GLFTParams | [0,100] | GLFTParams |
-| sticky_threshold | 1.0 | quoting.stickyThreshold | [0.01,10]（0=churn 防呆拒收） | quoter->updateStickyParams |
+| sticky_threshold | 2.0 | quoting.stickyThreshold | [0.01,10]（0=churn 防呆拒收） | quoter->updateStickyParams |
 | improve_retreat_ratio | 2.0 | quoting.improveRetreatRatio | [0,1000] | 同上 |
 | protect_ticks | 1.0 | quoting.protectTicks | [0.5,1e4]（<半 tick 拒收；关闭走 price_protection 开关） | quoter->updateProtectionParams |
 | max_price_deviation | 20.0 | quoting.maxPriceDeviation | [0,1e6] | quoter->updateMaxPriceDeviation |

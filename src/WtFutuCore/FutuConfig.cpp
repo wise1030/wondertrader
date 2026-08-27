@@ -4,6 +4,8 @@
  */
 #include "FutuConfig.h"
 #include <cstring>
+#include <cmath>
+#include <cstdlib>
 
 namespace futu
 {
@@ -36,7 +38,25 @@ double FutuConfig::readDouble(wtp::WTSVariant* cfg, const char* key, double defV
     if (!cfg)
         return defVal;
     wtp::WTSVariant* node = cfg->get(key);
-    return isInvalidScalar(node) ? defVal : node->asDouble();
+    if (isInvalidScalar(node))
+        return defVal;
+    // V10-P2-18: 标量路径双守卫 ——
+    //  (a) 字符串标量: 全串 strtod 校验 + finite。YAML ".nan"/".inf" 字面量被
+    //      WTSVariant 存为字符串, atof 解析失败静默返回 0.0 (protectTicks 误配 0
+    //      即静默关价格保护), 必须 fail 回默认值; glibc strtod 可解析的 "nan"/"inf"
+    //      也要被 finite 拦下。
+    //  (b) 数值标量: 旧校验 `x<=0 || x>max` 双向比较对 NaN 恒 false 全放行,
+    //      isfinite 补上数值路径的防线。
+    if (node->type() == wtp::WTSVariant::VT_String)
+    {
+        const char* s = node->asCString();
+        char* end = nullptr;
+        double v = std::strtod(s, &end);
+        bool ok = (end != s && *end == '\0' && std::isfinite(v));
+        return ok ? v : defVal;
+    }
+    double v = node->asDouble();
+    return std::isfinite(v) ? v : defVal;
 }
 
 uint32_t FutuConfig::readUInt32(wtp::WTSVariant* cfg, const char* key, uint32_t defVal)

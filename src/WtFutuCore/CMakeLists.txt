@@ -32,6 +32,14 @@ SET(CMAKE_CXX_STANDARD 17)
 SET(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ============================================================================
+# V10-P2-20: 去大锁收官验收通道 (AGENTS "切 none 剩余流程"/README §8.9 硬步骤)
+#   -DT=ON 等价独立目录全量重配: cmake -B build_tsan -DWT_FUTU_TSAN=ON ..
+#   注意: 全链路插桩要求本目标与 TestUnits 同开关构建 (运行时拦截器取自可执行文件)
+# ============================================================================
+option(WT_FUTU_TSAN "Instrument WtFutuCore/TestUnits with ThreadSanitizer" OFF)
+option(WT_FUTU_WARN "Enable -Wall -Wextra on WtFutuCore/TestUnits (observation)" OFF)
+
+# ============================================================================
 # Compiler flags - 与 WtUftCore 保持一致，避免 ABI 问题
 # 注意: 移除 -flto -march=native 等可能导致跨库 ABI 不兼容的选项
 # ============================================================================
@@ -82,6 +90,16 @@ LINK_DIRECTORIES(${LNKS})
 # Create SHARED library (与其他策略工厂保持一致)
 # ============================================================================
 ADD_LIBRARY(WtFutuCore SHARED ${SRCS} ${HDRS})
+
+# V10-P2-20: TSAN / warnings 通道 (仅 GCC/Clang)
+IF(WT_FUTU_TSAN AND NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    TARGET_COMPILE_OPTIONS(WtFutuCore PRIVATE -fsanitize=thread -g -O1 -fno-omit-frame-pointer)
+    SET_TARGET_PROPERTIES(WtFutuCore PROPERTIES LINK_FLAGS "-fsanitize=thread")
+    MESSAGE(STATUS "WtFutuCore: ThreadSanitizer instrumentation ON")
+ENDIF()
+IF(WT_FUTU_WARN AND NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    TARGET_COMPILE_OPTIONS(WtFutuCore PRIVATE -Wall -Wextra -Wno-unused-parameter)
+ENDIF()
 
 # Link dependencies
 TARGET_LINK_LIBRARIES(WtFutuCore

@@ -157,7 +157,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     //------------------------------------------------------------
     // 模块开关统一由 coordinator.yaml 管理(唯一权威来源):
     //   5 个策略级开关 + use_signal_aggregator + useHedging 写在 coordinator 根级;
-    //   3 个模块级开关(toxicityDetector/spreadOptimizer/adaptiveParam) 写在
+    //   2 个模块级开关(toxicityDetector/spreadOptimizer; adaptiveParam 已于 V8-R3 整体删除) 写在
     //   coordinator 的 modules.<name>.enabled 子键.
     // config.yaml 不再承载任何开关, 避免多源错配.
     // 字段初值见 UftFutuMmStrategy.h::Modules 构造函数(仅作 coordinator
