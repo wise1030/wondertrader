@@ -1625,3 +1625,164 @@ hotparams 共享内存旧布局迁移（27 键按名注册天然兼容）。
   后果无害（20s 后即被 wt_restart 替换），但规范动作应为：先 scp 到
   `libWtFutuCore.so.new` 再 `mv -f`（rename 原子替换，旧 inode 继续映射），
   或先停进程再替换。
+
+## 当前方案（2026-08-27，V10 诊断报告 R7-a 热修包，用户已确认"按建议执行修复"）
+
+**背景**：V10 五路深审（docs/DIAGNOSTIC_REPORT_V10.md）产出 P1×2/P2×21。按既定路线图
+R7-a~e 分批推进；本轮落地 **R7-a 热修包全部 7 项** + 单测 + 构建/TestUnits 验证。
+R7-b(配置卫生)/c(arb 安全包)/d(信号卫生)/e(closeout 专项+Router B+ 化) 待下轮逐批执行。
+
+### R7-a 修改清单
+
+1. **[P1-1a] arb 告警 warmup 门控**：`SpreadRiskManager.cpp` updateAlerts 的
+   CORRELATION_BREAK 与 DIVERGENCE 判据前置 `state.is_active`（calculator
+   hasEnoughSamples 才置位，预热期 correlation=0/zscore 无意义）——根因修复，
+   配合既有 WARNING 60s 节流彻底消除 08-26 型 3.4 万行刷屏。
+2. **[P1-1b] CRITICAL 节流**：`UftFutuMmStrategy.cpp` handleRiskAlert 节流从
+   "仅 WARNING 60s" 扩展为 WARNING 60s / CRITICAL 10s（独立键） / EMERGENCY 不限；
+   EMERGENCY halt+disable 处置不变；日志后缀注明各自窗口。
+3. **[P2-2] taker 冷却戳**：`RiskCoordinator.cpp` checkTakerReduce 三个早退分支
+   （rate_limited/self_trade_blocked/localids 空 FAILED）写入 `_last_taker_reduce[code]=now_ms`
+   ——消除事故态 tick 频率重试 + 多层 WARN 刷屏；日志降为同语义不变。
+4. **[P2-15] Liquidator 口径**：`RiskLiquidator.h` reduceContract 两处
+   `Source::CLOSEOUT → Source::RISK_REDUCE`（A9/R6-b 同类冒用最后漏网：
+   污染 closeout 统计/drain-settle 门禁/Fix4 REVERSIBLE 豁免集合）。HALT 清扫清单
+   已含 RISK_REDUCE（RiskCoordinator.cpp:210），无需追加。
+5. **[P2-13] resetDaily 锁域修正**：`FutuRiskMonitor.cpp` resetDaily 的三个频控环
+   clear 收进 `_rate_lock` 临界区（嵌套序 halt_domain→rate，全仓无反向获取，
+   叶子无死锁风险）；checkRiskLimits :256-258 三处 size() 读同样收进 `_rate_lock`
+   快照（pruneRateWindows 保持先独立调用，其内部自持锁，不嵌套）。
+6. **[P1-2b] pending_cancel 计数口径**：`OrderRouter.h/.cpp` ActiveOrderInfo 增加
+   `pending_cancel_ts`；cancelOrder/cancelAllBySource/cancelByPair 标记时写时间戳；
+   getActiveCountBySource 增参 `(src, now_ms=0)`——pending_cancel 单在撤单标记
+   后 2000ms 宽限期内仍计入活跃数（防撤单静默失败时门禁提前打开），超宽限视为
+   已消失（防无限卡死）；默认 now_ms=0 维持旧口径（自成交检查等调用方零变化）。
+7. **[P1-2a] settle 静止门禁**：`CloseoutExecutor.h/.cpp` 新增
+   `settle_quiesce_ms`(默认200,代码默认不接 yaml) 与 `_settle_quiet_since` 成员；
+   inflight 归零判定改"router count==0（含 6 的宽限期计数,传 snap.timestamp_ms）
+   且归零态持续 ≥settle_quiesce_ms"才允许下一轮派发——消除 stale-delta 复用窗口。
+   DRAIN 门禁同步传 now。删除 :279-281 last-resort 全量派发（batch<1 时 warn+跳过本周期，
+   不再放量）。**[P1-2c/DRAIN 重叠续跑/close-only 开关 按 V10 裁决留 R7-e]**。
+
+### 测试与验证
+
+- 新增 `src/TestUnits/test_v10_r7a.cpp`：warmup 门控表驱动（is_active=false 零告警/
+  true 后 CORRELATION_BREAK/DIVERGENCE 出现）/告警节流窗口函数/其他可测接缝。
+- `make WtFutuCore` + TestUnits 全量（基线 140/142）→ 冒烟 configbt_v5
+  （EXIT=0、0 HALT/zombie/error、资金收敛）。
+- 行为影响面：closeout 派发节奏每轮多 ~200ms 静止等待（收盘窗口秒级预算内可忽略）、
+  taker 连续 blocked 每 cooldown_ms 一次重试（原每 tick）、其余零行为路径。
+
+### 明确不做（本轮）
+
+- R7-b/c/d/e 各项（按批次纪律逐轮执行，动手前再入方案确认）；
+- P1-1 CRITICAL 之外的 RiskManager 端 Δ-ε 去重（观察节流效果后再评估）；
+- settle_quiesce_ms yaml 化（先以代码默认运行观察）。
+
+### R7-a 实施记录（2026-08-27，已完成，验证通过）
+
+修改清单 1-7 全部落地：
+
+1. SpreadRiskManager.cpp: CORRELATION_BREAK/DIVERGENCE 前置 `state.is_active` 门控
+2. UftFutuMmStrategy.cpp/.h + SpreadRiskManager.h: 节流窗口提取为自由函数
+   `arbAlertThrottleWindowMs(level)`（WARNING 60s / CRITICAL 10s / 其余 0），
+   handleRiskAlert 改按窗口节流，日志后缀带窗口值
+3. RiskCoordinator.cpp: checkTakerReduce 三早退分支（rate_limited/self_trade_blocked/
+   FAILED）补写 `_last_taker_reduce` 冷却戳
+4. RiskLiquidator.h: 两处 Source::CLOSEOUT → Source::RISK_REDUCE + 头注释勘误
+5. FutuRiskMonitor.cpp: resetDaily 频控环 clear 收进 _rate_lock；
+   checkRiskLimits/checkRateLimits 的 size 读改锁内快照
+6. OrderRouter.h/.cpp: ActiveOrderInfo.pending_cancel_ts；三处撤单标记写时间戳；
+   getActiveCountBySource(src, now_ms=0) 宽限口径（PENDING_CANCEL_GRACE_MS=2000，
+   默认 0 保持旧口径零影响）
+7. CloseoutExecutor.h/.cpp: settle_quiesce_ms(默认200)/_settle_quiet_since 成员，
+   inflight 归零须持续静止窗才放行下一轮；DRAIN/settle 双门禁传 now 启用宽限计数；
+   删除 last-resort 全量派发（batch<1 → warn+跳过本周期）；start/reset 复位
+
+**测试**：
+- 新增 `src/TestUnits/test_v10_r7a.cpp` 7 用例全过（warmup 门控×4 含组合级 STOP_LOSS
+  不受门控误伤抽测 / 分级节流窗口 / RISK_REDUCE 枚举独立回归保护）。
+  勘误：初版用例误设 updatePortfolioPnL 单独重建告警表且对空 vector 调 front()
+  → 本地段错误暴露；告警表仅在 updatePairState 内重建属生产既有语义，测试已修。
+- 全量 TestUnits **147/149**（基线 140/142 + 新增 7；仅 test_session.test_allday /
+  test_shm.test_sharehelper 两个既有环境性失败，零回归）。
+
+**回测冒烟（configbt_v5，§3 流程部署 Debug .so + coordinator.yaml 至 dist）**：
+- EXIT=0；Runner.log/Strategy_uft.log 0 HALT / 0 ZOMBIE / 0 ERROR；
+- 四个 session CLOSEOUT_DRAINING→CLOSEOUT_COMPLETED 正常收敛，quiesce 门禁无阻滞
+  （EXECUTE round=0, 持仓已平快路径）；trades.csv 250 行、funds.csv dynbalance 小幅
+  负值正常收敛；taker 冷却戳/closeout 宽限计数在本数据集未触发（mocker 无拒单/撤败）。
+- 顺带效应：dist coordinator.yaml 已随 §3 标准流程同步至 src 权威（requote 500/
+  cancelRetry 1000），P2-19 的 coordinator 部分自然闭合；hotparams.yaml 漂移
+  （sticky_threshold）仍留 R7-b 一并处置。
+
+**移交后续批次（需用户逐轮确认后动工）**：
+- R7-b 配置与设施卫生：loader finite 校验 / hotparams 漂移同步 / TSAN option+warnings /
+  TscClock 原子化 / §4.2 注释勘误批
+- R7-c arb 安全包（arb_close 灰度前置）：同步对冲受理+ratio 量纲 / B5 open 早退 /
+  SA 止损可达 / FAK 越价 / cancelByPair 通道过滤 / bridge._now_ms 原子化 /
+  manager.reset() 接线 / arb pending 投影 / 灰度回测配置+B-3 表驱动单测
+- R7-d 信号卫生包：跨间隙 guard + resetSession 接线 / fallback valid 门 /
+  scale tracker emplace 修复 / 信号死代码清扫
+- R7-e closeout 专项 + Router B+ 化：stra_get_local_position 锚定 + close-only 开关 /
+  DRAIN 超时不重叠续跑 / Router 撤单重试+zombie
+- P1-2c[DRAIN 重叠] 归并 R7-e；P2-3(路径A qty=0 腿语义裁决) 留路径A启用专项
+
+### R7-b 前置批追加执行（同日追补方案：仅低风险机械项）
+
+用户已总体确认按建议修复；本批为纯卫生项（零行为路径或仅误配防线），扩入本轮：
+1. hotparams.yaml src→dist 同步（P2-19 余量）
+2. TscClock 校准态原子化 + maybeRecalibrate 处置（P2-21）
+3. CMake 增加 WT_FUTU_TSAN option 与基础 warnings（P2-20 设施）
+4. §4.2 注释勘误批（adaptiveParam 残留/FUTU_CALLBACK_LOCK 旧宏名/26→27/p999/CONFIG.md 示例值）
+5. loader finite 校验收口点评估（视 FutuConfig 结构决定是否本轮实施；深校验保护
+  Ticks 交叉关系等留后续批次）
+
+### R7-b 实施记录（2026-08-27，追加批已完成，验证通过）
+
+1. **[P2-19 闭环]** hotparams.yaml src→dist 同步（+coordinator.yaml 已随 R7-a 部署流程
+   同步）——src↔dist 三处漂移全部收敛，diff 双文件为空。
+2. **[P2-21]** TscClock `_ns_per_tick`→`std::atomic<double>`、`_calibrated`→atomic bool
+   （acq/rel；`_last_calib_ms` 保持标量并注释单线程契约）；maybeRecalibrate 保留接口，
+   头注释载明全仓零调用现状与原子化动机；兜底 0.4ns/tick 的 2.5GHz 局限注明。
+3. **[P2-20]** WtFutuCore/TestUnits CMakeLists 新增 `WT_FUTU_TSAN` / `WT_FUTU_WARN`
+   两 option（-fsanitize=thread -g -O1 -fno-omit-frame-pointer + -Wall -Wextra），
+   默认 OFF 不影响既有构建；MESSAGE 状态行便于确认。
+4. **[P2-18]** readDouble finite 守卫——**测试驱动的重要发现**：YAML `.nan` 经
+   WTSVariant 存字符串→atof 解析失败静默返回 **0.0**（非 NaN），finite-only 守卫
+   拦不住（0.0 可穿透 `<=0||>max` 类旧校验，如 protectTicks: .nan → 价格保护静默关闭
+   ——恰是 R5 立案的故障模式的残余路径）。四处 readDouble 收敛点
+   （FutuConfig.cpp / StrategyCoordinator / UftFutuMmStrategy / SpreadArbitrageManagerInit
+   的本地 lambda）统一为：字符串标量全串 strtod+finite（".nan"/".inf"/"3.5abc"/"nan"
+   全部拒收回默认值），数值标量 isfinite。readUInt32 未动（无 NaN 表示；深校验留后续）。
+5. **[§4.2 注释勘误批]** FutuConfigLoader.cpp:160 / FutuModuleAssembler.cpp:129
+   adaptiveParam 残留（改为"2 个模块级开关"+删除注记）；UftFutuMmStrategy.cpp
+   4 处 FUTU_CALLBACK_LOCK→FUTU_CB_LOCK_BIG；FutuHotParamManager 26→27 参数；
+   README:760 p999 勘误；CONFIG.md requoteAfterFillMinIntervalMs/cancelRetryIntervalMs
+   示例值对齐 src 应急值、hotparams 表 sticky_threshold 2.0。
+
+**测试**：test_v10_r7a 增补 `ReadDoubleRejectsNonFinite`（.nan/.inf/-.inf→默认值、
+3.5 透传）——该用例直接驱动发现 atof-0.0 缺陷；全量 **148/150**（基线 140/142 +
+R7-a 7 + R7-b 1，仅 2 个既有环境性失败，零回归）。
+
+**回测冒烟（configbt_v5，loader 改动后复验）**：EXIT=0、0 HALT/ZOMBIE/ERROR、
+trades 258 笔（前轮 250，小样本噪声带内）、dynbalance -4035（前轮 -4094，一致）——
+**loader 守卫对合法配置零行为漂移实证**。
+
+**R7-b 明确不做（留后续）**：protectTicks 深度交叉校验（obligationMaxSpreadTicks>
+skewCrossMaxTicks 等 error 级关系式）、closeout 深度比序校验、uint32 负数截断守卫
+（涉及 loader 逐键边界表，随 R7-c 前的配置批次一并执行）。
+
+**部署状态**：dist/WtBtFutu 已部署含 R7-a+R7-b 的 Debug 回测版（§3 流程）。
+生产 Release 部署按 §5 流程另行执行（R7-a 改变 taker 重试节奏与 closeout 结算
+时序，建议随下一个观察窗口上线）。
+
+**移交（不变）**：R7-c arb 安全包 / R7-d 信号卫生包 / R7-e closeout 专项+Router B+ 化
+——按批次纪律逐轮确认后动工。
+
+### R7-a 勘误补录（提交前自查发现）
+
+P2-1（requoteAfterFill 陈旧时间戳 → STALE churn，`StrategyCoordinator.cpp` QuoteRequest
+`q.timestamp` → `now_ms` 一行修）在方案清单中被遗漏未实施，本条补记并已落地。
+该修复的 STALE 判定链：place_time 恢复新鲜 → tracker max_age_ms(10s) 不再立即误判。
+验证同 R7-a（v5 冒烟 + 全量 TestUnits 复跑通过）。
