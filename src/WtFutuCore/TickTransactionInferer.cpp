@@ -3,6 +3,7 @@
  * \brief Implementation of Tick-Level Transaction Inference
  */
 #include "TickTransactionInferer.h"
+#include "signals/ISignalSource.h" // kSignalGapGuardMs (V10-P2-4)
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Share/TimeUtils.hpp"
@@ -85,6 +86,26 @@ InferredTransaction TickTransactionInferer::inferFromTick(double bid_px,
         result.method = InferenceMethod::UNKNOWN;
         result.confidence = 0;
         return result;
+    }
+
+    // V10-P2-4: 跨间隙/跨日守卫 —— 休市重开或换日(action_time 为日内 HHMMSSmmm 域,
+    // 跨日回绕 ts<prev)的陈旧档位差分会把整档挂单量推断为一笔高置信"大单",
+    // 污染 large_trade_ratio/trade 毒性通道。丢帧并重置 prev-state。
+    {
+        const bool forward_gap =
+            (timestamp > _prev_state.timestamp && timestamp - _prev_state.timestamp > kSignalGapGuardMs);
+        const bool day_rollover = (timestamp < _prev_state.timestamp);
+        if (forward_gap || day_rollover) {
+            _prev_state.bid_px = bid_px;
+            _prev_state.ask_px = ask_px;
+            _prev_state.bid_vol = bid_vol;
+            _prev_state.ask_vol = ask_vol;
+            _prev_state.last_price = last_price;
+            _prev_state.timestamp = timestamp;
+            result.method = InferenceMethod::UNKNOWN;
+            result.confidence = 0;
+            return result;
+        }
     }
 
     // Calculate changes

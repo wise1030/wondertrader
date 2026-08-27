@@ -79,10 +79,11 @@ struct TradeFlowAnalysis
     double avg_trade_size;      ///< Average trade size
     double large_trade_ratio;   ///< Ratio of large trades
     double net_flow_normalized; ///< Statistical significance normalized [-1, 1]
+    int recent_trades;          ///< V10-P2-5: 滑窗内推断/成交数 (显著性门 n>3)
 
     TradeFlowAnalysis()
         : net_flow(0), buy_pressure(0.5), sell_pressure(0.5), avg_trade_size(0), large_trade_ratio(0),
-          net_flow_normalized(0)
+          net_flow_normalized(0), recent_trades(0)
     {}
 };
 

@@ -65,6 +65,18 @@ public:
             return;
         }
 
+        // V10-P2-4: 跨间隙守卫 —— 重置 prev-state, 本帧不产 OFI (陈旧档位差分是伪流)
+        if (_last_timestamp != 0 && timestamp > _last_timestamp &&
+            timestamp - _last_timestamp > kSignalGapGuardMs)
+        {
+            _prev_bid_price = _prev_ask_price = 0;
+            _prev_bid_vol = _prev_ask_vol = 0;
+            _last_timestamp = timestamp;
+            _result.valid = false;
+            _result.timestamp = timestamp;
+            return;
+        }
+
         if (_prev_bid_price > 0 && _prev_ask_price > 0) {
             // Calculate OFI using standard formulation
             // OFI = e_bid - e_ask

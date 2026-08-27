@@ -142,6 +142,20 @@ public:
 
         LeadContractInfo& info = it->second;
 
+        // V10-P2-4: 跨间隙守卫 —— 休市/开板首帧的 prev-mid 差分是伪跳变
+        // (多小时陈旧 last_mid vs 当前 mid)。重置该 lead 的 prev-state 与
+        // mid_change 历史, 本帧不产信号; 下一帧起恢复正常差分。
+        if (info.last_mid > 0 && info.last_timestamp != 0 && timestamp > info.last_timestamp &&
+            timestamp - info.last_timestamp > kSignalGapGuardMs)
+        {
+            info.last_mid = mid;
+            info.last_timestamp = timestamp;
+            auto hist_it = _mid_change_histories.find(code);
+            if (hist_it != _mid_change_histories.end())
+                hist_it->second.clear();
+            return;
+        }
+
         if (info.last_mid > 0) {
             double mid_change = (mid - info.last_mid) / info.last_mid;
 

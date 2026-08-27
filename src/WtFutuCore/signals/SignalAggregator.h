@@ -612,15 +612,23 @@ private:
                 // 1. 信号一致性：计算各信号与加权平均方向的一致程度
                 double consistency = 1.0;
                 if (_valid_signals.size() > 1) {
+                    // V10-P2-5: |v|<eps 的中性信号不计入一致性分母 (旧 >=0 计正,
+                    // 零成交通道满 confidence 时系统性抬高 consistency)
+                    constexpr double kNeutralEps = 1e-9;
                     int consistent_count = 0;
+                    size_t dir_count = 0;
                     double avg_direction = (_ctx.alpha.alpha >= 0) ? 1.0 : -1.0;
                     for (size_t i = 0; i < _valid_signals.size(); ++i) {
-                        double sig_direction = (_valid_signals[i] >= 0) ? 1.0 : -1.0;
+                        if (std::abs(_valid_signals[i]) < kNeutralEps)
+                            continue;
+                        ++dir_count;
+                        double sig_direction = (_valid_signals[i] > 0) ? 1.0 : -1.0;
                         if (sig_direction == avg_direction) {
                             consistent_count++;
                         }
                     }
-                    consistency = static_cast<double>(consistent_count) / _valid_signals.size();
+                    if (dir_count > 0)
+                        consistency = static_cast<double>(consistent_count) / dir_count;
                 }
 
                 // 2. 信号强度：加权平均绝对值
@@ -729,7 +737,9 @@ private:
         for (uint8_t i = 0; i < static_cast<uint8_t>(WeightedSignalType::COUNT); i++) {
             auto type = static_cast<WeightedSignalType>(i);
             // B3: 窗口/间隔可配 (原 500/20 常量)
-            _scale_trackers.emplace(type, RollingScaleTracker(_cfg.rolling_window, _cfg.rolling_interval, 0.95, 0.01));
+            // V10-P3-3: emplace 对已存在 key 是 no-op —— reset() 后再 init 时
+            // 旧 p95 历史与 _tick_count 会残留; 显式赋值保证真重置
+            _scale_trackers[type] = RollingScaleTracker(_cfg.rolling_window, _cfg.rolling_interval, 0.95, 0.01);
         }
         _scale_trackers_initialized = true;
     }

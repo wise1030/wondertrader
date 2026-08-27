@@ -30,6 +30,11 @@ NS_WTP_END
 namespace futu
 {
 
+/// V10-P2-4: 信号源跨间隙守卫阈值 (ms) —— 相邻帧时间差超过该值视为休市/小节休息/
+/// 开板间隙, 差分类信号丢弃该帧并重置 prev-state (防多小时陈旧状态注入伪跳变)。
+/// 常规 tick 周期 500ms, 5s 阈值 ≈ 10 个 tick, 正常运行不会误触发。
+constexpr uint64_t kSignalGapGuardMs = 5000;
+
 class MarketDataContext;
 struct SignalContext;
 

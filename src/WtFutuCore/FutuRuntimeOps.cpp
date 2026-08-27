@@ -643,6 +643,12 @@ void FutuRuntimeOps::onSessionBegin(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx,
     if (s._spread_arb_manager)
         s._spread_arb_manager->reset();
 
+    // V10-P2-4: 信号栈会话复位 —— coordinator.resetSession 扩展覆盖
+    // aggregator/market_data/toxicity (此前生产路径不可达);
+    // 若 strategy 层 coordinator 已在别处复位则本调用幂等无害。
+    if (s._coordinator)
+        s._coordinator->resetSession();
+
     // 重置本地状态
 
     // 启动异步套利执行器

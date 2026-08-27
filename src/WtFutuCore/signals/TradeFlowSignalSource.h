@@ -84,9 +84,12 @@ public:
             // 优先用 TradeFlowTracker 计算的统计显著性归一化
             // (比 buy_pressure/sell_pressure 比值更不易饱和)
             _result.net_flow_normalized = flow.net_flow_normalized;
+            // V10-P2-5: 无成交统计显著性门 (n>3, 与 getAnalysis 的显著性门一致) ——
+            // TradeFlowAnalysis 构造默认 buy=sell_pressure=0.5, 零成交也满置信参与
+            // 加权, 清淡期系统性稀释 alpha 并污染方向一致性度量
             _result.confidence = (flow.buy_pressure + flow.sell_pressure > 0) ? 1.0 : 0.5;
+            _result.valid = (flow.recent_trades > 3);
         }
-        _result.valid = true;
         _result.timestamp = book.getTimestamp();
     }
 

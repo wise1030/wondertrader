@@ -31,6 +31,17 @@ void RealizedVolSignalSource::update(const MarketDataContext& book)
     if (_code.empty())
         _code = book.getCode();
 
+    // V10-P2-4: 跨间隙守卫 —— 跨休市单跳收益平方进入方差窗口会推高 realized_vol
+    // 数十 tick (widen/pause 误触发); 丢帧并只推进 _last_mid
+    if (_last_mid > 0 && _last_ts != 0 && book.getTimestamp() > _last_ts &&
+        book.getTimestamp() - _last_ts > kSignalGapGuardMs)
+    {
+        _last_mid = mid;
+        _last_ts = book.getTimestamp();
+        return;
+    }
+    _last_ts = book.getTimestamp();
+
     // Incremental return calculation
     if (_last_mid > 0) {
         double ret = (mid - _last_mid) / _last_mid;
@@ -107,6 +118,7 @@ void RealizedVolSignalSource::reset()
     _running_sum = 0;
     _running_sum_sq = 0;
     _last_mid = 0;
+    _last_ts = 0; // V10-P2-4
     _result = VolatilitySignalResult();
     _result.type = SignalType::VOLATILITY;
 }

@@ -1884,3 +1884,39 @@ funds 收敛——arb 路径出厂 disabled 故零触发，行为变化集中在
    资金收敛；出现 ORPHAN LEG HEDGE DEFERRED 即 P2-6a 重试路径生效证据
 
 **移交**：R7-d 信号卫生包 / R7-e closeout 专项 + Router B+ 化。
+
+### R7-d 实施记录（2026-08-27③，已完成，_ec_5d A/B 归因通过）
+
+1. **[P2-4 间隙守卫]** 共享常量 `kSignalGapGuardMs=5000`（ISignalSource.h）；四源接入：
+   OFI（prev 重置+丢帧）/Momentum（_last_ts 新成员）/Volatility（同）/TickInferer
+   （含跨日回绕 ts<prev 判定）；LeadLag 走 updateLeadContract per-code 重置
+   （_mid_change_histories 清理）。语义：间隙帧丢帧+prev 对齐，下一帧重新武装。
+2. **[P2-4 会话复位]** coordinator.resetSession() 扩展覆盖 _signal_aggregators/
+   _market_data/_toxicity reset（此前运行期零调用）；RuntimeOps onSessionBegin
+   在 bridge/orch/arb-manager 复位旁接线（幂等）。
+3. **[P2-5]** TradeFlow fallback 显著性门：TradeFlowAnalysis.recent_trades 新字段
+   （getAnalysis 从 _inference_window.size() 填充）；fallback valid = n>3
+   （与 getAnalysis 显著性门一致）；SSOT 路径维持 valid=true。
+4. **[P2-5/P3-2]** computeAlpha consistency 中性剔除（|v|<1e-9 不计分子分母）；
+   ICWeightTracker weighted_direction==0 → consistency_boost 显式中立 1.0。
+5. **[P3-3]** initScaleTrackers emplace→显式赋值（reset 后真重置，消除 no-op 陷阱）。
+
+**测试**：新增 test_v10_r7d.cpp 4 用例（TickInferer 间隙拒收+自愈/跨日回绕拒收/
+OFI 间隙丢帧+重新武装/TradeFlow 零样本 invalid）；既有 test_v8_r3 泄漏测试适配
+（窗口 5000→100ms，跳步 20s→400ms，避开新守卫且保持测试意图）。
+全量 **156/158**（仅 2 个既有环境性失败，零回归）。
+勘误：OFI 测试初版误设间隙后首帧即可产 OFI（实际为重新武装帧，第二帧恢复）；
+SignalResult 无 ofi 字段（经 getOFI() 访问器）。
+
+**_ec_5d A/B 归因（预期行为变化，非回归）**：
+| 指标 | R6 基线 | R7-d | 归因 |
+|---|---|---|---|
+| 成交笔数 | 17,939 | 20,158 (+12.4%) | 间隙守卫抑制伪 vol/pause（跨休市/开板伪信号）→ 报价连续性提升，方向与 P2-4 设计一致 |
+| TOXIC(warning 行) | 2,370–2,770 带 | 2,729 | 带内 ✓ |
+| dynbalance(0612) | 291.9k–306.9k 带 | 296,937 | 带内 ✓ |
+| HALT/zombie | 0 | 0 | ✓ |
+v5 冒烟同步健康（247→340 同向变化，closeprofit 转正）；生产部署前建议随观察
+窗口积累（同 momentum window 先例）。
+
+**明确不做（本轮）**：LeadLag anchor 陈旧度量域重设计（B5 aging 启用前置，需独立
+定义）；MarketDataContext net-flow 间隙处理（5s 时间窗自然老化已覆盖）。

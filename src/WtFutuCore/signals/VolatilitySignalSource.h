@@ -63,6 +63,7 @@ private:
 
     double _vpin_weight = 0.3;
     double _last_mid = 0;
+    uint64_t _last_ts = 0; ///< V10-P2-4: 跨间隙守卫时间基准
 
     // Direct vol thresholds for tier classification
     // (V8-S10: 默认值同步 _ec_5d 实测标定 p95/p99.5; 旧 0.002/0.004 对 EC 不可达)

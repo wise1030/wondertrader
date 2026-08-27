@@ -442,11 +442,16 @@ public:
             ic_factor = std::max(0.3, std::min(2.0, ic_factor));
 
             // Consistency boost: if this signal agrees with majority, boost
+            // V10-P3-2: weighted_direction==0 (全部弱信号/中性) 时显式中立 (factor 1.0)
+            // —— 旧实现 majority_sign 恒取 -1, 把零方向下的全部信号判成"反对多数"
             double signal_sign = (entries[i].signal_val > 0) ? 1.0 : -1.0;
-            double majority_sign = (weighted_direction > 0) ? 1.0 : -1.0;
-            double consistency_boost = (signal_sign == majority_sign && std::abs(entries[i].signal_val) > 0.01)
-                                           ? (0.8 + 0.4 * consistency)  // [0.8, 1.2]
-                                           : (1.2 - 0.4 * consistency); // [0.8, 1.2]
+            double consistency_boost = 1.0;
+            if (weighted_direction != 0.0) {
+                double majority_sign = (weighted_direction > 0) ? 1.0 : -1.0;
+                consistency_boost = (signal_sign == majority_sign && std::abs(entries[i].signal_val) > 0.01)
+                                        ? (0.8 + 0.4 * consistency)  // [0.8, 1.2]
+                                        : (1.2 - 0.4 * consistency); // [0.8, 1.2]
+            }
 
             // Combine layers
             double w = w_base * regime_factor * ic_factor * consistency_boost;

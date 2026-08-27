@@ -38,7 +38,7 @@ public:
     };
 
     explicit MomentumSignalSource(const Config& cfg = Config())
-        : _cfg(cfg), _enabled(true), _last_mid(0), _ema_momentum(0)
+        : _cfg(cfg), _enabled(true), _last_mid(0), _last_ts(0), _ema_momentum(0)
     {}
 
     //==========================================================================
@@ -68,6 +68,16 @@ public:
         // 对数收益率 log(P_t/P_{t-1}) 消除品种价格差异, 数学性质:
         //   - 可加性: log(P3/P1) = log(P3/P2) + log(P2/P1)
         //   - 对称性: 涨跌相同幅度, 对数收益率绝对值相同
+        // V10-P2-4: 跨间隙守卫 —— 跨休市的 log(mid/last_mid) 是伪收益,
+        // 会污染滚动动量数十 tick; 丢帧并只推进 _last_mid
+        if (_last_mid > 0 && _last_ts != 0 && ts > _last_ts && ts - _last_ts > kSignalGapGuardMs)
+        {
+            _last_mid = mid;
+            _last_ts = ts;
+            _result.valid = false;
+            _result.timestamp = ts;
+            return;
+        }
         if (_last_mid > 0) {
             double lr = std::log(mid / _last_mid);
             if (_log_returns.full())
@@ -76,6 +86,7 @@ public:
             _log_return_sum += lr;
         }
         _last_mid = mid;
+        _last_ts = ts;
 
         size_t n = _log_returns.size();
         if (n >= 9) // 收益数 = 价格数-1, 等价于原 _price_history.size() >= 10
@@ -100,6 +111,7 @@ public:
         _log_returns.clear();
         _log_return_sum = 0;
         _last_mid = 0;
+        _last_ts = 0;
         _ema_momentum = 0;
         _result = AlphaSignalResult();
     }
@@ -125,6 +137,7 @@ private:
     RingBuffer<double, 128> _log_returns; ///< 对数收益环形缓冲
     double _log_return_sum = 0;           ///< 滚动和(满环时扣减最旧)
     double _last_mid;
+    uint64_t _last_ts; ///< V10-P2-4: 跨间隙守卫时间基准
     double _ema_momentum;
 
     void calculateMomentum()

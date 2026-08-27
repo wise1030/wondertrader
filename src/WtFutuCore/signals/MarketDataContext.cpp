@@ -291,6 +291,7 @@ TradeFlowAnalysis TradeFlowTracker::getAnalysis() const
     //   大量成交混合方向: net_flow小, n大 → 显著性低 (合理)
     //   tanh 压缩到 [-1,1], p95 约 ±0.7 (不饱和)
     size_t n = _inference_window.size();
+    flow.recent_trades = static_cast<int>(n); // V10-P2-5
     if (n > 3 && flow.avg_trade_size > 0) {
         double sqrt_n = std::sqrt(static_cast<double>(n));
         double significance = _net_trade_flow / (flow.avg_trade_size * sqrt_n);

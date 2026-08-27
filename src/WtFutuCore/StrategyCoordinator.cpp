@@ -1459,6 +1459,24 @@ void StrategyCoordinator::resetSession()
     _tick_count = 0;
     _market_pause_active = false; // V8-R6 收官: 边沿触发标志跨会话复位
     for (auto& [code, slot] : _last_mid) { if (slot) slot->v.store(0.0, std::memory_order_relaxed); }
+
+    // V10-P2-4: 信号栈会话复位接线 —— 此前本函数运行期零调用方, aggregator/
+    // market_data/toxicity 的 reset() 生产路径不可达, 差分类估计器跨 session
+    // 残留 (配合各源 update 入口的跨间隙守卫构成两层防线)。
+    if (_signal_aggregators) {
+        for (auto& [code, agg] : *_signal_aggregators) {
+            if (agg)
+                agg->reset();
+        }
+    }
+    if (_market_data) {
+        for (auto& [code, md] : *_market_data) {
+            if (md)
+                md->reset();
+        }
+    }
+    if (_toxicity)
+        _toxicity->reset();
 }
 
 void StrategyCoordinator::resetDaily()

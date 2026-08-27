@@ -82,13 +82,15 @@ TEST(SpreadCalculator, ZScoreReflectsSpreadDeviation)
 
 TEST(TickInferer, NoVolumeLeakAfterWindowExpiry)
 {
-    // 注: 时间戳基址须远大于 window(5000ms) -- pruneHistory 的
-    // current_time-window 为无符号运算, 小时间戳会下溢成巨数误剪全部记录
+    // 注: 时间戳基址须远大于 window -- pruneHistory 的
+    // current_time-window 为无符号运算, 小时间戳会下溢成巨数误剪全部记录。
+    // V10-P2-4 兼容: 窗口过期跳步改为 4x100=400ms (< kSignalGapGuardMs 5s),
+    // 否则跨间隙守卫会把窗口 B 帧按陈旧 prev 拒收 (UNKNOWN)。
     constexpr uint64_t T0 = 10000000ULL;
 
     TickTransactionInferer inf;
     TickInfererConfig cfg;
-    cfg.imbalance_window_ms = 5000;
+    cfg.imbalance_window_ms = 100;
     cfg.large_trade_threshold = 50.0; // 大单线: B 帧 vol=50 大单, A 帧 vol=10 小单
     inf.setConfig(cfg);
 
@@ -107,11 +109,11 @@ TEST(TickInferer, NoVolumeLeakAfterWindowExpiry)
         EXPECT_NEAR(stats.buy_volume, 10 * 10 * (0.2 + 10.0 / 30.0), 1e-6);
     }
 
-    // 窗口 B: 时间前进 4×window (A 全部过期), 一笔大单 (ask 消耗 50 -> vol=50 >= 50)
+    // 窗口 B: 时间前进 4×window(400ms, A 全部过期), 一笔大单 (ask 消耗 50 -> vol=50 >= 50)
     // V8-R3 修复前: _total_volume 残留 A 窗 Σ(1-conf)×vol = 10×10×0.4667 = 46.7,
     //   large_trade_ratio = 50/(50+46.7) = 0.52 (失真);
     // 修复后: add/prune 对称, _total_volume = 50, ratio = 1.0
-    auto big = inf.inferFromTick(99.0, 99.5, 1000, 850.0, 99.5, 10, T0 + 20000);
+    auto big = inf.inferFromTick(99.0, 99.5, 1000, 850.0, 99.5, 10, T0 + 400);
     ASSERT_TRUE(big.is_buy_initiated);
     ASSERT_DOUBLE_EQ(big.volume, 50.0);
 
