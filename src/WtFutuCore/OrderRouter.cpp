@@ -179,15 +179,39 @@ void OrderRouter::cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid)
     RecursiveSpinGuard _g(_lock);
     // 标记 pending_cancel (与 cancelAllBySource/cancelByPair 一致),
     // 使 getActiveOrders/totalActiveOrders 在 cancel-ack 窗口内不再视其为活跃.
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     for (auto& kv : _active_orders) {
         for (auto& info : kv.second) {
             if (info.localid == localid && !info.pending_cancel) {
                 info.pending_cancel = true;
+                info.pending_cancel_ts = now_ms; // V10-P1-2b: 宽限期计数基准
                 break;
             }
         }
     }
     orderApiCall([&] { return ctx->stra_cancel(localid); });
+}
+
+uint32_t OrderRouter::getActiveCountBySource(Source src, uint64_t now_ms) const
+{
+    RecursiveSpinGuard _g(_lock);
+    auto it = _active_orders.find(static_cast<int>(src));
+    if (it == _active_orders.end())
+        return 0;
+    // 默认口径 (now_ms==0): 排除 pending_cancel (与 totalActiveOrders/getActiveOrders 一致).
+    // 宽限口径 (now_ms!=0, CloseoutExecutor 门禁用): 撤出未超 PENDING_CANCEL_GRACE_MS 的
+    // pending_cancel 单仍计入 —— 原排除规则正是 V10-P1-2b 的过冲向量 (撤单静默失败时
+    // 计数提前归零 → 代际重叠下单); 宽限期上界同时防止 ack 永久丢失导致门禁卡死.
+    uint32_t n = 0;
+    for (const auto& info : it->second) {
+        if (!info.pending_cancel)
+            ++n;
+        else if (
+            now_ms != 0 && info.pending_cancel_ts != 0 && now_ms > info.pending_cancel_ts &&
+            now_ms - info.pending_cancel_ts < PENDING_CANCEL_GRACE_MS)
+            ++n;
+    }
+    return n;
 }
 
 void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
@@ -201,9 +225,11 @@ void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
     // Mark orders as pending_cancel before sending cancel request.
     // This prevents self-trade check from treating them as active orders
     // during the cancel-acknowledge window.
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     for (auto& info : it->second) {
         if (!info.pending_cancel) {
             info.pending_cancel = true;
+            info.pending_cancel_ts = now_ms; // V10-P1-2b: 宽限期计数基准
             orderApiCall([&] { return ctx->stra_cancel(info.localid); });
         }
     }
@@ -232,6 +258,7 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
     auto orders_it = _active_orders.find(key);
 
     size_t n = 0;
+    uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
     for (uint32_t oid : ids) {
         bool sent = false;
         if (orders_it != _active_orders.end()) {
@@ -239,6 +266,7 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
                 if (info.localid == oid) {
                     if (!info.pending_cancel) {
                         info.pending_cancel = true;
+                        info.pending_cancel_ts = now_ms; // V10-P1-2b: 宽限期计数基准
                         orderApiCall([&] { return ctx->stra_cancel(oid); });
                         ++n;
                     }

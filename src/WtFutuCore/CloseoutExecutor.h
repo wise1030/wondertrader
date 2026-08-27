@@ -84,6 +84,10 @@ struct CloseoutExecConfig
     uint32_t sweep_ticks = 3;           ///< SWEEP: opponent price + N ticks
     bool use_fak = true;                ///< Use FAK for all orders
     uint32_t max_batch_size = 20;       ///< Absolute cap on single batch qty (lots)
+    /// V10-P1-2a: 批次结算静止窗 (ms) —— inflight 计数归零后须持续该时长才允许下一轮
+    /// 派发。消除 "订单终态回报先于成交回报被处理" 的 stale-delta 复用窗口
+    /// (2026-08-26 实盘 clip 过冲 31→-9 的向量 a)。代码默认, 不接 yaml。
+    uint32_t settle_quiesce_ms = 200;
 
     /// Get depth ratio for a tier
     double depthRatio(PriceTier tier) const
@@ -219,6 +223,7 @@ private:
     double _total_to_hedge = 0;
     double _total_filled = 0;
     double _inflight_qty = 0; ///< Qty submitted but not yet confirmed filled/cancelled
+    uint64_t _settle_quiet_since = 0; ///< V10-P1-2a: router 计数归零的起始时刻 (0=未归零)
 
     uint64_t _start_ts = 0;
     uint64_t _drain_start_ts = 0;

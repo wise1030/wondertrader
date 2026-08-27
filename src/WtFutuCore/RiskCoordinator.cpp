@@ -87,11 +87,15 @@ bool RiskCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx, uint64_t exchange_
             ? _deps.order_router->submitSell(ctx, cand.code.c_str(), cand.price, cand.qty, Source::RISK_REDUCE, 1)
             : _deps.order_router->submitBuy(ctx, cand.code.c_str(), cand.price, cand.qty, Source::RISK_REDUCE, 1);
 
+        // V10-P2-2: 三个早退分支同样写入冷却戳 —— 否则持续限流/自成交冲突场景
+        // (恰是 util>=1.3 的事故高发态) 会以 tick 频率重试并叠加多层 WARN 刷屏。
         if (rr.rate_limited) {
+            _last_taker_reduce[cand.code] = now_ms;
             WTSLogger::warn("[TAKER_REDUCE] {} rate limited, will retry next cooldown", cand.code);
             continue;
         }
         if (rr.self_trade_blocked) {
+            _last_taker_reduce[cand.code] = now_ms;
             WTSLogger::warn("[TAKER_REDUCE] {} self-trade blocked (MM quotes on the way), will retry", cand.code);
             continue;
         }
@@ -102,6 +106,7 @@ bool RiskCoordinator::checkTakerReduce(wtp::IUftStraCtx* ctx, uint64_t exchange_
                 _deps.risk_monitor->recordOrder();
             triggered = true;
         } else {
+            _last_taker_reduce[cand.code] = now_ms;
             WTSLogger::error("[TAKER_REDUCE] {} order FAILED", cand.code);
         }
     }

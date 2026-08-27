@@ -75,6 +75,9 @@ struct ActiveOrderInfo
     // remains in _active_orders until onOrderDone, so self-trade check may block new orders
     // that conflict with a cancelling (but not yet cancelled) order.
     bool pending_cancel = false;
+    /// V10-P1-2b: pending_cancel 标记时刻 (replay ms) —— 供 getActiveCountBySource
+    /// 的"撤单确认宽限期"计数使用 (撤单可能被静默吞掉, 撤出后短窗内单子仍假定存活).
+    uint64_t pending_cancel_ts = 0;
 };
 
 /// Order submission result
@@ -159,20 +162,16 @@ public:
     /// Counts are maintained via recordActiveOrder / onOrderDone — only orders
     /// that went through this router are counted. Direct ctx->stra_* calls are
     /// invisible here.
-    uint32_t getActiveCountBySource(Source src) const
-    {
-        RecursiveSpinGuard _g(_lock);
-        auto it = _active_orders.find(static_cast<int>(src));
-        if (it == _active_orders.end())
-            return 0;
-        // 排除 pending_cancel (与 totalActiveOrders/getActiveOrders 口径一致).
-        // 否则 closeout 撤单后 ack 未回时计数不归零, inflight guard 卡死.
-        uint32_t n = 0;
-        for (const auto& info : it->second)
-            if (!info.pending_cancel)
-                ++n;
-        return n;
-    }
+    ///
+    /// V10-P1-2b: @param now_ms 非 0 时启用"撤单确认宽限期"口径 —— pending_cancel
+    /// 单在标记后 PENDING_CANCEL_GRACE_MS 内仍计入活跃数 (B+ 已实证引擎 doCancel
+    /// 同步失败会被静默吞掉, 撤出即归零会让 closeout 结算门禁提前打开 → 代际重叠
+    /// 下单); 超过宽限期视为已消失 (防撤单 ack 丢失时门禁无限卡死)。
+    /// 默认 0 = 维持旧口径: pending_cancel 一律不计 (自成交检查等调用方零变化)。
+    uint32_t getActiveCountBySource(Source src, uint64_t now_ms = 0) const;
+
+    /// 撤单确认宽限期 (ms): closeout 结算/DRAIN 门禁的 pending_cancel 计数窗口。
+    static constexpr uint64_t PENDING_CANCEL_GRACE_MS = 2000;
 
     //==========================================================================
     // Self-Trade Prevention

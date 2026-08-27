@@ -35,6 +35,7 @@ void CloseoutExecutor::start(wtp::IUftStraCtx* ctx, const char* code, uint64_t c
     _prev_round_qty = 0;
     _rounds.clear();
     _consecutive_zero_fills = 0;
+    _settle_quiet_since = 0; // V10-P1-2a
 
     // Drain start timestamp: captured on first handleDraining call from snap.timestamp_ms
     // (must be in same time domain as snap.timestamp_ms = ms-from-midnight)
@@ -55,6 +56,7 @@ void CloseoutExecutor::reset()
     _total_to_hedge = 0;
     _total_filled = 0;
     _inflight_qty = 0;
+    _settle_quiet_since = 0; // V10-P1-2a
     _sweep_done = false;
     _prev_round_pos = 0;
     _prev_round_ts = 0;
@@ -111,10 +113,11 @@ bool CloseoutExecutor::handleDraining(wtp::IUftStraCtx* ctx, const MarketSnapsho
         // MM 单, arb/hedge/closeout 经 OrderRouter 不在其内. closeout 触发时
         // cancelAllBySource 的撤单在途成交会改变实际持仓, 不等其落地会导致
         // ASSESS 基于滞后持仓计算 _remaining.
+        // V10-P1-2b: 传 now 启用 pending_cancel 宽限期计数 (撤单静默失败时不提前放行)
         if (drain_ok && _router) {
-            drain_ok = (_router->getActiveCountBySource(Source::ARBITRAGE) == 0 &&
-                        _router->getActiveCountBySource(Source::HEDGING) == 0 &&
-                        _router->getActiveCountBySource(Source::CLOSEOUT) == 0);
+            drain_ok = (_router->getActiveCountBySource(Source::ARBITRAGE, now_ms) == 0 &&
+                        _router->getActiveCountBySource(Source::HEDGING, now_ms) == 0 &&
+                        _router->getActiveCountBySource(Source::CLOSEOUT, now_ms) == 0);
         }
     } else {
         // No tracker — assume drain ok (best effort)
@@ -209,13 +212,24 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx, const MarketSnapsh
     // the book → all filled at once when price reached them → blowup.
     if (_inflight_qty > 0) {
         // Count only this executor's own active orders (CLOSEOUT source).
-        int active = _router ? static_cast<int>(_router->getActiveCountBySource(Source::CLOSEOUT)) : 0;
+        // V10-P1-2b: 传 now 启用 pending_cancel 宽限期计数 (2s 内的撤出单仍算活跃,
+        // 防撤单静默失败时门禁提前打开 → 代际重叠下单)。
+        int active = _router ? static_cast<int>(_router->getActiveCountBySource(Source::CLOSEOUT, now_ms)) : 0;
         if (active > 0) {
             // Previous batch still inflight — wait
+            _settle_quiet_since = 0;
             return;
         }
+        // V10-P1-2a: 结算静止门禁 —— count 归零须持续 settle_quiesce_ms 才认批次已结算。
+        // 原"归零即放行"依赖 Trade 回报先于 Order 终态被处理的时序假设; 该假设破缺时
+        // 第二轮 clip 按旧持仓发出满额 (2026-08-26 实盘 31→-9 过冲的直接向量)。
+        if (_settle_quiet_since == 0)
+            _settle_quiet_since = now_ms;
+        if (now_ms < _settle_quiet_since || now_ms - _settle_quiet_since < _cfg.settle_quiesce_ms)
+            return; // quiet window not elapsed yet — keep waiting
         // Previous batch settled
         _inflight_qty = 0;
+        _settle_quiet_since = 0;
         // 记录上一轮成交(接线 updateRoundFill — 旧代码从未被调用,
         // _total_filled 恒 0, estimateFillRate 永远走初始估算分支)
         updateRoundFill(snap);
@@ -276,9 +290,11 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx, const MarketSnapsh
             tier = static_cast<PriceTier>(static_cast<int>(tier) + 1);
             batch_qty = calcBatchQty(_remaining, tier, snap.bid1_qty, snap.ask1_qty);
         }
-        if (batch_qty < 1.0) {
-            batch_qty = std::abs(_remaining); // last resort: send full remaining
-        }
+        // V10-P1-2d: 删除 last-resort 全量派发 (batch = |remaining|) —— 深度不足时的
+        // 放量兜底正是 clip 过冲放大器; 升档到 SWEEP 后仍 <1 手则本周期跳过,
+        // 下个 tick 重试 (SWEEP 档 calcBatchQty 恒返 |remaining|, 到此只剩 remaining<1 的边角)。
+        if (batch_qty < 1.0)
+            return;
     }
 
     batch_qty = std::floor(batch_qty); // round down to integer lots

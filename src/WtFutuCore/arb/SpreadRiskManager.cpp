@@ -168,7 +168,9 @@ void SpreadRiskManager::updateAlerts()
         const auto& state = kv.second;
 
         // Correlation break
-        if (state.correlation < _config.max_correlation_break) {
+        // V10-P1-1a: 前置 is_active(=calculator hasEnoughSamples) 门控 —— 预热期
+        // correlation 恒 0, 判据必然触发, 是 2026-08-26 单日 3.4 万行告警刷屏的机制根因。
+        if (state.is_active && state.correlation < _config.max_correlation_break) {
             RiskAlert alert;
             alert.pair_id = pair_id;
             alert.level = RiskAlert::Level::WARNING;
@@ -179,8 +181,8 @@ void SpreadRiskManager::updateAlerts()
             _active_alerts.push_back(alert);
         }
 
-        // Divergence
-        if (std::abs(state.zscore) > _config.max_divergence_zscore * 0.8) {
+        // Divergence (V10-P1-1a: 同样受 is_active 门控 —— 预热期 zscore 无统计意义)
+        if (state.is_active && std::abs(state.zscore) > _config.max_divergence_zscore * 0.8) {
             RiskAlert alert;
             alert.pair_id = pair_id;
             alert.level = RiskAlert::Level::WARNING;

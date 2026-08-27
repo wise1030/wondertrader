@@ -6,7 +6,8 @@
  * channel_ready AUTO REDUCE 等), 统一语义:
  *   - 对手价 (exitLong@bid1 / exitShort@ask1), 保证立即成交
  *   - flag 默认 1 (FAK), 风险处置必须当次成交, 不留挂单
- *   - Source::CLOSEOUT (走 OrderRouter 审计/统计)
+ *   - Source::RISK_REDUCE (走 OrderRouter 审计/统计; V10-P2-15: 原 CLOSEOUT 冒用,
+ *     污染 closeout 门禁口径/REVERSIBLE 豁免集合)
  *   - 价格三级校验 (last_price/bid1/ask1 > 0), 无效价拒绝发单
  *   - qty clamp 到实际持仓, 不超卖
  *
@@ -94,15 +95,19 @@ public:
 
         if (cs->position > 0)
         {
+            // V10-P2-15: CLOSEOUT → RISK_REDUCE —— 冒用 CLOSEOUT 会 (a) 污染 closeout
+            // 统计与 CloseoutExecutor 的 drain/settle 门禁(getActiveCountBySource),
+            // (b) 让强平单事件误入 CloseoutOrchestrator 消耗 retry 预算,
+            // (c) 隐式落入 Fix4 REVERSIBLE 豁免集合。与 taker 减仓(V8-R6/P2-3)同口径。
             _deps.router->submitSell(ctx, code.c_str(), cs->bid1, exec_qty,
-                Source::CLOSEOUT, flag);
+                Source::RISK_REDUCE, flag);
             WTSLogger::error("[LIQUIDATE] SELL_CLOSE {} x{:.0f} @ {:.1f} ({})",
                 code, exec_qty, cs->bid1, reason);
         }
         else
         {
             _deps.router->submitBuy(ctx, code.c_str(), cs->ask1, exec_qty,
-                Source::CLOSEOUT, flag);
+                Source::RISK_REDUCE, flag);
             WTSLogger::error("[LIQUIDATE] BUY_CLOSE {} x{:.0f} @ {:.1f} ({})",
                 code, exec_qty, cs->ask1, reason);
         }

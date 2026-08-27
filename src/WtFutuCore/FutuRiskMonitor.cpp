@@ -253,9 +253,17 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
     // P2-1: 直接用 ring buffer size() 替代 atomic 双轨计数
     // 读侧先剔除过期样本: 滑窗只在事件到达时推进会导致停止报单后误报持续
     pruneRateWindows(ts);
-    uint32_t orders = static_cast<uint32_t>(_order_times.size());
-    uint32_t cancels = static_cast<uint32_t>(_cancel_times.size());
-    uint32_t trades = static_cast<uint32_t>(_trade_times.size());
+    // V10-P2-13: size 快照在 _rate_lock 内读取 —— 与生产者 try_push / 日切 clear
+    // 的结构竞态读收紧为锁内一致视图 (prune 内部自持同一把锁, 此处单独开区, 不嵌套)。
+    uint32_t orders = 0;
+    uint32_t cancels = 0;
+    uint32_t trades = 0;
+    {
+        SpinLockGuard _g(_rate_lock);
+        orders = static_cast<uint32_t>(_order_times.size());
+        cancels = static_cast<uint32_t>(_cancel_times.size());
+        trades = static_cast<uint32_t>(_trade_times.size());
+    }
 
     if (orders > _rate_limits.max_orders_per_sec) {
         RiskViolation v;
@@ -330,9 +338,18 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
 bool FutuRiskMonitor::checkRateLimits()
 {
     pruneRateWindows(_current_time.load(std::memory_order_relaxed));
-    return _order_times.size() < _rate_limits.max_orders_per_sec &&
-           _cancel_times.size() < _rate_limits.max_cancels_per_sec &&
-           _trade_times.size() < _rate_limits.max_trades_per_sec;
+    // V10-P2-13: 与 checkRiskLimits 同口径 —— size 快照在 _rate_lock 内读取
+    uint32_t orders = 0;
+    uint32_t cancels = 0;
+    uint32_t trades = 0;
+    {
+        SpinLockGuard _g(_rate_lock);
+        orders = static_cast<uint32_t>(_order_times.size());
+        cancels = static_cast<uint32_t>(_cancel_times.size());
+        trades = static_cast<uint32_t>(_trade_times.size());
+    }
+    return orders < _rate_limits.max_orders_per_sec && cancels < _rate_limits.max_cancels_per_sec &&
+           trades < _rate_limits.max_trades_per_sec;
 }
 
 // R2.2 checkSoftLimits 已删 (2026-08-24② A1): 零调用死方法。
@@ -673,9 +690,15 @@ void FutuRiskMonitor::resetDaily()
     _pause_timestamp = 0;
     _last_recovery_check = 0;
 
-    _order_times.clear();
-    _cancel_times.clear();
-    _trade_times.clear();
+    // V10-P2-13: 频控环清零收进 _rate_lock —— 生产者(recordOrder/Cancel/Trade)与
+    // arb/TdSpi 线程持 _rate_lock 写入, 原先在 _halt_domain_lock 内裸 clear 会与其
+    // 并发撕裂环形不变式。锁嵌套序固定 halt_domain→rate, 全仓无反向获取, 无死锁风险。
+    {
+        SpinLockGuard _rg(_rate_lock);
+        _order_times.clear();
+        _cancel_times.clear();
+        _trade_times.clear();
+    }
     // P2-1: atomic 双轨计数已删除,清零靠 ring buffer clear()
 
     _delta_snapshots.fill(DeltaSnapshot());

@@ -99,6 +99,20 @@ struct RiskAlert
     RiskAlert() : level(Level::INFO), type(Type::POSITION_LIMIT), value(0), threshold(0), timestamp(0) {}
 };
 
+/// V10-P1-1b: 策略层 arb 告警节流窗口 (ms)。WARNING 60s / CRITICAL 10s / 其余 0=不节流。
+/// EMERGENCY 是一次性动作告警(halt+disable), 必须直通。独立自由函数便于单测。
+inline uint64_t arbAlertThrottleWindowMs(RiskAlert::Level level)
+{
+    switch (level) {
+    case RiskAlert::Level::WARNING:
+        return 60000;
+    case RiskAlert::Level::CRITICAL:
+        return 10000;
+    default:
+        return 0;
+    }
+}
+
 
 //==============================================================================
 // Spread Risk Manager
