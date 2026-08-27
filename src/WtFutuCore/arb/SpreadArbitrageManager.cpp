@@ -533,7 +533,7 @@ SpreadArbitrageManager::applyB3Gate(const std::string& pair_id, const SpreadSign
             arb_state.close_in_flight_qty = 0;
             arb_state.close_in_flight_set_time = 0;
             clearActiveCloseIntent(pair_id);
-            _timed_out_pairs.push_back(pair_id); // 复用撤单清理通道
+            _timed_out_pairs.emplace_back(pair_id, true); // V10-P2-10: close 通道标记
         }
 
         // B4: 平仓防双发 (有在飞平仓单则抑制新平仓信号)
@@ -603,6 +603,16 @@ SpreadArbitrageManager::applyB3Gate(const std::string& pair_id, const SpreadSign
     // -----------------------------------------------------------------
     // Update per-pair arb state under lock
     // -----------------------------------------------------------------
+    // V10-P2-7: B5 过冲冷却对 open 通道同样生效 —— 头文件契约"冷却期抑制一切信号"
+    // 此前只在 close 分支兑现(:521); open 侧 derived 反号后 gap 巨大, 会在过冲熔断
+    // 后 ~5ms 的下一信号周期朝原方向重建仓, 放大刚被熔断的敞口。
+    // 注: isInOvershootCooldown 走 _intent_spin, 与下方 _pair_arb_spin 无嵌套
+    // (close 分支亦在取 arb 锁之前调用, 同模式)。
+    if (isInOvershootCooldown(pair_id)) {
+        result.type = SpreadSignalType::NONE;
+        return result;
+    }
+
     SpinLockGuard arb_lock(_pair_arb_spin);
 
     auto& arb_state = _pair_arb_states[pair_id];
@@ -632,7 +642,7 @@ SpreadArbitrageManager::applyB3Gate(const std::string& pair_id, const SpreadSign
         arb_state.in_flight_qty = 0;
         arb_state.in_flight_direction = 0;
         arb_state.in_flight_set_time = 0;
-        _timed_out_pairs.push_back(pair_id);
+        _timed_out_pairs.emplace_back(pair_id, false); // V10-P2-10: open 通道标记
     }
 
     if (arb_state.in_flight_qty > 0.5) {
@@ -1021,6 +1031,26 @@ bool SpreadArbitrageManager::isLegInActivePair(const std::string& code) const
     if (!_calculator_manager)
         return false;
     return _calculator_manager->isSpreadContract(code);
+}
+
+bool SpreadArbitrageManager::convertLegQtyToOpposite(
+    const std::string& pair_id, const std::string& leg_code, double leg_qty, double& out_qty) const
+{
+    auto cfg_it = _pair_configs.find(pair_id);
+    if (cfg_it == _pair_configs.end() || leg_qty <= 0)
+        return false;
+    const SpreadPairConfig& cfg = cfg_it->second;
+    const double r1 = (cfg.leg1_ratio > 0) ? cfg.leg1_ratio : 1.0;
+    const double r2 = (cfg.leg2_ratio > 0) ? cfg.leg2_ratio : 1.0;
+    if (leg_code == cfg.leg1_code) {
+        out_qty = leg_qty * (r2 / r1);
+        return true;
+    }
+    if (leg_code == cfg.leg2_code) {
+        out_qty = leg_qty * (r1 / r2);
+        return true;
+    }
+    return false;
 }
 
 bool SpreadArbitrageManager::isInOvershootCooldown(const std::string& pair_id) const

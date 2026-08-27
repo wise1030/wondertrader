@@ -31,7 +31,10 @@ public:
                                          double price, double qty, Source src,
                                          int flag = 0) = 0;
     virtual void cancelAllBySource(wtp::IUftStraCtx* ctx, Source src) = 0;
-    virtual size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id) = 0;
+    /// V10-P2-10: channel 通道过滤 —— 0=全部 / 1=仅 open 族(is_close==false) /
+    /// 2=仅 close 族(is_close==true)。未登记 is_close 的 id 仅在 channel==0 时撤销
+    /// (通道未知时盲撤可能误伤另一通道在飞单, 跳过留其自身超时兜底)。
+    virtual size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id, int channel = 0) = 0;
 };
 
 } // namespace futu

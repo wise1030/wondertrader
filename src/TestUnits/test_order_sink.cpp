@@ -58,7 +58,7 @@ public:
         cancel_all_sources.push_back(src);
     }
 
-    size_t cancelByPair(wtp::IUftStraCtx* /*ctx*/, const std::string& pair_id) override
+    size_t cancelByPair(wtp::IUftStraCtx* /*ctx*/, const std::string& pair_id, int /*channel*/ = 0) override
     {
         cancel_pair_ids.push_back(pair_id);
         return 1;

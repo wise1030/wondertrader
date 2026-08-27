@@ -145,12 +145,14 @@ public:
 
     /// 注册套利单 → pair 映射 (ArbExecutionBridge 在 tagOrderPair 时同步调用).
     /// 支持一个 pair 多组活跃订单 (MeanReversion 加仓场景).
-    void registerPairOrder(uint32_t localid, const std::string& pair_id);
+    /// V10-P2-10: is_close 登记 —— cancelByPair 通道过滤的依据
+    void registerPairOrder(uint32_t localid, const std::string& pair_id, bool is_close = false);
 
     /// 撤指定 pair 的全部活跃订单 (含历史加仓组).
     /// 替代单腿失败时的 cancelAllBySource(ARBITRAGE) — 避免误撤其它 pair 的在途单.
+    /// @param channel V10-P2-10: 0=全部/1=仅 open 族/2=仅 close 族 (IOrderSink 默认 0)
     /// @return 实际发出撤单请求的数量
-    size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id) override;
+    size_t cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id, int channel = 0) override;
 
     //==========================================================================
     // Active order query (per-source)
@@ -247,6 +249,9 @@ private:
 
     /// A7: localid → pair_id 映射 (cancelByPair 用, onOrderDone 时清理)
     wtp::wt_hashmap<uint32_t, std::string> _oid_to_pair;
+
+    /// V10-P2-10: localid → is_close 映射 (cancelByPair 通道过滤依据, 同步清理)
+    wtp::wt_hashmap<uint32_t, bool> _oid_to_pair_close;
 
     /// MM order tracker reference (for self-trade prevention)
     UnifiedOrderTracker* _mm_tracker = nullptr;

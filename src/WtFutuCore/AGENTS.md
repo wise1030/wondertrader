@@ -1786,3 +1786,101 @@ P2-1（requoteAfterFill 陈旧时间戳 → STALE churn，`StrategyCoordinator.c
 `q.timestamp` → `now_ms` 一行修）在方案清单中被遗漏未实施，本条补记并已落地。
 该修复的 STALE 判定链：place_time 恢复新鲜 → tracker max_age_ms(10s) 不再立即误判。
 验证同 R7-a（v5 冒烟 + 全量 TestUnits 复跑通过）。
+
+## 当前方案（2026-08-27②，V10-R7c arb 安全包，用户已确认"执行后续批次"）
+
+**目标**：关闭 arb_close 灰度开启前的全部已知功能缺口（V10 报告 P2-6/7/8/9/10/11/12/16）。
+
+### 修改清单
+
+1. **[P2-7] B5 过冲冷却约束 open 通道**：SpreadArbitrageManager.cpp open 分支
+   （:601 后、:606 取 _pair_arb_spin 前）加 isInOvershootCooldown 早退（该函数用
+   _intent_spin，与 _pair_arb_spin 无嵌套，close 分支同模式）。
+2. **[P2-8] SA 止损可达**：StatisticalFeatures 加 raw_composite_signal（钳位前原始值）；
+   generateSignal 止损判据改比原始值；默认 stop_loss_threshold 1.5→0.95。
+3. **[P2-9] FAK 越价**：AsyncArbitrageExecutor is_close/order_flag 计算前移至自成交
+   改价块之前；FAK(order_flag==1) 命中自成交边界时改 pay-through（BUY=min_sell+tick /
+   SELL=max_buy-tick），非 FAK 保持被动退价；利润门槛复核链不变。
+4. **[P2-6] 同步 hedge-on-fill 受理+ratio**：
+   a) bridge onTradeFill 对冲单 rr 增加 accepted 判定（rejected/rate_limited/
+      self_trade_blocked/空 localids → 不累加 hedged_qty，条目保留供下一笔成交回报
+      重试，error 日志；无后续成交由 30s stale 清理兜底）——与 V8-A2 异步路径对齐；
+   b) Manager 新增 convertLegQtyToOpposite(pair_id, leg_code, qty, &out)（cfg.r
+      换算，>0 校验）；bridge markLegRejected 增 leg_code 参（默认空=不换算），
+      3 处调用点传 order.code，cap=对侧计划手数。
+5. **[P2-10] cancelByPair 通道过滤**：IOrderSink/OrderRouter cancelByPair 增
+   channel 参（0=全部/1=仅 open/2=仅 close，默认 0）；registerPairOrder 增 is_close；
+   Manager _timed_out_pairs → vector<pair<string,bool>>（携带通道），popTimedOutPairs
+   签名同步；bridge timed_out 按标记传通道、overshoot 固定传 close 通道；
+   test_order_sink mock 签名同步。
+6. **[P2-11] bridge._now_ms 原子化**：ArbExecutionBridge.h :101 → atomic<uint64_t>，
+   新增 nowMs() 访问器（保留墙钟 bootstrap 回退并注释残余域差语义：仅首帧前
+   created/last_attempt 基准，最坏后果=对冲条目提前过期告警，无簿记损坏）。
+7. **[P2-12] manager.reset() 接线**：FutuRuntimeOps onSessionBegin 在
+   _arb_bridge.resetSession() 旁补 _spread_arb_manager->reset()（arb 线程
+   stop-after/start-before 的单线程窗口内，无并发）——B7 stale-in-flight 会话兜底复活。
+8. **[P2-16] arb 部分成交 pending 投影**：onOrderEvent 终态判定块之前，
+   leftQty>0 且 router 来源==ARBITRAGE 时 tracker.updateOrderQty(localid, leftQty)
+   （MM 单已由 quoter.onOrder 处理；closeout 不入 tracker 维持既有口径）。
+9. **测试**：SA 止损可达性（raw 超 0.95 → STOP_LOSS）/convertLegQtyToOpposite
+   数学（r1=1,r2=3 双向）/（B-3 gate 表驱动与灰度回测留灰度批次）。
+10. **runbook**：dist 生成 configbt_arb_grey.yaml 的说明写入 AGENTS（arb_close.enabled=
+    true + stop_loss/timeout 解禁；执行归属用户侧灰度批次）。
+
+### 验证
+
+make WtFutuCore+TestUnits 全量（基线 148/150）→ v5 冒烟 0 HALT/zombie/error、
+资金收敛 → 每项行为影响限于 arb 路径（回测 arb_close disabled 路径零触发）。
+
+### R7-c 实施记录（2026-08-27②，已完成，验证通过）
+
+1. **[P2-7]** open 分支 :601 后加 isInOvershootCooldown 早退（_intent_spin，取
+   _pair_arb_spin 之前，close 分支同模式）——B5"冷却期抑制一切信号"契约两通道对齐。
+2. **[P2-8]** StatisticalFeatures.raw_composite_signal（钳位前原始值）；止损判据改比
+   raw；默认阈值 1.5→0.40（composite 单位，语义注释固化：仅 z 饱和上限 ≈0.353，
+   0.40=z 主导+vol 因子同向；配置可按权重方案重标定）。
+3. **[P2-9]** executor is_close/order_flag 前移至自成交改价前；FAK 命中自成交边界
+   改 pay-through（BUY=min_sell+tick / SELL=max_buy-tick），非 FAK 保持被动退价；
+   利润门槛复核链不变。
+4. **[P2-6]** a) onTradeFill 对冲单 accepted 判定（rejected/rate_limited/stp/空
+   localids → 不累加 hedged_qty，条目保留待下一笔成交回报重试，error 日志；
+   30s stale 清理兜底）；受理时补 recordOrder；b) Manager::convertLegQtyToOpposite
+   （cfg ratio 换算，未知回退原值）+ markLegRejected 增 leg_code 参，3 调用点传
+   order.code，cap=对侧计划手数（修 ratio≠1 错配）。
+5. **[P2-10]** IOrderSink/OrderRouter cancelByPair 增 channel（0 全部/1 仅 open/
+   2 仅 close，默认 0；通道未登记的 id 过滤模式下跳过防盲撤）；registerPairOrder
+   增 is_close（bridge 传 order.is_close）+ _oid_to_pair_close 同步清理；
+   Manager _timed_out_pairs 携带通道标记（close :536=true / open :635=false），
+   popTimedOutPairs 签名同步；bridge timed_out 按标记传参、overshoot 固定 2；
+   test_order_sink mock 同步。
+6. **[P2-11]** bridge._now_ms → atomic<uint64_t> + nowMs()（relaxed）；onTick store
+   /两处 fallback/trackArbOrder place_time 收口；首帧前墙钟 bootstrap 残余域差
+   语义注释固化（最坏=对冲条目提前过期告警，无簿记损坏）。
+7. **[P2-12]** onSessionBegin 在 bridge/orch resetSession 旁接线
+   _spread_arb_manager->reset()（上一 arb 线程 stop 之后 / 本 session start 之前
+   单线程窗口，无并发）——B7 stale-in_flight 会话兜底从死代码复活。
+8. **[P2-16]** onOrderEvent 在 closeout/onOrderDone 之前：非终态且
+   router.isOrderFromSource(ARBITRAGE) 时 tracker.updateOrderQty(localid, leftQty)
+   ——arb 建仓期全源 pending 投影不再系统性高估。
+
+**测试**：新增 test_v10_r7c.cpp 4 用例（SA 止损可达性——功能测试经 vol 因子操纵
+raw composite 越阈 / 阈值语义固化 / ratio 换算双向 + 未配 ratio 回退 1.0）；
+全量 **152/154**（仅 2 个既有环境性失败，零回归）。
+勘误：首版测试 vol 操纵数据设计缺陷（hist 窗口混入大值稀释 ratio→0.387<0.40），
+已修；threshold<0.353 断言口径错误（0.40 为语义固化值），改为 DOUBLE_EQ(0.40)。
+
+**回测冒烟（configbt_v5）**：EXIT=0、0 HALT/ZOMBIE/ERROR、trades 247（噪声带）、
+funds 收敛——arb 路径出厂 disabled 故零触发，行为变化集中在 arb_close 灰度面。
+
+**编译勘误**：atomic 引入后 trackArbOrder 三目两侧类型不匹配（atomic vs int64），
+改经 nowMs() 访问器。
+
+**arb 灰度 runbook（记录归档，执行归属后续灰度批次）**：
+1. `cp dist/WtBtFutu/_ec_5d.yaml dist/WtBtFutu/configbt_arb_grey.yaml`
+2. 编辑 spread_arbitrage.yaml（dist 副本）：arb_close.enabled=true + stop_loss/
+   timeout_exit 解禁（C1/C2）；ration≠1 的 pair 建议同步配置以激活 P2-6 换算路径
+3. 回测 coordinator 必须 useAsyncArbThread:false；isBacktest:true 显式
+4. 判据：0 error/HALT/zombie + STOP_LOSS/TIMEOUT/残腿 HEDGE 事件至少各 1 次 +
+   资金收敛；出现 ORPHAN LEG HEDGE DEFERRED 即 P2-6a 重试路径生效证据
+
+**移交**：R7-d 信号卫生包 / R7-e closeout 专项 + Router B+ 化。

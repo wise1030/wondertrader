@@ -69,6 +69,9 @@ StatisticalFeatures StatisticalArbStrategy::calculateFeatures(const SpreadState&
     feat.composite_signal = w_z * feat.zscore + w_m * feat.zscore_momentum + w_v * (feat.volatility_ratio - 1.0) +
                             w_c * feat.correlation_trend;
 
+    // V10-P2-8: 保留钳位前原始值供止损判据 (clamp 后 |sig|<=1, 与 >1 的阈值比较恒假)
+    feat.raw_composite_signal = feat.composite_signal;
+
     // Clamp to [-1, 1]
     feat.composite_signal = std::max(-1.0, std::min(1.0, feat.composite_signal));
 
@@ -172,7 +175,6 @@ SpreadSignal StatisticalArbStrategy::generateSignal(const SpreadState& state, ui
     }
 
     double sig = _features.composite_signal;
-    double abs_sig = std::abs(sig);
 
     // No position - check for entry
     if (!state.hasPosition()) {
@@ -195,7 +197,9 @@ SpreadSignal StatisticalArbStrategy::generateSignal(const SpreadState& state, ui
     // Has position - check for exit
     else {
         // Stop loss
-        if (abs_sig > _config.stop_loss_threshold) {
+        // V10-P2-8: 改比钳位前原始合成值 —— 旧代码对 clamp 后的 sig 判 >1.5 恒假,
+        // 选择 SA 主策略的 pair 无 z 类止损兜底 (只剩 TIMEOUT_EXIT)
+        if (std::abs(_features.raw_composite_signal) > _config.stop_loss_threshold) {
             signal.type = SpreadSignalType::STOP_LOSS;
             signal.confidence = 1.0;
             signal.suggested_size = std::abs(state.spread_position);

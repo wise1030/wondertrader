@@ -235,21 +235,33 @@ void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
     }
 }
 
-void OrderRouter::registerPairOrder(uint32_t localid, const std::string& pair_id)
+void OrderRouter::registerPairOrder(uint32_t localid, const std::string& pair_id, bool is_close)
 {
     RecursiveSpinGuard _g(_lock);
     _oid_to_pair[localid] = pair_id;
+    _oid_to_pair_close[localid] = is_close; // V10-P2-10
 }
 
-size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id)
+size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_id, int channel)
 {
     RecursiveSpinGuard _g(_lock);
     // 收集该 pair 全部活跃 localid (含历史加仓组, A7)
+    // V10-P2-10: channel 过滤 —— 0=全部 / 1=仅 open 族 / 2=仅 close 族。
+    // 通道未知 (未登记 is_close) 的 id 仅在 channel==0 时撤销, 防盲撤另一通道在飞单。
     std::vector<uint32_t> ids;
     ids.reserve(4);
     for (const auto& kv : _oid_to_pair) {
-        if (kv.second == pair_id)
-            ids.push_back(kv.first);
+        if (kv.second != pair_id)
+            continue;
+        if (channel != 0) {
+            auto close_it = _oid_to_pair_close.find(kv.first);
+            if (close_it == _oid_to_pair_close.end())
+                continue; // 通道未知 → 过滤模式下跳过
+            bool is_close = close_it->second;
+            if ((channel == 1 && is_close) || (channel == 2 && !is_close))
+                continue;
+        }
+        ids.push_back(kv.first);
     }
     if (ids.empty())
         return 0;
@@ -313,6 +325,7 @@ void OrderRouter::onOrderDone(uint32_t localid)
     Source src = src_it->second;
     _order_source_map.erase(src_it);
     _oid_to_pair.erase(localid); // A7: 同步清理 pair 映射
+    _oid_to_pair_close.erase(localid); // V10-P2-10: 同步清理通道标记
 
     auto key = static_cast<int>(src);
     auto orders_it = _active_orders.find(key);

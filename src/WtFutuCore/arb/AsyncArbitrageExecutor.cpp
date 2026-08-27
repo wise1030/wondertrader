@@ -391,6 +391,18 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     double orig_leg2_price = leg2_price;
     bool price_adjusted = false;
 
+    // C0: 平仓单执行策略 (STOP_LOSS → FAK 对手价; TIMEOUT → GFD mid)
+    // V10-P2-9: 前移到自成交改价之前 —— FAK 止损单的被动退价会退到自家 MM quote
+    // 后面, FAK 立即杀单 → 止损零成交, z 仍极端则周期重复空转 (做市场景两腿同时被
+    // 双边报价, 命中边界是常态)。FAK 改 pay-through: 越过我方 quote 一个 tick 仍保
+    // 立即成交, 且利润门槛复核链(下放)继续把真实成本超阈的信号拒掉。
+    bool is_close = is_close_signal(signal.type);
+    int order_flag = 0;
+    if (is_close && _arb_manager) {
+        order_flag = _arb_manager->getArbCloseConfig().policy_for(signal.type).order_flag;
+    }
+    const bool is_fak = (order_flag == 1);
+
     // Self-trade check (P7: O(1) 预计算标量 — 全局 min_sell/max_buy 即约束边界,
     // 与原"扫全部订单取最严格价"等价, 消除锁内 O(n) 线性扫描).
     {
@@ -400,20 +412,22 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         if (leg1_is_buy) {
             auto it = _mm_min_sell.find(signal.leg1_code);
             if (it != _mm_min_sell.end() && it->second > 0 && it->second <= leg1_price) {
-                leg1_price = it->second - leg1_tick_size;
+                leg1_price = is_fak ? (it->second + leg1_tick_size) : (it->second - leg1_tick_size);
                 price_adjusted = true;
-                WTSLogger::warn("Self-trade risk on {} BUY, adjusted price from {} to {}",
+                WTSLogger::warn("Self-trade risk on {} BUY, {} price from {} to {}",
                                 signal.leg1_code,
+                                is_fak ? "pay-through" : "adjusted",
                                 orig_leg1_price,
                                 leg1_price);
             }
         } else {
             auto it = _mm_max_buy.find(signal.leg1_code);
             if (it != _mm_max_buy.end() && it->second > 0 && it->second >= leg1_price) {
-                leg1_price = it->second + leg1_tick_size;
+                leg1_price = is_fak ? (it->second - leg1_tick_size) : (it->second + leg1_tick_size);
                 price_adjusted = true;
-                WTSLogger::warn("Self-trade risk on {} SELL, adjusted price from {} to {}",
+                WTSLogger::warn("Self-trade risk on {} SELL, {} price from {} to {}",
                                 signal.leg1_code,
+                                is_fak ? "pay-through" : "adjusted",
                                 orig_leg1_price,
                                 leg1_price);
             }
@@ -423,20 +437,22 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         if (leg2_is_buy) {
             auto it = _mm_min_sell.find(signal.leg2_code);
             if (it != _mm_min_sell.end() && it->second > 0 && it->second <= leg2_price) {
-                leg2_price = it->second - leg2_tick_size;
+                leg2_price = is_fak ? (it->second + leg2_tick_size) : (it->second - leg2_tick_size);
                 price_adjusted = true;
-                WTSLogger::warn("Self-trade risk on {} BUY, adjusted price from {} to {}",
+                WTSLogger::warn("Self-trade risk on {} BUY, {} price from {} to {}",
                                 signal.leg2_code,
+                                is_fak ? "pay-through" : "adjusted",
                                 orig_leg2_price,
                                 leg2_price);
             }
         } else {
             auto it = _mm_max_buy.find(signal.leg2_code);
             if (it != _mm_max_buy.end() && it->second > 0 && it->second >= leg2_price) {
-                leg2_price = it->second + leg2_tick_size;
+                leg2_price = is_fak ? (it->second - leg2_tick_size) : (it->second + leg2_tick_size);
                 price_adjusted = true;
-                WTSLogger::warn("Self-trade risk on {} SELL, adjusted price from {} to {}",
+                WTSLogger::warn("Self-trade risk on {} SELL, {} price from {} to {}",
                                 signal.leg2_code,
+                                is_fak ? "pay-through" : "adjusted",
                                 orig_leg2_price,
                                 leg2_price);
             }
@@ -485,12 +501,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     // Create order requests
     uint32_t req_id = _next_request_id.fetch_add(2, std::memory_order_relaxed);
 
-    // C0: 平仓单执行策略 (STOP_LOSS → FAK 对手价; TIMEOUT → GFD mid)
-    bool is_close = is_close_signal(signal.type);
-    int order_flag = 0;
-    if (is_close && _arb_manager) {
-        order_flag = _arb_manager->getArbCloseConfig().policy_for(signal.type).order_flag;
-    }
+    // C0: is_close/order_flag 已前移到自成交改价块之前 (V10-P2-9, FAK 越价语义)
 
     // Leg 1 order
     ArbOrderRequest order1;

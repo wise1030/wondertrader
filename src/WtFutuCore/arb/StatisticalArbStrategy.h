@@ -47,7 +47,11 @@ struct StatisticalArbConfig
     uint32_t convergence_timeout; ///< Timeout for convergence (seconds)
 
     StatisticalArbConfig()
-        : entry_threshold(0.7), exit_threshold(0.3), stop_loss_threshold(1.5), max_position(15.0), base_qty(1.0),
+        : entry_threshold(0.7), exit_threshold(0.3),
+          // V10-P2-8: 1.5 → 0.40 —— 旧默认配合 composite 钳位 [-1,1] 使止损分支恒假。
+          // 阈值语义 = raw composite 单位: 默认权重下仅 z 饱和的上限 ≈ w_z'=0.353,
+          // 0.40 要求 z 主导且波动比因子同向放大; 配置可按权重方案重标定。
+          stop_loss_threshold(0.40), max_position(15.0), base_qty(1.0),
           feature_window(100), min_samples(50), weight_zscore(0.30), weight_momentum(0.20), weight_volatility(0.15),
           weight_correlation(0.20), convergence_timeout(5400)
     {}
@@ -65,6 +69,9 @@ struct StatisticalFeatures
     double correlation_trend; ///< Correlation trend
 
     double composite_signal;  ///< Weighted composite signal
+    /// V10-P2-8: 钳位前的原始合成值 —— 止损判据用 (composite 被 clamp 到 [-1,1]
+    /// 后与 >1 的阈值比较恒假, SA 的 z 类止损曾静默缺位)
+    double raw_composite_signal;
     double signal_confidence; ///< Signal confidence
 
     // Feature quality metrics
@@ -78,7 +85,7 @@ struct StatisticalFeatures
 
     StatisticalFeatures()
         : zscore(0), zscore_momentum(0), volatility_ratio(1), correlation_trend(0), composite_signal(0),
-          signal_confidence(0), feature_stability(0), is_valid(false)
+          raw_composite_signal(0), signal_confidence(0), feature_stability(0), is_valid(false)
     {}
 };
 

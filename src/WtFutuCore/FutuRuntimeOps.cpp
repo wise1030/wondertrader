@@ -635,6 +635,14 @@ void FutuRuntimeOps::onSessionBegin(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx,
     _arb_bridge.resetSession();
     _closeout_orch.resetSession();
 
+    // V10-P2-12: SpreadArbitrageManager::reset() 接线 —— 此前全仓零调用,
+    // "stale in_flight 冻结整个 session" 的 B7 会话兜底实为死代码, 跨夜盘→日盘
+    // 连续运行时 in_flight/intent/冷却/_last_signals 全部残留, 只剩 120s 超时单保险。
+    // 并发安全: 此处位于上一 arb 线程 stop()(onSessionEnd) 之后、本 session
+    // start() 之前, 与 arb 线程无重叠窗口。
+    if (s._spread_arb_manager)
+        s._spread_arb_manager->reset();
+
     // 重置本地状态
 
     // 启动异步套利执行器
@@ -956,6 +964,16 @@ void FutuRuntimeOps::onOrderEvent(UftFutuMmStrategy& strat,
     // closeout 订单跟踪 (已拆分至 CloseoutOrchestrator, 架构重构 C3)
     // 注意: 必须在 onOrderDone 抹除来源记录之前调用 (内部用 OrderRouter 来源标记识别)
     _closeout_orch.onOrderEvent(ctx, localid, stdCode, isCanceled, leftQty, now_ms);
+
+    // V10-P2-16: arb 单部分成交的 pending 投影对齐 —— 此前只有 MM 路径经
+    // quoter.onOrder → updateOrderQty 收缩挂单量, arb 单 qty 不动直到终态 untrack,
+    // 建仓期全源 pending 系统性高估 (保守方向: 义务/衰减/util 提前触发)。
+    // MM 单已在上方 quoter.onOrder 中处理; closeout/liquidation 不入 tracker
+    // (T4 口径除外项, 注释已载明)。
+    if (!isCanceled && leftQty > 0 && strat._order_tracker && _order_router &&
+        _order_router->isOrderFromSource(localid, Source::ARBITRAGE)) {
+        strat._order_tracker->updateOrderQty(localid, leftQty);
+    }
 
     // 通知 OrderRouter 订单完成（撤销或完全成交）
     if ((isCanceled || leftQty == 0) && _order_router)

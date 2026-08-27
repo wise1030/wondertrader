@@ -23,12 +23,15 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
 {
     RecursiveSpinGuard _g(_lock);
     // v7.1: replay 时钟注入 (stale 对冲清理/时间戳统一基准, 回测可复现)
+    // V10-P2-11: relaxed store —— TdSpi 读者经 nowMs() 原子读
     {
         uint32_t ad = tick->actiondate();
         uint32_t at = tick->actiontime();
-        _now_ms = static_cast<uint64_t>(ad) * 86400000ULL + static_cast<uint64_t>(at / 10000000) * 3600000ULL +
-                  static_cast<uint64_t>((at / 100000) % 100) * 60000ULL +
-                  static_cast<uint64_t>((at / 1000) % 100) * 1000ULL + (at % 1000);
+        _now_ms.store(static_cast<uint64_t>(ad) * 86400000ULL +
+                          static_cast<uint64_t>(at / 10000000) * 3600000ULL +
+                          static_cast<uint64_t>((at / 100000) % 100) * 60000ULL +
+                          static_cast<uint64_t>((at / 1000) % 100) * 1000ULL + (at % 1000),
+                      std::memory_order_relaxed);
     }
 
     if (!_deps.async_arb || !_deps.use_spread_arbitrage)
@@ -61,7 +64,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     // B1 根治: 新信号订单提交时 (processPendingOrders) 主动清除 original_qty==0 条目,
     // 消除 2s 窗口内新信号成交被错误对冲的风险.
     {
-        uint64_t now_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
+        uint64_t now_ms = nowMs() > 0 ? nowMs() : TimeUtils::getLocalTimeNow();
         for (auto it = _arb_hedge_on_fill.begin(); it != _arb_hedge_on_fill.end();) {
             const uint64_t timeout_ms = (it->second.original_qty > 0) ? 30000 : 2000;
             if (it->second.created_time_ms > 0 && now_ms - it->second.created_time_ms > timeout_ms) {
@@ -211,7 +214,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                                 router_result.rejected,
                                 router_result.localids.empty());
                 _deps.order_router->cancelByPair(ctx, order.pair_id); // A7
-                markLegRejected(order.pair_id, order.qty);
+                markLegRejected(order.pair_id, order.qty, order.code);
             }
             return;
         }
@@ -235,7 +238,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
             }
             for (uint32_t lid : router_result.localids) {
                 _deps.async_arb->tagOrderPair(lid, order.pair_id);
-                _deps.order_router->registerPairOrder(lid, order.pair_id); // A7: cancelByPair 映射
+                _deps.order_router->registerPairOrder(lid, order.pair_id, order.is_close); // A7 + V10-P2-10 通道标记
                 // A8: 录入 UnifiedOrderTracker (此前 trackArbOrder 全项目无调用者,
                 // arb 单不在 tracker → 自成交检查/在途量统计/sticky 对 arb 单全部失效).
                 // 录入后现有 recordOrderFill/untrack 链路自动生效 (on_trade/on_order 无条件调用).
@@ -245,7 +248,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                                                        exe_price,
                                                        exe_qty,
                                                        exe_price /*placeMid 近似*/,
-                                                       _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow(),
+                                                       nowMs() > 0 ? nowMs() : TimeUtils::getLocalTimeNow(),
                                                        order.is_buy);
                 }
             }
@@ -259,7 +262,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 WTSLogger::warn("AsyncArb leg FAILED for pair={}, canceling opposite leg", order.pair_id);
                 _deps.order_router->cancelByPair(ctx, order.pair_id); // A7: 原 cancelAllBySource 误撤其它 pair
                 // 残腿防护: 若对侧腿已在途成交, 撤单无法挽回 → 标记, onTradeFill 时反向平仓
-                markLegRejected(order.pair_id, order.qty);
+                markLegRejected(order.pair_id, order.qty, order.code);
             }
             return;
         }
@@ -271,7 +274,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 WTSLogger::warn("AsyncArb leg STP-BLOCKED for pair={}, canceling opposite leg", order.pair_id);
                 _deps.order_router->cancelByPair(ctx, order.pair_id); // A7
                 // 残腿防护: 同上
-                markLegRejected(order.pair_id, order.qty);
+                markLegRejected(order.pair_id, order.qty, order.code);
             }
             return;
         }
@@ -383,20 +386,24 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     //       但 leg2 仍在场上 → 可能重复建仓
     // ============================================================
     if (_deps.arb_manager && _deps.order_router) {
-        std::vector<std::string> timed_out;
+        // V10-P2-10: timed_out 携带通道标记, cancelByPair 按通道过滤 ——
+        // open 超时清理不再误撤同 pair 在飞的 close 止损单 (双通道并发场景)
+        std::vector<std::pair<std::string, bool>> timed_out;
         if (_deps.arb_manager->popTimedOutPairs(timed_out)) {
-            for (const auto& pair_id : timed_out) {
-                WTSLogger::warn("Arb in_flight timeout cleanup: pair={}, canceling pending arb orders", pair_id);
-                _deps.order_router->cancelByPair(ctx, pair_id); // A7: 原 cancelAllBySource 误撤其它 pair
+            for (const auto& [pair_id, is_close] : timed_out) {
+                WTSLogger::warn("Arb in_flight timeout cleanup: pair={}, channel={}, canceling pending arb orders",
+                                pair_id,
+                                is_close ? "close" : "open");
+                _deps.order_router->cancelByPair(ctx, pair_id, is_close ? 2 : 1); // A7 + V10-P2-10
             }
         }
 
-        // B5: 过冲 pair 撤单 (sign-flip 触发, 与超时清理同模式轮询)
+        // B5: 过冲 pair 撤单 (sign-flip 触发, 与超时清理同模式轮询; 恒为 close 通道)
         std::vector<std::string> overshoot;
         if (_deps.arb_manager->popOvershootPairs(overshoot)) {
             for (const auto& pair_id : overshoot) {
                 WTSLogger::error("Arb OVERSHOOT cleanup: pair={}, canceling pending arb orders", pair_id);
-                _deps.order_router->cancelByPair(ctx, pair_id);
+                _deps.order_router->cancelByPair(ctx, pair_id, 2); // V10-P2-10: close 通道
             }
         }
     }
@@ -428,45 +435,75 @@ void ArbExecutionBridge::onTradeFill(
                     (_deps.portfolio && _deps.portfolio->getContractSnapshot(stdCode, cs_buf)) ? &cs_buf : nullptr;
                 double hedge_price =
                     isLong ? (cs && cs->bid1 > 0 ? cs->bid1 : price) : (cs && cs->ask1 > 0 ? cs->ask1 : price);
+                bool accepted = false;
                 if (isLong) {
                     // V8-A9: 残腿对冲单此前冒用 Source::CLOSEOUT -- 污染 closeout
                     // 订单统计且意外享受 Fix4 的 REVERSIBLE halt 豁免 (orphan 队列
-                    // 路径已正确用 HEDGING, 见 :317-319)
+                    // 路径已正确用 HEDGING, 见 orphan 回调)
                     auto rr = _deps.order_router->submitSell(ctx, stdCode, hedge_price, hedge_qty, Source::HEDGING, 1);
                     if (rr.rejected)
                         WTSLogger::warn("ORPHAN LEG HEDGE SELL {} rejected - invalid price={}", stdCode, hedge_price);
+                    // V10-P2-6: 受理判定与 V8-A2 异步孤儿腿路径对齐 ——
+                    // rejected/rate_limited/self_trade_blocked/空 localids 不得记成"已对冲"
+                    accepted = !rr.rejected && !rr.rate_limited && !rr.self_trade_blocked && !rr.localids.empty();
                 } else {
                     auto rr = _deps.order_router->submitBuy(ctx, stdCode, hedge_price, hedge_qty, Source::HEDGING, 1);
                     if (rr.rejected)
                         WTSLogger::warn("ORPHAN LEG HEDGE BUY {} rejected - invalid price={}", stdCode, hedge_price);
+                    accepted = !rr.rejected && !rr.rate_limited && !rr.self_trade_blocked && !rr.localids.empty();
                 }
-                hedge_it->second.hedged_qty += hedge_qty;
-                WTSLogger::warn("UftFutuMmStrategy[{}] ORPHAN LEG HEDGE: pair={} {} {} x {} @ {} (cumulative {}/{})",
-                                _deps.strategy_id,
-                                arb_pair_id,
-                                isLong ? "SELL" : "BUY",
-                                stdCode,
-                                hedge_qty,
-                                hedge_price,
-                                hedge_it->second.hedged_qty,
-                                hedge_it->second.original_qty);
-                if (hedge_it->second.original_qty > 0 && hedge_it->second.hedged_qty >= hedge_it->second.original_qty) {
-                    _arb_hedge_on_fill.erase(hedge_it);
+                if (accepted) {
+                    hedge_it->second.hedged_qty += hedge_qty;
+                    if (_deps.risk_monitor)
+                        _deps.risk_monitor->recordOrder();
+                    WTSLogger::warn("UftFutuMmStrategy[{}] ORPHAN LEG HEDGE: pair={} {} {} x {} @ {} (cumulative {}/{})",
+                                    _deps.strategy_id,
+                                    arb_pair_id,
+                                    isLong ? "SELL" : "BUY",
+                                    stdCode,
+                                    hedge_qty,
+                                    hedge_price,
+                                    hedge_it->second.hedged_qty,
+                                    hedge_it->second.original_qty);
+                    if (hedge_it->second.original_qty > 0 &&
+                        hedge_it->second.hedged_qty >= hedge_it->second.original_qty) {
+                        _arb_hedge_on_fill.erase(hedge_it);
+                    }
+                } else {
+                    // V10-P2-6: 不累加 hedged_qty, 条目保留 —— 下一笔成交回报会以
+                    // 含本次量的 remaining 重试对冲; 若再无成交回报, 30s stale
+                    // 清理兜底 (对冲通道失败与拒单同源: 流控/STP 是 08-26 实证常态)
+                    WTSLogger::error("ORPHAN LEG HEDGE DEFERRED: pair={} {} x{} @{} not accepted "
+                                     "(rate_limited/stp/engine-fail), will retry on next fill (cum {}/{})",
+                                     arb_pair_id,
+                                     isLong ? "SELL" : "BUY",
+                                     hedge_qty,
+                                     hedge_price,
+                                     hedge_it->second.hedged_qty,
+                                     hedge_it->second.original_qty);
                 }
             }
         }
     }
 }
 
-void ArbExecutionBridge::markLegRejected(const std::string& pair_id, double order_qty)
+void ArbExecutionBridge::markLegRejected(const std::string& pair_id, double order_qty, const std::string& leg_code)
 {
     RecursiveSpinGuard _g(_lock);
+    // V10-P2-6: 失败腿手数 → 对侧腿计划对冲手数换算 (ratio 折算);
+    // 未知 pair/腿或换算失败时保持 order_qty 原值 (与旧实现兼容)
+    double cap = order_qty;
+    if (!leg_code.empty() && _deps.arb_manager) {
+        double converted = 0;
+        if (_deps.arb_manager->convertLegQtyToOpposite(pair_id, leg_code, order_qty, converted))
+            cap = converted;
+    }
     auto& st = _arb_hedge_on_fill[pair_id];
     // 多次拒单/撤单: 取最大预期上限; 0(未知) 不覆盖已知上限
-    if (st.original_qty <= 0 || order_qty > st.original_qty)
-        st.original_qty = order_qty;
+    if (st.original_qty <= 0 || cap > st.original_qty)
+        st.original_qty = cap;
     if (st.created_time_ms == 0)
-        st.created_time_ms = _now_ms > 0 ? _now_ms : TimeUtils::getLocalTimeNow();
+        st.created_time_ms = nowMs() > 0 ? nowMs() : TimeUtils::getLocalTimeNow();
 }
 
 void ArbExecutionBridge::onLegCancelled(wtp::IUftStraCtx* ctx, const std::string& pair_id)

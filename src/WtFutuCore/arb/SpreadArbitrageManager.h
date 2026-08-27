@@ -360,7 +360,9 @@ private:
 
     /// Pairs whose in_flight timed out and need cleanup (cancel pending legs).
     /// UftFutuMmStrategy polls this via popTimedOutPairs() each tick.
-    std::vector<std::string> _timed_out_pairs;
+    /// V10-P2-10: 携带通道标记 (true=close 族 / false=open 族) —— 供 cancelByPair
+    /// 通道过滤, 消除 open 超时误撤在飞 close 止损单 (双通道并发场景)。
+    std::vector<std::pair<std::string, bool>> _timed_out_pairs;
 
     /// In-flight timeout in milliseconds. After this, in_flight_qty is forcibly
     /// reset. Default: 60 seconds (60000 ms). Compared against `current_time`
@@ -423,6 +425,17 @@ public:
     //==========================================================================
     const ArbCloseConfig& getArbCloseConfig() const { return _arb_close_cfg; }
 
+    /// V10-P2-6: 失败腿下单量 → 对侧腿计划对冲手数换算 (pair ratio 折算)。
+    /// 同步 hedge-on-fill 的封顶量此前直接用失败腿自身手数, ratio≠1 时对侧
+    /// 对冲量错配 (r1=1,r2=3 例: leg1 10 手失败 → leg2 成交 30 手只能回补 10)。
+    /// @param pair_id   pair 标识
+    /// @param leg_code  失败腿合约代码
+    /// @param leg_qty   失败腿下单量
+    /// @param out_qty   [out] 对侧腿计划对冲手数
+    /// @return true=换算成功; false=未知 pair/腿或 ratio 非法 (调用方回退 leg_qty)
+    bool convertLegQtyToOpposite(
+        const std::string& pair_id, const std::string& leg_code, double leg_qty, double& out_qty) const;
+
 private:
     /// B1: pair_id → 活跃平仓 intent (spin lock 保护, 跨线程)
     wtp::wt_hashmap<std::string, CloseIntent> _active_close_intents;
@@ -440,7 +453,7 @@ private:
 public:
     /// Pop pairs whose in_flight timed out (for external cancel cleanup).
     /// Returns true if any pairs were written to out_pairs.
-    bool popTimedOutPairs(std::vector<std::string>& out_pairs)
+    bool popTimedOutPairs(std::vector<std::pair<std::string, bool>>& out_pairs)
     {
         while (_pair_arb_spin.test_and_set(std::memory_order_acquire)) {
         }
