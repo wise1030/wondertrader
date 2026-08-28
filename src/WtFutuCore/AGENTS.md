@@ -1978,3 +1978,91 @@ R7-e(本提交) 全部完成。dist/WtBtFutu 已部署含全部批次的 Debug �
 **遗留（后续会话）**：去大锁 WS-C + 切 none 四步验收（TSAN 通道已就绪 R7-b）；
 sticky 判定三路径统一；路径A qty=0 腿语义裁决；框架层限制持续推动
 （CTP-50 分类/membin/stra_cancel_all 口径）。
+
+## 远程生产日志分析（2026-08-28 午间，只读诊断）+ 去大锁就绪度判定
+
+**分析对象**：ubuntu@129.211.5.54 Logs/Runner_2026-08-28.log（147,960 行）+
+bilateral_stats_20260828.log + Strategy 日志。**远程二进制 = 3f7c7aa4（08-26 构建，
+不含 R7-a~e）**，cron 08:40 单实例正常运行。
+
+### 今日运行画像
+
+| 维度 | 数据 | 判定 |
+|---|---|---|
+| 稳定性 | 0 segfault / 0 exception / 0 系统级 ERROR；config validation 0 err 0 warn | ✅ |
+| 订单流 | 提交 13,625 / Cncld 13,585 / AllTrd **24**；592 × "报单已全成交或已撤销，不能再撤"（撤单-成交竞态，09:00 开盘 25 笔最多） | 竞态高频证实，市场面无害 |
+| Zombie/闩锁 | 6 次升级（09:00×2 / 10:30×2 / 11:12×1 / 11:28×2），全部自动解除；**11:12 ao2610 闩锁持续 13.5min**（合同停报 11:12:02→11:25:32）；tracker B+ 重试 15 次 | ⚠️ 当日最大可用性损伤 |
+| 告警 | ARB_RISK 263 行（08-26 为 3.4 万） | ✅ 节流 ~130× |
+| Closeout | 夜盘 00:58 TRIGGERED→DRAINING→FAILED(retry 1/10)→EXECUTE rounds（SELL 14/9）重试链工作 | ✅（COMPLETED 行未见，日盘开盘报价正常，无残留告警） |
+| 覆盖率/成交 | bilateral ratio 7~10%（2609: 9-10% / 2610: 7%），avg spread 6.25 tick，全日 24 笔成交 | 清淡宽价差日 |
+| 观测性 | usePerformanceMonitor=false → **无任何 p99/p999 延迟数据** | ❌ WS-F 验收硬缺口 |
+
+### 去大锁（切 none）四步验收就绪度
+
+| 步骤 | 状态 | 本轮动作 |
+|---|---|---|
+| ① TSAN 构建 TestUnits 全量 | 设施就绪（R7-b WT_FUTU_TSAN），**未执行** | 本地执行 |
+| ② _ec_5d big vs none 统计带 A/B | **未执行** | 本地执行 |
+| ③ refreshQuotes 持锁时长埋点 + TdSpi onOrder 阻塞计数 | **未实现**（R6 收官清单遗留）+ 生产 monitor 关闭 | 本轮实现代码 |
+| ④ 生产灰度 p99/p999 → 删 _cb_mtx | 依赖①②③ + **远程先部署 R7**（今日 13.5min 闩锁停报=旧缺陷噪声，会污染 none 观察窗；R7-a/e 结算门禁+escalate 直击该链路） | 部署后独立观察窗 |
+
+### 日志输入对去大锁的关键判断
+
+1. **先部署 R7 再切 none 观察**：11:12 闩锁 13.5min 属旧二进制缺陷表现（撤单静默
+   失败+闩锁解除依赖 tracker 存活集合刷新），R7-e escalateStaleCancels 与 R7-a
+   结算静止门禁直接命中；混线观察会误归因到拆锁。
+2. **592 次 cancel-fill 竞态 = 拆锁后 quoter 自旋锁竞争点正是 TdSpi onOrder 路径**
+   （WS-F 已识别的风险项），埋点（③）必须先行量化，无数据不切 none。
+3. 当日 24 笔成交/13.6k 单：撤单密度远高于成交密度 → none 模式下 Md 持锁穿越
+   stra_cancel 与 TdSpi onOrder/on_trade 的碰撞概率建模需要 ③ 的实测分布支撑。
+
+### 本轮执行（写入即方案，用户已确认"根据日志分析去大锁等后续遗留工作"）
+
+1. **WS-F 埋点**：PerformanceMonitor 增 QUOTE_LOCK_HOLD（Md 单写，refreshQuotes
+   持锁时长，TSC 差）与 ORDER_CB_WAIT（Td 单写，onOrderEvent 中 quoter->onOrder
+   阻塞时长）两条 ring + checkThresholds 分级告警；coordinator 三处 refreshQuotes
+   调用点 + RuntimeOps onOrderEvent quoter->onOrder 调用点接线（monitor 空指针
+   守卫，关闭时零开销）。
+2. TSAN 构建：独立目录 `-DWT_FUTU_TSAN=ON` 全量 TestUnits。
+3. none 模式：独立目录 `-DFUTU_CB_LOCK_BIG=0` 全量构建 → _ec_5d big vs none
+   统计带 A/B（笔数 ±1.5% + 0 HALT/zombie/error + TOXIC warning 行带）。
+4. 结论归档 + 部署顺序建议。
+
+### 去大锁验收执行记录（2026-08-28，①②③完成，④待部署后观察窗）
+
+1. **WS-F 埋点（代码落地）**：PerformanceMonitor 新增 QUOTE_LOCK_HOLD /
+   ORDER_CB_WAIT 两条延迟 ring（按类型单写者纪律: QUOTE_LOCK_HOLD=Md 经
+   coordinator processQuoting+requoteAfterFill 两处 refreshQuotes 包裹 TSC 差;
+   ORDER_CB_WAIT=Td 经 RuntimeOps onOrderEvent 中 quoter->onOrder 包裹）+
+   getLatencyStats/摘要输出。monitor 关闭时零开销（!enabled 早退）。
+   验证: 全量 TestUnits 156/158 不变。
+2. **① TSAN 全量 TestUnits**（src/build_tsan, WT_FUTU_TSAN=ON, 注意 ASLR 高熵
+   内核需 `setarch $(uname -m) -R` 运行）: **156/158 通过, ThreadSanitizer
+   WARNING = 0** —— WS-A 停机域收编/R7 各锁域修正/SPSC/自旋锁体系无数据竞争
+   报告（局限: WTSTools/Share/WtUftCore 未插桩, 首轮覆盖 WtFutuCore+TestUnits）。
+3. **② _ec_5d big vs none 统计带 A/B**（none = 独立目录 -DFUTU_CB_LOCK_BIG=0）:
+   | 指标 | big | none | 判定 |
+   |---|---|---|---|
+   | 成交笔数 | 20,111 | 20,125 (+0.07%) | 统计带内 ✓ |
+   | dynbalance(0612) | 301,952 | 299,898 (-0.68%) | 带内 ✓ |
+   | TOXIC(warning 行) | 2,729 | 2,729 | 完全一致 ✓ |
+   | HALT/zombie | 0 | 0 | ✓ |
+   **none 行为等价直接得证**（同日 R7-d 后基线 20,158 亦带内）。
+
+### ④ 生产灰度前置（部署顺序，待用户确认执行）
+
+1. **先部署 R7 Release**（含 WS-F 埋点）到远程并**打开 usePerformanceMonitor**:
+   config/coordinator.yaml `usePerformanceMonitor: true` + `warnThresholdNs/criticalThresholdNs`
+   按 R6 收官建议取值; Runner 日志将出现 `QuoteLockHold/OrderCbWait` p99 摘要行。
+2. 观察窗（建议 ≥2 个交易日）采集: QuoteLockHold p99/max 与 OrderCbWait p99/max
+   —— big 基线分布（此时 Md 持锁穿越被 _cb_mtx 串行化, 两埋点近似反映锁内耗时
+   而非竞争）; 同时验证 R7 对 08-28 类 zombie 闩锁停报（旧版 13.5min）的改善。
+3. big 基线确认后: 远程 none 构建（`-DFUTU_CB_LOCK_BIG=0`）灰度 ≥1 个交易日,
+   对比两埋点分布无恶化（WS-F 验收标准）→ 删 _cb_mtx（单独 commit, revert 即回退）。
+4. **本日日志佐证切 none 的风险点**: 592 次 cancel-fill 竞态集中在 TdSpi 路径,
+   拆锁后 quoter 锁 Md(refreshQuotes 持锁穿越发单) vs Td(onOrder) 碰撞概率
+   以 ①埋点实测为准, 无数据不切换。
+
+**明确不做（本轮）**: WS-C TradingState 单写者收敛维持"独立会话"裁决 ——
+none 模式行为等价已证, WS-C 是删 _cb_mtx 后的进一步延迟优化, 非切换前置;
+_ec_5d_tuned/_perf 等其他回测配置不在本轮范围。

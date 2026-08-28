@@ -66,6 +66,24 @@ void PerformanceMonitor::recordSignalToOrder(uint64_t latencyNs)
     _current_latency_ns[static_cast<int>(LatencyType::SIGNAL_TO_ORDER)].store(latencyNs, std::memory_order_relaxed);
 }
 
+void PerformanceMonitor::recordQuoteLockHold(uint64_t latencyNs)
+{
+    if (!_enabled)
+        return;
+    if (_quote_lock_hold_history.full())
+        _quote_lock_hold_history.pop();
+    _quote_lock_hold_history.push(latencyNs);
+}
+
+void PerformanceMonitor::recordOrderCbWait(uint64_t latencyNs)
+{
+    if (!_enabled)
+        return;
+    if (_order_cb_wait_history.full())
+        _order_cb_wait_history.pop();
+    _order_cb_wait_history.push(latencyNs);
+}
+
 void PerformanceMonitor::recordTickProcessed()
 {
     ++_throughput.ticks_processed;
@@ -160,6 +178,10 @@ LatencyStats PerformanceMonitor::getLatencyStats(LatencyType type) const
         return calculateStats(_cancel_to_ack_history);
     case LatencyType::SIGNAL_TO_ORDER:
         return calculateStats(_signal_to_order_history);
+    case LatencyType::QUOTE_LOCK_HOLD:
+        return calculateStats(_quote_lock_hold_history);
+    case LatencyType::ORDER_CB_WAIT:
+        return calculateStats(_order_cb_wait_history);
     default:
         return LatencyStats();
     }
@@ -235,6 +257,23 @@ std::string PerformanceMonitor::getSummary() const
     }
 
     // P0: on_tick 入口 → 主流水线结束 全链路延迟 (rdtsc, SIGNAL_TO_ORDER 通道)
+    // V10-R7e/WS-F: 去大锁验收指标进摘要 (灰度观察直接读取)
+    auto qlh = getLatencyStats(LatencyType::QUOTE_LOCK_HOLD);
+    if (qlh.count > 0) {
+        oss << "QuoteLockHold: ";
+        oss << "mean=" << qlh.mean_ns / 1000.0 << "us, ";
+        oss << "p99=" << qlh.p99_ns / 1000.0 << "us, ";
+        oss << "max=" << qlh.max_ns / 1000.0 << "us ";
+        oss << "(n=" << qlh.count << ")\n";
+    }
+    auto ocw = getLatencyStats(LatencyType::ORDER_CB_WAIT);
+    if (ocw.count > 0) {
+        oss << "OrderCbWait:   ";
+        oss << "mean=" << ocw.mean_ns / 1000.0 << "us, ";
+        oss << "p99=" << ocw.p99_ns / 1000.0 << "us, ";
+        oss << "max=" << ocw.max_ns / 1000.0 << "us ";
+        oss << "(n=" << ocw.count << ")\n";
+    }
     auto s2o = getLatencyStats(LatencyType::SIGNAL_TO_ORDER);
     if (s2o.count > 0) {
         oss << "Tick-FullChain: ";

@@ -27,11 +27,16 @@ namespace futu
 /// Latency type for tracking different latency paths
 enum class LatencyType : uint8_t
 {
-    TICK_TO_QUOTE,  ///< Tick arrival to quote placement
-    ORDER_TO_ACK,   ///< Order sent to acknowledgment
-    QUOTE_TO_FILL,  ///< Quote placed to fill
-    CANCEL_TO_ACK,  ///< Cancel sent to acknowledgment
-    SIGNAL_TO_ORDER ///< Strategy signal to order sent
+    TICK_TO_QUOTE,   ///< Tick arrival to quote placement
+    ORDER_TO_ACK,    ///< Order sent to acknowledgment
+    QUOTE_TO_FILL,   ///< Quote placed to fill
+    CANCEL_TO_ACK,   ///< Cancel sent to acknowledgment
+    SIGNAL_TO_ORDER, ///< Strategy signal to order sent
+    /// V10-R7e/WS-F: 去大锁验收埋点 —— quoter 自旋锁竞争显性化 (AGENTS 去大锁
+    /// 方案 WS-F 验收标准: refreshQuotes 持锁时长 p99 + TdSpi onOrder 因该锁
+    /// 阻塞时长; 切 FUTU_CB_LOCK_BIG=0 前必须量化确认无恶化)
+    QUOTE_LOCK_HOLD, ///< Md: refreshQuotes 持 quoter 锁全程时长 (含锁内穿越引擎发单)
+    ORDER_CB_WAIT    ///< Td: onOrderEvent 中 quoter->onOrder 获取该锁的阻塞时长
 };
 
 /// Percentile type for latency statistics
@@ -203,6 +208,11 @@ public:
     /// Record signal-to-order latency
     void recordSignalToOrder(uint64_t latencyNs);
 
+    /// V10-R7e/WS-F: refreshQuotes 持锁时长 (Md 单写)
+    void recordQuoteLockHold(uint64_t latencyNs);
+    /// V10-R7e/WS-F: TdSpi onOrder 取 quoter 锁阻塞时长 (Td 单写)
+    void recordOrderCbWait(uint64_t latencyNs);
+
     //==========================================================================
     // Throughput Recording
     //==========================================================================
@@ -269,6 +279,9 @@ private:
     RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _quote_to_fill_history;
     RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _cancel_to_ack_history;
     RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _signal_to_order_history;
+    // V10-R7e/WS-F: 去大锁验收埋点 (按类型单写者纪律: QUOTE_LOCK_HOLD=Md, ORDER_CB_WAIT=Td)
+    RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _quote_lock_hold_history;
+    RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _order_cb_wait_history;
 
     // Current latency (for quick checks)
     std::atomic<uint64_t> _current_latency_ns[5] = {};

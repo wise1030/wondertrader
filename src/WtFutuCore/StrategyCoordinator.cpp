@@ -1198,12 +1198,17 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
     // 调用, 最高频的 MM 报单路径零计数, 频控对其失明; refreshQuotes 返回值
     // 为本轮实际挂单数 (handleObligation/Flexible/Bilateral 全部汇聚于此)
     {
+        // V10-R7e/WS-F: refreshQuotes 持锁时长埋点 (Md 单写; 去大锁验收判据,
+        // 含锁内穿越 stra_* 发单的全程 —— 拆锁后此锁变为真实竞争点)
+        uint64_t _ql_t0 = futu::TscClock::now();
         uint32_t orders_placed = tc.quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
             tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
             tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
             tick->bidprice(0), tick->askprice(0),
             decision.risk, decision.strategy
         });
+        if (_perf_monitor)
+            _perf_monitor->recordQuoteLockHold(futu::TscClock::toNs(futu::TscClock::now() - _ql_t0));
         if (orders_placed > 0 && _risk_monitor)
             _risk_monitor->recordOrders(orders_placed);
     }
@@ -1426,6 +1431,8 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     // V8-P0-2: requoteAfterFill 补挂单同样计入频控 (实盘跑 TdSpi 事件驱动,
     // 批量接口内部自旋锁保证多线程计数安全)
     {
+        // V10-R7e/WS-F: 持锁时长埋点 (TdSpi 事件驱动补挂路径)
+        uint64_t _ql_t0 = futu::TscClock::now();
         uint32_t orders_placed = quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
             latest_mid, new_l0_bid, new_l0_ask, q.spread_mult, allow_bid, allow_ask,
             // V10-P2-1: 用新鲜 replay 时钟 now_ms 作新单 place_time 基准 —— 原传
@@ -1435,6 +1442,8 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
             now_ms, q.upper_limit, q.lower_limit, fresh_best_bid, fresh_best_ask,
             decision.risk, decision.strategy
         });
+        if (_perf_monitor)
+            _perf_monitor->recordQuoteLockHold(futu::TscClock::toNs(futu::TscClock::now() - _ql_t0));
         if (orders_placed > 0 && _risk_monitor)
             _risk_monitor->recordOrders(orders_placed);
     }

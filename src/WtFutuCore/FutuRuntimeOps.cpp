@@ -7,6 +7,7 @@
  * friend + 引用别名方案: 函数体与原实现逐行一致, 锁在策略壳内持有。
  */
 #include "FutuRuntimeOps.h"
+#include "TscClock.h" // V10-R7e/WS-F 埋点
 #include "UftFutuMmStrategy.h"
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
@@ -924,6 +925,7 @@ void FutuRuntimeOps::onOrderEvent(UftFutuMmStrategy& strat,
     auto& _order_router = strat._order_router;
     auto& _async_arb = strat._async_arb;
     auto& _arb_bridge = strat._arb_bridge;
+    auto& _performance_monitor = strat._performance_monitor; // V10-R7e/WS-F 埋点
 
     // 更新频率统计
     if (_risk_monitor && isCanceled)
@@ -949,7 +951,13 @@ void FutuRuntimeOps::onOrderEvent(UftFutuMmStrategy& strat,
     uint32_t sec_in_min = s;
     for (auto& [code, quoter] : _quoters) {
         if (quoter->isMyOrder(localid)) {
+            // V10-R7e/WS-F: TdSpi 取 quoter 锁阻塞时长埋点 (Td 单写) ——
+            // big 锁时代被 _cb_mtx 掩盖, none 模式下这是 Md 持锁穿越发单的
+            // 直接竞争点, 切 none 前后对比的验收判据之一
+            uint64_t _ow_t0 = futu::TscClock::now();
             quoter->onOrder(localid, isCanceled, leftQty, uTime_HHMM, sec_in_min);
+            if (_performance_monitor)
+                _performance_monitor->recordOrderCbWait(futu::TscClock::toNs(futu::TscClock::now() - _ow_t0));
             break;
         }
     }
