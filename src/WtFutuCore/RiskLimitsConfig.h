@@ -39,12 +39,18 @@ struct RiskRateLimits
     uint32_t same_side_window_ms;
     uint32_t same_side_pause_ms;
 
+    // V10-R8-a: ORDER_RATE 持续违规 → ERROR 单轨暂停的持续时间阈值 (ms)。
+    // 场景: 盘前/非交易时段交易所拒单循环 (SHFE"当前状态禁止报单"走 cancel 通道,
+    // 不触发 on_entrust 错误计数 → 既有 ERROR 熔断盲区), 08-28 实测 20:59 一分钟
+    // 44,304 单 (738/s)。0=禁用该护栏。
+    uint32_t order_rate_pause_ms;
+
     RiskRateLimits()
         : max_orders_per_sec(50), max_cancels_per_sec(30), max_trades_per_sec(20), max_delta_change_per_sec(3.0),
           delta_rate_window_sec(2), delta_rate_cooldown_ms(15000), position_breach_pause_threshold(1.2),
           delta_critical_mult(1.5), delta_warning_mult(0.8), position_warning_l1(0.8), position_warning_l2(0.9),
           position_hard_block_ratio(1.0), widen_threshold(1), max_consecutive_same_side(5), same_side_window_ms(3000),
-          same_side_pause_ms(5000)
+          same_side_pause_ms(5000), order_rate_pause_ms(3000)
     {}
 
     static RiskRateLimits fromVariant(wtp::WTSVariant* v)
@@ -66,6 +72,7 @@ struct RiskRateLimits
         r.max_consecutive_same_side = FutuConfig::readUInt32(v, "maxConsecutiveSameSide", 5);
         r.same_side_window_ms = FutuConfig::readUInt32(v, "sameSideWindowMs", 3000);
         r.same_side_pause_ms = FutuConfig::readUInt32(v, "sameSidePauseMs", 5000);
+        r.order_rate_pause_ms = FutuConfig::readUInt32(v, "orderRatePauseMs", 3000);
         return r;
     }
 };

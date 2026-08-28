@@ -139,6 +139,7 @@ WtBtRunner/WtUftRunner -c <主配置.yaml>
 | maxDailyLoss | double | -200000 | -200000.0 | 日亏线(元)；装配取 abs 作正容忍度；触发=IRREVERSIBLE halt |
 | frequency.maxOrdersPerSec | uint32 | 50 | 50 | E14 [1,500] 报单频控（P0-2 后 MM 报单经 recordOrders 计入） |
 | frequency.maxCancelsPerSec / maxTradesPerSec | uint32 | 30/10 | 30/20 | 撤单/成交频控 |
+| frequency.orderRatePauseMs | uint32 | 3000 | 3000 | V10-R8-a: ORDER_RATE 持续违规超此时长 → 单轨 ERROR 暂停（盘前拒单风暴护栏；0=禁用；经指数退避试探恢复） |
 | frequency.maxDeltaChangePerSec | double | 50.0 | 3.0 | delta 变化率上限/s（DELTA_RATE 触发源） |
 | frequency.deltaRateWindowSec / deltaRateCooldownMs | uint32 | 10/5000 | 2/15000 | delta 速率滑窗/冷却（恢复须过冷却） |
 | frequency.positionHardBlockRatio | double | (未配)/_ec_5d=1.0 | 1.0 | block_add 阈值：\|delta\| ≥ contract_max_delta×ratio 时 flexible 加仓侧跳过（键名历史遗留，实际 delta 口径） |

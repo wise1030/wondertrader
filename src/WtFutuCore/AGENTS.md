@@ -2066,3 +2066,88 @@ bilateral_stats_20260828.log + Strategy 日志。**远程二进制 = 3f7c7aa4（
 **明确不做（本轮）**: WS-C TradingState 单写者收敛维持"独立会话"裁决 ——
 none 模式行为等价已证, WS-C 是删 _cb_mtx 后的进一步延迟优化, 非切换前置;
 _ec_5d_tuned/_perf 等其他回测配置不在本轮范围。
+
+## 远程生产日志复盘②（2026-08-29 凌晨，08-28 全天含夜盘；二进制仍为 3f7c7aa4 旧版）
+
+### 全天画像（vs 午间首轮）
+
+| 维度 | 全天数据 | 判定 |
+|---|---|---|
+| 稳定性 | 0 ERROR 级 / 0 segfault；订单状态 Smtting 65,383 / Cncld 65,299 / AllTrd 60 | ✅ |
+| Zombie 闩锁 | 全天 14 次（09:00×1, 10:30×2, 11:12×1, 11:28×2, **13:30×2, 14:15×2, 14:24×1, 14:41×2, 21:00×1**），全部自动解除 | ⚠️ 午后+夜盘开盘延续，与撤单竞态同源 |
+| cancel-fill 竞态 | "报单已全成交或已撤销，不能再撤" 全天 **1,156** 次（午间 592） | TdSpi 撤单路径高频活跃 |
+| closeout | **14:58 日盘 TRIGGERED→COMPLETED（2 秒，干净）**；00:58 夜盘 FAILED(retry)→EXECUTE 重试链工作 | ✅ |
+| 成交 | 全天 60 笔（清淡宽价差日，avg spread 6.25 tick） | — |
+
+### 🔴 新立案 R8-a：开盘前报价风暴（P1 级运营缺陷）
+
+**现象**：20:59 一分钟内提交 **44,304 笔订单（738 单/秒，占全天 68%）**，全部即时
+Cncld，其中 264 笔触发"不能再撤"竞态报错。
+**逐日恶化**：08-26=0（应急参数日）→ 08-27=24,042（49%）→ 08-28=44,304（68%）。
+08-25 的 41 万/日爆容（membin 事故）极可能由此主导。
+
+**机制链**（日志证据）：
+1. 20:59:04 "Price recovered (first tick after channel ready)" —— 盘前竞价 tick
+   使 channel-ready 恢复路径立即复价；
+2. 交易时段未开始，交易所/前置对 GFD 秒撤（Smtting→Cncld 同秒成对）；
+3. 撤终态经 B+ live 事件驱动补挂（requoteAfterFill from_fill=false）与逐 tick
+   processQuoting 的 cancel-replace churn 叠加，500ms/200ms 限频门均未拦住
+   （738 单/秒 远超 per-contract 限频上界 → 主循环为逐 tick 全档重挂而非补挂门）；
+4. ORDER_RATE 频控违规仅 WARNING 不熔断（checkRiskLimits 设计如此），风暴持续整分钟。
+
+**后果**：membin 单日订单量被风暴灌水（框架 200k 容量守卫缺失的复发风险，见已知
+外部限制）；撤单流控冲击 21:00 开盘（21:00 zombie×1 同源）；订单统计/延迟埋点口径污染。
+
+**修复方向（R8-a 方案，待用户确认后实施）**：
+- **报价恢复门加交易时段校验**：onChannelReady/first-tick 复价与 processQuoting 入口
+  增加 `sessInfo->isInTradingTime(stra_get_time())`（或等价 trading-window 判定），
+  非交易时段（含 20:55-21:00 集合竞价窗口）不挂单只撤单；
+- 频控升级可裁决：ORDER_RATE 违规连续 N 秒 → 本合约 pause（复用 side_pause 语义），
+  防同类风暴失控；
+- 回归验证：回测不覆盖盘前窗口（replayer 数据无 20:59 段），靠实盘部署观察
+  20:59 分钟级订单量归零 + TestUnits 时段门单测（虚拟时间注入）。
+
+### 对去大锁/部署顺序的影响（补充前轮裁定）
+
+- 风暴使"生产灰度 p99/p999"观察窗数据被开盘前噪声污染 → **部署 R7 时必须同车
+  携带 R8-a 时段门**（否则 QuoteLockHold/OrderCbWait 分布含 738 单/秒尖刺）；
+- 08-28 夜盘开盘 21:00 zombie 与 09:00/13:30/14:15 日内闩锁同为撤单竞态家族，
+  R7-e escalateStaleCancels 上线后的观察重点项不变。
+
+### R8-a 实施记录（2026-08-29，已完成，验证通过）
+
+**方案修订说明**：立案时的"报价恢复门加交易时段校验"经远程取证否决——preCheck
+已有 `sessInfo->isInTradingTime` 检查且 20:59 全天 0 条 skip 日志（session 表判定
+20:59 可交易属框架 session 配置面问题，策略层不越界改 session 语义；记入已知外部
+限制待框架核实）。真正缺口：**交易所拒单（"当前状态禁止报单"）走 cancel 终态
+通道，绕过 on_entrust 错误计数 → 既有 ERROR 熔断对风暴类拒单盲区**。
+
+**落地（通用护栏，不解析错误码）**：
+1. RiskLimitsConfig：`order_rate_pause_ms`（默认 3000，键 risk.frequency.
+   orderRatePauseMs，0=禁用）
+2. RiskCoordinator::checkRisk：ORDER_RATE violation 持续超阈值 → 单轨 ERROR
+   暂停 + cancel_all_quotes + order_error_count++（指数退避收敛到 60s cap）+
+   quoting_paused_since 置位（复用 handleQuotingAutoResume 试探恢复）；违规消失
+   即清零重新武装；RISK_HALTED 态被 setQuotingPhase 校验天然拒绝（不绕 halt）
+3. 恢复挂钩：StrategyCoordinator::setResumeStateHooks（assembler 在 wireDeps 前
+   注入 &s._quoting_paused_since / &s._order_error_count）
+
+**生效链**：20:59 风暴 → recordOrders（V8-R1 起全源覆盖）→ checkRiskLimits 每
+tick 产出 ORDER_RATE violation → 持续 3s → ERROR 暂停 + 全撤 → requote/
+processQuoting canQuote=false 全部静默 → 10s 试探恢复 → 仍风暴则退避翻倍 →
+收敛（每分钟 ≤6 次试探 → ≤1 次）。
+
+**测试**：test_v10_r8a 4 用例（持续超阈触发+单轨语义+挂钩落位 / 瞬时违规重新
+计时 / IRREVERSIBLE halt 守卫态不可绕过 / 配置默认与键解析）。
+勘误：首版守卫态用例用 REVERSIBLE halt——被 checkAndRecover 立即恢复（设计使
+然），改 IRREVERSIBLE 构造。全量 **160/162**（仅 2 个既有环境性失败，零回归）。
+
+**回测冒烟（configbt_v5）**：EXIT=0、0 HALT/zombie/error、护栏 0 触发（正常
+数据无风暴，行为中性实证）、trades 346（R7-d 后 340 噪声带）、资金收敛。
+
+**部署与观察（随 R7 同车 Release）**：
+- 预期 20:59 分钟级订单量从 44k 量级降到 ≤ 数百（3s 风暴 + 退避试探的残量）；
+- 观察项："[RISK] ORDER_RATE sustained breach" 日志频次、试探恢复后二次触发间隔
+  （应呈 10→20→40→60s 退避）、正常开盘报价恢复延迟 ≤60s；
+- ORDER_RATE 阈值（maxOrdersPerSec=50）与 3s 阈值的联动标定：若正常开盘 burst
+  误触发，优先调 orderRatePauseMs（如 5000）而非放宽频控。

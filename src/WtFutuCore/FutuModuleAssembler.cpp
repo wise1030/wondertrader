@@ -686,6 +686,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     // B7: trading_state must be set before wireDeps (was setTradingState call)
     deps.trading_state = &_trading_state;
     if (_coordinator) {
+        // V10-R8-a: 风暴护栏恢复挂钩 (须先于 wireDeps, RiskCoordinator::Deps 聚合初始化消费)
+        _coordinator->setResumeStateHooks(&s._quoting_paused_since, &s._order_error_count);
         _coordinator->wireDeps(deps);      // B7: consolidated dep wiring (replaces 15 setters + setTradingState)
         _coordinator->validateDeps();      // B7: fail-fast validation
     }

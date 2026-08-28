@@ -191,6 +191,49 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
     // P0-1.1: Active risk check every tick (复用缓冲, 零堆分配)
     _deps.risk_monitor->checkRiskLimits(_deps.portfolio, _violations_buf);
     auto& violations = _violations_buf;
+
+    // V10-R8-a: ORDER_RATE 持续违规 → 单轨 ERROR 暂停 (策略层通用风暴护栏)。
+    // 既有 ERROR 熔断依赖 on_entrust 失败计数, 而盘前/非交易时段的交易所拒单
+    // (SHFE"当前状态禁止报单")走 cancel 终态通道 → 计数盲区, 08-28 实测
+    // 20:59 一分钟 44,304 单 (738/s)。此处以 ORDER_RATE violation 的持续时长
+    // 为触发源 (recordOrders 自 V8-R1 覆盖 MM 报单, 全源无盲区), 复用 ERROR
+    // 轨道: 不动 haltTrading/恢复预算, 经 handleQuotingAutoResume 指数退避
+    // 试探恢复; 恢复试探若仍处风暴则重新计入 (order_error_count++ 收敛到 60s)。
+    {
+        uint64_t now_ms = tc.timestamp;
+        bool rate_breach = false;
+        for (const auto& v : violations) {
+            if (v.type == RiskLimitType::ORDER_RATE) {
+                rate_breach = true;
+                break;
+            }
+        }
+        if (rate_breach) {
+            if (_rate_breach_since_ms == 0) {
+                _rate_breach_since_ms = now_ms;
+            } else if (
+                now_ms > _rate_breach_since_ms &&
+                now_ms - _rate_breach_since_ms >= _deps.risk_monitor->getRateLimits().order_rate_pause_ms) {
+                if (_deps.trading_state && _deps.trading_state->qphase != QuotingPhase::ERROR) {
+                    if (_deps.trading_state->setQuotingPhase(QuotingPhase::ERROR)) {
+                        if (_deps.cancel_all_quotes)
+                            _deps.cancel_all_quotes(ctx);
+                        if (_deps.order_error_count)
+                            _deps.order_error_count->fetch_add(1, std::memory_order_relaxed);
+                        if (_deps.quoting_paused_since)
+                            _deps.quoting_paused_since->store(now_ms, std::memory_order_relaxed);
+                        WTSLogger::error(
+                            "[RISK] ORDER_RATE sustained breach {}ms -> ERROR pause (cancel-reject "
+                            "storm guard, probe-resume via backoff)",
+                            now_ms - _rate_breach_since_ms);
+                    }
+                }
+            }
+        } else {
+            _rate_breach_since_ms = 0;
+        }
+    }
+
     if (!violations.empty()) {
         RiskCategory category;
         RiskAction action = _deps.risk_monitor->determineActionWithCategory(

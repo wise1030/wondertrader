@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include "RiskLiquidator.h"   // _liquidator 值成员 + clampReduceQty
 #include "FutuRiskMonitor.h"  // FutuRiskMonitor / RiskViolation / CloseoutSub / RiskAction
@@ -39,6 +40,10 @@ public:
         SelfTradeCalibrator* self_trade_calibrator = nullptr;
         const CoordinatorConfig* cfg = nullptr;
         std::function<void(wtp::IUftStraCtx*)> cancel_all_quotes; // HALT 撤所有做市单
+        // V10-R8-a: 策略层恢复状态挂钩 (复用 handleQuotingAutoResume 指数退避试探恢复;
+        // 均为策略成员原子的直通指针, Md 单写者线程)
+        std::atomic<uint64_t>* quoting_paused_since = nullptr;
+        std::atomic<uint32_t>* order_error_count = nullptr;
     };
     void setDeps(const Deps& deps) { _deps = deps; }
 
@@ -54,5 +59,6 @@ private:
     RiskLiquidator _liquidator;                  // 2b: 统一强平原语 (从 coordinator 迁入)
     uint64_t _last_halt_log_ms = 0;              // 2b: halted 日志限频 (从 coordinator 迁入)
     std::vector<RiskViolation> _violations_buf;  // 2b: 风控违规复用缓冲 (从 coordinator 迁入)
+    uint64_t _rate_breach_since_ms = 0;          // V10-R8-a: ORDER_RATE 持续违规起点 (0=无违规; Md 单写者)
 };
 } // namespace futu

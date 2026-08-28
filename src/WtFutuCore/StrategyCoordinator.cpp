@@ -393,7 +393,9 @@ void StrategyCoordinator::setTradingState(TradingState* state)
             if (_quoters) {
                 for (auto& [code, q] : *_quoters) { q->cancelAll(ctx); }
             }
-        }});  // P1.3 Step2a+2b: wire RiskCoordinator
+        },
+        // V10-R8-a: 风暴护栏恢复挂钩 (setResumeStateHooks 由装配器在 wireDeps 前注入)
+        _resume_quoting_paused_since, _resume_order_error_count});  // P1.3 Step2a+2b
 }
 
 void StrategyCoordinator::wireDeps(const CoordinatorDeps& deps)

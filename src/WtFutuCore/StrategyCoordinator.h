@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <chrono>
+#include <atomic>
 #include <unordered_map>
 #include "../Includes/WTSMarcos.h"
 #include "../Includes/FasterDefs.h"
@@ -282,6 +283,13 @@ public:
     void setCorrelationManager(CorrelationManager* manager) { _correlation_manager = manager; }
     void setOrderRouter(OrderRouter* router) { _order_router = router; }
 
+    /// V10-R8-a: 策略层恢复状态挂钩注入 (须在 wireDeps 之前调用)
+    void setResumeStateHooks(std::atomic<uint64_t>* quoting_paused_since, std::atomic<uint32_t>* order_error_count)
+    {
+        _resume_quoting_paused_since = quoting_paused_since;
+        _resume_order_error_count = order_error_count;
+    }
+
     /// Get trading state (read-only for external queries)
     const TradingState& tradingState() const { return *_trading_state; }
     /// Get trading state (mutable for direct manipulation by risk/toxicity modules)
@@ -390,6 +398,8 @@ private:
     AsyncArbitrageExecutor* _arb_executor = nullptr;
     SpreadArbitrageManager* _arb_manager = nullptr; // B2: 平仓 intent 查询 (可空)
     OrderRouter* _order_router = nullptr;
+    std::atomic<uint64_t>* _resume_quoting_paused_since = nullptr; // V10-R8-a
+    std::atomic<uint32_t>* _resume_order_error_count = nullptr;    // V10-R8-a
 
     wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* _quoters = nullptr;
     wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* _spread_opts = nullptr;
