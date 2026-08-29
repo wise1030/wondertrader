@@ -2151,3 +2151,36 @@ processQuoting canQuote=false 全部静默 → 10s 试探恢复 → 仍风暴则
   （应呈 10→20→40→60s 退避）、正常开盘报价恢复延迟 ≤60s；
 - ORDER_RATE 阈值（maxOrdersPerSec=50）与 3s 阈值的联动标定：若正常开盘 burst
   误触发，优先调 orderRatePauseMs（如 5000）而非放宽频控。
+
+### R8-b 实施记录（2026-08-29，isInTradingTime(20:59)=true 根因确诊 + 挂单面竞价门，已完成）
+
+**根因确诊**（远程 sessions.json + WTSSessionInfo.hpp 证据链）：
+- ao 腿 session 模板 FN0100：`auction=[2059,2100)`（夜盘集合竞价撮合分钟），offset=300；
+- 框架 `WTSSessionInfo::timeToMinutes` 首行 `if(isInAuctionTime(uTime)) return 0;`
+  → `isInTradingTime(20:59)`=true——**框架设计意图**（hpp:42-47 注释：竞价分钟供
+  行情/状态机对齐，"状态机会往前延伸一分钟"），非缺陷；
+- 错位在**挂单面**：交易所撮合分钟不接受连续竞价报单（SHFE"当前状态禁止报单"，
+  即日志中的 canceled:26 家族）→ preCheck 时段门形同虚设 → 44,304 单风暴；
+- 白盘同构暴露面：FD0900 `auction=[0859,0900)`（08-28 未触发仅因无 tick 流入）。
+
+**落地**：
+1. preCheck：`tc.is_trading_session = isInTradingTime(hhmm) && !isInAuctionTime(hhmm)`
+   ——撮合分钟不挂普通单；白/夜盘竞价面一并闭合；一处改动全门生效
+   （processQuoting/taker/风控链均在 preCheck 下游）；
+2. requoteAfterFill：新增统一出口 `isOrderSubmissionAllowed(ctx, code)`
+   （= 同一复合语义，`_phase_mgr.getSession` + `stra_get_time` HHMM）——
+   事件驱动补挂绕过 preCheck（20:59 风暴中该路径 29,534 次活跃），**顺带封堵
+   小节休市窗口的撤终态补挂**（存量休市重挂单在开盘遭逆向选择的潜伏面）；
+3. 无 session 信息时保持旧行为 true（兼容口径与 preCheck 一致）。
+
+**测试**：test_v10_r8b 3 用例（FN0100 语义锁定：2059 不可挂/2058 不可/2100 可/
+午夜可；FD0900：0859 不可/0900 可/小节休市不可；防退化：正常时段不受影响）。
+全量 **163/165**（仅 2 个既有环境性失败，零回归）。
+
+**回测冒烟（configbt_v5）**：EXIT=0、0 HALT/zombie/error、trades 338（带内）、
+8 会话 closeout 全部 COMPLETED、资金收敛——休市补挂门未误伤正常数据。
+
+**与 R8-a 关系**：竞价门=首道防线（源头静默），ORDER_RATE 持续违规护栏=R8-a
+（最后防线，防其他拒单风暴模式），双层保留。**部署预期**：R7+R8 同车上线后
+20:59 分钟订单量应归零（R8-a 残量试探亦消失）；观察项 = 20:59/08:59 分钟
+Smtting 计数、21:00 开盘首批挂单正常存活。

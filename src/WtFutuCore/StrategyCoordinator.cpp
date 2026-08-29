@@ -733,6 +733,17 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
 // Stage 1: Pre-check
 //==========================================================================
 
+bool StrategyCoordinator::isOrderSubmissionAllowed(wtp::IUftStraCtx* ctx, const char* code)
+{
+    // V10-R8-b: 挂单面时段语义单一出口 = 交易时段内 且 非集合竞价撮合分钟。
+    // 无 session 信息时保持旧行为 true (与 preCheck 兼容口径一致)。
+    wtp::WTSSessionInfo* sessInfo = _phase_mgr.getSession(code);
+    if (!sessInfo)
+        return true;
+    uint32_t cur_hm = ctx->stra_get_time(); // HHMM 格式 (全栈约定)
+    return sessInfo->isInTradingTime(cur_hm) && !sessInfo->isInAuctionTime(cur_hm);
+}
+
 bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick)
 {
     if (!_channel_ready || !tick) {
@@ -808,7 +819,13 @@ bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::
         // 之前 /100 → HH, 把 23:14 误判成 00:23, 导致回测全 skip
         // F6: 复用 tc.time_hms (processTick 入口已 stra_get_time, 消除重复跨 DSO 虚调用)
         uint32_t currentTime = tc.time_hms; // HHMM 格式
-        tc.is_trading_session = sessInfo->isInTradingTime(currentTime);
+        // V10-R8-b: 集合竞价撮合分钟排除 —— 框架按设计把竞价分钟视为交易时间
+        // (isInTradingTime 内部 timeToMinutes 对 isInAuctionTime 直接返回 0, 用于
+        // 行情/状态机对齐), 但交易所撮合分钟不接受连续竞价报单 (SHFE"当前状态禁止
+        // 报单")。错位导致 08-28 盘前 20:59 一分钟 44,304 单 (738/s) 风暴, 撮合
+        // 分钟精确落在 auction=[2059,2100)。挂单面语义 = 交易时段内 且 非竞价撮合分钟。
+        tc.is_trading_session =
+            sessInfo->isInTradingTime(currentTime) && !sessInfo->isInAuctionTime(currentTime);
 
         if (!tc.is_trading_session) {
             WTSLogger::debug(
@@ -1303,6 +1320,12 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     // 风控 HALT 显式拦截: haltTrading() 只置 _trading_halted, 不联动 qphase=RISK_HALTED,
     // 故 canQuote() 仍 true -> 旧实现 HALT 期间仍重挂(13:50 后 943 笔成交绕过风控).
     if (_risk_monitor && _risk_monitor->isTradingHalted())
+        return false;
+
+    // V10-R8-b: 时段/竞价撮合分钟禁止补挂 —— 事件驱动补挂绕过 preCheck; 与时段门
+    // 同源 (20:59 风暴中该路径 29,534 次活跃), 顺带封堵小节休市窗口的撤终态补挂
+    // (休市重挂的存量单在开盘即遭逆向选择)。
+    if (!isOrderSubmissionAllowed(ctx, code.c_str()))
         return false;
 
     auto it = _quoters->find(code);

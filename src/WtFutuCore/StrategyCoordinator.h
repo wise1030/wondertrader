@@ -349,6 +349,11 @@ public:
     /// @param from_fill true=成交触发(发 FillReceived 事件); false=B+ 撤单终态回报
     ///        触发的 live 事件驱动补挂 (不发 FillReceived, 其余守卫/限频完全一致)
     bool requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms, bool from_fill = true);
+
+    /// V10-R8-b: 挂单面时段语义单一出口 —— 交易时段内 且 非集合竞价撮合分钟
+    /// (isInTradingTime 对竞价分钟按设计返回 true, 与交易所挂单接受面错位;
+    /// 无 session 信息时返回 true 保持旧行为)
+    bool isOrderSubmissionAllowed(wtp::IUftStraCtx* ctx, const char* code);
     // attemptPositionReduction removed — replaced by enhanced skew (clamp + inventory_skew_gain, delta 口径)
 
     inline bool isTradingHalted() const
