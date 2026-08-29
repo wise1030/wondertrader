@@ -2184,3 +2184,29 @@ processQuoting canQuote=false 全部静默 → 10s 试探恢复 → 仍风暴则
 （最后防线，防其他拒单风暴模式），双层保留。**部署预期**：R7+R8 同车上线后
 20:59 分钟订单量应归零（R8-a 残量试探亦消失）；观察项 = 20:59/08:59 分钟
 Smtting 计数、21:00 开盘首批挂单正常存活。
+
+## 生产部署记录（2026-08-29 11:44，R7-a~e + R8-a/b Release，已完成验证）
+
+| 项 | 值 |
+|---|---|
+| 构建树 | src/build_release（Release，无 TSAN/none 定义，big 锁基线） |
+| md5 | `5dbc8063728efee61cb8e2cd4d1aa3d5`（双侧一致） |
+| 备份 | `uft/libWtFutuCore.so.bak_20260829_1142` / `coordinator.yaml.bak_20260829_1142` |
+| 替换 | scp → `.so.new` → `mv -f` 原子替换（08-26 覆写事故教训的规范动作） |
+| 配置 | `usePerformanceMonitor: true`（WS-F 基线采集）；perf 阈值走代码默认（warn 10µs / critical 50µs）；`orderRatePauseMs` 未写 yaml（默认 3000 生效） |
+| 重启 | 标准 wt_restart.sh（周末窗口，休市无交易影响）；`pgrep -x` 单实例 ✓；Config validation 0 err 0 warn |
+| 冒烟 | 部署前本地 Release 版 v5 冒烟通过（338 笔，与 Debug 轮一致） |
+
+**⚠️ 新发现——远程 VM 非 invariant TSC**：重启日志 `[TscClock] non-invariant TSC
+detected`（R5 探测生效）。含义：WS-F 埋点（QuoteLockHold/OrderCbWait）的绝对 ns
+存在系统性刻度偏差（兜底 0.4ns/tick 隐含 2.5GHz，实际 VM 频率偏离即低估/高估）。
+**对去大锁灰度的判定仍有效**（big vs none 同主机同系数，分布对比为相对比较）；
+绝对值不可跨机引用。后续可评估：非 invariant 环境下 toNs 退化为 chrono 直读
+（每次 ~20ns，仅监控路径可接受）。
+
+**周一（08-31）首个交易日观察清单**（cron 08:40 重启后生效新二进制）：
+1. 20:59 / 08:59 分钟 Smtting 计数 ≈ 0（R8-b 竞价门 + R8-a 护栏双层）；
+2. Runner.log 摘要行出现 `QuoteLockHold/OrderCbWait` p99（WS-F 基线开始积累）；
+3. `ORDER_RATE sustained breach` 应无（或仅开盘 burst 短暂出现后退避收敛）；
+4. zombie 升级次数对照 08-28 的 14 次（R7-e escalateStaleCancels 生效面）；
+5. `[ROUTER] Cancel retry/ZOMBIE` 新日志家族首日表现。
