@@ -358,6 +358,18 @@ void CloseoutExecutor::handleExecuting(wtp::IUftStraCtx* ctx, const MarketSnapsh
         return;
     }
 
+    // V10-R8-c(2): FAK 保底对触价 —— FAK 限价未达对手价时, 交易所瞬间全量杀单
+    // (零成交): 2026-08-31 14:58 实证 BUY 20 @ 2655 vs ask=2662 (10 tick 宽价差)
+    // -> 零成交撤单 -> orchestrator 误判 FAILED。FAK 语义 = 立即成交否则撤销,
+    // 报价至少须到达对触价; 追价力度仍由 tier/urgency 表达 (SWEEP 档为对手价穿越)。
+    if (_cfg.use_fak)
+    {
+        if (is_buy && snap.ask1 > 0 && price < snap.ask1)
+            price = snap.ask1;
+        else if (!is_buy && snap.bid1 > 0 && price > snap.bid1)
+            price = snap.bid1;
+    }
+
     // --- Submit order ---
     WTSLogger::warn("CloseoutExecutor[{}] EXECUTE round {}: {} {:.0f} @ {:.2f} "
                     "(tier={}, urgency={:.3f}, remaining={:.1f}, time_left={}ms)",

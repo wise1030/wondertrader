@@ -501,6 +501,14 @@ ProcessingResult StrategyCoordinator::processTick(
     // now_ms 由调用方(on_tick)注入时复用, 避免每 tick 重复读墙钟.
     tc.timestamp = (now_ms > 0) ? now_ms : TimeUtils::getLocalTimeNow();
 
+    // V10-R8-c(1): 挂单面时段语义须在 Stage 0 (closeout) 即可用 —— tc 为每 tick
+    // 栈上新建, is_trading_session 此前仅由报价阶段 preCheck 赋值 (默认 false),
+    // 而 closeout 活跃期 Stage 0 提前 return 使 preCheck 永不执行, CloseoutTrigger
+    // 的 FAILED 重试门恒假 -> FAILED 永不重试 (2026-08-31 实证: CLOSEOUT_RETRYING
+    // 历史全零, 收盘平仓首笔零成交即死锁, 仓位过夜)。语义与 preCheck/isOrderSubmissionAllowed
+    // 同源: 交易时段内 且 非集合竞价撮合分钟; 无 session 信息时 true (兼容口径)。
+    tc.is_trading_session = isOrderSubmissionAllowed(ctx, stdCode);
+
     // v7.7 性能#1: 本 tick 唯一一次合约快照, 后续 Stage (preCheck/quoting) 复用
     if (_portfolio)
         tc.cs_valid = _portfolio->getContractSnapshot(tc.code, tc.cs);

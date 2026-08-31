@@ -2272,3 +2272,41 @@ High tick-to-quote warning）。实际 p99 ~330µs 是本机正常水平（非 i
 - Trader 通道 15:45:32 disconnect 4097（收盘后，无害）。
 - **今晚验证项**：20:59 分钟 Smtting≈0（R8-b 夜盘竞价门+R8-a 残量）+ 21:00 开盘带隔夜
   仓的报价恢复正常（short 63×2 在身，skew 全力减仓侧）。
+
+### R8-c 实施记录（2026-08-31 晚，用户确认"按照1~4执行实施"，已完成验证）
+
+**夜盘日志核查（实施前）**：20:59 = **0 单**（R8-b 夜盘竞价门实证，08-28 同分钟 44,304）
+——R8 双层防线正式闭环；夜盘 21:00-23:06 零 zombie / 零 ORDER_RATE、1,460 单 / 16 笔；
+ao2609 白盘 skew 减仓 51→1；ao2610 仍困于 1.0-1.1 停滞带（21:00:13 重挂 halt，
+util=62/60=1.03）——修复 3b 的直接佐证。
+
+**落地清单**：
+1. **[R8-c(1)] 重试门时序根修**：processTick Stage 0 前（tc 构建处）新增
+   `tc.is_trading_session = isOrderSubmissionAllowed(ctx, stdCode)`——消除对 preCheck
+   执行顺序的隐式依赖（closeout 活跃期 Stage 0 提前 return → preCheck 永不执行 →
+   栈上默认 false → FAILED 重试永不武装）。语义与 preCheck 同源（复合竞价门 +
+   无 session 兼容 true）；全仓唯一消费方 CloseoutTrigger.cpp:52，preCheck 后续
+   重算同值无行为漂移。
+2. **[R8-c(2)] FAK 保底对触价**：CloseoutExecutor EXECUTE round 定价后、提交前——
+   `use_fak` 时 BUY≥ask1 / SELL≤bid1（对侧无盘口时不钳制）。FAK 被动价=必然瞬间
+   全量杀单（08-31 14:58 实证 BUY@2655 vs ask=2662）；追价力度仍由 tier/urgency
+   表达（SWEEP=对手价穿越）。注：orchestrator M9 语义（零成交→FAILED）保持不变——
+   保底触价后零成交只剩极端场景（对手价瞬间撤单），FAILED 重试门已由 1 修复。
+3. **[R8-c(3)] 停滞带 + 刷屏**：
+   a) `takerReduceThreshold` 1.1→1.0（config/coordinator.yaml，src 权威+dist 同步）
+      ——消除 "halt(>1.0) 已触发而减仓(<1.1) 永不触发" 的无退出路径区间；
+   b) POSITION_BREACH 告警节流 1s→60s 专用常量（POS_BREACH_WARN_THROTTLE_MS，
+      FutuRiskMonitor.h；delta/soft 告警保持 1s 不变）——08-31 实证 13,186 条/日。
+4. **[R8-c(4)] PERF 阈值标定**（config/config.yaml，src 权威）：
+   latencyThreshold 100000→500000（单 tick 高延迟告警）、warnThresholdNs 10000→500000、
+   criticalThresholdNs 50000→1000000——原值低于本机正常 p99（330-390µs）33 倍，
+   日刷 26,312 条 error 级告警。远程以 sed 同名键手术修改（**不整文件覆盖**：
+   远程 config.yaml 含运行态值 enabled:true / orderErrorThreshold=1000 临时参数）。
+
+**验证**：构建零 error；TestUnits 全量 **163/165**（仅 2 个既有环境性失败，零回归）；
+v5 冒烟 EXIT=0、0 HALT/zombie、trades 342（带内 338-346）、资金收敛、closeout 快路径
+（EXECUTE round=0 属既有行为，fix2 路径需实盘宽价差场景激活）。
+
+**部署**：Release 构建 → 原子替换 → 远程 config.yaml/coordinator.yaml 手术 sed →
+（重启时机见部署记录）。00:58 夜盘 closeout 为 fix1+fix2 首个实盘验证点：
+EXECUTE round 价格应 ≥ ask1、CLOSEOUT_COMPLETED 出现、无 CLOSEOUT_RETRYING 死锁。

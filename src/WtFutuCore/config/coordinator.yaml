@@ -28,7 +28,7 @@ coordinator:
   # [风控口径] 合约 util=|净头寸|/maxPosition >= takerReduceThreshold 时,
   # FAK 对手价平掉超出 takerReduceTargetUtil×maxPosition 的部分; 每合约限频.
   # 注意: 这是风控动作 (position 口径), 与策略链路的 delta 软限 (maxDelta) 相互独立.
-  takerReduceThreshold: 1.1        # 触发阈值 (0=禁用; v7.3: PAUSE_QUOTING 死分支已删除,
+  takerReduceThreshold: 1.0        # 触发阈值 (0=禁用; v7.3: PAUSE_QUOTING 死分支已删除; V10-R8-c(3) 1.1->1.0: 消除 1.0<util<1.1 停滞带——halt 已触发而减仓永不触发, 08-31 ao2610 util=1.05 全天无退出路径,
                                    #   仓位控制全部由连续链承担: skew(1.0)->force义务(1.0)->taker(1.1))
   takerReduceTargetUtil: 0.8       # 减仓目标利用率
   takerReduceCooldownMs: 30000     # 每合约限频(ms)

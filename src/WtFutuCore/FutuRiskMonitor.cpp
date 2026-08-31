@@ -325,7 +325,7 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
         // 热路径告警限频：POSITION_BREACH 在持仓持续超限时每 tick 广播/写盘，
         // 按时间节流至最多每 1s 一次。
         uint64_t last_pos_warn = _last_pos_breach_warn_ms.load(std::memory_order_relaxed);
-        if (ts < last_pos_warn || ts - last_pos_warn >= WARN_THROTTLE_MS) {
+        if (ts < last_pos_warn || ts - last_pos_warn >= POS_BREACH_WARN_THROTTLE_MS) {
             _last_pos_breach_warn_ms.store(ts, std::memory_order_relaxed);
             broadcastAlert("POSITION_BREACH", v.message);
         }

@@ -647,6 +647,10 @@ private:
     // 偶发重复输出可接受，故 per-contract map 采用与 _halt_quoting_state 一致的
     // 宽松竞争模型；portfolio 级用原子时间戳。
     static constexpr uint64_t WARN_THROTTLE_MS = 1000;
+    /// V10-R8-c(3): POSITION_BREACH 专用节流 —— 持仓超限是持续态 (08-31 ao2610
+    /// util=1.05 停滞带全天 13,186 条 1s 节流告警), 60s 足以追踪演化且不刷屏;
+    /// 其余告警 (delta/soft) 保持 1s。
+    static constexpr uint64_t POS_BREACH_WARN_THROTTLE_MS = 60000;
     mutable std::atomic<uint64_t> _last_delta_warn_ms{0};
     mutable std::atomic<uint64_t> _last_pos_breach_warn_ms{0};
     mutable std::atomic<uint64_t> _last_cost_stale_alert_ms{0};

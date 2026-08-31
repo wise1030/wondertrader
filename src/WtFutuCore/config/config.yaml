@@ -173,11 +173,11 @@ strategies:
         # 性能监控参数
         # ========================================================
         performance:
-          latencyThreshold: 100000   # 延迟告警阈值 (ns)
+          latencyThreshold: 500000   # 单tick高延迟告警阈值 (ns); V10-R8-c(4) 标定: 本机正常 tick-to-quote p99 ~330-390us, 100us 恒刷屏
           enabled: false             # 是否启用性能监控
           logInterval: 1000          # 日志间隔 (tick)
-          warnThresholdNs: 10000     # 延迟告警阈值 (ns)
-          criticalThresholdNs: 50000 # 延迟严重告警阈值 (ns)
+          warnThresholdNs: 500000    # p99 延迟告警阈值 (ns); V10-R8-c(4) 标定 (原 10us 低于正常值 33 倍, 日刷 2.6 万条 error)
+          criticalThresholdNs: 1000000 # p99 延迟严重告警阈值 (ns); V10-R8-c(4) 标定 (原 50us 恒触发)
 
         # ========================================================
         # 下单控制
