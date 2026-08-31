@@ -2310,3 +2310,17 @@ v5 冒烟 EXIT=0、0 HALT/zombie、trades 342（带内 338-346）、资金收敛
 **部署**：Release 构建 → 原子替换 → 远程 config.yaml/coordinator.yaml 手术 sed →
 （重启时机见部署记录）。00:58 夜盘 closeout 为 fix1+fix2 首个实盘验证点：
 EXECUTE round 价格应 ≥ ask1、CLOSEOUT_COMPLETED 出现、无 CLOSEOUT_RETRYING 死锁。
+
+### R8-c 部署记录（2026-08-31 23:35，Release e3895832，当晚生效）
+
+| 项 | 值 |
+|---|---|
+| 部署物 | libWtFutuCore.so md5 `e3895832…`（原子 mv）+ config.yaml/coordinator.yaml 手术修改（备份 `.bak_20260831_2310`） |
+| 重启 | 23:34 首启发现 PERF 节插入层级错误（嵌进 closeout 内未被读取）→ 23:35 修正缩进（closeout 同级）重启，`PerformanceMonitor: latencyThreshold=500000ns` 装载 ✓，validation 0 err 0 warn，单实例 |
+| **fix(3b) 实盘闭环** | 23:34:15 重启后首个有效 tick 即触发 `[TAKER_REDUCE] ao2610 util=1.05>=1.00: BUY_CLOSE 15@2680 (target=48)` → 成交，**-63→-48 精确到目标**，自周五起困于停滞带的合约退出 halt 区（util 0.8） |
+| **fix(4) 实盘闭环** | 新进程零 `exceeds CRITICAL`（旧进程退出前最后冲刺 74 条属预期）；PERF error 刷屏归零 |
+| 误勘 | 首次插入的 performance 节缩进用了 8 空格（closeout 键级）落进 closeout 内 → yaml 层级教训：**插入配置节必须对齐目标节的父级**（远程 closeout=6 空格级） |
+| 待验证 | **00:58 夜盘 closeout = fix(1)+fix(2) 首个实盘验证点**：EXECUTE round FAK 价格应 ≥ask1、CLOSEOUT_COMPLETED 出现、无 FAILED 死锁 |
+
+**当前持仓状态**（23:35）：ao2610 short 48（已达标）、ao2609 long 31（夜盘 alpha 驱动，
+cap 内）；明晨 08:40 cron 正常轮换。
