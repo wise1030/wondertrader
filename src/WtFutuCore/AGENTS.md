@@ -2210,3 +2210,65 @@ detected`（R5 探测生效）。含义：WS-F 埋点（QuoteLockHold/OrderCbWai
 3. `ORDER_RATE sustained breach` 应无（或仅开盘 burst 短暂出现后退避收敛）；
 4. zombie 升级次数对照 08-28 的 14 次（R7-e escalateStaleCancels 生效面）；
 5. `[ROUTER] Cancel retry/ZOMBIE` 新日志家族首日表现。
+
+## 远程生产日志复盘③（2026-08-31 16:15，R7+R8 新版首个交易日日盘；二进制 5dbc8063）
+
+### 观察清单验收（周一清单 5 项 → 4 过 1 待验）
+
+| # | 项 | 结果 |
+|---|---|---|
+| 1 | 08:59/20:59 分钟订单量 ≈ 0 | **08:59 = 0 ✓**（R8-b 白盘竞价门实证；09:00 开盘 40 单正常）。20:59 待今晚夜盘验证 |
+| 2 | QuoteLockHold/OrderCbWait p99 摘要 | ✓ 出现。**big 基线**: QLH mean=25.5µs/p99=136.6µs/max=2.83ms；OCW mean=4.17µs/p99=18.5µs/max=146µs（n=16384；TSC 刻度偏差 caveat 不变） |
+| 3 | ORDER_RATE sustained breach | 0 次 ✓（R8-a 护栏零误触发） |
+| 4 | zombie 升级次数 | 3 单（10:30:10×2 / 13:30:40×1，均在小节/午休开盘瞬间）vs 08-28 的 14 次；**闩锁 6s 内解除**（13:30:40→13:30:46 lifted）vs 旧版 13.5min |
+| 5 | [ROUTER] Cancel retry/ZOMBIE | 重试→升级→引擎兜底→自动解除全链路首日工作正常 |
+
+**订单健康面**：6,616 Smtting / 6,581 Cncld / 22 AllTrd（08-28 含风暴 65,383/60）；分钟峰值仅 67（13:33）；**cancel-fill 竞态 0**（08-28: 1,156）；0 segfault/系统错误。
+
+### 🔴 新立案 R8-c：closeout FAILED 后重试死锁（当日 14:58 实证，仓位过夜）
+
+**事件链**（ao2609，delta=-63）：
+1. 14:58:01 TRIGGERED→halt+cancelAll→executor START→DRAIN(1s)→ASSESS(remaining=63)；
+2. 14:58:02 EXECUTE round 0: **BUY 20 @ 2655.00（tier=1, urgency=0.7）**——当时盘口
+   bid=2652/**ask=2662**（10 tick 宽价差），`useFak: true` → FAK 买价 2655 < 卖一 2662，
+   无可吃量 → **交易所瞬间全量杀单零成交**（"已撤单报单已提交"）；
+3. orchestrator onOrderEvent: zero_fill_reject && !self_canceled → markCloseoutFailed
+   （M9 语义把"FAK 被动价零成交"当拒单，executor 的 consecutive_zero_fills→SWEEP
+   追价阶梯永无机会运行）；
+4. **重试死锁（潜伏缺陷，非 R8 回归）**：`CloseoutTrigger.cpp:52 if(!tc.is_trading_session)
+   return true`——但 `tc` 是 processTick 每 tick 栈上新建（StrategyCoordinator.cpp:496），
+   `is_trading_session` 仅在 preCheck(:827, 报价阶段)赋值且默认 false(:100)；Stage 0
+   closeout 路径提前 return → 报价阶段永不执行 → **FAILED 分支看到的永远是默认 false
+   → 重试永不武装**。历史 `CLOSEOUT_RETRYING` 告警 = 0（08-26/27/28/31 全查），
+   08-28 夜盘的"EXECUTE rounds"实为同轮 in-flight 单成交，非重试路径；
+5. 后果：ao2609 short 63 + ao2610 short 63 过夜；QUOTING_PAUSED 残留至 session 切换。
+
+**修复方向（待确认）**：
+- a) processTick Stage 0 前（tc 构建处）用 `_phase_mgr.getSession(code)` 复合语义直接
+  填 `tc.is_trading_session`（消除对 preCheck 执行顺序的隐式依赖）；
+- b) FAK 单保底对触价（BUY≥ask1）或 tier 定价把 FAK 语义纳入（被动价+FAK=必然零成交）；
+- c) M9 语义修订：FAK 零成交撤单不算"拒单"（交 executor 追价），或 FAILED 前先试 SWEEP 档。
+
+### 🟡 新发现②：POSITION_BREACH(1.0) 与 taker_reduce(1.1) 之间的停滞带
+
+ao2610 -63/60（util=1.05）09:00:27 触发合约级 halt → **全天 13,186 条 POSITION_BREACH
+warning**（每 tick 无节流）+ 报价全停（bilateral=0）+ **RISK_REDUCE=0**（taker reduce 阈值
+1.1 > 1.05 永不触发）。1.0<halt<1.1 区间合约无自动退出路径（报价停→无法做回来；减仓不触发）。
+修复方向：takerReduceThreshold 降到 1.0（纯配置）或 POSITION_BREACH 告警节流（60s/合约）。
+
+### 🟡 新发现③：PERF 阈值未标定 → 26,312 条 error 级刷屏
+
+全日 " - error" 26,440 条中 26,312 条 = `[PERF] TickToQuote/FullChain p99 ~330-390µs
+exceeds CRITICAL threshold (50µs)`（代码默认 warn=10µs/critical=50µs；另有 100µs 级
+High tick-to-quote warning）。实际 p99 ~330µs 是本机正常水平（非 invariant TSC VM +
+宽价差低频）。**纯配置修复**：coordinator.yaml 设定现实阈值（建议 warn=500µs/crit=1000µs，
+锁持锁/回调等待 ring 阈值另议），src 权威同步。
+
+### 其他记录
+
+- 09:00:27 Delta 告警簇（portfolio 114 > soft 30 > critical 45）：周末隔夜仓（周五夜盘
+  遗留 short 51+63）所致，skew 正确响应；13:30:40 午休开盘同类簇 ×21（同源）。
+- SECTION_BREAK 各节窗口正常；closeout 14:58 触发/双边统计 flush 正常。
+- Trader 通道 15:45:32 disconnect 4097（收盘后，无害）。
+- **今晚验证项**：20:59 分钟 Smtting≈0（R8-b 夜盘竞价门+R8-a 残量）+ 21:00 开盘带隔夜
+  仓的报价恢复正常（short 63×2 在身，skew 全力减仓侧）。
