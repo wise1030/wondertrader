@@ -35,6 +35,7 @@
 #include "SignalAggregator.h"
 #include "TradingState.h"
 #include "../Share/CodeHelper.hpp"
+#include "../Share/TimeUtils.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 
 namespace
@@ -111,6 +112,11 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         coord_cfg.perf_critical_threshold_ns = _config.perf.critical_threshold_ns;
         _coordinator->setConfig(coord_cfg);
     }
+
+    // V10-R9: 实盘注入 live 墙钟 —— 会话门 (isOrderSubmissionAllowed) 用本地墙钟,
+    // 休市期 ctx tick 时间冻结会把整个休市窗口判为可交易; 回测保持 tick 钟复现。
+    if (!s._is_backtest)
+        _coordinator->setLiveWallclock([] { return TimeUtils::getCurMin() / 100; });
 
     // 从 Coordinator 获取模块开关（来自 coordinator.yaml）
     const auto& coord_cfg = _coordinator->getConfig();

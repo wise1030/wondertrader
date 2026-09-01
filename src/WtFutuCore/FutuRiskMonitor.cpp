@@ -10,6 +10,7 @@
 #include "UnifiedOrderTracker.h"
 #include "SessionPhaseManager.h"
 #include "../WTSTools/WTSLogger.h"
+#include "../Share/TimeUtils.hpp"
 #include "../WtUftCore/EventNotifier.h"
 #include <algorithm>
 
@@ -348,8 +349,25 @@ bool FutuRiskMonitor::checkRateLimits()
         cancels = static_cast<uint32_t>(_cancel_times.size());
         trades = static_cast<uint32_t>(_trade_times.size());
     }
-    return orders < _rate_limits.max_orders_per_sec && cancels < _rate_limits.max_cancels_per_sec &&
-           trades < _rate_limits.max_trades_per_sec;
+    bool ok = orders < _rate_limits.max_orders_per_sec && cancels < _rate_limits.max_cancels_per_sec &&
+              trades < _rate_limits.max_trades_per_sec;
+    // V10-R9: 超限节流告警 —— 本方法此前零调用者 (死代码), 风暴中 ORDER_RATE 永不
+    // 触发。现已接入 preCheck (逐 tick) 与 requoteAfterFill (逐补挂调用)。
+    if (!ok)
+    {
+        uint64_t now = TimeUtils::getLocalTimeNow();
+        uint64_t last = _last_rate_warn_ms.load(std::memory_order_relaxed);
+        if (last == 0 || now - last >= RATE_WARN_THROTTLE_MS)
+        {
+            if (_last_rate_warn_ms.compare_exchange_strong(last, now, std::memory_order_relaxed))
+            {
+                WTSLogger::warn("[RISK] ORDER_RATE breach: orders={}/{} cancels={}/{} trades={}/{} -> submissions blocked",
+                                orders, _rate_limits.max_orders_per_sec, cancels, _rate_limits.max_cancels_per_sec,
+                                trades, _rate_limits.max_trades_per_sec);
+            }
+        }
+    }
+    return ok;
 }
 
 // R2.2 checkSoftLimits 已删 (2026-08-24② A1): 零调用死方法。

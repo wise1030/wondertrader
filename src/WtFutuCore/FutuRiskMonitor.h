@@ -651,9 +651,13 @@ private:
     /// util=1.05 停滞带全天 13,186 条 1s 节流告警), 60s 足以追踪演化且不刷屏;
     /// 其余告警 (delta/soft) 保持 1s。
     static constexpr uint64_t POS_BREACH_WARN_THROTTLE_MS = 60000;
+    /// V10-R9: ORDER_RATE 超限告警节流 —— 风暴态本判定每 tick/每补挂调用触发,
+    /// 5s 足以追踪且不刷屏。
+    static constexpr uint64_t RATE_WARN_THROTTLE_MS = 5000;
     mutable std::atomic<uint64_t> _last_delta_warn_ms{0};
     mutable std::atomic<uint64_t> _last_pos_breach_warn_ms{0};
     mutable std::atomic<uint64_t> _last_cost_stale_alert_ms{0};
+    mutable std::atomic<uint64_t> _last_rate_warn_ms{0};
     mutable std::unordered_map<std::string, uint64_t> _last_soft_warn_ms;
 
     // B+ 修复(P1-1): 双线程 (数据/交易) 并发访问的软状态 map 均以自旋锁保护。

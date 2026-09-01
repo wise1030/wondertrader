@@ -9,6 +9,7 @@
 #include <memory>
 #include <chrono>
 #include <atomic>
+#include <functional>
 #include <unordered_map>
 #include "../Includes/WTSMarcos.h"
 #include "../Includes/FasterDefs.h"
@@ -260,6 +261,16 @@ public:
     /// hedge/taker/requote 等节流统一改用 replay 时钟 (0=未注入, 回退墙钟).
     void setExchangeTime(uint64_t ms) { _last_exchange_time_ms = ms; }
 
+    /// V10-R9: 注入 live 墙钟 (HHMM) —— 实盘会话门 (isOrderSubmissionAllowed)
+    /// 必须用本地墙钟: ctx->stra_get_time() 取自最后 tick, 休市期冻结 → 休市窗口
+    /// 被判为可交易 (2026-09-01 10:15 风暴根因之一)。回测不注入 → 保持 tick 钟
+    /// 复现性。参数化以便单测注入伪时钟。
+    void setLiveWallclock(std::function<uint32_t()> fn) { _wallclock_hhmm = std::move(fn); }
+
+    /// V10-R9: 补挂限频判定 (纯函数, 单测锁定)。单向窗口 now < last+interval → 拦截;
+    /// 等值/冻结/回拨时钟均拦截。interval_ms=0 → 禁用 (恒放行)。
+    static bool requoteThrottleAllow(uint64_t& last, uint64_t now_ms, uint32_t interval_ms);
+
     bool loadConfig(const std::string& config_file);
     void loadConfigFromVariant(wtp::WTSVariant* cfg);
     void initialize();
@@ -470,6 +481,9 @@ private:
     std::unordered_map<std::string, CachedQuote> _last_quote_params;
     std::unordered_map<std::string, uint64_t> _last_requote_ms;
     std::unordered_map<std::string, uint64_t> _last_bilateral_log_ms;
+
+    // V10-R9: live 墙钟提供器 (HHMM) —— 空则回退 ctx tick 钟 (回测/默认)
+    std::function<uint32_t()> _wallclock_hhmm;
 
     // v7.1: replay 时钟 (策略每 tick 注入; 节流判定统一时间基准, 0=未注入回退墙钟)
     uint64_t _last_exchange_time_ms = 0;

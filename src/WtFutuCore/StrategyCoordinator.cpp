@@ -748,8 +748,16 @@ bool StrategyCoordinator::isOrderSubmissionAllowed(wtp::IUftStraCtx* ctx, const 
     wtp::WTSSessionInfo* sessInfo = _phase_mgr.getSession(code);
     if (!sessInfo)
         return true;
-    uint32_t cur_hm = ctx->stra_get_time(); // HHMM 格式 (全栈约定)
-    return sessInfo->isInTradingTime(cur_hm) && !sessInfo->isInAuctionTime(cur_hm);
+    // V10-R9: 实盘必须用本地墙钟 —— ctx->stra_get_time() 取自最后 tick, 休市
+    // (小节休市/收盘后) 无 tick 时冻结在最后一分钟, 会把整个休市窗口判为可交易
+    // (2026-09-01 10:15-10:30 回调风暴根因之一: 冻结在 1015 → 休市全程判可交易)。
+    // 回测不注入 _wallclock_hhmm → 保持 tick 钟以保复现性 (FutuModuleAssembler
+    // 仅在 !_is_backtest 时注入)。
+    uint32_t cur_hm = _wallclock_hhmm ? _wallclock_hhmm() : ctx->stra_get_time();
+    // V10-R9: bStrict —— 每节最后一分钟 (如 1015) 整分钟不属于交易时间: 分钟级
+    // HHMM 判定下 10:15:00-59 全部命中 1015 误判为交易中; 该分钟实际已收盘,
+    // 排除它损失零交易时间 (白盘末分钟 1014/1129/1459 不受影响)。
+    return sessInfo->isInTradingTime(cur_hm, true) && !sessInfo->isInAuctionTime(cur_hm);
 }
 
 bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick)
@@ -761,6 +769,11 @@ bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::
     if (_risk_monitor && _risk_monitor->isCloseoutTriggered()) {
         return false;
     }
+
+    // V10-R9: 逐 tick 频控熔断 —— checkRateLimits 此前零调用者 (死代码, 风暴中
+    // ORDER_RATE 永不触发)。超限暂停本轮报价处理, 复牌/窗口修剪后自动恢复。
+    if (_risk_monitor && !_risk_monitor->checkRateLimits())
+        return false;
 
     // Extract prices
     tc.bid_px = tick->bidprice(0);
@@ -1313,6 +1326,22 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
 //   天然满足"撤剩余单重新挂单"语义。
 //==========================================================================
 
+//==========================================================================
+// V10-R9: 补挂限频判定 (独立纯函数, 单测锁定语义)
+//   单向窗口: now < last+interval → 拦截。等值时钟 (休市无 tick 的回调风暴)、
+//   时钟回拨均拦截 (保守方向); 旧判定 `now_ms > last &&` 在等值时钟下恒假,
+//   节流被静默绕过 —— 2026-09-01 10:15 风暴放大器根因之一。
+//==========================================================================
+bool StrategyCoordinator::requoteThrottleAllow(uint64_t& last, uint64_t now_ms, uint32_t interval_ms)
+{
+    if (interval_ms == 0)
+        return true; // 0=禁用
+    if (last > 0 && now_ms < last + interval_ms)
+        return false;
+    last = now_ms;
+    return true;
+}
+
 bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::string& code, uint64_t now_ms, bool from_fill)
 {
     // from_fill=false: B+ 撤单终态回报触发的事件驱动补挂 — 不是成交, 不发 FillReceived
@@ -1333,7 +1362,16 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     // V10-R8-b: 时段/竞价撮合分钟禁止补挂 —— 事件驱动补挂绕过 preCheck; 与时段门
     // 同源 (20:59 风暴中该路径 29,534 次活跃), 顺带封堵小节休市窗口的撤终态补挂
     // (休市重挂的存量单在开盘即遭逆向选择)。
+    // V10-R9: 实盘墙钟注入后休市窗口(含秒级边界)被本门彻底封死 —— 2026-09-01 风暴
+    // 中本门因 ctx 时间冻结在 1015 而全程放行。
     if (!isOrderSubmissionAllowed(ctx, code.c_str()))
+        return false;
+
+    // V10-R9: 提交入口频控熔断 —— checkRateLimits 此前零调用者 (死代码, 风暴中
+    // ORDER_RATE 永不触发)。事件驱动补挂逐调用检查, 超限静默跳过本轮补挂
+    // (tick 路径由 preCheck 逐 tick 检查; 休市期 _current_time 冻结 → 窗口不修剪
+    // → 持续拦截, 复牌后自动恢复 —— 恰为期望方向)。
+    if (_risk_monitor && !_risk_monitor->checkRateLimits())
         return false;
 
     auto it = _quoters->find(code);
@@ -1357,10 +1395,14 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     }
 
     // 限频防 churn (密集成交时合并重挂)
-    uint64_t& last = _last_requote_ms[code];
-    if (last > 0 && now_ms > last && now_ms - last < _cfg.requote_after_fill_min_interval_ms)
+    // V10-R9: 时钟改本地墙钟 + 谓词改单向窗口。旧实现 now_ms 源自 _exchange_time_ms
+    // (tick 钟, FutuRuntimeOps:944), 休市无 tick 时冻结; 旧判定 `now_ms > last &&`
+    // 在等值时钟下恒假 → 200ms 节流被静默绕过 (2026-09-01 10:15 风暴放大器)。
+    // requoteAfterFill 调用点均为实盘路径 (回测由下一 tick processQuoting 补挂),
+    // 墙钟恒前进 → 节流恒有效; 判定语义见 requoteThrottleAllow (单测锁定)。
+    if (!requoteThrottleAllow(_last_requote_ms[code], TimeUtils::getLocalTimeNow(),
+                              _cfg.requote_after_fill_min_interval_ms))
         return false;
-    last = now_ms;
 
     // ===== [FIX] 成交后按最新价重算报价+数量, 并作用 retreat =====
     // 旧实现直接用缓存 q.l0_bid/q.l0_ask (上一 processQuoting tick、本次成交前的价格)
