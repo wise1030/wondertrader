@@ -2387,3 +2387,14 @@ cap 内）；明晨 08:40 cron 正常轮换。
 | 冒烟 | 337 笔 vs 基线 343（-1.7% = bStrict 节末分钟设计效应，带内）；TestUnits 9/9 新用例，全量仅 2 既有环境性失败 |
 | **勘误** | 回测冒烟的 `Runner.log` 无 `AllTrd` 行（mocker 无 trader_ctp 回报）——**回测成交数必须数 `outputs_bt/uft/trades.csv`**；且 BT 运行须 `< /dev/null` 干净退出否则 timeout 杀进程导致 CSV 不落盘（今日"0 成交"假警报根因） |
 | 部署 | 待 Release 构建 + 远程部署（建议今夜 20:40 cron 前完成） |
+
+#### R9 部署记录（2026-09-01 20:46，Release 689fec37，当晚夜盘生效）
+- 时点：20:40 cron 已按 R8-c 版重启 → 20:46 手动原子替换 + 二次重启（夜盘 20:55 开盘
+  前 9 分钟窗口，新代码当晚生效，不依赖明晨 cron）
+- 备份 `uft/libWtFutuCore.so.bak_20260901_2046`（回滚 = cp 回 + 重启）
+- 验证：md5 689fec37 ✓ / 单实例 PID 3015344 / Login succeed (trading date 20260902) /
+  `PerformanceMonitor: latencyThreshold=500000ns` 装载 ✓ / Config validation 0 err 0 warn ✓
+- Release 冒烟：341 笔（基线 343，带内）
+- 待观察：**20:59 竞价门=0**（R8-b+R9 双保险首个夜盘）、23:00 前后无 ORDER_RATE 告警、
+  00:58 closeout 正常、明日 10:15-10:30 小节休市窗口 = 零提交（R9 首个实盘验收点）、
+  闩锁释放时间 < 5min
