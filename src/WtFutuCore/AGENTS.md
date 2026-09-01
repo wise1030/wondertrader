@@ -2398,3 +2398,16 @@ cap 内）；明晨 08:40 cron 正常轮换。
 - 待观察：**20:59 竞价门=0**（R8-b+R9 双保险首个夜盘）、23:00 前后无 ORDER_RATE 告警、
   00:58 closeout 正常、明日 10:15-10:30 小节休市窗口 = 零提交（R9 首个实盘验收点）、
   闩锁释放时间 < 5min
+
+#### R9c 监控成交标签修复（2026-09-01 深夜，dist 工具层）
+- **现象**：监控页面 2609/2610 全部显示 开空/平空，无开多/平多
+- **根因（两层）**：`dist/convert_trades.py` 将 trade.membin 转换为 wtpy MonSvr 的
+  trades.csv：(1) direct 列输出 BUY/SELL，而前端按 `"LONG"==direction?"多":"空"` 判定
+  → 恒不匹配 → 所有成交落"空"；(2) CLOSE 行 direction 需填**被平的持仓域**（买平=SHORT/
+  卖平=LONG），否则平多/平空反转
+- **修复**：direction 输出改为持仓域语义（OPEN 按成交方向、CLOSE 取反），与 CTP 下发
+  offset 语义一一对应（买开=开多/卖开=开空/买平=平空/卖平=平多）；远程已替换
+  （备份 convert_trades.py.bak_20260901）并重新生成 trades.csv
+- **注意**：监控标签现反映**引擎实际下发的 CTP offset**（与 Runner.log Signal 行一致），
+  非策略本地账本视角——两账本背离（外部 723 手多头）期间两者本就不等
+- **勘误链**：wtpy 前端映射位置 console/static/js/app.*.js trades.forEach 渲染段
