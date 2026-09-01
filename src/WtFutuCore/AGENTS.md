@@ -2377,3 +2377,13 @@ cap 内）；明晨 08:40 cron 正常轮换。
 - **D2 节流加固保留**：谓词改单向窗口（等值/冻结/回拨时钟均拦截）+ 实盘墙钟
 - **D5 落实为接线**：checkRateLimits 确认零调用者（死代码）——preCheck 逐 tick 检查 +
   requoteAfterFill 逐调用检查，超限静默跳过提交 + 5s 节流告警
+
+#### R9 实施记录（commit bc596bd3，2026-09-01）
+| 项 | 内容 |
+|---|---|
+| fix(D3) | `isOrderSubmissionAllowed`：实盘注入本地墙钟（`setLiveWallclock`，Assembler 仅 `!_is_backtest` 注入，回测保持 tick 钟复现）+ `isInTradingTime(hm, bStrict=true)` 排除每节末分钟（10:15:00-59 的 HHMM==1015 曾误判交易中） |
+| fix(D2) | 节流抽取纯函数 `requoteThrottleAllow`（单向窗口 `now < last+interval`，等值/冻结/回拨时钟均拦截），requoteAfterFill 内改用墙钟（调用点均实盘路径） |
+| fix(D5) | `checkRateLimits`（此前零调用者）接入 preCheck（逐 tick）与 requoteAfterFill（逐补挂调用），超限静默拦截 + 5s 节流告警；休市期 `_current_time` 冻结 → 持续拦截，复牌自动恢复（期望方向） |
+| 冒烟 | 337 笔 vs 基线 343（-1.7% = bStrict 节末分钟设计效应，带内）；TestUnits 9/9 新用例，全量仅 2 既有环境性失败 |
+| **勘误** | 回测冒烟的 `Runner.log` 无 `AllTrd` 行（mocker 无 trader_ctp 回报）——**回测成交数必须数 `outputs_bt/uft/trades.csv`**；且 BT 运行须 `< /dev/null` 干净退出否则 timeout 杀进程导致 CSV 不落盘（今日"0 成交"假警报根因） |
+| 部署 | 待 Release 构建 + 远程部署（建议今夜 20:40 cron 前完成） |
