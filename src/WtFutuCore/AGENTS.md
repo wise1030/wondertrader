@@ -2324,3 +2324,45 @@ EXECUTE round 价格应 ≥ ask1、CLOSEOUT_COMPLETED 出现、无 CLOSEOUT_RETR
 
 **当前持仓状态**（23:35）：ao2610 short 48（已达标）、ao2609 long 31（夜盘 alpha 驱动，
 cap 内）；明晨 08:40 cron 正常轮换。
+
+### V10-R9 立案：休市回调风暴 + 幽灵单闩锁焊死（2026-09-01 盘中实证，未实施）
+
+**现象**：10:15 小节休市起 50 秒内提交 12,411 笔真实订单（峰值 430/s，734→876→2956→4305
+指数增长，10:16:09 因 SimNow 前置流控截断），零成交零撤单确认；10:30 僵尸闩锁置位后因
+幽灵单永无终态回报，retainZombieHalts 无法释放，**报价冻结 4.5 小时至 14:58 closeout**。
+白盘覆盖率仅 ~23%。全天 Canceled 回报 = 0。
+
+**根因链（代码级已闭环）**：
+1. **D1 撤单拒绝误判终态**：休市期 SHFE 拒绝撤单（err 26"当前状态禁止"，action: CL/OL
+   均有）→ 回调 isCanceled=true → onOrderEvent(FutuRuntimeOps.cpp:971) 视为撤单终态 →
+   事件驱动补挂 requoteAfterFill(from_fill=false) → 新单再被拒(err 26, action: OL) →
+   再触发 → **回调速度指数正反馈**。
+2. **D2 限频时钟冻结失效**：now_ms 取 _exchange_time_ms（tick 时钟，:944），休市无 tick
+   → 冻结 → 节流判定 `now_ms > last && now_ms-last<200ms`（:1361）恒 false →
+   **200ms 节流被静默绕过**（首调用后 last==now_ms，条件永假直通）。
+3. **D3 会话门时钟泄漏**：isOrderSubmissionAllowed 用 ctx->stra_get_time()（最后 tick 的
+   HHMM，休市冻结在 1015）→ FN0100 模板 [900,1015] 含边界 → 整个休市窗口判为可交易，
+   R8-b 门失效。模板 sessions.json FN0100 本身正确（900-1015/1030-1130 分段）。
+4. **D4 幽灵单无对账**：12,411 笔被 SimNow 前置黑洞（无任何终态回报）→ tracker 存活集
+   永不清空 → 闩锁焊死。已知外部限制"引擎 onRspOrders 只重建自身账本"未覆盖 tracker。
+5. **D5 熔断未触发**：maxOrdersPerSec=50 vs 实测 430/s，ORDER_RATE=0——计数口径未覆盖
+   事件驱动提交路径（或仅在回报侧计数）。
+
+**附带发现**：09:00-09:41 闩锁抖动 10 次（开盘 SimNow 拥塞 → 撤单 ack 慢 → 3 次重试升级
+→ cancelAll → ack 到 → 解锁循环），同族问题轻度表现；2610 CTP 分方向统计行疑点
+（long opened 66 vs 实际平空 41）另案核查 TraderAdapter.cpp:1591 字段映射。
+
+**修复方案（待用户确认后实施）**：
+- P0-D1：onOrderEvent 区分撤单成功/被拒（错误码透传）；被拒不补挂、计入
+  _order_error_count（现有 order_error_threshold 熔断即可生效）、由 tick 路径退避重试
+- P0-D2：回调驱动路径 now_ms 强制用 TimeUtils::getLocalTimeNow()（墙钟单调基准）；
+  节流判定去掉 `now_ms > last` 前置（等值时钟也应拦截）
+- P0-D3：isOrderSubmissionAllowed 的 cur_hm 改本地实时钟（HHMM），tick 钟仅作回测复现
+  路径（_is_backtest 分流）
+- P1-D4：幽灵单对账——zombie 超 T(如 120s) 且撤单重试耗尽时发起 queryOrders 对账，
+  CTP 已终态/不存在则 untrack + warning；无对账能力时按超时兜底 untrack（保守：仓位
+  以 onRspPosition 校准）
+- P1-D5：ORDER_RATE 计数前移至提交入口（stra_buy/sell 路由处），事件路径同受 50/s 熔断
+
+**验证计划**：单测（冻结时钟节流/撤拒分类/门时钟）+ v5 冒烟 + 实盘次日 10:15-10:30
+窗口零提交、闩锁释放时间 < 5min。
