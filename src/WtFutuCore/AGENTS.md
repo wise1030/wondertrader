@@ -2426,3 +2426,27 @@ cap 内）；明晨 08:40 cron 正常轮换。
   FAILED/ORDER_RATE/PERF CRITICAL/TAKER/RATE WARN 全 0
 - **外部仓位**（盲区持续）：2609 long 290 / 2610 long 733（账户级，策略净仓独立且微小）
 - 工具收编：convert_trades.py → scripts/（direction 持仓域语义修复已入库）
+
+#### R9d 合约换月 ao2609→ao2611 / ao2610→ao2612（2026-09-02，配置级，已完成）
+- **改动面（活体权威=远程 config）**：config.yaml（anchorCode SHFE.ao2609→ao2611 +
+  两合约块 code/alias）、spread_arbitrage.yaml（pair id ao0910→ao1112 + legs）；contracts.json
+  已含 2611/2612 无需动；mdparsers.yaml 无合约引用（订阅由策略合约清单驱动）；
+  hotparams 无合约代码
+- **时序**：12:50 sed 完成（备份 *.bak_20260902_1250）——磁盘配置不影响运行中进程，
+  旧进程按内存旧配置交易下午盘至 15:00 收盘；15:25 收盘后 wt_restart 激活新合约
+- **验证**：单实例 PID 3275899 / validation 0 err 0 warn / MD subscribed 2611+2612 /
+  Trader login 20260902 / 两合约 synced net=0 NO PRICE（收盘后无 tick，夜盘首 tick 后报价）
+- **残留（已知无害）**：stradata 播种旧码 local books（2609 -2 / 2610 +2）为休眠簿记，
+  无配置路径触达（报价/closeout/portfolio 均遍历配置合约）；2609/2610 账户外部仓位
+  （long 290/733）留在账户，策略不再触达
+- **观察点**：今晚 20:59=0、21:00 新合约首 tick→报价启动、00:58 closeout（新合约）、
+  2611/2612 流动性（夜盘首日）
+
+### 09-02 日盘剩余问题清单（日志扫描）
+1. **PERF warn 阈值过紧**：TickToQuote/FullChain p99 实测 545-600µs vs warn=500µs
+   → ~5,000 条 warn/日（R8-c 标定基于当时 330-390µs）。建议 warn→1ms/crit→2ms（纯配置）
+2. Delta util 83.3% (25/30) 提示 1,074 条/日——skew 正常工作的信息级刷屏，可 60s 节流
+3. ao2610 毒性单边停边 635 条（toxic_detected）——保护性行为非缺陷
+4. ZOMBIE 19 条/3 簇（撤单竞速）——D4-lite 待用户裁决
+5. "app discard signal 17"×2（SIGCHLD 噪声，无害）
+6. 11 点档 0 成交——5.4t 宽价差行情面，非停报（双边覆盖率 56-64%）
