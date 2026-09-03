@@ -2586,3 +2586,38 @@ RISK_HALTED/ERROR/HALT 优先级→canTransitionQuoting 仅 RISK_HALTED 受限 +
 **部署注意（下批 Release 时执行）**：远程 hotparams.yaml 的 toxicity_spread_factor 键
 删除（新管理器拒未知键会 warn 一条, 无害但应清理）；远程 coordinator.yaml 同步 src
 权威（注释语义更新 + spreadOptimizer 删键）
+
+## 当前方案（2026-09-03，毒性检测演进路线——用户认可方案并要求执行 Step-1）
+
+### 总体路线（数据驱动，四步）
+
+| 步 | 内容 | 行为影响 | 状态 |
+|---|---|---|---|
+| 1 | 观测性：episode 事件日志 + markout 离线分析脚本 | **零**（纯日志） | 本轮执行 |
+| 2 | 实盘 1-2 周数据回答：①vpin/combined 在 ao 的分位数分布（数据已具备：debug %50 采样行）②episode markout 有效性 ③与 vol tier 重叠率 | 零 | 数据积累 |
+| 3 | 数据裁决后：在线分位数阈值(enter p99/exit p95 滞回) + z-score 偏离化 + 元防护(暂停占比上限) | 有 | 待步 2 |
+| 4 | 视证据决定是否引入跳变守卫替代路径 | 有 | 待步 3 |
+
+### Step-1 具体执行清单（本轮）
+
+1. **StrategyCoordinator episode 追踪**（日志行格式，warn 级生产可见）：
+   - 进入：`[TOXIC-EPISODE] <code> enter`（相位实际进入 TOXICITY 的边沿，非 RISK_HALTED 拒入）
+   - 退出：`[TOXIC-EPISODE] exit duration=<ms> peak=<score>`（hold 期满恢复 / 会话切换收尾
+     记 `session_reset`）；peak=episode 期间最大 toxic_score（Step7 逐 tick 跟踪）
+   - 用途：覆盖率归因（episode duration 求和=毒性停报时长）、episode 粒度离线分析
+2. **scripts/analyze_toxicity_markout.py**：输入 Runner.log + trades.csv，输出——
+   episode 清单/时长统计；episode 前 K 秒("引线窗口")内成交的 +10s/+30s/+60s markout
+   （符号化：买成交后价格跌=adverse）vs 基准成交对比；episode 期间成交数（应≈0=暂停生效）；
+   side 字段双格式兼容（回测 BUY/SELL = 成交方向；实盘 convert_trades 输出 LONG/SHORT =
+   持仓域，按 domain 规则反推方向：LONG+CLOSE=sell / SHORT+CLOSE=buy 等）
+3. **分布数据**：不新增代码——debug 级 `[TOXIC] score=... vpin=...` 每 50 tick 采样行
+   已在生产日志（debug 级开启），步 2 直接解析
+4. **测试**：episode 为日志逻辑无可测接缝——以 v5 冒烟日志出现/符合格式为验证
+   （入档明示，不造无意义用例）
+
+**明确不做（本轮）**：检测内核/阈值/响应语义一切不动（R10 后单层 TOXICITY 相位即终态，
+直到步 3 有数据证据）；元防护/覆盖率 inv 维度并入 step 3 一并评估（episode duration
+日志已可等效计算，不为统计而加状态）
+
+**验证**：make+TestUnits 全量零回归 → v5 冒烟检查 episode 行格式与频次（vpin blip 数据集
+应有大量 episode）→ 脚本对冒烟日志自跑验证解析正确
