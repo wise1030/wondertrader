@@ -2673,3 +2673,27 @@ libWtFutuCore.so sha256=4f0d9cf7...（file 校验 ELF x86-64 ✓，源码=HEAD �
 积累 1-2 周后跑 `python3 scripts/analyze_toxicity_markout.py --log Logs/Runner_<date>.log
 --trades generated/outputs/futu_mm_ao_live/trades.csv --tick 1.0`（远程 trades.csv 为
 convert_trades.py 持仓域格式，脚本已兼容）。
+
+## 当前方案（2026-09-04，配置审计修复批 R12，用户已确认：F1 改 0.7、远程不重启、其余照建议）
+
+**背景**：配置全面审计（代码键面 × src 示例 × dist × 远程三方交叉）发现——
+A1 远程 `quoting.qtyDecay: 0.7` 死键（代码读 qtyDecayFactor，默认 2.0 长期实际生效，
+消费者=FutuQuoter 库存 qty 指数衰减 4 处）；A2 `bilateralStatsMaxSpreadTicks` 死键
+（实际取 obligationMaxSpreadTicks=10 数值巧合相同）；B 远程 coordinator.yaml 残留
+R10 前死键 toxicitySpreadFactor+旧三层注释（数值键全一致）；C src 示例缺 6 个可选键
++ monitor 注释自相矛盾 + 示例合约过期；D AGENTS 批次 B 的 B5(alphaMaxAgeMs) 计划
+未实施属文档债。
+
+**修改清单（用户确认版）**：
+1. **远程（不重启，下次重启生效）**：config.yaml `qtyDecay: 0.7`→`qtyDecayFactor: 0.7`
+   （F1，行为变化点：衰减系数 2.0→0.7，减仓侧 qty 变大——用户裁决启用原意图）；
+   删 `bilateralStatsMaxSpreadTicks`（F2）；coordinator.yaml 整体同步 src 权威
+   （F3，零行为变化：仅死键+陈旧注释清除）；config.yaml 补 portfolio 节
+   （maxDelta:30/hedgeRatio:1.0，与热参一致防失效回落）（F4）。备份 .bak_20260904_cfgfix
+2. **src 示例**：config.yaml risk.frequency 补 orderRatePauseMs:3000 + closeout 补
+   closeOnly:false（F5）；coordinator.yaml signalAggregator 补 model.rollingWindow/
+   rollingInterval/icUpdateInterval(=编译期默认 500/20/50) + lead_lag.maxAgeMs:0
+   （F6）；示例 contracts 改两段式口径+注释标明需替换实际合约、monitor 注释对齐
+   （F7）；AGENTS.md 勘误 B5 未实施（F8）
+3. **dist 同步**：coordinator.yaml（F6 触及）
+4. **验证**：yaml 解析检查 → v5 冒烟（新键=默认值，预期零行为变化）→ 远程 diff 复核
