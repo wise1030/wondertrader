@@ -2566,3 +2566,23 @@ RISK_HALTED/ERROR/HALT 优先级→canTransitionQuoting 仅 RISK_HALTED 受限 +
 - dist/WtBtFutu 已同步（.so + coordinator.yaml + hotparams.yaml）
 - **部署**：生产 Release 构建按 §5 流程另行执行（行为变化面=毒性 episode 暂停时长语义 +
   单边抑制消失，观察项=DIAG toxicity=true 频次与覆盖变化）
+
+#### V10-R10 复核记录（2026-09-02④，实施后立即对抗性复核）
+
+**复核发现并修正（3 项，已随本提交落地）**：
+1. **死 API 残留**：SignalAggregator::updateToxicity 在 Step7 改写后零调用者 → 连同
+   SignalContext.toxicity 槽位与 ToxicitySignalResult 结构一并删除（SignalType::TOXICITY
+   枚举值保留，属通用信号框架占位）。此前实施记录中"保留惰性槽位"的措辞作废
+2. **README 章节引用错误**：§4.8 中 "— §4.11" 笔误（§4.11 是 UnifiedOrderTracker），
+   毒性相位门应指向 §4.2 StrategyCoordinator
+3. 二次冒烟复核：280 行/13,459 暂停行与首轮逐值一致 → 死代码清除零行为漂移实证
+
+**复核确认的既有语义（非 R10 引入，记录在案）**：
+- TOXICITY/MARKET 相位自由抢占 ERROR 相位（canTransitionQuoting 仅 RISK_HALTED 受限）
+  → 毒性 episode 叠加 ERROR 退避期时, TOXICITY 退出直接翻 NORMAL, ERROR 指数退避被
+  旁路。历史 C 层（MARKET 兼容毒性）行为相同, 非本次回归; 若需收紧属独立裁决项
+- 1-tick 检测滞后（Step7 在 gates 之后重算, 与旧 C 层一致）属既有设计
+
+**部署注意（下批 Release 时执行）**：远程 hotparams.yaml 的 toxicity_spread_factor 键
+删除（新管理器拒未知键会 warn 一条, 无害但应清理）；远程 coordinator.yaml 同步 src
+权威（注释语义更新 + spreadOptimizer 删键）

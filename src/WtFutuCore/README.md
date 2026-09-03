@@ -436,7 +436,7 @@ contract 分量相加，相对力度随价差宽度漂移（与"contract 主导"
 
 **V10-R10 单层毒性响应**（旧"三层联动"已删）：
 1. 本模块 is_toxic → StrategyCoordinator TOXICITY 相位（双边报价暂停 + 边沿 cancelAll；
-   无毒且超 cooloffMs 恢复保持期后恢复）— §4.11
+   无毒且超 cooloffMs 恢复保持期后恢复）— §4.2
 2. GLFT pause 仅剩市场/价差路径（spread_mult ≥ max×0.9）— §4.5⑨
 3. 单边抑制（toxic_side）/GLFT 毒性加宽已整体删除
 

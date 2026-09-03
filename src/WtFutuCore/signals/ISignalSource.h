@@ -186,17 +186,6 @@ struct MarketStateSignalResult : public SignalResult
 };
 
 /// Toxicity signal result
-struct ToxicitySignalResult : public SignalResult
-{
-    double toxicity_score; ///< Toxicity score [0, 1]
-    bool toxic_detected;   ///< Toxic flow detected
-    double vpin;           ///< VPIN value
-
-    ToxicitySignalResult()
-        : SignalResult(SignalType::TOXICITY), toxicity_score(0), toxic_detected(false), vpin(0)
-    {}
-};
-
 //==============================================================================
 // Signal Context (Unified State)
 //==============================================================================
@@ -230,7 +219,8 @@ struct SignalContext
     BookImbalanceSignalResult book_imbalance;
     AlphaSignalResult alpha;
     MarketStateSignalResult market_state;
-    ToxicitySignalResult toxicity;
+    // V10-R10: toxicity 槽位已删 — 毒性检测不再经 SignalContext 传播,
+    // 由 StrategyCoordinator 直接消费 ToxicFlowDetector::analyze()
 
     //========== Convenience Methods ==========
 
@@ -266,7 +256,6 @@ struct SignalContext
         book_imbalance = BookImbalanceSignalResult(); // 修复reset()遗漏book_imbalance
         alpha = AlphaSignalResult();
         market_state = MarketStateSignalResult();
-        toxicity = ToxicitySignalResult();
     }
 };
 
