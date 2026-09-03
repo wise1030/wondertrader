@@ -2478,3 +2478,51 @@ cap 内）；明晨 08:40 cron 正常轮换。
   ② 毒性停边：Both-side toxic 全停 ×23（2611）+ 单边抑制（365/284 条诊断）
   ③ CTP-50 拒单缺口：平今补挂被拒 → 该侧空档直至撤单 ack 落地
 - inv 计数按事件加权非时间加权，占比不等于时长占比；bil 秒数才是真覆盖
+
+## 当前方案（2026-09-02③，毒性响应简化：单层"检测即双边暂停"，待用户确认）
+
+**目标语义（唯一行为）**：
+- `modules.toxicityDetector.enabled=true`（既有开关）且 is_toxic=true → 进入 **TOXICITY 相位**
+  （QuotingPhase 枚举现成，TradingState.h:65"毒性流暂停（定时恢复）"，此前从未被使用）：
+  canQuote()=false 阻断新报价 + 进入边沿触发 cancelAll 一次；无毒且超过 resume-hold
+  （沿用键 cooloffMs）→ tryResumeFrom(TOXICITY) 恢复
+- 开关 = false → 毒性对系统零影响
+- isActive() 在 TOXICITY 时为 true（设计本意）→ 只停报价，成交处理/风控/closeout 不受累
+  （现状 MARKET 兼容会把 isActive 也压 false，属过度暂停）
+
+**保留不动（检测内核零改动）**：ToxicFlowDetector 门面/PredictiveToxicity/RealizedToxicity/
+VPIN/R2 归一化/阈值 0.75·0.60·0.9/extreme 兜底；DIAG 5s 节流日志保留
+
+**删除/简化清单**：
+1. `QuotePolicyChain.h`：删 ToxicityPolicy 类（:209-259）及链注册；删 QuotePolicyContext 的
+   use_toxicity_detector/toxicity/toxicity_cooloff_ms 三字段；链固定顺序注释同步
+2. `StrategyCoordinator.cpp`：:938-968 shouldPause 分裂为两个独立门——
+   market_state.should_pause→MARKET（原逻辑）；(use_toxicity_detector && toxic_detected)
+   →TOXICITY，无毒且过 hold→tryResumeFrom(TOXICITY)；边沿 cancelAll 合并为单一
+   pause-active 标志（任一源 inactive→active 撤一次，两源皆消复位）；:1019/:1024
+   updateToxicity 去 toxic_side 参；:1178 pctx 填充删
+3. `SignalAggregator.h`：shouldPause() 收窄为 market_state.should_pause（毒性不再经过此
+   函数，注释固化）；updateToxicity(score, detected)；ToxicityState 删 toxic_side
+4. `ToxicFlowDetector/PredictiveToxicity`：ToxicityMetrics/PredictiveToxicityResult 删
+   toxic_side（推导代码一并删，无消费方）
+5. `SpreadOptimizer.cpp/.h`：删 :61-62 毒性加宽块 + toxicity_spread_factor/
+   toxicity_min_score 参数与 loader 键 + ctx.toxicity 字段；:216-217 pause 项保持（market 口径）
+6. `SelfTradeCalibrator`：toxic_side 死字段删（R3 遗留顺手项）
+7. 配置：coordinator.yaml toxicityDetector 节注释改写单层语义（cooloffMs 保留键名、注释
+   改"恢复保持期"）；删 toxicitySpreadFactor/toxicityMinScore 键；CONFIG.md 同步
+8. 测试：test_toxicity_direction.cpp 重写——开关关零触发/开→TOXICITY 相位+边沿撤单一次/
+   hold 期满才恢复/MARKET 语义不变/RISK_HALTED 下 setQuotingPhase(TOXICITY) 被拒；
+   ToxicNormalization 检测侧用例保留（内核未动），方向断言删
+
+**行为变化（明示）**：① episode 首拍从"方向明确→单边停"变"双边停"（episode 主体本就
+MARKET 双边停，净影响≈0）；② GLFT 毒性加宽消失——score∈(0.05,0.75) 带内不再加宽保护
+（接受，按目标语义）；③ TOXICITY 期间 getPhaseStr 显示 TOXICITY（原显示 MARKET），
+isActive() 回归设计本意；④ 回测 TOXIC warning 行消失、DIAG 行保留
+
+**风险与对策**：恢复抖动（score 绕 0.75 震荡→cancelAll 反复）→ resume-hold 单调退出；
+RISK_HALTED/ERROR/HALT 优先级→canTransitionQuoting 仅 RISK_HALTED 受限 + TOXICITY 恢复
+只翻自身相位，天然对称守卫；回测成交笔数变化归因记录（首拍+加宽消失），判据
+0 HALT/zombie/error + 资金收敛
+
+**验证**：TestUnits 全量（基线 163/165）→ v5 冒烟 → 实盘观察（DIAG 相位、无单边停日志、
+恢复滞后 cooloffMs）
