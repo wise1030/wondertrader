@@ -59,13 +59,12 @@ struct PredictiveToxicityResult
     double alpha_toxicity; ///< Combined alpha toxicity
     double combined_score; ///< Weighted combined score
     bool is_toxic;         ///< Exceeds threshold
-    int toxic_side;        ///< 1=buy toxic, -1=sell toxic, 0=none
     double extreme_signal; ///< Maximum extreme signal (> 0.9)
     bool vpin_ready;       ///< V8-T4: 桶数已达 warmup 门 (VPIN 通道有效)
 
     PredictiveToxicityResult()
         : vpin(0), ofi_toxicity(0), trade_toxicity(0), alpha_toxicity(0), combined_score(0), is_toxic(false),
-          toxic_side(0), extreme_signal(0), vpin_ready(false)
+          extreme_signal(0), vpin_ready(false)
     {}
 };
 

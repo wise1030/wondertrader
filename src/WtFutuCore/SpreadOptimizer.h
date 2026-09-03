@@ -36,16 +36,14 @@ struct GLFTParams
     double min_spread_mult; ///< Minimum spread multiplier
 
     // ========== GLFT+Alpha 增强参数 ==========
-    // 毒性影响（仅通过 toxicity_spread_factor 影响 spread，不影响 skew）
+    // V10-R10: 毒性加宽链路已删除 — 毒性响应统一为"检测即双边暂停"
+    // (StrategyCoordinator TOXICITY 相位), 优化器不再消费毒性信号
 
     // 置信度加权
     double confidence_weight_min; ///< 最小置信度权重 (default 0.2)
     double confidence_weight_max; ///< 最大置信度权重 (default 1.0)
 
     // Book imbalance - removed from skew, now only in alpha
-
-    // 毒性对 spread 的影响
-    double toxicity_spread_factor; ///< 毒性对 spread 的扩大系数 (default 1.0)
 
     // 低置信度保护
     double low_confidence_spread_factor; ///< 低置信度时 spread 扩大系数 (default 0.8)
@@ -71,19 +69,16 @@ struct GLFTParams
     double portfolio_skew_weight; ///< portfolio delta skew 权重 (default 0.5)
     double contract_skew_weight;  ///< contract delta skew 权重 (default 1.0)
 
-    // B4(2026-08-24②): 毒性加宽最小门槛 (原硬编码 0.05)
-    double toxicity_min_score; ///< toxicity_score 低于此值不加宽 spread (default 0.05, 过滤噪声)
-
     GLFTParams()
         : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5), phi(0.20), delta_skew_threshold(0.3),
           delta_skew_factor(1.5), portfolio_max_delta(0), max_spread_mult(3.0), min_spread_mult(1.0),
-          confidence_weight_min(0.2), confidence_weight_max(1.0), toxicity_spread_factor(1.0),
+          confidence_weight_min(0.2), confidence_weight_max(1.0),
           low_confidence_spread_factor(2.0) // M8: 统一为 2.0 (低置信度应扩大 spread; 此前构造 0.8 vs yaml 2.0 行为相反)
           ,
           low_confidence_threshold(0.3), vol_scale(5.0), depth_normalization(100.0), no_depth_spread_mult(1.5),
           depth_sensitivity_scale(0.2), pause_spread_mult_ratio(0.9), delta_skew_power(1.5),
           vol_percentile_scale(50.0), inventory_skew_gain(1.0), skew_cross_max_ticks(3.0), portfolio_skew_weight(0.5),
-          contract_skew_weight(1.0), toxicity_min_score(0.05)
+          contract_skew_weight(1.0)
     {}
 
     static GLFTParams fromVariant(wtp::WTSVariant* v, double base_spread, double tick_size, double portfolio_max_delta)
@@ -98,7 +93,6 @@ struct GLFTParams
         p.portfolio_max_delta = portfolio_max_delta;
         p.delta_skew_threshold = FutuConfig::readDouble(v, "deltaSkewThreshold", 0.3);
         p.delta_skew_factor = FutuConfig::readDouble(v, "deltaSkewFactor", 1.5);
-        p.toxicity_spread_factor = FutuConfig::readDouble(v, "toxicitySpreadFactor", 1.0);
         p.confidence_weight_min = FutuConfig::readDouble(v, "confidenceWeightMin", 0.2);
         p.confidence_weight_max = FutuConfig::readDouble(v, "confidenceWeightMax", 1.0);
         p.low_confidence_spread_factor =
@@ -115,7 +109,6 @@ struct GLFTParams
         p.skew_cross_max_ticks = FutuConfig::readDouble(v, "skewCrossMaxTicks", 3.0);
         p.portfolio_skew_weight = FutuConfig::readDouble(v, "portfolioSkewWeight", 0.5);
         p.contract_skew_weight = FutuConfig::readDouble(v, "contractSkewWeight", 1.0);
-        p.toxicity_min_score = FutuConfig::readDouble(v, "toxicityMinScore", 0.05);
         return p;
     }
 };
@@ -133,13 +126,12 @@ struct GLFTResult
     bool pause_quoting;
 
     // ========== 分解字段（调试和分析用）==========
-    double toxicity_adjustment; ///< 毒性对价差的调整
     double confidence_weight;   ///< 置信度权重
     double glft_vol_contrib;    ///< GLFT 波动率贡献
 
     GLFTResult()
         : fair_value(0), bid_price(0), ask_price(0), base_spread(0), inventory_skew(0), alpha_adjustment(0),
-          spread_mult(1.0), pause_quoting(false), toxicity_adjustment(0), confidence_weight(1.0), glft_vol_contrib(0)
+          spread_mult(1.0), pause_quoting(false), confidence_weight(1.0), glft_vol_contrib(0)
     {}
 };
 
@@ -243,7 +235,7 @@ public:
     /// @param contractDelta 当前合约 delta (= position * hedge_ratio, 有正负号)
     ///        [2026-08-19 起不再参与 skew 计算 — 单合约 skew 输入改由
     ///         PortfolioContext.contract_delta_util 注入; 参数保留仅为 API 兼容]
-    /// @param ctx 信号上下文（含 alpha, volatility, toxicity, book_imbalance）
+    /// @param ctx 信号上下文（含 alpha, volatility, book_imbalance; V10-R10 起不再含毒性）
     /// @param alphaSensitivity Alpha 敏感度（ticks per alpha unit）
     /// @param pCtx 组合上下文（可选，用于组合级 skew）
     GLFTResult computeOptimalQuote(double midPrice,

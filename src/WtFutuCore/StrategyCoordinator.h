@@ -459,8 +459,15 @@ private:
     uint64_t _limit_skip_cnt = 0;               // 锁板单边盘口 skip 计数 (日志节流)
     uint64_t _last_pause_diag_ms = 0;           // 上次shouldPause诊断日志时间戳(ms)
 
-    // 5A-2: 报价决策链 (GLFT 后的 6 个调整阶段; 软风控倍数/毒性冷却
-    //   状态由 RiskWidenPolicy/ToxicityPolicy 持有)
+    // V10-R10: 毒性单层语义 — "检测即双边暂停"(TOXICITY 相位), 协调器单点属主
+    // _toxic_resume_time: 最后一次 is_toxic tick + cooloffMs (恢复保持期, 防阈值震荡抖动)
+    // _toxic_pause_active: 当前毒性暂停态 (= use_toxicity_detector && now < resume_time),
+    //   由 updateSignals Step7 每 tick 重算, 同 tick 内 gates 块与 checkRisk 消费 (Md 线程)
+    uint64_t _toxic_resume_time = 0;
+    bool _toxic_pause_active = false;
+
+    // 5A-2: 报价决策链 (GLFT 后的调整阶段; V10-R10 起 ToxicityPolicy 已删,
+    //   毒性暂停由协调器 TOXICITY 相位承担)
     QuotePolicyChain _quote_chain;
 
     // v7.1: taker 减仓限频状态 (每合约上次触发时间戳 ms)
@@ -498,10 +505,10 @@ private:
     // (安静期) 一次性写盘。仅 MdSpi 线程触碰, 无需加锁。
     std::vector<std::pair<uint32_t, std::string>> _bilateral_io_backlog;
 
-    // V8-R6/P2-2: MARKET 暂停边沿触发 —— 仅进入暂停的首 tick 撤一次全单
-    // (旧实现 qphase==MARKET 期间每 tick 重发 cancelAll, 首轮后槽内全为
-    //  pendingCancel, 后续每 tick 白白抢 quoter 自旋锁+遍历)
-    bool _market_pause_active = false;
+    // V8-R6/P2-2 + V10-R10: 暂停边沿触发 —— 仅进入任一暂停(MARKET/TOXICITY)的首 tick
+    // 撤一次全单; 两源皆消复位。(旧实现 qphase==MARKET 期间每 tick 重发 cancelAll,
+    // 首轮后槽内全为 pendingCancel, 后续每 tick 白白抢 quoter 自旋锁+遍历)
+    bool _pause_cancel_active = false;
 };
 
 } // namespace futu

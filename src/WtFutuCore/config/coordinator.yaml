@@ -100,12 +100,11 @@ coordinator:
       warmupTicks: 20
 
     # --- 毒性检测器 (VPIN + OFI + 自成交校准) ---
-    # A4(2026-08-24②) 三层响应联动说明 —— 同一毒性分数驱动三处动作, 调参须整体评估:
-    #   L1 加宽: modules.spreadOptimizer.toxicitySpreadFactor (score>0.05 时 spread_mult 放大)
-    #   L2 停边: QuotePolicyChain::ToxicityPolicy (is_toxic -> 单/双边停报 + cooloffMs 冷却)
-    #   L3 停报: GLFT pause 条件 (spread_mult >= maxSpreadMult × pauseSpreadMultRatio)
+    # V10-R10 单层响应语义: enabled=true 且 is_toxic → TOXICITY 相位 = 双边报价暂停
+    # (阻断新报价 + 进入边沿 cancelAll 一次); 无毒且超过 cooloffMs(恢复保持期)才恢复。
+    # 单边抑制/GLFT 加宽/链内冷却已全部删除; 调参只影响"何时进入/何时恢复"。
     toxicityDetector:
-      enabled: true                # 模块级开关 (唯一位置: modules.<name>.enabled)
+      enabled: true                # 模块级开关 (唯一位置: modules.<name>.enabled); false=毒性对系统零影响
       # V8-R2 归一化后各分数严格 [0,1]: alpha_toxicity=归一(ofi/trade)权重加权和,
       # vpin=桶归一 imbalance 均值, combined=vpinWeight×vpin+(1-vpinWeight)×alpha。
       # 典型市场 combined ~0.4-0.5 (OFI 归一器设计映射典型值到 tanh 0.5-0.8),
@@ -116,7 +115,7 @@ coordinator:
       window: 20                   # VPIN 桶数窗口
       bucketSize: 50
       minWarmupBuckets: 5          # 预热桶数 (低于此数不触发)
-      cooloffMs: 5000              # 毒性冷却期
+      cooloffMs: 5000              # 恢复保持期 (V10-R10: 最后一次 is_toxic 后保持暂停的时长, 防阈值震荡抖动)
       alphaWeight: 0.5             # alpha 通道内 OFI 权重 (与 bookWeight 一起归一化, V8-T6)
       bookWeight: 0.3              # alpha 通道内 trade imbalance 权重
       selfTradeWeight: 0.4         # 自成交通道权重 (V8-T2: 单次施加, 不再平方)
@@ -144,8 +143,7 @@ coordinator:
       noDepthSpreadMult: 1.5       # 无深度时价差乘子
       volScale: 5.0                # 波动率缩放
       volPercentileScale: 50.0     # 波动率分位缩放
-      pauseSpreadMultRatio: 0.9    # 暂停时价差乘子比率
-      toxicitySpreadFactor: 1.0
+      pauseSpreadMultRatio: 0.9    # 暂停时价差乘子比率 (V10-R10: toxicitySpreadFactor 键已删除)
       # v7.1 连续控制: 归一化库存 skew (统一 delta 口径 util=(delta+同向pending×hr)/maxDelta)
       # skew_norm = util^deltaSkewPower × inventorySkewGain; 1.0 = 减仓侧贴 mid
       inventorySkewGain: 1.0

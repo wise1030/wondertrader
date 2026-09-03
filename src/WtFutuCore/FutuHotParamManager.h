@@ -3,7 +3,7 @@
  * \brief 热更新参数管理器 (从 UftFutuMmStrategy 拆分的热参数职责)
  *
  * 设计目的:
- *   集中管理 27 个热更新参数的注册(共享内存同步)与应用分发。
+ *   集中管理 26 个热更新参数的注册(共享内存同步)与应用分发。
  *   策略类只持有一个实例, on_params_updated 委托给 applyAll。
  */
 #pragma once
@@ -60,7 +60,6 @@ enum HotParamIndex : uint32_t
     HP_MAX_SPREAD_MULT,
     HP_MIN_SPREAD_MULT,
     HP_DEPTH_SENSITIVITY,
-    HP_TOXICITY_SPREAD_FACTOR,
     HP_LOW_CONFIDENCE_SPREAD_FACTOR,
     HP_STICKY_THRESHOLD,
     HP_IMPROVE_RETREAT_RATIO,
@@ -197,7 +196,6 @@ public:
             "max_spread_mult",
             "min_spread_mult",
             "depth_sensitivity",
-            "toxicity_spread_factor",
             "low_confidence_spread_factor",
             "sticky_threshold",
             "improve_retreat_ratio",

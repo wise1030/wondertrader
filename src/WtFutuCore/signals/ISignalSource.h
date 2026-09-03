@@ -191,10 +191,9 @@ struct ToxicitySignalResult : public SignalResult
     double toxicity_score; ///< Toxicity score [0, 1]
     bool toxic_detected;   ///< Toxic flow detected
     double vpin;           ///< VPIN value
-    int toxic_side;        ///< Toxic side (1=buy toxic, -1=sell toxic, 0=both/none)
 
     ToxicitySignalResult()
-        : SignalResult(SignalType::TOXICITY), toxicity_score(0), toxic_detected(false), vpin(0), toxic_side(0)
+        : SignalResult(SignalType::TOXICITY), toxicity_score(0), toxic_detected(false), vpin(0)
     {}
 };
 
@@ -235,8 +234,10 @@ struct SignalContext
 
     //========== Convenience Methods ==========
 
-    /// Check if quoting should be paused (risk or toxicity)
-    bool shouldPause() const { return market_state.should_pause || toxicity.toxic_detected; }
+    /// Check if quoting should be paused (market state only)
+    /// V10-R10: 毒性不再经过此函数 — 毒性暂停由 StrategyCoordinator 的
+    /// TOXICITY 相位统一负责（检测即双边暂停，StrategyCoordinator 单点属主）
+    bool shouldPause() const { return market_state.should_pause; }
 
     /// Check if spread should be widened (volatility or state)
     bool shouldWiden() const { return market_state.should_widen || volatility.vol_tier >= VolTier::ELEVATED; }

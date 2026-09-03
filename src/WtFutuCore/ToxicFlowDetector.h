@@ -103,13 +103,12 @@ struct ToxicityMetrics
     double realized_adverse_ratio;
     double toxic_score;
     bool is_toxic;
-    int toxic_side;
     double avg_adverse_move;
     uint32_t total_fills;
     uint32_t adverse_fills;
 
     ToxicityMetrics()
-        : predictive_toxicity(0), realized_adverse_ratio(0), toxic_score(0), is_toxic(false), toxic_side(0),
+        : predictive_toxicity(0), realized_adverse_ratio(0), toxic_score(0), is_toxic(false),
           avg_adverse_move(0), total_fills(0), adverse_fills(0)
     {}
 };

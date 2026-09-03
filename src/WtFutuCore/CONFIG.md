@@ -16,7 +16,7 @@
 - [§1 配置加载链路总览](#1-配置加载链路总览)
 - [§2 主配置（configbt_v5.yaml / _ec_5d.yaml）](#2-主配置)
 - [§3 模块配置 coordinator.yaml](#3-模块配置-coordinatoryaml)
-- [§4 热更新配置 hotparams.yaml（27 参数）](#4-热更新配置-hotparamsyaml)
+- [§4 热更新配置 hotparams.yaml（26 参数）](#4-热更新配置-hotparamsyaml)
 - [§5 日志配置 logcfgbt.yaml](#5-日志配置-logcfgbtyaml)
 - [§6 套利配置 spread_arbitrage.yaml](#6-套利配置-spread_arbitrageyaml)
 - [§7 死键清单（配了也不生效）](#7-死键清单)
@@ -254,14 +254,14 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | window | 20 | 50 | — | VPIN 桶数窗口 |
 | bucketSize | 50 | 1000 | — | VPIN 桶大小(量) |
 | minWarmupBuckets | 5 | 5 | — | 预热桶数门 |
-| cooloffMs | 5000 | 5000 | — | 毒性冷却 ms（qphase=TOXICITY 时长） |
+| cooloffMs | 5000 | 5000 | — | 恢复保持期 ms（V10-R10: 最后一次 is_toxic 后保持 TOXICITY 暂停的时长, 防阈值震荡抖动） |
 | alphaWeight / bookWeight | 0.5/0.3 | 0.3/0.3 | 和>0 | alpha 通道内权重（通道内归一 T6） |
 | selfTradeWeight | 0.4 | 0.4 | [0,1] | 自成交通道权重（单次施加 T2） |
 | extremeSignalWeight | 0.8 | 0.8 | — | 极端信号兜底权重 |
 | extremeSignalThreshold | 0.9 | 0.9 | [0.5,1] | extreme 判定门槛（R2：原 0.6 落在 OFI 常态区属误触发路径） |
 
-> 三层响应联动（A4 注记）：本节 is_toxic → 停边+cooloff；GLFT toxicity_spread_factor 加宽
-> （过 toxicity_min_score 门槛）；GLFT pause mult≥max×pauseSpreadMultRatio。
+> V10-R10 单层响应：is_toxic → TOXICITY 相位（双边报价暂停 + 边沿 cancelAll），无毒且超
+> cooloffMs 恢复——单边抑制/GLFT 加宽/GLFT 毒性 pause 项全部删除（协调器单点属主）。
 
 ### 3.5 modules.spreadOptimizer（GLFTParams::fromVariant，SpreadOptimizer.h:89-120）
 
@@ -279,9 +279,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | depthSensitivity | 0.5 | 0.5 | 深度敏感度。热参可覆盖 |
 | depthSensitivityScale / depthNormalization / noDepthSpreadMult | 0.2/100/1.5 | 同左 | 深度项辅助参数 |
 | volScale / volPercentileScale | 5.0/50.0 | 同左 | φσ² 缩放/分位归一分母 |
-| pauseSpreadMultRatio | 0.9 | 0.9 | spread_mult≥max×此值→暂停报价(SpreadOptimizer.cpp:217) |
-| toxicitySpreadFactor | 1.0 | 1.0 | 毒性加宽系数(L1)。热参可覆盖 |
-| toxicityMinScore | (未配) | 0.05 | B4：加宽最小分数门槛（噪声过滤） |
+| pauseSpreadMultRatio | 0.9 | 0.9 | spread_mult≥max×此值→暂停报价(SpreadOptimizer.cpp:217)；V10-R10 起 toxicitySpreadFactor/toxicityMinScore 键已删除 |
 | inventorySkewGain | 1.0 | 1.0 | 归一化库存 skew 增益（1.0=util≥1 贴 mid） |
 | skewCrossMaxTicks | 3.0 | 3.0 | util≥1 减仓侧穿越 mid 的最大 tick（须<obligationMaxSpreadTicks） |
 | portfolioSkewWeight / contractSkewWeight | 0.5/1.0 | 同左 | 双维 skew 权重（C1 后同 ticks 量纲=稳定相对力度；和≤0 退回 max 模式） |
@@ -305,7 +303,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 
 ---
 
-## 4. 热更新配置 hotparams.yaml（27 参数）
+## 4. 热更新配置 hotparams.yaml（26 参数）
 
 **唯一的热更文件**（实盘 watcher 1Hz；回测完全不生效）。snake_case 键名。
 
@@ -334,7 +332,6 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | max_spread_mult | 3.0 | GLFTParams | [0,100] | GLFTParams |
 | min_spread_mult | 1.0 | GLFTParams | [0,100] | GLFTParams |
 | depth_sensitivity | 0.5 | GLFTParams | [0,1000] | GLFTParams |
-| toxicity_spread_factor | 1.0 | GLFTParams | [0,100] | GLFTParams |
 | low_confidence_spread_factor | 2.0 | GLFTParams | [0,100] | GLFTParams |
 | sticky_threshold | 2.0 | quoting.stickyThreshold | [0.01,10]（0=churn 防呆拒收） | quoter->updateStickyParams |
 | improve_retreat_ratio | 2.0 | quoting.improveRetreatRatio | [0,1000] | 同上 |
@@ -362,7 +359,7 @@ parse 校验规则 (FutuHotParamManager.cpp:242-338):
   文件不可载 → 整体失败(本轮跳过)
   "abc"/"true"/空串 → strtod 全串校验拒收该键 warn(atof 会静默变0, 故显式校验)
   NaN/inf/越界(bounds 表) → 拒收该键保留旧值 warn
-  未知键 → 忽略(只遍历 27 个注册名)
+  未知键 → 忽略(只遍历 26 个注册名; V10-R10 起 toxicity_spread_factor 已移除)
   合法变更 → 写共享内存 + old->new 审计日志 + 变更计数
 
 applyAll 应用顺序 (:74-203):

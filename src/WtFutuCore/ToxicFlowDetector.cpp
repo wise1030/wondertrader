@@ -158,10 +158,6 @@ void ToxicFlowDetector::updateCache() const
                                // >2×vpin_threshold (0.5 加权稀释), 配置语义差 2 倍
                                || (pred_result.vpin_ready && pred_result.vpin > _params.vpin_threshold);
 
-    if (_cached_metrics.is_toxic) {
-        _cached_metrics.toxic_side = pred_result.toxic_side;
-    }
-
     _cache_dirty = false;
 }
 

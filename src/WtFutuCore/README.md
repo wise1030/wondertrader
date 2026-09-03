@@ -55,7 +55,7 @@ WtFutuCore 是运行于 WonderTrader UFT 引擎之上的**期货高频做市 + �
 │         启动期一次性构建依赖图，wireDeps + validateDeps fail-fast│
 ├─────────────────────────────────────────────────────────────┤
 │ 协调层  StrategyCoordinator（单 tick 主流水线）               │
-│         QuotePolicyChain（报价决策六策略固定顺序链）           │
+│         QuotePolicyChain（报价决策五策略固定顺序链）           │
 │         RiskCoordinator（风控统一入口）                       │
 ├─────────────────────────────────────────────────────────────┤
 │ 领域层  SpreadOptimizer(GLFT) │ 信号族 │ ToxicFlowDetector    │
@@ -230,7 +230,7 @@ UftFutuMmStrategy::on_tick (cpp:615) ── _cb_mtx ─────────�
 | `ModuleParams` | portfolio_max_delta(:126)/toxicity_cooloff_ms(:129)/auto_cancel_max_age_ms(:132)/**stale_extension_ticks(:136,B1)**/cancel_retry_interval_ms(:138)/cancel_max_retries(:139)/alpha_sensitivity(:144)/cold_start_confidence_factor(:145) | 123-146 |
 | `CoordinatorConfig` | 开关+taker 减仓三键+requote 限频+section break 秒+双边统计参数；`_raw_variant` 存档(:191, 装配期 8 处使用) | 149-202 |
 | `CoordinatorDeps` | B7 一次性依赖注入结构（15 setter 合一） | 213-235 |
-| `_quote_chain` | QuotePolicyChain 六策略（§4.9） | 438 |
+| `_quote_chain` | QuotePolicyChain 五策略（§4.9） | 438 |
 | `_last_mid` | MidSlot 原子中间价表（唯一属主，getLastMid :419-423） | 414-415 |
 | `_global_portfolio_ctx` | 组合级聚合缓存（含 C2 的 contract_realized_delta_util） | 406 |
 
@@ -313,8 +313,7 @@ raw 存档 :206｜根级开关 :237-239｜modules 开关 :242-270（MM=false 级
 ```
 ① base_spread = computeBaseSpread(ctx)                          :44
 ② spread_mult 复合乘子（统一管理所有非 delta 风险的加宽）:
-   2a 毒性加宽: toxic_detected && score > params.toxicity_min_score(B4)
-      → tox_mult = 1 + score × toxicity_spread_factor           :60-66
+   2a (V10-R10 已删除) 毒性加宽 — 毒性响应统一为 TOXICITY 相位双边暂停
    2b 低置信保护: alpha.valid && conf < low_confidence_threshold
       → mult = 1 + (thr-conf)/thr × lowConfidenceSpreadFactor(M8) :70-74
    2c EMA 平滑(三常数):
@@ -435,10 +434,11 @@ contract 分量相加，相对力度随价差宽度漂移（与"contract 主导"
 
 ### 4.8 ToxicFlowDetector（VPIN 毒性检测）— ToxicFlowDetector.h
 
-**三层毒性响应联动**（A4 文档固化）：
-1. GLFT 加宽（toxicity_spread_factor，score 过 toxicity_min_score 门槛）— §4.5②a
-2. 本模块 is_toxic → ToxicityPolicy 停边 + cooloffMs 冷却（qphase=TOXICITY）— §4.9
-3. GLFT pause（spread_mult ≥ max×0.9）— §4.5⑨
+**V10-R10 单层毒性响应**（旧"三层联动"已删）：
+1. 本模块 is_toxic → StrategyCoordinator TOXICITY 相位（双边报价暂停 + 边沿 cancelAll；
+   无毒且超 cooloffMs 恢复保持期后恢复）— §4.11
+2. GLFT pause 仅剩市场/价差路径（spread_mult ≥ max×0.9）— §4.5⑨
+3. 单边抑制（toxic_side）/GLFT 毒性加宽已整体删除
 
 **评分管线**：
 
@@ -456,9 +456,8 @@ RealizedToxicity:
   extreme 兜底: |signal|≥extremeSignalThreshold(0.9,R2) → extremeSignalWeight
 is_toxic = combined > adverseThreshold(0.75)
          OR (vpin_ready && vpin > vpinThreshold(0.60))     ←T4 恢复 OR 条件
-方向 toxic_side: ofi_component 与 book_imbalance 同号时单边抑制
-  (1=激进买流→抑制 ask; -1→抑制 bid; QuotePolicyChain §6.2 语义)
-冷却 cooloffMs(5000): RiskCoordinator.cpp:347-356 进入/退出 TOXICITY 相位
+V10-R10: toxic_side 方向语义已删除; is_toxic 由 StrategyCoordinator Step7 每 tick
+  重算 resume-hold (cooloffMs=5000) 并翻转 TOXICITY 相位 (检测即双边暂停)
 ```
 
 加载期边界校验（adverse/vpin/weights 越界 warn 回落默认，fromVariant :69-94）。
@@ -467,16 +466,15 @@ is_toxic = combined > adverseThreshold(0.75)
 
 ### 4.9 QuotePolicyChain（报价决策链）— QuotePolicyChain.h
 
-固定顺序执行六策略（与旧 processQuoting 内联顺序一致，:391-393；chain.run 固定顺序保证=A4 边界声明）：
+固定顺序执行五策略（V10-R10 起 ToxicityPolicy 移除，毒性响应归协调器 TOXICITY 相位；chain.run 固定顺序保证=A4 边界声明）：
 
-| # | 策略 | 行号 | 职责 |
-|---|---|---|---|
-| 1 | RiskWidenPolicy | :94 | 软风控 WIDEN_SPREAD 倍数注入（tickSoft 无状态逐 tick 重算 vs onHardWiden 升级路径——同 tick 覆盖顺序由链序保证） |
-| 2 | ArbCloseSyncPolicy | :156 | ARB 平仓协同抑制（getArbCloseDirection A13: 冲突→双侧抑制 kConflict） |
-| 3 | ToxicityPolicy | :209 | is_toxic 停边（1→ask / -1→bid，T5 方向交换后语义）+ cooloff 冷却 |
-| 4 | LimitPricePolicy | :268 | 涨跌停保护 L0-L3 分档（v7.8 修复 spread_mult 死写→L0 实际拉宽 :308） |
-| 5 | ColdStartPolicy | :344 | 信号未热身时 maxSpreadMult 保守报价（cold_start_confidence_factor=0.005） |
-| 6 | FillRetreatPolicy | :372 | 成交后退让（SelfTradeCalibrator.retreatTicks 机制，取保守价） |
+| # | 策略 | 职责 |
+|---|---|---|
+| 1 | RiskWidenPolicy | 软风控 WIDEN_SPREAD 倍数注入（tickSoft 无状态逐 tick 重算 vs onHardWiden 升级路径——同 tick 覆盖顺序由链序保证） |
+| 2 | ArbCloseSyncPolicy | ARB 平仓协同抑制（getArbCloseDirection A13: 冲突→双侧抑制 kConflict） |
+| 3 | LimitPricePolicy | 涨跌停保护 L0-L3 分档（v7.8 修复 spread_mult 死写→L0 实际拉宽） |
+| 4 | ColdStartPolicy | 信号未热身时 maxSpreadMult 保守报价（cold_start_confidence_factor=0.005） |
+| 5 | FillRetreatPolicy | 成交后退让（SelfTradeCalibrator.retreatTicks 机制，取保守价） |
 
 > 边界声明：本链是"风控响应与业务调整混链"——顺序即优先级，新增策略必须评估对下游的覆盖关系。
 
@@ -671,7 +669,7 @@ ready：channel_ready=true/price_stale=true→arb enable→**zombie 清扫锚点
 
 ### 4.17 热参数体系（FutuHotParamManager/Watcher）
 
-**27 参数稳态权威链**（实盘）：`hotparams.yaml > 共享内存残留 > config/coordinator`；
+**26 参数稳态权威链**（实盘；V10-R10 起 27th toxicity_spread_factor 移除）：`hotparams.yaml > 共享内存残留 > config/coordinator`；
 **回测不跑 watcher**——热参完全不生效，logDriftSummary 打印的差异键即"回测/实盘行为分叉点"。
 
 #### 完整链路（V8-P0-1 加固后 + 2026-08-24 加固）

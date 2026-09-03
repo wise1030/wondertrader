@@ -2526,3 +2526,43 @@ RISK_HALTED/ERROR/HALT 优先级→canTransitionQuoting 仅 RISK_HALTED 受限 +
 
 **验证**：TestUnits 全量（基线 163/165）→ v5 冒烟 → 实盘观察（DIAG 相位、无单边停日志、
 恢复滞后 cooloffMs）
+
+### V10-R10 实施记录（2026-09-02③ 方案确认后执行，已完成）
+
+**落地清单（与方案逐项对应）**：
+1. QuotePolicyChain.h：ToxicityPolicy 类删除（含 inCooloff/reset）、QuotePolicyContext 删
+   toxicity/use_toxicity_detector/toxicity_cooloff_ms 三字段、链注册移除（六策略→五策略）
+2. StrategyCoordinator：gates 块重写——TOXICITY 门（_toxic_pause_active，Step7 每 tick 重算
+   resume-hold：is_toxic 时 _toxic_resume_time=now+cooloffMs）+ MARKET 门（shouldPause 已
+   收窄 market-only）；同 tick 双源 TOXICITY 后入胜出、恢复 tryResumeFrom(expected) 精确
+   匹配不互翻；边沿 cancelAll 合并为 _pause_cancel_active（任一源 inactive→active 撤一次）；
+   checkRisk 实参改 _toxic_pause_active；DIAG 文案统一 "pause active: market=/toxicity="
+   （5s 节流）；pctx 毒性三行删；resetSession 复位 hold
+3. SignalAggregator/ISignalSource：shouldPause() 收窄 market-only；updateToxicity(score,
+   detected) 去 toxic_side（现有调用点已全部移除，成员为惰性槽位）；ToxicitySignalResult 删方向
+4. ToxicFlowDetector/PredictiveToxicity：ToxicityMetrics/PredictiveToxicityResult 删 toxic_side
+   及推导（门面拷贝删）
+5. SpreadOptimizer：:61-66 毒性加宽块删 + toxic_active EMA 条件简化 + toxicity_adjustment
+   输出字段删 + GLFTParams 两参数/loader 键删
+6. RiskCoordinator：TOXICITY 相位翻转移除（所有权收编协调器），仅保留 in_cooloff 驱动的
+   decayCalibration（checkRisk 签名不变）
+7. SelfTradeCalibrator：toxic_side 死字段删（R3 遗留闭环）
+8. 热参 27→26：HP_TOXICITY_SPREAD_FACTOR 移除（枚举/注册名/defaults/bounds/applyAll）+
+   hotparams.yaml 键删；CONFIG.md/README.md 计数与毒性章节全部改写为单层语义
+9. 测试：test_toxicity_direction.cpp 删除（被测对象不复存在）；新增
+   test_v10_r10_toxicity_simplify.cpp 4 用例（TOXICITY 只停报价且 isActive=true/双源同 tick
+   TOXICITY 胜出+不互翻/对称守卫/RISK_HALTED 拒绝进入）
+
+**验证**：
+- TestUnits 全量 **162/164**（新基线；仅 test_session.test_allday / test_shm.test_sharehelper
+  两个既有环境性失败，零回归；测试总数 165→164 = 旧方向用例删除 + 4 新增）
+- v5 冒烟：EXIT=0、0 HALT/0 zombie、资金收敛（dynbalance 逐日递增）
+- **成交归因（设计内行为变化）**：trades 279 vs R9 基线 338-346（-17%）——归因=v5 数据集
+  vpin 常态在 0.60 阈值边缘高频震荡（debug 采样 51% tick is_toxic=true），每 blip 触发 5s
+  恢复保持期 → 报价时间占比下降。DIAG 实证：13,459 条 pause active 全部 toxicity=true
+  （market=0）。**非回归**：旧三层链路下这些 blip 同样触发暂停（仅时长短）；实盘 vpin 常态
+  远低于阈值（R2 实测独立触发 2 次/日），不受影响。若后续实盘 blip 偏多，调 vpinThreshold
+  或 cooloffMs（纯配置）
+- dist/WtBtFutu 已同步（.so + coordinator.yaml + hotparams.yaml）
+- **部署**：生产 Release 构建按 §5 流程另行执行（行为变化面=毒性 episode 暂停时长语义 +
+  单边抑制消失，观察项=DIAG toxicity=true 频次与覆盖变化）

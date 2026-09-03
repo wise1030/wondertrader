@@ -92,7 +92,6 @@ struct SelfTradeToxicityMetrics
     double realized_toxicity;   ///< Post-trade realized toxicity
     double toxicity_score;      ///< Combined score
     bool is_toxic;              ///< Toxicity flag
-    int toxic_side;             ///< = -recommended_side (V8-T5: 与 PredictiveToxicity "1=buy toxic" 语义不一致, 当前零消费者, R2 方向裁决时统一)
 
     // Detailed stats
     double avg_adverse_move; ///< Average adverse move (ticks)
@@ -100,7 +99,7 @@ struct SelfTradeToxicityMetrics
     uint32_t adverse_fills;  ///< Number of adverse fills
 
     SelfTradeToxicityMetrics()
-        : predictive_toxicity(0), realized_toxicity(0), toxicity_score(0), is_toxic(false), toxic_side(0),
+        : predictive_toxicity(0), realized_toxicity(0), toxicity_score(0), is_toxic(false),
           avg_adverse_move(0), total_fills(0), adverse_fills(0)
     {}
 };

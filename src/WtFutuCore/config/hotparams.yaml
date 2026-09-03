@@ -39,7 +39,6 @@ delta_skew_factor: 1.5
 max_spread_mult: 3.0
 min_spread_mult: 1.0
 depth_sensitivity: 0.5
-toxicity_spread_factor: 1.0
 low_confidence_spread_factor: 2.0
 
 # --- 报价粘性/保护参数 ---

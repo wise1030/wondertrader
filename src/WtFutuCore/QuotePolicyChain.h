@@ -19,8 +19,8 @@
  * 等价性关键:
  *   - RiskWidenPolicy._mult 保留旧 _risk_spread_mult 全部写入语义
  *     (soft 每 tick 无条件覆盖 / hard max 闩锁 / 恢复清零);
- *   - ToxicityPolicy._resume_time 保留旧 _toxicity_resume_time
- *     (checkRisk 冷却查询 + processQuoting 抑制 + resetSession 清零);
+ *   - V10-R10: ToxicityPolicy 已删除 — 毒性响应统一为"检测即双边暂停"
+ *     (StrategyCoordinator TOXICITY 相位单点属主, 见 AGENTS.md 该方案条目);
  *   - 阈值/舍入 (L1×1.2 L2×1.5, 涨跌停 20/10/0.5 ticks, floor/ceil
  *     tick 对齐) 逐行搬迁。
  */
@@ -67,12 +67,7 @@ struct QuotePolicyContext
     // 服务依赖 (可空)
     const SpreadOptimizer* spread_opt = nullptr; ///< ColdStart 取参数
     SpreadArbitrageManager* arb_manager = nullptr;
-    ToxicFlowDetector* toxicity = nullptr;
     SelfTradeCalibrator* calibrator = nullptr;
-
-    // 模块配置
-    bool use_toxicity_detector = false;
-    uint64_t toxicity_cooloff_ms = 0;
 };
 
 class IQuotePolicy
@@ -202,61 +197,10 @@ public:
 };
 
 //==============================================================================
-// 3. ToxicityPolicy — 毒性抑制 + cooloff 冷却
-//    _resume_time 与旧 _toxicity_resume_time 语义一致:
-//    is_toxic → 设置冷却 + 按 toxic_side 抑制; 冷却期内双边抑制。
+// 3. (V10-R10 已删除) ToxicityPolicy — 毒性响应统一为"检测即双边暂停"
+//    由 StrategyCoordinator 的 TOXICITY 相位承担 (canQuote()=false + 边沿 cancelAll),
+//    单边抑制/方向判定/链内冷却全部移除, 恢复保持期由协调器 resume-hold 承担。
 //==============================================================================
-class ToxicityPolicy : public IQuotePolicy
-{
-public:
-    // v7.6: _resume_time 原子化 — apply/inCooloff 在 MdSpi,
-    //       reset 在 onSessionBegin (RtTicker 线程)
-    bool inCooloff(uint64_t timestamp) const { return timestamp < _resume_time.load(std::memory_order_acquire); }
-
-    void reset() { _resume_time.store(0, std::memory_order_release); }
-
-    void apply(const QuotePolicyContext& ctx, QuoteState& st) override
-    {
-        if (!ctx.use_toxicity_detector || !ctx.toxicity)
-            return;
-
-        ToxicityMetrics tox = ctx.toxicity->analyze();
-
-        if (tox.is_toxic) {
-            // 设置冷却期：即使score短暂回落，也保持保护期
-            _resume_time.store(ctx.timestamp + ctx.toxicity_cooloff_ms, std::memory_order_release);
-
-            // V8-T5 方向语义统一 (与 T1 同车): toxic_side==1 为激进买流
-            // (ofi>0 且 trade imbalance>0, 见 PredictiveToxicity.cpp) --
-            // 知情买方吃的是我方 ask (逆向选择在 ask 侧), 故抑制 ask;
-            // ==-1 激进卖流 -> 抑制 bid。原映射 (1->停bid) 方向反了。
-            if (tox.toxic_side == 1) {
-                st.allow_ask = false;
-                WTSLogger::warn(
-                    "[TOXIC] {} Aggressive buy flow (score={:.2f}), pausing ask quotes", ctx.code, tox.toxic_score);
-            } else if (tox.toxic_side == -1) {
-                st.allow_bid = false;
-                WTSLogger::warn(
-                    "[TOXIC] {} Aggressive sell flow (score={:.2f}), pausing bid quotes", ctx.code, tox.toxic_score);
-            } else {
-                st.allow_bid = false;
-                st.allow_ask = false;
-                WTSLogger::warn(
-                    "[TOXIC] {} Both-side toxic (score={:.2f}), pausing all quotes", ctx.code, tox.toxic_score);
-            }
-        } else if (ctx.timestamp < _resume_time.load(std::memory_order_acquire)) {
-            // 冷却期内：is_toxic已恢复，但仍在保护期
-            st.allow_bid = false;
-            st.allow_ask = false;
-            WTSLogger::debug("[TOXIC] {} in cooloff (resume in {}ms)",
-                             ctx.code,
-                             _resume_time.load(std::memory_order_acquire) - ctx.timestamp);
-        }
-    }
-
-private:
-    std::atomic<uint64_t> _resume_time{0};
-};
 
 //==============================================================================
 // 4. LimitPricePolicy — 涨跌停保护 (P0-2)
@@ -394,15 +338,13 @@ class QuotePolicyChain
 {
 public:
     RiskWidenPolicy& riskWiden() { return _risk_widen; }
-    ToxicityPolicy& toxicity() { return _toxicity; }
 
-    /// GLFT 之后依次执行: RiskWiden → ArbCloseSync → Toxicity → LimitPrice
-    /// → ColdStart → FillRetreat
+    /// GLFT 之后依次执行: RiskWiden → ArbCloseSync → LimitPrice
+    /// → ColdStart → FillRetreat (V10-R10: ToxicityPolicy 移除)
     void run(const QuotePolicyContext& ctx, QuoteState& st)
     {
         _risk_widen.apply(ctx, st);
         _arb_sync.apply(ctx, st);
-        _toxicity.apply(ctx, st);
         _limit_price.apply(ctx, st);
         _cold_start.apply(ctx, st);
         _fill_retreat.apply(ctx, st);
@@ -411,7 +353,6 @@ public:
 private:
     RiskWidenPolicy _risk_widen;
     ArbCloseSyncPolicy _arb_sync;
-    ToxicityPolicy _toxicity;
     LimitPricePolicy _limit_price;
     ColdStartPolicy _cold_start;
     FillRetreatPolicy _fill_retreat;

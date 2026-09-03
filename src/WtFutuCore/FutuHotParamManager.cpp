@@ -51,7 +51,6 @@ void FutuHotParamManager::registerParams(wtp::IUftStraCtx* ctx,
         {"max_spread_mult", glft_defaults.max_spread_mult, nullptr},
         {"min_spread_mult", glft_defaults.min_spread_mult, nullptr},
         {"depth_sensitivity", glft_defaults.depth_sensitivity, nullptr},
-        {"toxicity_spread_factor", glft_defaults.toxicity_spread_factor, nullptr},
         {"low_confidence_spread_factor", glft_defaults.low_confidence_spread_factor, nullptr},
         {"sticky_threshold", _config.quoting.sticky_threshold, nullptr},
         {"improve_retreat_ratio", _config.quoting.improve_retreat_ratio, nullptr},
@@ -91,7 +90,6 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
         p.max_spread_mult = hotVal(HP_MAX_SPREAD_MULT);
         p.min_spread_mult = hotVal(HP_MIN_SPREAD_MULT);
         p.depth_sensitivity = hotVal(HP_DEPTH_SENSITIVITY);
-        p.toxicity_spread_factor = hotVal(HP_TOXICITY_SPREAD_FACTOR);
         p.low_confidence_spread_factor = hotVal(HP_LOW_CONFIDENCE_SPREAD_FACTOR);
         optimizer->updateParams(p); // Thread-safe update (replaces const_cast)
     }
@@ -249,7 +247,8 @@ bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<st
         return false;
     }
 
-    // V8-P0-1: 27 参数边界表 -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
+    // V8-P0-1: 26 参数边界表 -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
+    // V10-R10: toxicity_spread_factor 移除 (毒性加宽链路删除)
     // 加固(2026-08-24): 收紧至与 FutuConfigLoader error 级 / FutuConfigValidator 同口径 --
     //   此前 base_spread{0,1000}/base_qty{0,1e5}/level_step{0,1000}/max_delta{0,1e6} 均宽于
     //   loader 拒启范围, protect_ticks/sticky_threshold 允许 0 (静默关软保护/churn 风暴)。
@@ -280,7 +279,6 @@ bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<st
         /* max_spread_mult */ {0.0, 100.0},
         /* min_spread_mult */ {0.0, 100.0},
         /* depth_sensitivity */ {0.0, 1000.0},
-        /* toxicity_spread_factor */ {0.0, 100.0},
         /* low_confidence_spread_factor */ {0.0, 100.0},
         /* sticky_threshold */ {0.01, 10.0},    // loader warn (0,10]; 0=每 tick 重挂 churn 风暴防呆
         /* improve_retreat_ratio */ {0.0, 1000.0},

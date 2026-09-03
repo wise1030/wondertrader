@@ -274,10 +274,9 @@ public:
     /// V8-A6: 毒性结果显式写入口 (SignalContext 单写者恢复)。
     /// 此前 StrategyCoordinator 经非 const getContext() 反向裸写
     /// _ctx.toxicity.* — 聚合器内部状态被外部修改, 单一真相源名存实亡。
-    void updateToxicity(double score, int toxic_side, bool detected)
+    void updateToxicity(double score, bool detected)
     {
         _ctx.toxicity.toxicity_score = score;
-        _ctx.toxicity.toxic_side = toxic_side;
         _ctx.toxicity.toxic_detected = detected;
         _ctx.toxicity.valid = true;
     }

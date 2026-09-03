@@ -197,16 +197,8 @@ void PredictiveToxicity::updateCache() const
     _cached_result.is_toxic = _cached_result.combined_score > _cfg.alpha_threshold ||
                               (vpin_ready && _cached_result.vpin > _cfg.vpin_threshold);
 
-    // Toxic side
-    // V8-R2: side 归属与 is_toxic 解耦 -- 门面 extreme 兜底触发时 pred 可能
-    // 未过阈 (combined < alpha_threshold), 旧判定导致这类事件 side 恒 0 ->
-    // 双边抑制; ofi/imb 同号即给方向 (门面仅在自身 is_toxic 时消费)
-    if (_has_alpha_data) {
-        if (_latest_alpha.ofi_component > 0 && _latest_trade_imb.imbalance_ratio > 0)
-            _cached_result.toxic_side = 1;
-        else if (_latest_alpha.ofi_component < 0 && _latest_trade_imb.imbalance_ratio < 0)
-            _cached_result.toxic_side = -1;
-    }
+    // V10-R10: toxic_side 已随单边抑制链路一并删除 — 毒性响应统一为
+    // "检测即双边暂停"（StrategyCoordinator TOXICITY 相位），方向语义不再存在
 
     _cache_dirty = false;
 }

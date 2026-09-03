@@ -350,7 +350,6 @@ SelfTradeToxicityMetrics SelfTradeCalibrator::getToxicityMetrics(const std::stri
     metrics.realized_toxicity = calib.toxicity_level;
     metrics.toxicity_score = calib.toxicity_level;
     metrics.is_toxic = calib.high_toxicity;
-    metrics.toxic_side = -calib.recommended_side; // Invert: if recommend buy, avoid sell
 
     auto it = _contract_states.find(code);
     if (it != _contract_states.end()) {

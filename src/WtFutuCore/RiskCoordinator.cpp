@@ -388,19 +388,11 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
         }
     }
 
-    // Check toxicity cooldown
-    // 空指针保护 + P0-12: 使用TradingState方法
-    // P1-6/U1: enter 用 setQuotingPhase, exit 用 tryResumeFrom(TOXICITY)
-    // 避免冷却期结束时在 HALT/ERROR/MARKET 期间被误翻 NORMAL.
-    if (in_cooloff) {
-        if (_deps.trading_state)
-            _deps.trading_state->setQuotingPhase(QuotingPhase::TOXICITY);
-        if (_deps.self_trade_calibrator) {
-            _deps.self_trade_calibrator->decayCalibration(tc.code, tc.timestamp, _deps.cfg->modules.toxicity_cooloff_ms);
-        }
-    } else {
-        if (_deps.trading_state)
-            _deps.trading_state->tryResumeFrom(QuotingPhase::TOXICITY);
+    // V10-R10: TOXICITY 相位翻转已收编至 StrategyCoordinator (单点属主, 检测即双边
+    // 暂停 + resume-hold)。本处仅保留冷却期自成交校准衰减 (in_cooloff 语义不变:
+    // 调用点传入毒性暂停态, 含恢复保持期)。
+    if (in_cooloff && _deps.self_trade_calibrator) {
+        _deps.self_trade_calibrator->decayCalibration(tc.code, tc.timestamp, _deps.cfg->modules.toxicity_cooloff_ms);
     }
 
     // 空指针保护

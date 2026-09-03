@@ -4,7 +4,8 @@
  *
  * 职责: 承载从 coordinator 错位归属迁出的风控逻辑 (复核§3.2)。
  * Step 2a: checkTakerReduce (taker 减仓)。
- * Step 2b: checkRisk (风控中枢: HALT/PAUSE/TOXICITY 相位切换 + forceFlat + arb 禁用)。
+ * Step 2b: checkRisk (风控中枢: HALT/PAUSE 相位切换 + forceFlat + arb 禁用;
+ *          V10-R10 起 TOXICITY 相位翻转收编至 StrategyCoordinator)。
  */
 #pragma once
 #include <string>
@@ -50,7 +51,9 @@ public:
     /// taker 减仓 (Step 2a). exchange_time_ms = replay 时钟 (0=回退墙钟).
     bool checkTakerReduce(wtp::IUftStraCtx* ctx, uint64_t exchange_time_ms);
 
-    /// 风控中枢检查 (Step 2b). in_cooloff = 调用点预计算的 toxicity cooloff 状态.
+    /// 风控中枢检查 (Step 2b). in_cooloff = 调用点预计算的毒性暂停态 (含 resume-hold;
+    /// V10-R10 起 TOXICITY 相位翻转已收编至 StrategyCoordinator, 本处仅消费该态做
+    /// 自成交校准衰减)。
     bool checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bool in_cooloff);
 
 private:

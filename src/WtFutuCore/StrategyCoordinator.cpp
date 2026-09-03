@@ -525,7 +525,7 @@ ProcessingResult StrategyCoordinator::processTick(
             if (cs == CloseoutSub::DRAINING || cs == CloseoutSub::ASSESSING || cs == CloseoutSub::EXECUTING ||
                 cs == CloseoutSub::RETRYING) {
                 tc.total_delta = _portfolio->getTotalDelta(); // FORCE FLAT qty 需要
-                _risk_coord.checkRisk(ctx, tc, _toxicity && _quote_chain.toxicity().inCooloff(tc.timestamp));
+                _risk_coord.checkRisk(ctx, tc, _toxic_pause_active);
             }
         }
         return result;
@@ -590,7 +590,7 @@ ProcessingResult StrategyCoordinator::processTick(
         updateSignals(ctx, tc, tick);
 
         // Stage 4: Check risk
-        if (!_risk_coord.checkRisk(ctx, tc, _toxicity && _quote_chain.toxicity().inCooloff(tc.timestamp))) {
+        if (!_risk_coord.checkRisk(ctx, tc, _toxic_pause_active)) {
             // BLOCK_SIDE / HALT 时仍执行 taker 减仓 - 减仓是恢复正常的关键手段.
             // 旧逻辑 HALT 时跳过 checkTakerReduce 是反的: 恰恰 HALT 时最需要强平减仓
             // (13:50 HALT 后 TAKER_REDUCE 不复燃, 持仓任由 requote 放大). requote 路径
@@ -934,46 +934,62 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
     // P1-6/U1: enter 用 setQuotingPhase (会被 RISK_HALTED 校验拒绝, 安全),
     //         exit 用 tryResumeFrom(MARKET) (仅 qphase==MARKET 时翻 NORMAL,
     //         避免在 HALT/ERROR/TOXICITY 期间被误翻).
+    // V8-R6/P2-2 边沿触发 + V10-R10: 统一 pause-active 标志 —— 仅进入任一暂停的
+    // 首 tick 撤一次全单, 两源皆消复位。
+    // V10-R10 毒性门 (单层语义): _toxic_pause_active 由 Step7 每 tick 重算
+    // (use_toxicity_detector && now < resume_time; resume_time = 最后一次 is_toxic
+    // tick + cooloffMs 恢复保持期)。开关关闭 → 恒 false, 毒性对系统零影响。
+    // 相位优先级: 同 tick 双源同触发时 TOXICITY 后置入胜出 (setQuotingPhase 允许
+    // MARKET→TOXICITY 自由转移), 恢复路径各自 tryResumeFrom(expected) 精确匹配,
+    // 不互翻。toxic_pause_entered = 本 tick 相位实际进入结果 (局部量)。
+    bool toxic_pause_now = _toxic_pause_active;
+    bool toxic_pause_entered = false;
+    if (toxic_pause_now) {
+        if (_trading_state)
+            _trading_state->setQuotingPhase(QuotingPhase::TOXICITY);
+        toxic_pause_entered = (_trading_state && _trading_state->qphase == QuotingPhase::TOXICITY);
+    } else {
+        toxic_pause_entered = false;
+        if (_trading_state)
+            _trading_state->tryResumeFrom(QuotingPhase::TOXICITY);
+    }
+
+    // 市场状态门 (V10-R10: shouldPause() 收窄为 market_state.should_pause, 毒性不再经过)
     bool market_pause_now = false;
     if (sig_ctx.shouldPause()) {
         if (_trading_state)
             _trading_state->setQuotingPhase(QuotingPhase::MARKET);
         market_pause_now = (_trading_state && _trading_state->qphase == QuotingPhase::MARKET);
-        // DIAG: 限频诊断日志，确认shouldPause()触发原因
-        // V8-R6/P3: 时间基准统一 replay 时钟 (tc.timestamp), 不再取墙钟
-        {
-            if (tc.timestamp - _last_pause_diag_ms > 5000) {
-                WTSLogger::warn("[DIAG] {} shouldPause=true: should_pause={} toxic_detected={} "
-                                "vol_tier={} realized_vol={:.6f} vol_percentile={:.1f}",
-                                tc.code,
-                                sig_ctx.market_state.should_pause,
-                                sig_ctx.toxicity.toxic_detected,
-                                (int)sig_ctx.volatility.vol_tier,
-                                sig_ctx.volatility.realized_vol,
-                                sig_ctx.volatility.vol_percentile);
-                _last_pause_diag_ms = tc.timestamp;
-            }
-        }
     } else {
         if (_trading_state)
             _trading_state->tryResumeFrom(QuotingPhase::MARKET);
     }
 
-    // V8-R6/P2-2: 边沿触发 —— 仅进入 MARKET 暂停的首 tick 撤一次全单。
-    // 旧实现 qphase==MARKET 期间每 tick 重发 cancelAll: 首轮后槽内全为
-    // pendingCancel, 后续每 tick 白白抢 quoter 自旋锁+遍历 (纯热路径浪费)。
-    if (market_pause_now && !_market_pause_active && tc.quoter) {
+    // DIAG: 限频诊断日志, 统一标注暂停源 (5s 节流, replay 时钟)
+    if ((market_pause_now || toxic_pause_entered) && tc.timestamp - _last_pause_diag_ms > 5000) {
+        WTSLogger::warn("[DIAG] {} pause active: market={} toxicity={} "
+                        "vol_tier={} realized_vol={:.6f} vol_percentile={:.1f}",
+                        tc.code,
+                        market_pause_now,
+                        toxic_pause_entered,
+                        (int)sig_ctx.volatility.vol_tier,
+                        sig_ctx.volatility.realized_vol,
+                        sig_ctx.volatility.vol_percentile);
+        _last_pause_diag_ms = tc.timestamp;
+    }
+
+    bool any_pause_now = market_pause_now || toxic_pause_entered;
+    if (any_pause_now && !_pause_cancel_active && tc.quoter) {
         tc.quoter->cancelAll(ctx);
     }
-    _market_pause_active = market_pause_now;
+    _pause_cancel_active = any_pause_now;
 
     // 4. 更新毒性检测器 (使用 SignalContext 的信号)
     if (_cfg.use_toxicity_detector && _toxicity && sig_ctx.alpha.valid) {
         AlphaResult alpha_res;
         alpha_res.alpha = sig_ctx.alpha.alpha;
         // V8-T1: ofi_component 在 slot 中已算好 (SignalAggregator.h lambda),
-        // 此前漏填恒 0 -> PredictiveToxicity 的 toxic_side 永远为 0,
-        // 毒性单边抑制从不生效 (恒走双边抑制分支)
+        // 漏填曾导致 OFI 通道恒 0 — 检测内核保留该搬运 (V10-R10 起仅喂分数, 无方向消费)
         alpha_res.ofi_component = sig_ctx.alpha.ofi_component;
         alpha_res.is_strong_signal = sig_ctx.alpha.is_strong_signal;
         alpha_res.timestamp = sig_ctx.timestamp;
@@ -998,7 +1014,10 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
         _self_trade_calibrator->onTick(tc.code, tc.mid, tc.timestamp);
     }
 
-    // 7. 更新 VPIN
+    // 7. 毒性检测 (V10-R10 单层语义: 检测即双边暂停, 相位翻转在 updateSignals 头部门)
+    //    resume-hold: 最后一次 is_toxic tick 后保持 cooloffMs 暂停, 阈值震荡不抖动;
+    //    _toxic_pause_active 供同 tick 后续(checkRisk 已过)与下一 tick gates/checkRisk 消费;
+    //    开关关闭或模块缺失 → 不更新, 恒 false
     if (_cfg.use_toxicity_detector && _toxicity) {
         _toxicity->onTickVolume(tc.code.c_str(), tick);
 
@@ -1014,15 +1033,9 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
                              tox.is_toxic);
         }
 
-        if (tox.is_toxic) {
-            // V8-A6: 经显式入口写入 (单写者恢复), 不再反向裸写聚合器内部状态
-            aggregator->updateToxicity(tox.toxic_score, tox.toxic_side, true);
-        } else {
-            // V8-R6/P2-7 注释勘误: toxic_detected 每 tick 重算(非锁存),
-            // 无毒 tick 经 updateToxicity 显式复位 false。旧注释描述的
-            // "不复位锁存/永久锁死"是历史行为, 与当前代码相反, 防误导后续维护。
-            aggregator->updateToxicity(tox.toxic_score, tox.toxic_side, false);
-        }
+        if (tox.is_toxic)
+            _toxic_resume_time = tc.timestamp + _cfg.modules.toxicity_cooloff_ms;
+        _toxic_pause_active = (tc.timestamp < _toxic_resume_time);
     }
 }
 
@@ -1173,10 +1186,7 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
     pctx.cold_start = cold_start;
     pctx.spread_opt = tc.spread_opt;
     pctx.arb_manager = _arb_manager;
-    pctx.toxicity = _toxicity;
     pctx.calibrator = _self_trade_calibrator;
-    pctx.use_toxicity_detector = _cfg.use_toxicity_detector;
-    pctx.toxicity_cooloff_ms = _cfg.modules.toxicity_cooloff_ms;
 
     QuoteState qs;
     qs.skew = skew;
@@ -1546,9 +1556,10 @@ void StrategyCoordinator::resetSession()
     if (_trading_state) {
         _trading_state->reset();
     }
-    _quote_chain.toxicity().reset();
     _tick_count = 0;
-    _market_pause_active = false; // V8-R6 收官: 边沿触发标志跨会话复位
+    _toxic_resume_time = 0;      // V10-R10: 毒性 resume-hold 跨会话复位
+    _toxic_pause_active = false;
+    _pause_cancel_active = false; // V8-R6 收官: 边沿触发标志跨会话复位
     for (auto& [code, slot] : _last_mid) { if (slot) slot->v.store(0.0, std::memory_order_relaxed); }
 
     // V10-P2-4: 信号栈会话复位接线 —— 此前本函数运行期零调用方, aggregator/

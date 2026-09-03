@@ -54,16 +54,8 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     double alpha = ctx.alpha.valid ? ctx.alpha.alpha : 0.0;
     double confidence = ctx.alpha.valid ? ctx.alpha.confidence : 0.0;
 
-    // 2a. 毒性扩大 spread (全市场毒性，来自 PredictiveToxicity)
-    //     仅当 toxicity_score 足过最小阈值时才应用，过滤噪声
-    //     B4: 门槛参数化 (原硬编码 0.05), 键 toxicityMinScore
-    bool toxic_active = false;
-    if (ctx.toxicity.valid && ctx.toxicity.toxic_detected && ctx.toxicity.toxicity_score > params.toxicity_min_score) {
-        double tox_mult = 1.0 + ctx.toxicity.toxicity_score * params.toxicity_spread_factor;
-        spread_mult *= tox_mult;
-        result.toxicity_adjustment = tox_mult - 1.0;
-        toxic_active = true;
-    }
+    // 2a. (V10-R10 已删除) 毒性扩大 spread — 毒性响应统一为"检测即双边暂停"
+    //     (StrategyCoordinator TOXICITY 相位), 优化器不再消费毒性信号
 
     // 2b. 低置信度保护: 仅在 alpha 信号有效时生效
     //     无效信号(confidence=0 because alpha.valid=false)不应触发保护性扩大
@@ -78,7 +70,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     constexpr double spread_mult_ema_alpha = 0.30;   // 0.15→0.30: 更快响应
     constexpr double spread_mult_decay_alpha = 0.50; // 无风险时加速衰减
     constexpr double mean_reversion_alpha = 0.05;    // 每 tick 向 1.0 额外拉回 5%
-    if (spread_mult <= 1.0 && !toxic_active) {
+    if (spread_mult <= 1.0) {
         // 无风险事件: 加速向 1.0 收敛
         _smoothed_spread_mult =
             spread_mult_decay_alpha * spread_mult + (1.0 - spread_mult_decay_alpha) * _smoothed_spread_mult;
