@@ -23,7 +23,12 @@ HEADER = struct.Struct("<8sIIII")
 RECORD = struct.Struct("<16s32sIIddIQ")
 
 CST = timezone(timedelta(hours=8))
-DIRECT_MAP = {0: "BUY", 1: "SELL"}
+# V10-R9c: wtpy MonSvr 前端按 direction→多/空 + offset→开/平 组合渲染
+# ("OPEN"==offset?"开":"平"; "LONG"==direction?"多":"空")。
+# direction 必须填成交作用的持仓域: OPEN 按成交方向 (买开=LONG/卖开=SHORT),
+# CLOSE 取反 (买平平的是空头→SHORT/卖平平的是多头→LONG) —— 与 CTP 下发 offset
+# 语义一致 (买开=开多/卖开=开空/买平=平空/卖平=平多)。
+# 旧实现直接输出成交方向 BUY/SELL: 前端 "LONG" 恒不匹配 → 全部显示为 开空/平空。
 OFFSET_MAP = {0: "OPEN", 1: "CLOSE"}
 
 
@@ -46,7 +51,10 @@ def parse_membin(path):
             full_code = f"{exchg_s}.{code_s}" if exchg_s else code_s
             dt = datetime.fromtimestamp(ttime / 1000.0, tz=CST)
             time_int = int(dt.strftime("%Y%m%d%H%M%S"))
-            direct_s = DIRECT_MAP.get(direct, "SELL" if direct else "BUY")
+            if offset == 0:
+                direct_s = "LONG" if direct == 0 else "SHORT"
+            else:
+                direct_s = "SHORT" if direct == 0 else "LONG"
             offset_s = OFFSET_MAP.get(offset, "CLOSE" if offset else "OPEN")
             trades.append((full_code, time_int, direct_s, offset_s, price, volume))
     return trades

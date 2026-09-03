@@ -2648,3 +2648,28 @@ RISK_HALTED/ERROR/HALT 优先级→canTransitionQuoting 仅 RISK_HALTED 受限 +
 **移交**：①R10+R11 合并为一个 Release 批次待用户确认部署（行为面=R10 单层暂停，
 观测面=R11 episode 行）；②step-2 数据积累自部署后起算（生产 episode 日志 + debug
 分数行），1-2 周后跑 analyze_toxicity_markout.py 产出分布/markout/重叠率三报告
+
+#### V10-R10+R11 生产部署记录（2026-09-03 23:34，夜盘中插停，用户批准）
+
+**部署物**：Release 构建 `src/build_release/`（独立树，不影响 build_all Debug），
+libWtFutuCore.so sha256=4f0d9cf7...（file 校验 ELF x86-64 ✓，源码=HEAD 一致 ✓）
+
+**远程变更**（/home/ubuntu/projects/wondertrader/dist/）：
+- uft/libWtFutuCore.so 替换（备份 .bak_20260903_r10r11；现役 689fec37→R10+R11）
+- hotparams.yaml 删除 toxicity_spread_factor 键（备份 .bak_20260903_r10；
+  远程其余热参为生产调优权威值，不动）
+- coordinator.yaml 不动（cooloffMs:5000 已在；adverseThreshold 键名为历史遗留，
+  代码读 toxicThreshold+has() 守卫→编译默认，生产 Step7 阈值由热参 0.60 供给）
+
+**过程**：kill -INT 旧进程（2s 优雅退出）→ setsid nohup ./start.sh 重启（23:34）。
+部署时机偏离 §5 的 15:00 停盘窗口（夜盘中插停），经用户明示批准，理由：今夜剩余
+时段即生效"双边暂停"替代旧单边抑制（昨夜 21:06 曾现 25min 单边停摆）。
+
+**验证**（23:36）：报单/撤单/持仓更新正常流动；未知热参警告=0；`[TOXIC] score=0.21`
+生产常态远低于 0.60 阈值（印证"vpin blip 高频触发为 v5 数据集特性"归因）；
+订单错误计数 5/1000（正常水位）。
+
+**step-2 数据积累自此刻起算**：生产 episode 行（warn 级）+ debug %50 分数采样行，
+积累 1-2 周后跑 `python3 scripts/analyze_toxicity_markout.py --log Logs/Runner_<date>.log
+--trades generated/outputs/futu_mm_ao_live/trades.csv --tick 1.0`（远程 trades.csv 为
+convert_trades.py 持仓域格式，脚本已兼容）。
