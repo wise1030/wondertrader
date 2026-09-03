@@ -70,15 +70,17 @@ strategies:
         # ========================================================
         # 策略身份: 锚定合约 + 合约列表
         # ========================================================
-        anchorCode: SHFE.ag.ag2608
+        # 合约代码两段式(fullCode, 生产口径)或三段式(stdCode)均可, 框架自动归一化;
+        # 以下为示例代码, 实际使用时替换为当前交易合约
+        anchorCode: SHFE.ag2608
         isBacktest: false             # 回测模式 (on_trade 只撤不挂, 避免 _orders 迭代器失效; 生产=false)
 
         contracts:
-          - code: SHFE.ag.ag2608
+          - code: SHFE.ag2608
             maxPosition: 50          # 风控硬顶: 仅 halt_quoting 闸门, |净头寸|>maxPosition 即全停
             maxDelta: 30             # 策略库存软限: skew/qty衰减/义务/穿越的归一化基准 (delta 口径)
             targetPosition: 0
-          - code: SHFE.ag.ag2612
+          - code: SHFE.ag2612
             maxPosition: 50          # 风控硬顶 (同上)
             maxDelta: 30             # 策略库存软限 (同上)
             targetPosition: 0
@@ -148,8 +150,11 @@ strategies:
             maxConsecutiveSameSide: 3    # 同侧连续成交触发阈值 (0=禁用)
             sameSideWindowMs: 3000       # 连续计数窗口 (ms)
             sameSidePauseMs: 5000        # 触发后暂停报价时长 (ms)
-            # v7.1: 日界自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产必须 false)
-            autoClearIrreversibleOnReset: false
+          # v7.1: 日界自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产必须 false)
+          autoClearIrreversibleOnReset: false
+          # V10-R8-a: ORDER_RATE 持续违规护栏 — 超频持续超过此毫秒数 -> 单轨 ERROR 暂停
+          # + cancelAll + 指数退避自探恢复 (08-28 盘前 44,304 单/分风暴的兜底防线)
+          orderRatePauseMs: 3000
 
         # ========================================================
         # 收盘平仓参数 (CloseoutOrchestrator + CloseoutExecutor)
@@ -167,7 +172,9 @@ strategies:
           depthRatioAggressive: 0.8  # 激进档深度比例
           sweepThresholdMs: 5000     # 扫单触发时间
           sweepTicks: 3              # 扫单穿透 tick 数
-          useFak: true               # 使用 FAK 订单
+          useFak: true               # 使用 FAK 订单 (V10-R8-c(2): FAK 自动保底对触价, BUY>=ask1/SELL<=bid1)
+          closeOnly: false           # V10-R7-e: true=平仓量向实际仓位截断(宁可留尾不翻向开仓);
+                                     #   false=组合口径平仓; 生产建议 false (与回测验证面一致)
 
         # ========================================================
         # 性能监控参数
@@ -187,7 +194,7 @@ strategies:
         maxPendingPerSide: 30        # 单侧最大挂单量 (pending超限->撤该侧旧单+跳过本轮; OrderFilter风控)
 
         # ========================================================
-        # MonitorBridge — WtMonSvr GUI 数据桥 (可选, 默认关)
+        # MonitorBridge — WtMonSvr GUI 数据桥 (可选, 代码默认关; 本示例开启演示)
         # 开启后策略定期把资金/持仓快照写到 generated/stradata/{id}.json,
         # 收盘追加 generated/outputs/{id}/funds.csv 历史资金曲线。
         # 热路径开销: 每 tick 一次时间戳比较 (~ns); 到点才序列化写盘。

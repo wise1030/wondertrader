@@ -74,6 +74,7 @@ coordinator:
           emaAlpha: 0.1
         lead_lag:
           window: 50
+          maxAgeMs: 0               # lead 行情时效上限 (0=关闭, 默认)
 
       # === Alpha 模型 (模型层) ===
       model:
@@ -85,6 +86,9 @@ coordinator:
           momentum: 0.15
           lead_lag: 0.05
         strongThreshold: 0.7      # 强信号阈值
+        rollingWindow: 500        # B3: 归一化滚动窗口 (缺省=编译期常量 500)
+        rollingInterval: 20       # B3: 滚动统计更新间隔 ticks (缺省=20)
+        icUpdateInterval: 50      # B3: IC 权重更新间隔 ticks (缺省=50)
 
       # === 辅助信号 (不参与 alpha 模型, 驱动 should_widen/should_pause) ===
       volatility:

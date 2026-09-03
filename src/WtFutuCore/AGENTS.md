@@ -1484,7 +1484,9 @@ R1-R6、M1-M4、B1-B5 共 15 项发现，用户裁决全部接受。按风险与
 **B4 (P4) 毒性加宽门槛参数化**
 - GLFTParams.toxicity_min_score 默认 0.05，fromVariant 键 toxicityMinScore；:56 硬编码改参数
 
-**B5 (M3) alpha 时效老化（默认关）**
+**B5 (M3) alpha 时效老化（默认关）** 【2026-09-04 配置审计勘误：本项实际未实施——
+代码全仓无 alphaMaxAgeMs（实现的是 lead_lag.maxAgeMs 行情时效键）。文档债记录，
+如需 alpha 老化须另行立项】
 - coordinator signalAggregator 加 `alphaMaxAgeMs`（默认 0=关闭保行为）；
   update() 内 book timestamp 可得时，age 超限 → alpha.valid=false+confidence=0
 
@@ -2697,3 +2699,29 @@ R10 前死键 toxicitySpreadFactor+旧三层注释（数值键全一致）；C s
    （F7）；AGENTS.md 勘误 B5 未实施（F8）
 3. **dist 同步**：coordinator.yaml（F6 触及）
 4. **验证**：yaml 解析检查 → v5 冒烟（新键=默认值，预期零行为变化）→ 远程 diff 复核
+
+#### R12 实施记录（2026-09-04，配置审计修复批，已完成；远程不重启，下次重启生效）
+
+**远程**（备份 .bak_20260904_cfgfix ×2，yaml.safe_load 校验过）：
+- config.yaml：`qtyDecay: 0.7` → `qtyDecayFactor: 0.7`（F1，行为变化：qty 衰减系数
+  2.0→0.7，下次重启生效——用户裁决启用 08-26 前的原意图）；删 `bilateralStatsMaxSpreadTicks`
+  死键（F2）；补 `portfolio: {maxDelta: 30, hedgeRatio: 1.0}` 节（F4，防热参失效回落默认 50）
+- coordinator.yaml：整体同步 src 权威后补回生产项 `usePerformanceMonitor: true`
+  （F3；有效值 diff 复核：数值键零变化，仅注释更新 + 死键 toxicitySpreadFactor 移除）
+- **注意**：src 示例的 usePerformanceMonitor=false 是示例默认，远程生产必须 true
+  （WS-F 基线采集中）——本轮已踩坑纠正，后续同步 coordinator.yaml 到远程时必须先
+  保留该差异（建议在远程文件头维护"生产差异清单"注释）
+
+**src 示例**（config/）：config.yaml 补 orderRatePauseMs:3000/closeOnly:false +
+contracts 示例改两段式口径+注释、monitor 注释对齐（F5/F7）；coordinator.yaml 补
+model.rollingWindow/rollingInterval/icUpdateInterval + lead_lag.maxAgeMs:0（F6，
+全部=编译期默认值）；AGENTS.md 勘误 B5 alphaMaxAgeMs 未实施（F8，实为
+lead_lag.maxAgeMs 已存在，alpha 老化如需另行立项）
+
+**验证**：yaml 解析全过；dist/WtBtFutu coordinator.yaml 已同步；v5 冒烟 EXIT=0、
+Config validation 0 err 0 warn、trades 285（基线 279-283 噪声带内）、episode 行
+3015（与 R11 轮逐值一致——新键全=默认值，零行为漂移实证）
+
+**生效时点**：远程 config.yaml/coordinator.yaml 变更于下次重启生效（cron 08:40/20:40
+或人工）；F1 的 qtyDecayFactor=0.7 为唯一行为变化项——重启后观察减仓侧 qty 变化
+（util 高位时挂单手数较此前增大）
