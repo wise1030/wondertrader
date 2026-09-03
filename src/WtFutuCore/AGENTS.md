@@ -2621,3 +2621,30 @@ RISK_HALTED/ERROR/HALT 优先级→canTransitionQuoting 仅 RISK_HALTED 受限 +
 
 **验证**：make+TestUnits 全量零回归 → v5 冒烟检查 episode 行格式与频次（vpin blip 数据集
 应有大量 episode）→ 脚本对冒烟日志自跑验证解析正确
+
+#### V10-R11 实施记录（2026-09-03，Step-1 观测性，零行为变化，已完成）
+
+**落地**：
+1. StrategyCoordinator：episode 观测行（相位实际进入 TOXICITY 边沿开/退出闭，
+   warn 级生产可见）：`[TOXIC-EPISODE] <code> enter` / `exit duration=<ms> peak=<score>`；
+   resetSession 未闭合 episode 以 session_reset 收尾（防日志悬空）；peak 由 Step7
+   逐 tick 跟踪；3 成员（_toxic_episode_open/_start_ms/_peak）
+2. scripts/analyze_toxicity_markout.py（stdlib-only）：episode 统计（次数/总暂停时长/
+   时长与 peak 分布）、引线窗口(K秒)成交 vs 基准的 +10/30/60s markout 对比（符号化：
+   买后跌/卖后涨=adverse）、暂停期间成交数（暂停生效验证）、score/vpin 分位数分布
+   （服务 step-2 阈值重标定）；成交方向双格式兼容（回测 BUY/SELL / 实盘持仓域反推）
+3. 分布数据源复用既有 debug %50 采样行（生产日志 debug 级已开），零新增采样子系统
+
+**验证**：
+- TestUnits 全量 162/164 不变（2 既有环境失败）
+- v5 冒烟：EXIT=0、trades 283（vs R10 的 280 噪声带内——观测行零行为漂移实证）、
+  0 HALT/zombie、episode 行 3,015 条格式正确
+- 脚本自验（v5 数据）：1508 episodes/总暂停 1214.9min(52% 会话时间, vpin-blip 数据集
+  特性)/暂停期间成交 0（相位阻断无漏）/markout 管线工作/分布分位数产出（score p99=0.80,
+  vpin p50=0.516——证实 v5 数据阈值 0.60 落在 vpin p50-p90 之间=高频误触发根因的
+  分布证据，服务 step-2/3）
+- dist/WtBtFutu .so 已同步
+
+**移交**：①R10+R11 合并为一个 Release 批次待用户确认部署（行为面=R10 单层暂停，
+观测面=R11 episode 行）；②step-2 数据积累自部署后起算（生产 episode 日志 + debug
+分数行），1-2 周后跑 analyze_toxicity_markout.py 产出分布/markout/重叠率三报告

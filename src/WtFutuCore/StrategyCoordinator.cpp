@@ -984,6 +984,20 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
     }
     _pause_cancel_active = any_pause_now;
 
+    // V10-R11 Step-1: episode 观测 (零行为影响) — 相位实际进入/退出 TOXICITY 的边沿
+    // 记 episode 边界 (warn 级生产可见), 供离线覆盖率归因与 markout 有效性分析
+    if (toxic_pause_entered && !_toxic_episode_open) {
+        _toxic_episode_open = true;
+        _toxic_episode_start_ms = tc.timestamp;
+        _toxic_episode_peak = 0.0;
+        WTSLogger::warn("[TOXIC-EPISODE] {} enter", tc.code);
+    } else if (!toxic_pause_entered && _toxic_episode_open) {
+        _toxic_episode_open = false;
+        WTSLogger::warn("[TOXIC-EPISODE] exit duration={}ms peak={:.3f}",
+                        tc.timestamp - _toxic_episode_start_ms, _toxic_episode_peak);
+        _toxic_episode_peak = 0.0;
+    }
+
     // 4. 更新毒性检测器 (使用 SignalContext 的信号)
     if (_cfg.use_toxicity_detector && _toxicity && sig_ctx.alpha.valid) {
         AlphaResult alpha_res;
@@ -1036,6 +1050,10 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
         if (tox.is_toxic)
             _toxic_resume_time = tc.timestamp + _cfg.modules.toxicity_cooloff_ms;
         _toxic_pause_active = (tc.timestamp < _toxic_resume_time);
+
+        // V10-R11 Step-1: episode peak 逐 tick 跟踪 (episode 期间最大分数)
+        if (_toxic_episode_open && tox.toxic_score > _toxic_episode_peak)
+            _toxic_episode_peak = tox.toxic_score;
     }
 }
 
@@ -1559,6 +1577,12 @@ void StrategyCoordinator::resetSession()
     _tick_count = 0;
     _toxic_resume_time = 0;      // V10-R10: 毒性 resume-hold 跨会话复位
     _toxic_pause_active = false;
+    // V10-R11: 会话切换时未闭合 episode 收尾 (session_reset 标记, 防日志悬空)
+    if (_toxic_episode_open) {
+        _toxic_episode_open = false;
+        WTSLogger::warn("[TOXIC-EPISODE] exit session_reset peak={:.3f}", _toxic_episode_peak);
+        _toxic_episode_peak = 0.0;
+    }
     _pause_cancel_active = false; // V8-R6 收官: 边沿触发标志跨会话复位
     for (auto& [code, slot] : _last_mid) { if (slot) slot->v.store(0.0, std::memory_order_relaxed); }
 

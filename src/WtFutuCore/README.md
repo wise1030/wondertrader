@@ -458,6 +458,9 @@ is_toxic = combined > adverseThreshold(0.75)
          OR (vpin_ready && vpin > vpinThreshold(0.60))     ←T4 恢复 OR 条件
 V10-R10: toxic_side 方向语义已删除; is_toxic 由 StrategyCoordinator Step7 每 tick
   重算 resume-hold (cooloffMs=5000) 并翻转 TOXICITY 相位 (检测即双边暂停)
+V10-R11 观测行 (warn 级): [TOXIC-EPISODE] <code> enter / exit duration=<ms> peak=<score>
+  (session_reset 收尾), 配合 scripts/analyze_toxicity_markout.py 做离线覆盖率归因
+  与 markout 有效性分析
 ```
 
 加载期边界校验（adverse/vpin/weights 越界 warn 回落默认，fromVariant :69-94）。

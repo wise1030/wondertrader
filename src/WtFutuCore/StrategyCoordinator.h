@@ -466,6 +466,13 @@ private:
     uint64_t _toxic_resume_time = 0;
     bool _toxic_pause_active = false;
 
+    // V10-R11 Step-1: 毒性 episode 观测（零行为影响, 日志专用）
+    // 相位实际进入 TOXICITY 的边沿开 episode, hold 期满/会话切换收尾;
+    // peak 由 Step7 逐 tick 跟踪 (episode 期间最大 toxic_score)
+    bool _toxic_episode_open = false;
+    uint64_t _toxic_episode_start_ms = 0;
+    double _toxic_episode_peak = 0.0;
+
     // 5A-2: 报价决策链 (GLFT 后的调整阶段; V10-R10 起 ToxicityPolicy 已删,
     //   毒性暂停由协调器 TOXICITY 相位承担)
     QuotePolicyChain _quote_chain;
