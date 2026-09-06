@@ -126,6 +126,15 @@ private:
 
 	inline void updateUndone(const char* stdCode, double qty);
 
+	// F-core(2026-09-04): 平仓可平量 预扣/归还 辅助 —— 下单即预扣, 桥接
+	// "报单→柜台首笔推送" 的缓存冻结窗口(该窗口内柜台冻结尚未反映到 PosItem,
+	// 同 burst 多档平仓拆分按旧快照 sizing 会并发超卖 → CTP-50/51 拒单风暴)。
+	// 语义与 onPushOrder 首推送扣减/撤单归还完全对齐:
+	//   平今→只动 newavail; 平昨→先 preavail、溢出动 newavail (预扣);
+	//   归还反向: preavail 加回到 prevol 封顶、溢出加 newavail。
+	static void deductCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty);
+	static void restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty);
+
 	const RiskParams* getRiskParams(const char* stdCode);
 
 public:

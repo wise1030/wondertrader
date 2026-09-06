@@ -2778,3 +2778,43 @@ OFI extreme 饱和通道（peak 钉 0.80=1.0×0.8），vpin 零贡献。step-2 �
 **验证计划**：回测 mocker 无仓位冻结建模（不拒单），该修复回测不可验证行为差，
 靠：①代码复核 ②生产部署后拒单计数 354→个位数为验收 ③日志确认无 sizing 负数/倒挂。
 **风险**：钳制后某腿 quote 全变 open → 持仓小幅偏积累（现有 skew/taker 链兜住，可接受）。
+
+#### F-core 实施记录（2026-09-04 深夜，框架层冻结感知 sizing，用户明示授权越界）
+
+**机制重述**：复核发现框架**已有**冻结记账（onPushOrder 首笔 OrderID 推送时扣
+avail、非首推送撤单归还、成交消耗冻结），唯一漏洞 = **报单→首笔推送窗口**
+（CTP RTT 0.3-1s+）。同 burst 多档平仓拆分在该窗口内按旧快照 sizing → 并发超卖
+→ 50/51 拒单（09-04 夜 354 次实锤，340/354 无撤单痕迹，修正 Q1"撤单竞速"归因）。
+
+**修改清单（WtUftCore/TraderAdapter.{h,cpp}，越界修改记录在案）**：
+1. 新增 static 辅助 `deductCloseAvail`/`restoreCloseAvail`（桶语义与既有首推送扣减/
+   撤单归还逐一对齐：平今→newavail；平昨→preavail 溢出 newavail；归还反向 preavail
+   封顶 prevol 溢出 newavail）
+2. **下单即预扣**：buy/sell 全部 10 处平仓拆分点（AT_CloseToday/AT_CloseYestoday/
+   AT_Close×(非CoverToday/CoverToday平昨段/平今段) × 买卖两侧），closeLong/closeShort
+   返回成功（localid != UINT_MAX）即 deduct
+3. **onPushOrder 首推送分支**：本通道单（usertag 匹配 _order_pattern）跳过扣减
+   （已预扣）；非本通道单保持原逻辑；首见即撤单终态的本通道单 → restore 归还
+   （接受推送丢失边缘）
+4. **onRspEntrust 拒单**：非开仓单 restore 归还（柜台从未冻结；放在 _undone_qty==0
+   重复通知早退之后 = 恢复对重复推送幂等只执行一次）
+5. buy/sell 的 `const PosItem&` → `PosItem&`
+
+**不变式**：本通道平仓单生命周期 = 预扣(下单) → 首推送跳过 → 撤单归还(非首推送分支)
+/ 拒单归还(onRspEntrust) / 成交消耗(冻结不变, vol 下降)；净效果与柜台冻结严格同构。
+
+**已知残余（记录在案）**：
+- PosItem 无锁双写者（策略线程预扣 + API 线程归还/查询覆写）——延续框架既有
+  lockless 风格，最坏瞬时漂移一手级，下次持仓查询自愈
+- 持仓查询覆写发生在 预扣后/首推送前 的微秒窗：查询快照未含该单冻结 → 首推送跳过
+  扣减 → 少计一手级冻结 → 至多一笔超额被拒（onRspEntrust 归还自愈）
+- 回测不可验证：mocker 不经 TraderAdapter、无仓位冻结建模 → 验收靠生产 A/B
+  （拒单计数 354→个位数）；TestUnits 未加用例（私有 static + TraderAdapter 实例化
+  需 API 重载，性价比低，函数语义=既有代码原位提取）
+
+**验证**：编译零 error；TestUnits 162/164（2 既有环境失败，零回归）；v5 冒烟 EXIT=0、
+episode 3015 条逐值一致、trades 300（mocker 噪声带 247-346 内，回测不经 TraderAdapter
+故零关联）
+
+**部署注意**：需同时替换远程 libWtUftCore.so（根目录）与 uft/libWtFutuCore.so，
+重启生效；验收=次日 CTP-50/51 计数（基线 354/夜）

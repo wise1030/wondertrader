@@ -474,6 +474,45 @@ uint32_t TraderAdapter::getInfos(const char* stdCode)
 	return statInfo->infos();
 }
 
+// F-core(2026-09-04): 平仓可平量预扣/归还 (语义与 onPushOrder 首推送扣减/撤单归逐一对齐)
+void TraderAdapter::deductCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty)
+{
+	double& newavail = isLong ? pItem.l_newavail : pItem.s_newavail;
+	double& preavail = isLong ? pItem.l_preavail : pItem.s_preavail;
+	if (isToday)
+	{
+		newavail -= min(newavail, qty);
+	}
+	else
+	{
+		double d = min(preavail, qty);
+		preavail -= d;
+		double left = qty - d;
+		if (left > 0)
+			newavail -= min(newavail, left);
+	}
+}
+
+void TraderAdapter::restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty)
+{
+	double& newavail = isLong ? pItem.l_newavail : pItem.s_newavail;
+	double& preavail = isLong ? pItem.l_preavail : pItem.s_preavail;
+	double  prevol   = isLong ? pItem.l_prevol   : pItem.s_prevol;
+	if (isToday)
+	{
+		newavail += qty;
+	}
+	else
+	{
+		preavail += qty;
+		if (preavail > prevol)
+		{
+			newavail += (preavail - prevol);
+			preavail = prevol;
+		}
+	}
+}
+
 OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int flag, bool bForceClose, WTSContractInfo* cInfo /* = NULL */)
 {
 	OrderIDs ret;
@@ -491,7 +530,7 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 
 	// WTSLogger::log_dyn("trader", _id.c_str(), LL_DEBUG, "[{}] Buying {} of quantity {}", _id.c_str(), stdCode, qty);
 
-	const PosItem& pItem = _positions[stdCode];
+	PosItem& pItem = _positions[stdCode];
 	WTSTradeStateInfo* statInfo = (WTSTradeStateInfo*)_stat_map->get(stdCode);
 	if (statInfo == NULL)
 	{
@@ -591,6 +630,10 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 					uint32_t localid = closeShort(stdCode, price, curQty, (commInfo->getCoverMode() == CM_CoverToday), flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
+					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+					if (localid != UINT_MAX)
+						deductCloseAvail(pItem, false, commInfo->getCoverMode() == CM_CoverToday, curQty);
+
 					leftQty -= curQty;
 
 					//if (leftQty == 0)
@@ -636,6 +679,10 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 					uint32_t localid = closeShort(stdCode, price, curQty, false, flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
+					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+					if (localid != UINT_MAX)
+						deductCloseAvail(pItem, false, false, curQty);
+
 					leftQty -= curQty;
 
 					//if (leftQty == 0)
@@ -676,6 +723,10 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 						uint32_t localid = closeShort(stdCode, price, curQty, false, flag);
 						ret.emplace_back(localid);
 
+						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+						if (localid != UINT_MAX)
+							deductCloseAvail(pItem, false, false, curQty);
+
 						leftQty -= curQty;
 
 						//if (leftQty == 0)
@@ -702,6 +753,10 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 						uint32_t localid = closeShort(stdCode, price, curQty, false, flag);
 						ret.emplace_back(localid);
 
+						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+						if (localid != UINT_MAX)
+							deductCloseAvail(pItem, false, false, curQty);
+
 						leftQty -= curQty;
 
 						//if (leftQty == 0)
@@ -726,6 +781,10 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 						double curQty = min(leftQty, unitQty);
 						uint32_t localid = closeShort(stdCode, price, curQty, true, flag);
 						ret.emplace_back(localid);
+
+						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+						if (localid != UINT_MAX)
+							deductCloseAvail(pItem, false, true, curQty);
 
 						leftQty -= curQty;
 
@@ -769,7 +828,7 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 	if (cInfo == NULL) cInfo = getContract(stdCode);
 	WTSCommodityInfo* commInfo = cInfo->getCommInfo();
 
-	const PosItem& pItem = _positions[stdCode];
+	PosItem& pItem = _positions[stdCode];
 	WTSTradeStateInfo* statInfo = (WTSTradeStateInfo*)_stat_map->get(stdCode);
 	if (statInfo == NULL)
 	{
@@ -868,6 +927,10 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 					uint32_t localid = closeLong(stdCode, price, curQty, (commInfo->getCoverMode() == CM_CoverToday), flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
+					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+					if (localid != UINT_MAX)
+						deductCloseAvail(pItem, true, commInfo->getCoverMode() == CM_CoverToday, curQty);
+
 					leftQty -= curQty;
 
 					if (decimal::eq(leftQty, 0))
@@ -911,6 +974,10 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 					uint32_t localid = closeLong(stdCode, price, curQty, false, flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
+					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+					if (localid != UINT_MAX)
+						deductCloseAvail(pItem, true, false, curQty);
+
 					leftQty -= curQty;
 
 					if (decimal::eq(leftQty, 0))
@@ -947,6 +1014,10 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 						uint32_t localid = closeLong(stdCode, price, curQty, false, flag);
 						ret.emplace_back(localid);
 
+						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+						if (localid != UINT_MAX)
+							deductCloseAvail(pItem, true, false, curQty);
+
 						leftQty -= curQty;
 
 						if (decimal::eq(leftQty, 0))
@@ -974,6 +1045,10 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 							uint32_t localid = closeLong(stdCode, price, curQty, false, flag);
 							ret.emplace_back(localid);
 
+							// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+							if (localid != UINT_MAX)
+								deductCloseAvail(pItem, true, false, curQty);
+
 							leftQty -= curQty;
 
 							if (decimal::eq(leftQty, 0))
@@ -1000,6 +1075,10 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 							double curQty = min(leftQty, unitQty);
 							uint32_t localid = closeLong(stdCode, price, curQty, true, flag);
 							ret.emplace_back(localid);
+
+							// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
+							if (localid != UINT_MAX)
+								deductCloseAvail(pItem, true, true, curQty);
 
 							leftQty -= curQty;
 
@@ -1323,6 +1402,15 @@ void TraderAdapter::onRspEntrust(WTSEntrust* entrust, WTSError *err)
 			return;
 
 		updateUndone(stdCode.c_str(), -qty);
+
+		// F-core: 报单被拒(柜台从未冻结) -> 归还下单时的预扣可平量
+		//   (放在重复通知早退之后: 同一拒单的重复推送会被 oldQty==0 拦截, 恢复只执行一次)
+		if (!isOpen)
+		{
+			PosItem& pItem = _positions[stdCode];
+			restoreCloseAvail(pItem, isLong, isToday, qty);
+			printPosition(stdCode.c_str(), pItem);
+		}
 
 
 		if (strlen(entrust->getUserTag()) > 0)
@@ -1735,45 +1823,21 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 				double qty = orderInfo->getVolume();
 
 				PosItem& pItem = _positions[stdCode];
-				if (isLong)	//平多
+				// F-core: 本通道报出的平仓单(usertag 带本通道标识)已在下单时预扣,
+				//   首笔推送跳过扣减, 防止重复扣冻结;
+				//   非本通道单(盘前遗留/柜台侧他源)保持原扣减逻辑
+				bool ownOrder = StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true);
+				if (!ownOrder)
 				{
-					if (isToday)
-					{
-						pItem.l_newavail -= min(pItem.l_newavail, qty);	//如果是平今, 则只需要更新可平今仓
-					}
-					else
-					{
-						double left = qty;
-
-						//如果是平仓, 则先更新可平昨仓, 还有剩余, 再更新可平今仓
-						//如果品种区分平昨平今, 也按照这个流程, 因为平昨的总数量不可能超出昨仓
-						double maxQty = min(pItem.l_preavail, qty);
-						pItem.l_preavail -= maxQty;
-						left -= maxQty;
-
-						if (left > 0)
-							pItem.l_newavail -= min(pItem.l_newavail, left);
-					}
+					deductCloseAvail(pItem, isLong, isToday, qty);
+					printPosition(stdCode.c_str(), pItem);
 				}
-				else //平空
+				else if (orderInfo->getOrderState() == WOS_Canceled)
 				{
-					if (isToday)
-					{
-						pItem.s_newavail -= min(pItem.s_newavail, qty);
-					}
-					else
-					{
-						double left = qty;
-
-						double maxQty = min(pItem.s_preavail, qty);
-						pItem.s_preavail -= maxQty;
-						left -= maxQty;
-
-						if (left > 0)
-							pItem.s_newavail -= min(pItem.s_newavail, left);
-					}
+					// 接受推送丢失、首见即撤单终态: 下单预扣需归还(柜台确曾冻结后释放)
+					restoreCloseAvail(pItem, isLong, isToday, qty - orderInfo->getVolTraded());
+					printPosition(stdCode.c_str(), pItem);
 				}
-				printPosition(stdCode.c_str(), pItem);
 			}
 		}
 		else if (orderInfo->getOrderState() == WOS_Canceled && orderInfo->getOffsetType() != WOT_OPEN)
