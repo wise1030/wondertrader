@@ -2818,3 +2818,16 @@ episode 3015 条逐值一致、trades 300（mocker 噪声带 247-346 内，回�
 
 **部署注意**：需同时替换远程 libWtUftCore.so（根目录）与 uft/libWtFutuCore.so，
 重启生效；验收=次日 CTP-50/51 计数（基线 354/夜）
+
+#### F-core 部署记录（2026-09-06 周日 17:25，周末窗口，磁盘已替换/待重启激活）
+
+- 部署物：Release 双库——libWtUftCore.so sha256=788f9737...（F-core）+
+  uft/libWtFutuCore.so sha256=4f0d9cf7...（R10+R11，与周五运行版同源重编译）
+- 远程备份：libWtUftCore.so.bak_20260906_fcore / uft/libWtFutuCore.so.bak_20260906_fcore；
+  `.so.new` → `mv -f` 原子替换（双侧 sha256 一致 ✓）
+- **激活时点：周一 08:40 cron 重启**。周日惯例不重启运行中进程（周五 20:40 起
+  PID 4094567 内存映射旧 inode 空转，一致无混配）；曾尝试手动重启未生效（ssh 复合
+  命令问题），顺势回退到 cron 路径——磁盘新库不生效至重启，零风险敞口
+- **周一验收清单**：① 日盘 CTP-50/51 拒单计数（基线 354/夜 → 预期个位数）
+  ② Config validation 0 err ③ 报价/成交正常 ④ 平仓侧报价缺口消失→双边覆盖率回升
+  ⑤ order error 计数不再持续爬升
