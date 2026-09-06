@@ -2831,3 +2831,48 @@ episode 3015 条逐值一致、trades 300（mocker 噪声带 247-346 内，回�
 - **周一验收清单**：① 日盘 CTP-50/51 拒单计数（基线 354/夜 → 预期个位数）
   ② Config validation 0 err ③ 报价/成交正常 ④ 平仓侧报价缺口消失→双边覆盖率回升
   ⑤ order error 计数不再持续爬升
+
+## 当前方案（2026-09-06，V10-R13 arb 风控探针+信号链修复 C1/C2/C3/C5，待用户确认）
+
+**背景**：09-04 生产实证——`Arb in_flight timeout cleanup` ×6（arb 开仓单以
+last-price GFD 挂出反复未成交=C6 实证）；`[ARB_RISK] POSITION_LIMIT val=8>thr=3`
+（周四夜 00:45 起）——maxSinglePair=3 形同虚设。审计确认 4 个必修项：
+
+### 修改清单
+
+1. **C1+C2 方向感知仓位闸门**（SpreadArbitrageManager.cpp::generateSignal +
+   SpreadRiskManager）：
+   - 删除信号生成前的盲目前置探针（:212 `canOpenPosition(pair_id, 1.0)` 块——
+     探针量恒 1 且恒按正向试探, 空头侧 pos=-3 时 -3+1=-2 恰好放行 → 一批打到 -8；
+     且对 STOP_LOSS/TIMEOUT 一并误杀="越超限越不许止损"）
+   - 改为在 B-3 门之后、冷却武装之前插入：**仅 OPEN_*_SPREAD 信号**接受检查,
+     按 B-3 调整后实际下单量（leg1_qty>0 ? leg1_qty : suggested_size）带符号投影
+     （OPEN_LONG=+/OPEN_SHORT=-）调 `checkPositionLimits(pair_id, signed_qty)`
+     ——其实现 `new_pos=pos+size` 天然支持负数，RiskManager 零改动；
+     CLOSE/STOP_LOSS/TIMEOUT_EXIT/REBALANCE 不受仓位上限门控（减险永不阻塞）
+   - 闸门取用与 :212 相同的 `_pair_states_spin` 临界区（RiskManager 状态写入
+     updatePairState 也在该锁下）；调用点仍在 arb 线程（executor 5ms 循环），
+     无线程模型变化
+   - 若 canOpenPosition 因此零调用 → 删除（防死接口）
+2. **C3 MR 加仓覆盖 TIMEOUT**（MeanReversionStrategy.cpp:91-105）：加仓 if/else-if
+   块包进外层 `else`——只在 STOP_LOSS/TIMEOUT_EXIT/CLOSE_* 均未命中时才评估加仓,
+   TIMEOUT 不再被静默覆盖成 OPEN
+3. **C5 策略名映射**（SpreadArbitrageManagerInit.cpp:86-94）：补 `"statistical_arb"`
+   识别（现静默回落 mean_reversion 无告警）；未知策略名 warn+显式回落
+4. **测试**（test_v10_r13_arb_gate.cpp）：
+   - 方向感知：pos=-3 + OPEN_SHORT(qty=5) → NONE；pos=-3 + OPEN_LONG → 放行
+   - 减险豁免：pos=-8（已超限）+ STOP_LOSS → 信号存活
+   - C3：持仓+z 落入加仓区+超时 → 保持 TIMEOUT_EXIT（不被覆盖）
+   - C5："statistical_arb"→STATISTICAL_ARB；"garbage"→warn+MEAN_REVERSION
+
+### 明确不做（本轮）
+- B-3 目标仓位口径统一（max_spread_position vs maxSinglePair，涉及套利目标仓位
+  语义裁决）→ 留 arb_close 灰度专项
+- C4 EWMA 窗口语义（α=0.005 硬编码 vs windowSize 安慰剂）、C6 last-price GFD 定价
+  （6 次超时实证）、C7 leg2 队列裸发、止损豁免 30s 冷却 → 同留灰度专项
+- max_single_leg 死键接线 → 同上
+
+### 验证
+TestUnits 全量（基线 162/164）+ 新增 4 用例；v5 冒烟（arb_close 出厂 disabled，
+预期零行为变化）。部署随 arb_close 灰度专项同批（本轮不单独部署——
+C1/C2 的行为变化只在 arb 开仓边界触发，生产 pair 已在限上, 上线即生效）
