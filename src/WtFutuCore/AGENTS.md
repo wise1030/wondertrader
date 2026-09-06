@@ -2876,3 +2876,21 @@ last-price GFD 挂出反复未成交=C6 实证）；`[ARB_RISK] POSITION_LIMIT v
 TestUnits 全量（基线 162/164）+ 新增 4 用例；v5 冒烟（arb_close 出厂 disabled，
 预期零行为变化）。部署随 arb_close 灰度专项同批（本轮不单独部署——
 C1/C2 的行为变化只在 arb 开仓边界触发，生产 pair 已在限上, 上线即生效）
+
+#### R13 方案复核修正（2026-09-06②，对抗性复核后 2 处勘误，其余成立）
+
+1. **闸门量纲修正**：投影量改用 `signal.suggested_size`（B-3 开仓分支原样写入
+   order_qty = 价差手数，与 spread_position 同量纲）；原方案的 leg1_qty 是
+   腿手数（×leg1_ratio），ratio≠1 时与风控分母错位
+2. **勘误+清理**：canOpenPosition = checkPositionLimits 纯包装（:131-134），
+   唯一调用点 :212 删除后即死接口 → 连同声明删除；Manager.h:238-239
+   "canOpenPosition 由 applyB3Gate 内部调用"为陈旧注释，一并勘误
+3. **复核确认项**：REBALANCE 全仓无发出者（豁免清单无洞）；STOP_LOSS 豁免的
+   实际生效以前置依赖 arb_close.is_allowed 放行为条件（当前全 false 抑制于
+   B-3 close 门，属既有灰度裁决，非本轮范围）——豁免是启用后的结构前置
+4. **测试设计落地**：映射逻辑提取为 SpreadArbitrageTypes.h 纯函数
+   `strategyFromString(str, ArbitrageStrategy& out)`（loadConfig 消费）；
+   闸门符号映射提取 `SpreadArbitrageManager::signedOpenQty(type, qty)` 静态纯函数
+   （OPEN_LONG=+qty / OPEN_SHORT=-qty / 其余=0 不受门控）——两者直接可测；
+   T3 用 SpreadState{spread_position=-2, zscore=2.0, position_open_time=now-3601s}
+   断言 TIMEOUT_EXIT 存活（convergence_timeout 默认 3600s）
