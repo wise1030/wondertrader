@@ -113,7 +113,10 @@ coordinator:
       # vpin=桶归一 imbalance 均值, combined=vpinWeight×vpin+(1-vpinWeight)×alpha。
       # 典型市场 combined ~0.4-0.5 (OFI 归一器设计映射典型值到 tanh 0.5-0.8),
       # 阈值须显著高于常态 (旧值 0.25 是 ofi 通道恒 0 时代标定, 不可比)
-      adverseThreshold: 0.75       # 综合毒性触发阈值 (R2 回测标定: 0.65->2.8k 事件/0.75->2.8k, 敏感度低; 详见 AGENTS.md R2)
+      adverseThreshold: 0.80       # 综合毒性触发阈值 (V10-R12b: 2026-09-06 暂取前日(09-04)实测 p99=0.80
+                                   #   防大量触发/保覆盖率, 用户指令; 饱和簇=extreme上限0.80 不触发
+                                   #   → score 通道实际关闭, vpin 通道 0.60>前日p99 0.451 亦不触发;
+                                   #   step-2 观测数据(debug 分数行)不受影响继续积累. 历史: R2 标定 0.75)
       vpinThreshold: 0.60          # VPIN 单独触发阈值 (V8-T4: 恢复独立 OR 条件)
       vpinWeight: 0.5              # V8-T6: combined 中 VPIN 通道权重 (alpha 通道=1-w)
       window: 20                   # VPIN 桶数窗口
