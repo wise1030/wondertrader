@@ -128,11 +128,6 @@ SpreadRiskMetrics SpreadRiskManager::calculatePairRisk(const std::string& pair_i
     return risk;
 }
 
-bool SpreadRiskManager::canOpenPosition(const std::string& pair_id, double size) const
-{
-    return checkPositionLimits(pair_id, size);
-}
-
 std::vector<RiskAlert> SpreadRiskManager::generateAlerts() const
 {
     return _active_alerts;
@@ -209,6 +204,9 @@ void SpreadRiskManager::updateAlerts()
 
 bool SpreadRiskManager::checkPositionLimits(const std::string& pair_id, double size) const
 {
+    // V10-R13(C1): size 为带符号投影量 (多头方向+/空头方向-), 调用方
+    // (Manager::generateSignal 开仓闸门) 按 B-3 调整后实际下单量传入;
+    // 平仓/止损/超时等减险信号不调用本检查 (永不阻塞)
     double new_pos = getCurrentPosition(pair_id) + size;
 
     // Check single pair limit

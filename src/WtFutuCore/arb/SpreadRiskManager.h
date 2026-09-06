@@ -166,7 +166,10 @@ public:
     //==========================================================================
 
     /// Check if new position is allowed
-    bool canOpenPosition(const std::string& pair_id, double size) const;
+    /// V10-R13(C1/C2): canOpenPosition 包装接口已删 (唯一调用点 Manager::generateSignal
+    /// 前置盲探针移除), 直接使用 checkPositionLimits(pair_id, signed_size) —— size 支持
+    /// 负数 (空头方向投影); 提升为 public (Manager 开仓闸门直接调用)
+    bool checkPositionLimits(const std::string& pair_id, double size) const;
 
     /// Check for correlation breakdown
 
@@ -201,7 +204,6 @@ private:
     //==========================================================================
 
     void updateAlerts();
-    bool checkPositionLimits(const std::string& pair_id, double size) const;
 
     //==========================================================================
     // Configuration

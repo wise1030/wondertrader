@@ -88,20 +88,25 @@ SpreadSignal MeanReversionStrategy::generateSignal(const SpreadState& state, uin
         // 安全间距：加仓上限 = stop_loss_z * add_safety_ratio
         // 例: stop_loss_z=4.0, add_safety_ratio=0.75 → 加仓区间为 [-3.0, -1.0]
         // 止损区间为 [-inf, -4.0]，两者之间有1.0的安全间距
-        double add_safety_limit = _config.stop_loss_z * _config.add_safety_ratio;
+        // V10-R13(C3): 包进 else —— 此前不在 else-if 链内, TIMEOUT_EXIT/CLOSE 命中后
+        // 仍会被下方加仓 if 覆盖 (超时退出静默变加仓)
+        else
+        {
+            double add_safety_limit = _config.stop_loss_z * _config.add_safety_ratio;
 
-        if (state.spread_position > 0 && state.zscore < -_config.entry_z_threshold * 0.5 &&
-            state.zscore > -add_safety_limit) {
-            signal.type = SpreadSignalType::OPEN_LONG_SPREAD;
-            signal.confidence = calculateConfidence(state.zscore) * 0.7;
-            signal.suggested_size = calculatePositionSize(state.zscore) * 0.5;
-            signal.reason = "Strong reversion, adding to position (safe zone)";
-        } else if (state.spread_position < 0 && state.zscore > _config.entry_z_threshold * 0.5 &&
-                   state.zscore < add_safety_limit) {
-            signal.type = SpreadSignalType::OPEN_SHORT_SPREAD;
-            signal.confidence = calculateConfidence(state.zscore) * 0.7;
-            signal.suggested_size = calculatePositionSize(state.zscore) * 0.5;
-            signal.reason = "Strong reversion, adding to position (safe zone)";
+            if (state.spread_position > 0 && state.zscore < -_config.entry_z_threshold * 0.5 &&
+                state.zscore > -add_safety_limit) {
+                signal.type = SpreadSignalType::OPEN_LONG_SPREAD;
+                signal.confidence = calculateConfidence(state.zscore) * 0.7;
+                signal.suggested_size = calculatePositionSize(state.zscore) * 0.5;
+                signal.reason = "Strong reversion, adding to position (safe zone)";
+            } else if (state.spread_position < 0 && state.zscore > _config.entry_z_threshold * 0.5 &&
+                       state.zscore < add_safety_limit) {
+                signal.type = SpreadSignalType::OPEN_SHORT_SPREAD;
+                signal.confidence = calculateConfidence(state.zscore) * 0.7;
+                signal.suggested_size = calculatePositionSize(state.zscore) * 0.5;
+                signal.reason = "Strong reversion, adding to position (safe zone)";
+            }
         }
     }
 

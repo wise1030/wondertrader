@@ -236,7 +236,21 @@ public:
     //==========================================================================
     // Risk Management
     // (V8-R3: getRiskSummary/getActiveAlerts/canOpenPosition 转发死接口已删;
-    //  SpreadRiskManager::canOpenPosition 由 applyB3Gate 内部调用)
+    //  V10-R13(C1/C2): SpreadRiskManager::canOpenPosition 包装接口已随前置盲探针
+    //  移除而删除, 开仓闸门改走 checkPositionLimits(pair_id, signedOpenQty(...)))
+
+    /// V10-R13(C1/C2): 开仓类信号 → 带符号下单量 (纯函数, 可测)。
+    /// OPEN_LONG_SPREAD=+qty / OPEN_SHORT_SPREAD=-qty (空头方向投影);
+    /// 其余类型 (CLOSE/STOP_LOSS/TIMEOUT/REBALANCE/None 等) 返回 0 = 减险或无效,
+    /// 不受仓位上限门控 —— "越超限越不许止损" 的反模式根除。
+    static double signedOpenQty(SpreadSignalType type, double qty)
+    {
+        if (type == SpreadSignalType::OPEN_LONG_SPREAD)
+            return qty;
+        if (type == SpreadSignalType::OPEN_SHORT_SPREAD)
+            return -qty;
+        return 0.0;
+    }
 
     //==========================================================================
     // Callbacks

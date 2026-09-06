@@ -2894,3 +2894,26 @@ C1/C2 的行为变化只在 arb 开仓边界触发，生产 pair 已在限上, �
    （OPEN_LONG=+qty / OPEN_SHORT=-qty / 其余=0 不受门控）——两者直接可测；
    T3 用 SpreadState{spread_position=-2, zscore=2.0, position_open_time=now-3601s}
    断言 TIMEOUT_EXIT 存活（convergence_timeout 默认 3600s）
+
+#### R13 实施记录（2026-09-06，已完成，验证通过）
+
+1. **C1+C2**：前置盲探针 `canOpenPosition(pair_id, 1.0)` 删除（含死包装接口
+   SpreadRiskManager::canOpenPosition 本体+声明、Manager.h 陈旧注释勘误；
+   checkPositionLimits 提升 public 并注释带符号语义）；generateSignal 在 B-3 门后
+   插入方向感知开仓闸门——`signedOpenQty(type, suggested_size)`（静态纯函数）非零
+   时在 _pair_states_spin 临界区内调 checkPositionLimits 投影，不过→NONE+debug 日志；
+   仅 OPEN_*_SPREAD 受门，减险信号恒 0 不受门控
+2. **C3**：MR 加仓块包进外层 else（STOP_LOSS/TIMEOUT/CLOSE 优先，不再被覆盖）
+3. **C5**：映射收编 SpreadArbitrageTypes.h::strategyFromString（补 statistical_arb
+   识别）；未知值 warn + 显式回落 MEAN_REVERSION（ManagerInit 消费）
+4. **测试**：test_v10_r13_arb_gate.cpp 4 用例——带符号投影（pos=-3: -5拒/+1放/
+   -0.5拒；pos=+2 对称）/信号类型映射（减险恒0）/MR 超时不被加仓覆盖
+   （is_active=true, z=2.0 加仓区, duration 3.601e9>3600 → TIMEOUT_EXIT）/策略名映射。
+   勘误：首版漏设 state.is_active（min_samples 预热门 NONE），已修
+
+**验证**：编译零 error；TestUnits 全量 **166/168**（基线 162/164 + 4 新增，仅 2 个
+既有环境性失败，零回归）；v5 冒烟 EXIT=0、trades 284（噪声带）、episode 3015 逐值
+一致、arb 路径零触发（出厂 disabled——R13 行为面在 arb 开仓边界，回测不经过）
+
+**部署**：不单独部署——随 F-core（已磁盘替换待周一 08:40 cron 激活）下批 Release
+同车；R13 生效面=arb 开仓闸门（生产 pair 当前在限上，上线即约束生效）

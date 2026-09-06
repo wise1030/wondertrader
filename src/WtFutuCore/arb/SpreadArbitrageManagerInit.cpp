@@ -82,15 +82,17 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
     _config.enhance_market_making = readBool(arb, "enhanceMarketMaking", true);
 
     // Read strategy selection
+    // V10-R13(C5): 映射收编到 SpreadArbitrageTypes.h::strategyFromString (纯函数可测);
+    //   补 "statistical_arb" 识别 (此前只认 "statistical", 按注释配置会静默回落);
+    //   未知值 warn + 显式回落 mean_reversion
     std::string strategy_str = readString(arb, "primaryStrategy", "mean_reversion");
-    if (strategy_str == "mean_reversion") {
+    ArbitrageStrategy parsed = ArbitrageStrategy::MEAN_REVERSION;
+    if (strategyFromString(strategy_str, parsed)) {
+        _config.primary_strategy = parsed;
+    } else {
+        WTSLogger::warn("SpreadArbitrageManager: unknown primaryStrategy '{}', fallback to mean_reversion",
+                        strategy_str);
         _config.primary_strategy = ArbitrageStrategy::MEAN_REVERSION;
-    } else if (strategy_str == "statistical") {
-        _config.primary_strategy = ArbitrageStrategy::STATISTICAL_ARB;
-    } else if (strategy_str == "pairs_trading") {
-        _config.primary_strategy = ArbitrageStrategy::PAIRS_TRADING;
-    } else if (strategy_str == "trend_following") {
-        _config.primary_strategy = ArbitrageStrategy::TREND_FOLLOWING;
     }
 
     // Read portfolio settings

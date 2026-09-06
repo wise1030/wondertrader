@@ -49,6 +49,18 @@ enum class ArbitrageStrategy : uint8_t
 };
 
 /// 枚举 → 注册表名称映射 (与 yaml primaryStrategy 字符串一致)
+
+/// V10-R13(C5): yaml primaryStrategy 字符串 → 枚举 (纯函数, 可测)
+/// 识别 "mean_reversion"/"statistical"/"statistical_arb"/"pairs_trading"/"trend_following";
+/// 未知值返回 false (调用方 warn 后回落 MEAN_REVERSION)
+inline bool strategyFromString(const std::string& s, ArbitrageStrategy& out)
+{
+    if (s == "mean_reversion") { out = ArbitrageStrategy::MEAN_REVERSION; return true; }
+    if (s == "statistical" || s == "statistical_arb") { out = ArbitrageStrategy::STATISTICAL_ARB; return true; }
+    if (s == "pairs_trading") { out = ArbitrageStrategy::PAIRS_TRADING; return true; }
+    if (s == "trend_following") { out = ArbitrageStrategy::TREND_FOLLOWING; return true; }
+    return false;
+}
 inline const std::string& strategyTypeName(ArbitrageStrategy t)
 {
     static const std::string names[] = {

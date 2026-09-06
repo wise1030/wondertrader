@@ -194,7 +194,6 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     // 末尾写 last_signal 仍单独加锁 (在耗时策略执行之后, 不延长持锁窗口).
     uint64_t last_time = 0;
     SpreadState state;
-    bool can_open;
     {
         SpinLockGuard lock(_pair_states_spin);
         auto time_it = _last_signal_time.find(pair_id);
@@ -207,13 +206,6 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         if (state_it == _pair_states.end())
             return signal;
         state = state_it->second; // Copy for thread safety
-
-        // _risk_manager 由 updatePairState 在 _pair_states_spin 下写入, 读取也需同一锁.
-        can_open = _risk_manager->canOpenPosition(pair_id, 1.0);
-    }
-    if (!can_open) {
-        signal.type = SpreadSignalType::NONE;
-        return signal;
     }
 
     // Generate signal from strategy
@@ -277,6 +269,32 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
     //==========================================================================
     if (_portfolio_ptr != nullptr && signal.type != SpreadSignalType::NONE) {
         signal = applyB3Gate(pair_id, signal, current_time);
+    }
+
+    //==========================================================================
+    // V10-R13(C1/C2): 方向感知开仓闸门 (替代删除的前置盲探针 canOpenPosition(pair,1.0))
+    //   - 仅 OPEN_*_SPREAD 受仓位上限门控; CLOSE/STOP_LOSS/TIMEOUT 等减险信号永不阻塞
+    //     (旧探针在超限时一并误杀止损 = "越超限越不许止损")
+    //   - 投影量 = suggested_size (B-3 开仓分支原样写入 order_qty, 价差手数口径,
+    //     与 spread_position 同量纲; leg1_qty 是腿手数 ×ratio, 量纲不符不可用)
+    //   - 带符号: OPEN_LONG=+ / OPEN_SHORT=- (旧探针恒 +1, 空头侧 -3+1=-2 恰好放行,
+    //     一批可打到 -8 —— 09-04 生产 POSITION_LIMIT val=8>3 的穿透根因)
+    //==========================================================================
+    if (signal.type != SpreadSignalType::NONE && _risk_manager) {
+        double sq = signedOpenQty(signal.type, signal.suggested_size);
+        if (sq != 0.0) {
+            bool pass;
+            {
+                // RiskManager 状态由 updatePairState 在 _pair_states_spin 下写入, 读取同锁
+                SpinLockGuard lock(_pair_states_spin);
+                pass = _risk_manager->checkPositionLimits(pair_id, sq);
+            }
+            if (!pass) {
+                WTSLogger::debug("SpreadArbMgr[{}] open blocked by position gate: type={} qty={:.2f}",
+                                pair_id, (int)signal.type, sq);
+                signal.type = SpreadSignalType::NONE;
+            }
+        }
     }
 
     // Store last signal time/signal under spinlock
