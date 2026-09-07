@@ -46,8 +46,6 @@ void FutuHotParamManager::registerParams(wtp::IUftStraCtx* ctx,
         {"confidence_weight_min", glft_defaults.confidence_weight_min, nullptr},
         {"confidence_weight_max", glft_defaults.confidence_weight_max, nullptr},
         {"phi", glft_defaults.phi, nullptr},
-        {"delta_skew_threshold", glft_defaults.delta_skew_threshold, nullptr},
-        {"delta_skew_factor", glft_defaults.delta_skew_factor, nullptr},
         {"max_spread_mult", glft_defaults.max_spread_mult, nullptr},
         {"min_spread_mult", glft_defaults.min_spread_mult, nullptr},
         {"depth_sensitivity", glft_defaults.depth_sensitivity, nullptr},
@@ -85,8 +83,6 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
         p.confidence_weight_min = hotVal(HP_CONFIDENCE_WEIGHT_MIN);
         p.confidence_weight_max = hotVal(HP_CONFIDENCE_WEIGHT_MAX);
         p.phi = hotVal(HP_PHI);
-        p.delta_skew_threshold = hotVal(HP_DELTA_SKEW_THRESHOLD);
-        p.delta_skew_factor = hotVal(HP_DELTA_SKEW_FACTOR);
         p.max_spread_mult = hotVal(HP_MAX_SPREAD_MULT);
         p.min_spread_mult = hotVal(HP_MIN_SPREAD_MULT);
         p.depth_sensitivity = hotVal(HP_DEPTH_SENSITIVITY);
@@ -274,8 +270,6 @@ bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<st
         /* confidence_weight_min */ {0.0, 1.0},
         /* confidence_weight_max */ {0.0, 1.0},
         /* phi */ {0.01, 2.0},                  // validator checkRange [0.01,2] (原上界 1.0 过紧)
-        /* delta_skew_threshold */ {0.0, 0.9},  // validator checkRange [0,0.9]
-        /* delta_skew_factor */ {0.0, 100.0},
         /* max_spread_mult */ {0.0, 100.0},
         /* min_spread_mult */ {0.0, 100.0},
         /* depth_sensitivity */ {0.0, 1000.0},

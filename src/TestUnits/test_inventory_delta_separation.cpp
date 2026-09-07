@@ -111,8 +111,10 @@ GLFTParams makeSkewParams()
     GLFTParams p;
     p.base_spread = 2.0; // half_spread = 1.0 tick
     p.tick_size = 0.2;
-    p.delta_skew_power = 1.5;
-    p.inventory_skew_gain = 1.0;
+    // R14: tick 量化 skew (driver=Σw·sign(r)|r|^γ → k=round(k_max×driver)+滞环)
+    p.delta_skew_power = 1.0;    // γ=1 线性
+    p.skew_tick_max = 4.0;       // k_max
+    p.skew_hysteresis = 0.05;
     p.skew_cross_max_ticks = 3.0;
     p.portfolio_skew_weight = 0.0; // 纯 contract 维度
     p.contract_skew_weight = 1.0;
@@ -135,7 +137,7 @@ PortfolioContext makePCtx(double signed_util)
 
 } // namespace
 
-// 单路径 skew: util 驱动 inventory_skew, 方向 = 减仓侧贴 mid
+// 单路径 skew: util 驱动 inventory_skew, 方向 = 减仓侧贴 mid (R14: 整档量化)
 TEST(InventoryDeltaSeparation, SkewDrivenByDeltaUtil)
 {
     SpreadOptimizer opt("SHFE.ag2610");
@@ -144,8 +146,8 @@ TEST(InventoryDeltaSeparation, SkewDrivenByDeltaUtil)
 
     auto ctx = makePCtx(0.5); // 多头 50% → skew 应为负 (压 ask 向 mid)
     auto res = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    double expect = -std::pow(0.5, 1.5); // -0.3536 ticks
-    EXPECT_NEAR(res.inventory_skew, expect, 1e-6);
+    // R14: driver=0.5 → raw=2.0t → k=2, 未授权穿越 → cap=floor(half)=1 → -1.0 tick
+    EXPECT_NEAR(res.inventory_skew, -1.0, 1e-6);
     EXPECT_LT(res.inventory_skew, 0.0); // 多头 → 负 skew (减仓侧=ask 压向 mid)
     // 注: 不断言 ask_price — tick 取整会掩盖亚 tick 级 skew, inventory_skew 是取整前真值
 }
@@ -163,8 +165,8 @@ TEST(InventoryDeltaSeparation, ContractDeltaParamNoLongerDrivesSkew)
     EXPECT_NEAR(res.inventory_skew, 0.0, 1e-9);
 }
 
-// util≥1.0 授权穿越: inventory_skew 可超 half_spread(=1.0 tick);
-// util<1.0 时截断在 half_spread 内
+// R14: util≥1.0 授权穿越 → k 上限 k_max=4 (减仓侧=mid−3t 可成交);
+// util<1.0 时截断在 floor(half_spread)=1 tick 内 (至多贴 mid)
 TEST(InventoryDeltaSeparation, CrossAuthorizationBeyondHalfSpread)
 {
     SpreadOptimizer opt("SHFE.ag2610");
@@ -173,13 +175,13 @@ TEST(InventoryDeltaSeparation, CrossAuthorizationBeyondHalfSpread)
 
     auto below = makePCtx(0.9);
     auto res_below = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &below);
-    double expect_below = -std::pow(0.9, 1.5); // ≈-0.8538, 未穿越
-    EXPECT_NEAR(res_below.inventory_skew, expect_below, 1e-6);
-    EXPECT_GT(res_below.inventory_skew, -1.0);
+    // R14: driver=0.9 → raw=3.6t → k=4, 未授权 → cap=1 → -1.0
+    EXPECT_NEAR(res_below.inventory_skew, -1.0, 1e-6);
+    EXPECT_GT(res_below.inventory_skew, -1.0 - 1e-9);
 
     auto above = makePCtx(1.2);
     auto res_above = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &above);
-    double expect_above = -std::pow(1.2, 1.5); // ≈-1.3145, 穿越 half_spread
-    EXPECT_NEAR(res_above.inventory_skew, expect_above, 1e-6);
+    // R14: 授权穿越 → k=4 (=half+cross_max=1+3, 与旧扩展上限一致)
+    EXPECT_NEAR(res_above.inventory_skew, -4.0, 1e-6);
     EXPECT_LT(res_above.inventory_skew, -1.0);
 }

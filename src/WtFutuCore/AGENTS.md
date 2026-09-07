@@ -2951,3 +2951,93 @@ C1/C2 的行为变化只在 arb 开仓边界触发，生产 pair 已在限上, �
 - **回退**：cp config.yaml.bak_20260907_sticky config.yaml + 重启
 - **遗留**：实盘 CTP RTT 基线未测（SimNow 失真，勿过度调参）；换单重叠化（先挂后撤）
   涉及双份敞口风险，B+ 纪律当初为防它而设，不轻动
+
+#### V10-R14 skew 机制重构方案（2026-09-07 夜盘立案，待确认，未动代码）
+
+**立案证据（09-07 夜盘）**：下跌市（2743→2727，-16t/12min）中 delta 0→30 一小时撞限；
+util=1.0 撞限时刻总 skew 仅 -0.67t（ask=mid+0.33t 未穿越），7 分钟只减 1 手；
+root causes: ①sub-tick skew 是死区间（盘口对偏移的感知按 tick 离散，0.3t 改动不改变成交概率）
+②单条平滑幂函数（util^1.5×gain）被迫服务三个物理不同的阶段
+③组合+合约双驱动权重混合引入 realized util 平滑滞后（撞限时合约腿还在用 ~0.47）
+④义务层 qty=10 不衰减 × sticky 2.0 在场率 84% → 加仓侧弹药不减反增
+
+**方案核心：锚定 tick 的整档 skew（量化的库存温控阀）**
+
+1. **驱动量统一**：r = max(组合 delta util, 合约 delta util)，单一标量，
+   无权重混合、无 realized 平滑滞后（删除 portfolio/contract 双分量与两权重）
+2. **输出量化**：k = round(k_max × r^γ) 个 tick（整档）
+   - 圆整本身即阈值：r < ~0.35 时 k=0（无 sub-tick 死偏移，保住双边覆盖率与义务合规）
+   - 建议 k_max=4, γ=2.0：r=0.5→k=1（温和抑制）；r=0.75→k=2（减仓侧到 touch）；
+     r=0.9→k=3；r=1.0→k=4 → ask=mid+half−4 = **mid−3t 可成交**（撞限即主动平仓）
+   - 施加方式不变：中心平移（reservation price），与 alpha 叠加架构不动
+     （QuotePolicyChain.h:303 l0=mid∓half+skew×tick，整梯随移）
+   - 义务合规自动满足：价差恒 2t ≤ 义务带宽 10t，不自交；qty 不变 ≥10
+3. **滞环防抖**：k 变化需 r 越过档位阈值 ±h（h=0.05），防边界振荡引起的换单风暴
+4. **qty 衰减保留为辅助**：qtyDecayFactor 0.7→1.0（加仓侧 util 0.9 时挂量 5.3→4.1 手）
+5. **参数账**：新增 k_max/γ/h 三个；删除 delta_skew_threshold/factor/power/
+   inventory_skew_gain/portfolio_skew_weight/contract_skew_weight 六个 → **净 -3**
+6. **今夜场景回放对照**（r=1.0 撞限档）：现状 ask=mid+0.33t（无人买→不减仓）；
+   新逻辑 ask=mid−3t（吃掉三个档位卖压=主动减仓），预期撞限后分钟级收敛
+
+**风险面**：k≥2 时减仓侧贴近/穿过 touch，牺牲该方向 maker 边（这是风险控制的正当代价）；
+整档跳变配合滞环 + B+ 槽位纪律，换单频率有界；义务带内漂移不影响覆盖率统计
+
+**实施路线（待确认后执行）**：SpreadOptimizer::computeContractDeltaSkew/portfolio 两函数
+收敛为单函数 deltaSkewTicks(r) + 策略链注入点不变；配置键收敛；测试（档位映射/滞环/
+穿越授权/义务带合规断言/与 alpha 叠加）+ v5 冒烟 + 生产灰度
+
+##### R14 方案修正①（2026-09-07，用户质疑成立：保留双驱动加权结构）
+
+**质疑**：组合 delta 与合约 delta 符号可能相反；max() 单驱动丢失方向分配语义。
+**验证分析（成立）**：
+1. 对冲腿场景：组合多 +20、A 合约多 +20、B 合约空 -20。max() 会让 B 收到 r=0.67 的强
+   skew（按 B 自身空头方向）→ 强制拆对冲腿 = 主动放大组合风险——错误
+2. 加权求和的符号语义恰好正确：
+   - 组合分量（方向=组合符号）对两腿同向施压：组合多头时两腿 ask 都推向 touch =
+     鼓励加仓空头腿（建对冲）+ 减仓多头腿 ✓
+   - 合约分量（方向=该腿符号）：压制该腿自身过度增长
+   - 顺势腿（与组合同号）两分叠加→强 skew；对冲腿两分相抵→弱 skew ✓
+     正是"组合为正时强 skew 作用于正 delta 合约"的语义
+**修正**：保留双驱动加权结构，只替换**幅度映射**为 tick 量化：
+```
+driver_c = w_p · sign(D_p)·r_p^γ + w_c · sign(D_c)·r_c^γ     （符号保留, 加权求和不变）
+k_c      = clamp(round(k_max · driver_c), -k_max, +k_max)    （幅度整档量化）
+skew_c   = k_c ticks（中心平移, 施加方式不变）
+```
+- 量化后小驱动自然归零（|driver|<0.125 → k=0，消灭 sub-tick 死偏移）
+- 方向分配由原加权结构自动承担（对冲腿相抵语义不变）
+- γ 建议 1.0（线性+取整=隐式分档，再省一个幂次参数；BT 标定后可再评）
+- 同步修复 realized util 平滑滞后：合约腿改用**当前 util**（原平滑使撞限时仍用 0.47 旧值）
+- 滞环 h=0.05 作用于 k 跳变沿；穿越授权条件：r_p≥1.0 或 |r_c|≥1.0（沿用 cross_max=3t）
+- 参数账：删 threshold/factor/power/gain 四个；留 w_p/w_c 两权重；增 k_max/h → **净 -2**
+
+**今夜场景回放**（组合 0.97 + 合约 0.47，w_p=0.5/w_c=1.0）：driver=0.955 → k=4 →
+ask 压到 mid−3t 主动减仓；早期 r_p=r_c=0.5 → driver=0.75 → k=3 强抑制（现状仅 0.35t）
+
+##### R14 实施记录（2026-09-07，已完成，验证通过）
+
+- **核心改动**（SpreadOptimizer）：
+  - `computeDeltaSkewDriver(portfolio_delta, contract_util)` 纯函数：driver = w_p·sign(r_p)·|r_p|^γ
+    + w_c·sign(r_c)·|r_c|^γ（符号加权求和，对冲腿相抵语义保留——用户质疑修正①落实）
+  - `quantizeSkewTicks(raw)` 滞环量化：k=clamp(lround(raw),±k_max)，档边界±h 内不切换，
+    多档直跳允许；状态 `mutable int _last_skew_k`（Md 线程单写单读）
+  - 符号：driver>0(多头)→skew<0(整梯下移)；cap：授权穿越 |r_p|或|r_c|≥1.0 → k_max，
+    未授权 → floor(half_spread)（贴 mid 为止，义务合规）
+  - **勘误**：方案阶段所述"realized util 平滑滞后"不存在——0.47 是两腿分摊（14/30+15/30），
+    非滞后；本批未改口径
+- **参数收敛**：删除 delta_skew_threshold/delta_skew_factor/inventory_skew_gain（含热参
+  HP_DELTA_SKEW_THRESHOLD/FACTOR 两处全链路：enum/defaults/applyAll/bounds/白名单+校验器）；
+  deltaSkewPower 默认 1.5→**1.0**（γ 保留可配置）；新增 skewTickMax=4.0/skewHysteresis=0.05；
+  权重 w_p=0.5/w_c=1.0 保留（用户确认①）
+- **义务层 qty 不衰减维持现状**（用户确认③）；qtyDecayFactor 保持 R12 的 0.7（其放量治理目标
+  与本批库存侧冲突，不动）
+- **测试**：新增 test_v10_r14_skew_ticks.cpp 5 用例（档位映射/对冲腿相抵/滞环防抖/端到端穿越vs
+  贴mid/零库存零偏移）；改写 test_skew_dimensionality.cpp 全 6 用例到量化语义；更新
+  test_inventory_delta_separation.cpp 3 个 skew 用例期望值；热参边界测试改用 sticky_threshold。
+  全量 171/173（+5，零回归）
+- **冒烟**：v5 EXIT=0；trades 284→411、episode 3015→837（后者=V12b 阈值 0.80 首次冒烟生效，
+  预期；前者=skew 机制改变的行为面，BT 数据集库存低位期 k=0 无影响，堆积期提前减仓）
+- **配置**：src/dist coordinator.yaml spreadOptimizer 节已收敛（新键显式可见，死键删除）；
+  **远程未动**——R14 库未部署前旧库仍读旧键，部署批次一并切换
+- **部署**：不单独部署，随下批 Release 同车；验收口径=撞限场景减仓速度（7min/1手 → 分钟级）
+  与 driver 死区 |driver|<0.125 的无扰动行为

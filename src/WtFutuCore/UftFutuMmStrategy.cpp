@@ -334,7 +334,9 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
             FutuConfigValidator::checkRange("base_spread", glft.base_spread, 0.5, 20.0, vr);
             FutuConfigValidator::checkRange("phi", glft.phi, 0.01, 2.0, vr);
             FutuConfigValidator::checkPositive("tick_size", glft.tick_size, vr);
-            FutuConfigValidator::checkRange("delta_skew_threshold", glft.delta_skew_threshold, 0.0, 0.9, vr);
+            FutuConfigValidator::checkRange("skew_tick_max", glft.skew_tick_max, 1.0, 20.0, vr);
+            FutuConfigValidator::checkRange("skew_hysteresis", glft.skew_hysteresis, 0.0, 0.5, vr);
+            FutuConfigValidator::checkRange("delta_skew_power", glft.delta_skew_power, 0.5, 3.0, vr);
         }
 
         // Portfolio 参数校验

@@ -119,41 +119,33 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     result.fair_value = midPrice + result.alpha_adjustment;
 
     //==========================================================================
-    // 4. Delta Skew (统一 delta 口径, 2026-08-19 语义边界原则)
-    //    - 单合约 delta skew: 防止单合约头寸过度累积
-    //      (C2: 输入 = position×hedge_ratio/contract_max_delta 已实现口径,
-    //       pending 投影仅用于 force_obligation/qty 衰减 —— skew 响应已实现库存)
-    //    - 组合 delta skew: 防止组合整体头寸过度累积
+    // 4. Delta Skew (R14-2026-09-07: tick 量化档位)
+    //    驱动量(保留双驱动加权结构与符号相抵语义):
+    //      r_p = total_delta / portfolio_max_delta   (组合带符号利用率)
+    //      r_c = contract_realized_delta_util        (合约已实现口径带符号利用率)
+    //      driver = w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ
+    //    幅度映射(整档量化, 消灭 sub-tick 死偏移 —— 09-07 夜盘实证:
+    //      util=1.0 撞限总 skew 仅 0.67t, 未穿越 mid, 7 分钟只减 1 手):
+    //      k = clamp(round(k_max × driver), ±k_max), 滞环 h=skew_hysteresis
+    //    穿越授权: r_p≥1.0 或 |r_c|≥1.0 → |k| 上限 k_max (k_max=4/half=1 时
+    //      减仓侧=mid−3t 可成交, 恰好 = half+cross_max_ticks 的旧扩展上限);
+    //      未授权 → |k| ≤ floor(half_spread) (至多贴 mid, 义务合规)
     //==========================================================================
     double half_spread = result.base_spread / 2.0;
 
-    // v7.1 连续控制: 已实现 delta_util ≥ 1.0 时授权减仓侧穿越 mid
-    //   (C2: 从 projected 切换到 realized —— 主动减仓不被未成交挂单预授权)
-    bool cross_authorized = pCtx && pCtx->contract_realized_delta_util_valid &&
-                            std::abs(pCtx->contract_realized_delta_util) >= 1.0;
-
     double totalDelta = pCtx ? pCtx->total_delta : 0;
+    double contract_util_signed =
+        (pCtx && pCtx->contract_realized_delta_util_valid) ? pCtx->contract_realized_delta_util : 0.0;
 
-    // 单合约 skew: C2 起统一已实现口径 (单一路径);
-    //       未注入 (contract_max_delta<=0) 时单合约 skew 为 0, 仅组合维度生效
-    double contract_skew =
-        (pCtx && pCtx->contract_realized_delta_util_valid)
-            ? computeContractDeltaSkew(pCtx->contract_realized_delta_util, half_spread, params.skew_cross_max_ticks)
-            : 0.0;
-    // C1(2026-08-24②): 组合分量量纲统一到 ticks (×half_spread) ——
-    //   此前返回无纲量被隐式当 ticks 用, 与 contract 分量(ticks)相加时相对力度随价差宽度漂移。
-    double portfolio_skew = computePortfolioDeltaSkew(totalDelta, half_spread);
+    double r_p_signed = (params.portfolio_max_delta > 0) ? totalDelta / params.portfolio_max_delta : 0.0;
+    bool cross_authorized = (std::abs(r_p_signed) >= 1.0) || (std::abs(contract_util_signed) >= 1.0);
 
-    // v3 双维 skew：从"取较大者"改为加权求和（权重在 GLFTParams）
-    // - portfolio_skew_weight=0.5: portfolio 维度（控总敞口，温和影响）
-    // - contract_skew_weight=1.0:  contract 维度（控单合约 delta，主导力）
-    // 旧路径(max)保留：若两个权重之和<=0则退回 max 模式（向前兼容）
-    double delta_skew;
-    if (params.portfolio_skew_weight + params.contract_skew_weight > 1e-9) {
-        delta_skew = params.portfolio_skew_weight * portfolio_skew + params.contract_skew_weight * contract_skew;
-    } else {
-        delta_skew = (std::abs(portfolio_skew) > std::abs(contract_skew)) ? portfolio_skew : contract_skew;
-    }
+    double driver = computeDeltaSkewDriver(totalDelta, contract_util_signed);
+    // 符号约定: driver>0 (多头库存) → skew<0 (整梯下移: bid 拉远防堆积, ask 压向/穿过 mid 减仓)
+    int k = -quantizeSkewTicks(params.skew_tick_max * driver);
+
+    double k_cap = cross_authorized ? params.skew_tick_max : std::floor(half_spread);
+    double delta_skew = std::max(-k_cap, std::min(k_cap, (double)k));
 
     //==========================================================================
     // 5. 综合偏移计算
@@ -258,48 +250,33 @@ double SpreadOptimizer::computeBaseSpread(const SignalContext& ctx) const
     return std::clamp(spread, params.base_spread * params.min_spread_mult, params.base_spread * params.max_spread_mult);
 }
 
-double
-SpreadOptimizer::computeContractDeltaSkew(double signed_delta_util, double half_spread_ticks, double cross_max_ticks) const
+double SpreadOptimizer::computeDeltaSkewDriver(double portfolio_delta_signed, double contract_util_signed) const
 {
     const GLFTParams params = snapshotParams(); // F20
-    if (half_spread_ticks <= 0)
-        return 0.0;
-
-    double util = std::abs(signed_delta_util);
-    if (util <= 1e-9)
-        return 0.0;
-
-    double direction = (signed_delta_util > 0) ? -1.0 : 1.0;
-    // v7.1 归一化库存 skew (delta 口径): skew_norm = util^power × gain
-    //   norm=1.0 → 减仓侧贴 mid; gain=1.0, power=1.5 时:
-    //   util=0.5→0.35×half, util=0.8→0.72×half, util=1.0→贴mid
-    double norm = fastPow(util, params.delta_skew_power) * params.inventory_skew_gain;
-    // 穿越权限: util≥1.0 时允许 norm>1.0 (减仓侧穿越 mid 主动减仓),
-    //   上限 = 1 + cross_max/half; util<1.0 时 cap=1.0 保证义务合规
-    double cap = 1.0;
-    if (util >= 1.0 && cross_max_ticks > 0)
-        cap = 1.0 + cross_max_ticks / half_spread_ticks;
-    norm = std::min(norm, cap);
-    return direction * norm * half_spread_ticks;
+    auto signedPow = [](double x, double gamma) {
+        return (x >= 0.0 ? 1.0 : -1.0) * fastPow(std::abs(x), gamma);
+    };
+    double r_p = (params.portfolio_max_delta > 0) ? portfolio_delta_signed / params.portfolio_max_delta : 0.0;
+    return params.portfolio_skew_weight * signedPow(r_p, params.delta_skew_power) +
+           params.contract_skew_weight * signedPow(contract_util_signed, params.delta_skew_power);
 }
 
-double SpreadOptimizer::computePortfolioDeltaSkew(double totalDelta, double half_spread_ticks) const
+int SpreadOptimizer::quantizeSkewTicks(double raw_ticks) const
 {
     const GLFTParams params = snapshotParams(); // F20
-    if (params.portfolio_max_delta <= 0)
-        return 0.0;
-    if (half_spread_ticks <= 0)
-        return 0.0;
+    int k_max_i = (int)std::lround(params.skew_tick_max);
+    int target = (int)std::lround(raw_ticks);
+    target = std::max(-k_max_i, std::min(k_max_i, target));
+    if (target == _last_skew_k)
+        return _last_skew_k;
 
-    double util = std::abs(totalDelta) / params.portfolio_max_delta;
-    if (util <= params.delta_skew_threshold)
-        return 0.0;
-
-    double excess = util - params.delta_skew_threshold;
-    double direction = (totalDelta > 0) ? -1.0 : +1.0;
-    // C1(2026-08-24②): ×half_spread_ticks 归一到 ticks —— 与单合约分量同量纲,
-    //   加权权重(portfolioSkewWeight/contractSkewWeight)自此为稳定的相对力度语义。
-    return direction * params.delta_skew_factor * fastPow(excess, params.delta_skew_power) * half_spread_ticks;
+    // 滞环: raw 须越过 (当前档位 ± 0.5) 的切换边界再 ±h 才换档, 防边界振荡引起换单风暴
+    double boundary = (double)_last_skew_k + 0.5 * (target > _last_skew_k ? 1.0 : -1.0);
+    double h = params.skew_hysteresis;
+    if ((target > _last_skew_k && raw_ticks >= boundary + h) ||
+        (target < _last_skew_k && raw_ticks <= boundary - h))
+        _last_skew_k = target; // 允许多档直跳 (raw 大幅突变时一步到位)
+    return _last_skew_k;
 }
 
 } // namespace futu

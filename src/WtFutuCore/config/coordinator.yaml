@@ -135,9 +135,9 @@ coordinator:
     spreadOptimizer:
       phi: 0.20                    # 波动率加价系数 (A4 澄清: 名义源自 GLFT 库存厌恶项, 实际用于 base spread 的 vol 加成;
                                    #   库存厌恶由 deltaSkewFactor/inventorySkewGain 承担。键名保留兼容)
-      deltaSkewThreshold: 0.3      # Delta 偏斜触发
-      deltaSkewFactor: 1.5         # 偏斜强度
-      deltaSkewPower: 1.5
+      deltaSkewPower: 1.0          # R14(2026-09-07): driver 幂次 γ (线性+取整=隐式分档); deltaSkewThreshold/deltaSkewFactor 键已删除
+      skewTickMax: 4.0             # R14: skew 最大档位 (ticks); k=round(k_max×driver)
+      skewHysteresis: 0.05         # R14: 滞环宽度 (raw ticks, 档边界 ±h 内不切换)
       maxSpreadMult: 3.0           # 最大价差乘子
       minSpreadMult: 1.0           # 最小价差乘子
       confidenceWeightMin: 0.3
@@ -151,9 +151,9 @@ coordinator:
       volScale: 5.0                # 波动率缩放
       volPercentileScale: 50.0     # 波动率分位缩放
       pauseSpreadMultRatio: 0.9    # 暂停时价差乘子比率 (V10-R10: toxicitySpreadFactor 键已删除)
-      # v7.1 连续控制: 归一化库存 skew (统一 delta 口径 util=(delta+同向pending×hr)/maxDelta)
-      # skew_norm = util^deltaSkewPower × inventorySkewGain; 1.0 = 减仓侧贴 mid
-      inventorySkewGain: 1.0
+      # R14(2026-09-07) tick 量化 skew: driver = w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ
+      # (符号加权求和, 对冲腿自动相抵); k = round(skewTickMax×driver) + 滞环;
+      # driver>0(多头) → skew<0(整梯下移: bid 拉远防堆积, ask 压向 mid 减仓)
       # delta util>=1.0 时授权减仓侧穿越 mid 的最大 tick 数 (主动减仓; 须 < obligationMaxSpreadTicks=10)
       skewCrossMaxTicks: 3.0
       portfolioSkewWeight: 0.5     # 组合偏斜权重

@@ -26,9 +26,10 @@ struct GLFTParams
     //   库存厌恶的真实承担者是 delta_skew_factor / inventory_skew_gain。键名保留兼容。
     double phi; ///< Volatility markup coefficient in base spread (legacy name from GLFT inventory penalty)
 
-    // Delta skew parameters
-    double delta_skew_threshold; ///< Portfolio delta skew trigger threshold (utilization, default 0.3)
-    double delta_skew_factor;    ///< Portfolio delta skew intensity (default 1.5)
+    // Delta skew parameters (R14-2026-09-07: tick 量化驱动)
+    //   旧 delta_skew_threshold/factor 与 inventory_skew_gain 已删除——三者与 power 在调同一条
+    //   平滑曲线（过参数化且 sub-tick 死区间, 09-07 夜盘实证: util=1.0 撞限总 skew 仅 0.67t 无效）。
+    //   新语义: driver = w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ, skew_ticks=round(k_max×driver)+滞环
     double portfolio_max_delta;  ///< Portfolio-level Delta soft limit
 
     // Spread bounds
@@ -58,11 +59,12 @@ struct GLFTParams
     double depth_sensitivity_scale; ///< depth_sensitivity 缩放因子 (default 0.2)
 
     double pause_spread_mult_ratio; ///< spread_mult 暂停阈值比例 (default 0.9)
-    double delta_skew_power;        ///< delta skew 非线性幂次 (default 1.5)
+    double delta_skew_power;        ///< R14 γ: driver 幂次 (default 1.0; 线性+取整=隐式分档, 可配置)
     double vol_percentile_scale; ///< 波动率百分位归一化分母 (default 50.0)
 
-    // v7.1 连续控制重设计: 归一化库存 skew (delta_util 口径, 2026-08-19 起统一 delta)
-    double inventory_skew_gain;  ///< 归一化库存skew增益 (default 1.0; skew_norm=util^power×gain, 1.0=贴mid)
+    // R14(2026-09-07) tick 量化 skew 档位参数
+    double skew_tick_max;    ///< k_max: skew 最大档位数 (ticks, default 4.0)
+    double skew_hysteresis;  ///< 滞环宽度 (raw ticks 单位, 档边界 ±h 内不切换, default 0.05)
     double skew_cross_max_ticks; ///< delta util≥1.0 时授权减仓侧穿越 mid 的最大 tick 数 (default 3.0)
 
     // v3 双维 skew 权重（>0 启用加权模式，=0/未设则保留旧 max 模式）
@@ -70,14 +72,15 @@ struct GLFTParams
     double contract_skew_weight;  ///< contract delta skew 权重 (default 1.0)
 
     GLFTParams()
-        : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5), phi(0.20), delta_skew_threshold(0.3),
-          delta_skew_factor(1.5), portfolio_max_delta(0), max_spread_mult(3.0), min_spread_mult(1.0),
+        : base_spread(2.0), tick_size(0.2), depth_sensitivity(0.5), phi(0.20), portfolio_max_delta(0),
+          max_spread_mult(3.0), min_spread_mult(1.0),
           confidence_weight_min(0.2), confidence_weight_max(1.0),
           low_confidence_spread_factor(2.0) // M8: 统一为 2.0 (低置信度应扩大 spread; 此前构造 0.8 vs yaml 2.0 行为相反)
           ,
           low_confidence_threshold(0.3), vol_scale(5.0), depth_normalization(100.0), no_depth_spread_mult(1.5),
-          depth_sensitivity_scale(0.2), pause_spread_mult_ratio(0.9), delta_skew_power(1.5),
-          vol_percentile_scale(50.0), inventory_skew_gain(1.0), skew_cross_max_ticks(3.0), portfolio_skew_weight(0.5),
+          depth_sensitivity_scale(0.2), pause_spread_mult_ratio(0.9), delta_skew_power(1.0),
+          vol_percentile_scale(50.0), skew_tick_max(4.0), skew_hysteresis(0.05), skew_cross_max_ticks(3.0),
+          portfolio_skew_weight(0.5),
           contract_skew_weight(1.0)
     {}
 
@@ -91,8 +94,6 @@ struct GLFTParams
         p.max_spread_mult = FutuConfig::readDouble(v, "maxSpreadMult", 3.0);
         p.phi = FutuConfig::readDouble(v, "phi", 0.20);
         p.portfolio_max_delta = portfolio_max_delta;
-        p.delta_skew_threshold = FutuConfig::readDouble(v, "deltaSkewThreshold", 0.3);
-        p.delta_skew_factor = FutuConfig::readDouble(v, "deltaSkewFactor", 1.5);
         p.confidence_weight_min = FutuConfig::readDouble(v, "confidenceWeightMin", 0.2);
         p.confidence_weight_max = FutuConfig::readDouble(v, "confidenceWeightMax", 1.0);
         p.low_confidence_spread_factor =
@@ -103,9 +104,10 @@ struct GLFTParams
         p.no_depth_spread_mult = FutuConfig::readDouble(v, "noDepthSpreadMult", 1.5);
         p.depth_sensitivity_scale = FutuConfig::readDouble(v, "depthSensitivityScale", 0.2);
         p.pause_spread_mult_ratio = FutuConfig::readDouble(v, "pauseSpreadMultRatio", 0.9);
-        p.delta_skew_power = FutuConfig::readDouble(v, "deltaSkewPower", 1.5);
+        p.delta_skew_power = FutuConfig::readDouble(v, "deltaSkewPower", 1.0); // R14: γ 默认 1.0
         p.vol_percentile_scale = FutuConfig::readDouble(v, "volPercentileScale", 50.0);
-        p.inventory_skew_gain = FutuConfig::readDouble(v, "inventorySkewGain", 1.0);
+        p.skew_tick_max = FutuConfig::readDouble(v, "skewTickMax", 4.0);      // R14
+        p.skew_hysteresis = FutuConfig::readDouble(v, "skewHysteresis", 0.05); // R14
         p.skew_cross_max_ticks = FutuConfig::readDouble(v, "skewCrossMaxTicks", 3.0);
         p.portfolio_skew_weight = FutuConfig::readDouble(v, "portfolioSkewWeight", 0.5);
         p.contract_skew_weight = FutuConfig::readDouble(v, "contractSkewWeight", 1.0);
@@ -246,10 +248,11 @@ public:
 
     // Internal Logic (exposed for testing/secondary use)
     double computeBaseSpread(const SignalContext& ctx) const;
-    /// 归一化库存 skew (tick 单位, delta 口径). skew_norm=delta_util^power×gain, 1.0=贴mid;
-    /// delta_util≥1.0 时授权穿越 mid, 上限 1+cross_max/half_spread.
-    double computeContractDeltaSkew(double signed_delta_util, double half_spread_ticks, double cross_max_ticks) const;
-    double computePortfolioDeltaSkew(double totalDelta, double half_spread_ticks) const; ///< C1: ×half_spread 归一到 ticks
+    // R14(2026-09-07): tick 量化 skew —— 加权符号驱动(纯函数, 无纲) + 滞环整档量化
+    /// driver = w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ  (对冲腿符号相抵语义保留)
+    double computeDeltaSkewDriver(double portfolio_delta_signed, double contract_util_signed) const;
+    /// raw ticks → 滞环量化档位 k (clamp ±round(skew_tick_max)); 档边界 ±skew_hysteresis 内不切换
+    int quantizeSkewTicks(double raw_ticks) const;
 
 private:
     mutable std::atomic<uint64_t> _params_seq{0}; // F20: seqlock 版本号 (奇=写进行中)
@@ -258,6 +261,7 @@ private:
     mutable double _smoothed_spread_mult = 1.0;
     mutable double _last_output_spread_mult = 0.0; // B-1 fix: 上tick最终输出值，用于变化率限制
     mutable bool _mult_initialized = false;        // A2(2026-08-24②): 首 tick 跳过速率限幅（替代原魔数判定）
+    mutable int _last_skew_k = 0;                  // R14: skew 滞环当前档位 (Md 线程单写单读)
 };
 
 } // namespace futu

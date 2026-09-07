@@ -1,14 +1,14 @@
 /*!
  * \file test_skew_dimensionality.cpp
- * \brief 复核修复包 C 批 (2026-08-24②) unit tests
+ * \brief 复核修复包 C 批 (2026-08-24②) + V10-R14 (2026-09-07) 改写 unit tests
  *
- * C1: 组合 delta skew 量纲统一到 ticks (×half_spread) —— 此前返回无纲量被隐式当 ticks,
- *     与 contract 分量(ticks)加权相加时相对力度随价差宽度漂移。
- * C2: skew/穿越授权切换已实现口径 (contract_realized_delta_util, 不含 pending 投影);
- *     force_obligation 保持 projected 口径 (computeInventoryStrategyInputs, 既有测试覆盖)。
+ * C2(保留语义): skew/穿越授权切换已实现口径 (contract_realized_delta_util, 不含 pending 投影)。
+ * R14(2026-09-07): skew 幅度映射改 tick 量化档位 (driver 无纲 → k=round(k_max×driver)+滞环),
+ *   C1 的"量纲随 half_spread 漂移"问题由构造消除 (skew 恒为整 tick 数);
+ *   旧 delta_skew_threshold/factor/inventory_skew_gain 参数已删除。
  */
 #include "../WtFutuCore/SpreadOptimizer.h"
-#include "gtest/gtest/gtest.h"
+#include "gtest/gtest.h"
 
 #include <cmath>
 
@@ -22,11 +22,10 @@ GLFTParams makeParams()
     GLFTParams p;
     p.base_spread = 2.0; // half_spread = 1.0 tick (mult=1 时)
     p.tick_size = 0.2;
-    p.delta_skew_power = 1.5;
-    p.inventory_skew_gain = 1.0;
+    p.delta_skew_power = 1.0;    // γ=1 线性
+    p.skew_tick_max = 4.0;
+    p.skew_hysteresis = 0.05;
     p.skew_cross_max_ticks = 3.0;
-    p.delta_skew_threshold = 0.3;
-    p.delta_skew_factor = 1.5;
     p.portfolio_max_delta = 30.0;
     p.no_depth_spread_mult = 1.0; // 隔离深度变量
     return p;
@@ -35,65 +34,63 @@ GLFTParams makeParams()
 } // namespace
 
 //==========================================================================
-// C1: 组合 skew 量纲统一
+// R14: 组合/合约双驱动量化 (替代 C1 量纲测试 —— skew 恒为整 tick, 量纲问题由构造消除)
 //==========================================================================
 
-// 组合 skew 随 half_spread 线性伸缩 (同 util 同输入, 权重置 1 隔离加权)
-TEST(SkewDimensionality, PortfolioSkewScalesWithHalfSpread)
+// 组合分量独立驱动: 纯组合维度 (w_c=0), r_p=1.0 → driver=0.5 → raw=2.0t → k=2,
+// 授权穿越 (r_p≥1.0) → skew=-2t; 幅度不再随 half_spread 漂移
+TEST(SkewDimensionality, PortfolioComponentQuantized)
 {
-    SpreadOptimizer opt("T.C1");
+    SpreadOptimizer opt("T.R14a");
     auto p = makeParams();
     p.portfolio_skew_weight = 1.0; // 纯组合维度, 权重隔离
-    p.delta_skew_factor = 0.5;     // 缩小强度避开 ±half_spread 截断, 纯验证线性关系
+    p.contract_skew_weight = 0.0;
     opt.setParams(p);
 
     SignalContext sig;
-    PortfolioContext ctx; // realized/projected 均无效 → contract 分量=0
-    ctx.total_delta = 45.0; // util = 45/30 = 1.5 → excess=1.2
+    PortfolioContext ctx; // realized 未注入 → contract 分量=0
+    ctx.total_delta = 30.0; // r_p = 1.0
 
-    auto r1 = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    // half=1.0 tick (base=2, mult=1): C1 后组合分量 = factor × excess^p × half_spread
-    EXPECT_NEAR(r1.inventory_skew, -0.5 * std::pow(1.2, 1.5) * 1.0, 1e-9);
+    auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
+    // driver = 1.0×1.0 = 1.0 → raw=4t → k=4 (clamp k_max) → 授权 → -4t
+    EXPECT_NEAR(r.inventory_skew, -4.0, 1e-9);
 }
 
-// 权重语义稳定: 两维同量纲后, 加权结果 = 0.5×port + 1.0×contract (ticks), 且不触 ±half 截断
+// 权重语义稳定: driver = w_p·r_p + w_c·r_c (γ=1), 纯函数直接断言
 TEST(SkewDimensionality, WeightedSumStableSemantics)
 {
-    SpreadOptimizer opt("T.C1b");
+    SpreadOptimizer opt("T.R14b");
     auto p = makeParams();
     p.portfolio_skew_weight = 0.5;
     p.contract_skew_weight = 1.0;
     opt.setParams(p);
 
-    SignalContext sig;
-    PortfolioContext ctx;
-    ctx.total_delta = 30.0;                                        // 组合 util=1.0, excess=0.7
-    ctx.contract_realized_delta_util = 0.5;                        // 合约 util=0.5
-    ctx.contract_realized_delta_util_valid = true;
-
-    auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    const double port = -1.5 * std::pow(0.7, 1.5) * 1.0;           // -0.8786 ticks (half=1)
-    const double contract = -std::pow(0.5, 1.5) * 1.0;             // -0.3536 ticks
-    // 加权和 -0.7929 在 ±half_spread(±1.0) 内 → 不触截断, 权重语义可精确断言
-    EXPECT_NEAR(r.inventory_skew, 0.5 * port + 1.0 * contract, 1e-9);
+    // 对齐: 0.5×0.5 + 1.0×0.5 = 0.75
+    EXPECT_NEAR(opt.computeDeltaSkewDriver(15.0, 0.5), 0.75, 1e-9);
+    // 权重变化 → driver 变化 (语义稳定可断言)
+    auto p2 = makeParams();
+    p2.portfolio_skew_weight = 1.0;
+    p2.contract_skew_weight = 0.0;
+    opt.setParams(p2);
+    EXPECT_NEAR(opt.computeDeltaSkewDriver(15.0, 0.5), 0.5, 1e-9);
 }
 
-// 组合阈值死区不变: util ≤ threshold → 组合分量为 0
-TEST(SkewDimensionality, PortfolioDeadZoneUnchanged)
+// 死区由量化取整承担: |k_max×driver| < 0.5 → k=0 (无 sub-tick 死偏移)
+TEST(SkewDimensionality, DeadZoneFromQuantization)
 {
-    SpreadOptimizer opt("T.C1c");
+    SpreadOptimizer opt("T.R14c");
     auto p = makeParams();
     opt.setParams(p);
 
     SignalContext sig;
     PortfolioContext ctx;
-    ctx.total_delta = 9.0; // util = 0.3 == threshold → 0
+    ctx.total_delta = 1.5; // r_p=0.05 → driver=0.5×0.05=0.025 → raw=0.1t → k=0
     auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
     EXPECT_NEAR(r.inventory_skew, 0.0, 1e-12);
 }
 
 //==========================================================================
-// C2: skew/穿越授权用已实现口径
+// C2(保留): skew/穿越授权用已实现口径
 //==========================================================================
 
 // pending 高位时 (projected≥1.0 而 realized<1.0): skew 按 realized, 穿越不授权
@@ -114,9 +111,9 @@ TEST(SkewDimensionality, RealizedDrivesSkewNotProjection)
     ctx.contract_realized_delta_util_valid = true;
 
     auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    // skew 按 realized=0.8: -0.8^1.5 ≈ -0.7155, 且未穿越 (|skew| < half=1.0)
-    EXPECT_NEAR(r.inventory_skew, -std::pow(0.8, 1.5), 1e-9);
-    EXPECT_GT(r.inventory_skew, -1.0);
+    // R14: driver=0.8 → raw=3.2t → k=3, realized 未打满 → 未授权 → cap=floor(half)=1 → -1.0t
+    EXPECT_NEAR(r.inventory_skew, -1.0, 1e-9);
+    EXPECT_GT(r.inventory_skew, -1.0 - 1e-9);
 }
 
 // realized ≥ 1.0 授权穿越 (projected 无论高低)
@@ -137,8 +134,8 @@ TEST(SkewDimensionality, CrossAuthorizedByRealizedOnly)
     ctx.contract_realized_delta_util_valid = true;
 
     auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    double expect = -std::pow(1.3, 1.5);              // ≈-1.4822 > half(1.0) → 穿越
-    EXPECT_NEAR(r.inventory_skew, expect, 1e-9);
+    // R14: driver=1.3 → raw=5.2t → k=4 (clamp), 授权 → -4t (=half+cross_max 旧扩展上限)
+    EXPECT_NEAR(r.inventory_skew, -4.0, 1e-9);
     EXPECT_LT(r.inventory_skew, -1.0);
 }
 

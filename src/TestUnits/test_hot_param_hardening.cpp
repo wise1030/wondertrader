@@ -129,12 +129,12 @@ TEST(HotParamBounds, MaxDeltaRejectsZeroAndHuge)
     ASSERT_EQ(out.size(), 1u);
 }
 
-TEST(HotParamBounds, DeltaSkewThresholdValidatorRange)
+TEST(HotParamBounds, StickyThresholdBounds) // R14: 原 delta_skew_threshold 键已删, 改用 sticky_threshold {0.01,10}
 {
     std::vector<std::pair<uint32_t, double>> out;
-    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("delta_skew_threshold: 0.95\n").c_str(), out));
+    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("sticky_threshold: 0.005\n").c_str(), out));
     EXPECT_TRUE(out.empty());
-    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("delta_skew_threshold: 0.9\n").c_str(), out));
+    ASSERT_TRUE(FutuHotParamManager::parseHotParamFile(writeTmpYaml("sticky_threshold: 5.0\n").c_str(), out));
     ASSERT_EQ(out.size(), 1u);
 }
 
