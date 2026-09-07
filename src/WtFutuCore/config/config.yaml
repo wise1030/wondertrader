@@ -96,7 +96,7 @@ strategies:
           baseQty: 10.0              # 义务层挂单手数（scout/flexible 层由此派生）
           levelQtyMultiplier: 0.7      # 档位间数量几何衰减 (0.1-1.0, 每档 ×此值)
           levelStep: 1.0             # 每档价格步长 (tick 数)
-          stickyThreshold: 1.0       # 粘性更新阈值 (tick)
+          stickyThreshold: 2.0       # 粘性更新阈值 (tick)
           improveRetreatRatio: 2.0   # 改进/退让比率
           maxPriceDeviation: 20.0    # 最大价格偏差 (tick)
           useBilateralQuote: false   # 是否使用双边报价接口
