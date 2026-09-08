@@ -3041,3 +3041,25 @@ ask 压到 mid−3t 主动减仓；早期 r_p=r_c=0.5 → driver=0.75 → k=3 �
   **远程未动**——R14 库未部署前旧库仍读旧键，部署批次一并切换
 - **部署**：不单独部署，随下批 Release 同车；验收口径=撞限场景减仓速度（7min/1手 → 分钟级）
   与 driver 死区 |driver|<0.125 的无扰动行为
+
+##### R13+R14 Release 部署记录（2026-09-08 17:3x，完成，待今夜 20:40 激活）
+
+- **构建**：src/build_release（Release 规范目录，与 9/6 F-core 部署同源）；
+  libWtFutuCore.so = 2,427,376B（含 R13+R14；R13 全在 WtFutuCore/arb——勘误旧档
+  "src/WtUftCore/arb" 表述）；libWtUftCore.so 自 9/6 零源码变化（998432B 同尺寸），**不重复发布**
+- **Release 冒烟**：v5 EXIT=0、trades 405（Debug 411 同噪声带）、episode 837 逐值一致 ✓
+- **远程已替换**（全部 .bak_20260908_r14 备份）：
+  - dist/uft/libWtFutuCore.so md5 c715858b == 本地构建 ✓
+  - dist/coordinator.yaml / config.yaml md5 与 src 权威一致 ✓（R14 spreadOptimizer 新键
+    skewTickMax/skewHysteresis/deltaSkewPower=1.0 生效；旧键 deltaSkewThreshold/Factor/
+    inventorySkewGain 随死键移除；V12b adverseThreshold=0.80 保留）
+- **激活**：今夜 20:40 cron 重启（当前 17:3x，日盘已收）——R13 闸门 + R14 整档 skew 同车生效
+- **验收（明早）**：
+  1. [QUOTE] skew 值呈整 tick（-1.00/-2.00/-4.00 档），低库存期 skew=0（driver<0.125 死区）
+  2. delta 高利用时 ask 压 mid/穿越（若再撞限：减仓速度应达分钟级，vs 9-07 的 7min/1手）
+  3. CTP-50/51 拒单维持 0；POSITION_LIMIT 维持 0（R13 闸门在 arb 信号触发时生效）
+  4. 双边覆盖率不回退（skew 整梯平移不改变双边在场语义；sticky 2.0 继续生效）
+  5. 若 [QUOTE] 出现 k 档高频跳变 → 滞环不足，调 skewHysteresis（0.05→0.10）
+- **回退**：cp uft/libWtFutuCore.so.bak_20260908_r14 uft/libWtFutuCore.so &&
+  cp coordinator.yaml.bak_20260908_r14 coordinator.yaml && cp config.yaml.bak_20260908_r14
+  config.yaml + 重启（无需回退 libWtUftCore.so，未变）
