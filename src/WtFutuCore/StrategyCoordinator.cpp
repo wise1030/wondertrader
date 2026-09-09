@@ -1269,10 +1269,12 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
         // V10-R7e/WS-F: refreshQuotes 持锁时长埋点 (Md 单写; 去大锁验收判据,
         // 含锁内穿越 stra_* 发单的全程 —— 拆锁后此锁变为真实竞争点)
         uint64_t _ql_t0 = futu::TscClock::now();
+        // R15-b: 传 uTime/sec 供 quoter tick 驱动双边统计
         uint32_t orders_placed = tc.quoter->refreshQuotes(ctx, FutuQuoter::QuoteRequest{
             tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
             tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
             tick->bidprice(0), tick->askprice(0),
+            tc.time_hms, ctx->stra_get_secs() / 1000 % 60,
             decision.risk, decision.strategy
         });
         if (_perf_monitor)
@@ -1543,6 +1545,7 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
             // 触发的事件驱动补挂会把新单标成"数分钟前下单"→下一 tick 即判 STALE
             // 撤单→终态再触发补挂, 形成挂撤 churn 循环 (虚增撤单率+撞 CTP 流控)。
             now_ms, q.upper_limit, q.lower_limit, fresh_best_bid, fresh_best_ask,
+            ctx->stra_get_time(), ctx->stra_get_secs() / 1000 % 60,
             decision.risk, decision.strategy
         });
         if (_perf_monitor)

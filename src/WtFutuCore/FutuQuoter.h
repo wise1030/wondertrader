@@ -171,6 +171,10 @@ public:
         double lower_limit = 0;
         double best_bid = 0;
         double best_ask = 0;
+        // R15-b(2026-09-09): tick 驱动统计所需时间戳; 0 = 调用方未传 → 跳过 tick 采样
+        // (回调路径 onOrder/onEntrustAck 的统计更新不受影响, 两条路径幂等共存)
+        uint32_t uTime = 0;      ///< HHMM (stra_get_time 口径)
+        uint32_t sec_in_min = 0; ///< 分钟内秒 (stra_get_secs()/1000 口径)
         RiskVerdict verdict;      ///< 风控闸门 (halt/drain) - 决定能不能做
         StrategyInputs strategy;  ///< 策略输入 (util/obligation/block_add) - 决定怎么做
     };

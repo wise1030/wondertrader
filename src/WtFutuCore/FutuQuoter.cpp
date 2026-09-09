@@ -550,6 +550,16 @@ uint32_t FutuQuoter::refreshQuotes(wtp::IUftStraCtx* ctx, const QuoteRequest& re
         return 0;
     }
 
+    // R15-b(2026-09-09): 双边统计改 tick 驱动 —— 此前 update 仅在 onOrder/onEntrustAck
+    // 回调触发, 平静市 sticky 跳过重挂 → 无回调 → 统计时钟冻结在最后观测状态
+    // (09-09 日盘覆盖率读数 2.6%/0% 即冻结假象, 实际挂单在场)。此处每 tick 采样真实
+    // 槽位快照; 回调路径 update 保留(事件切换精度), 同刻重复调用幂等。
+    // 位置在 halt/side_pause 早退之后: 暂停期由 cancel ack 回调驱动状态转换, 不虚计。
+    if (req.uTime > 0 && _bilateral_stats.hasSessionInfo()) {
+        auto snapshot = getValidQuoteSnapshot();
+        _bilateral_stats.update(snapshot, req.uTime, req.sec_in_min);
+    }
+
     // F8: qty 衰减 exp 与 level 无关, 提升到入口每 tick 各算 1 次
     //   (原每 level 各 2 次 std::exp ~25-40ns/次, num_levels=3 时 6 次)
     const double long_decay =
