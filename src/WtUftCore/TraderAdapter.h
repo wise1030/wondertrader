@@ -281,6 +281,8 @@ private:
 	SpinMutex	_mtx_orders;
 	OrderMap*	_orders;
 	wt_hashset<std::string> _orderids;	//主要用于标记有没有处理过该订单
+	wt_hashset<uint32_t> _known_localids;	// R15-c(2026-09-10): 本进程历史下过单的 localid 集合
+											// (孤儿成交告警判据: usertag 匹配本通道但不在册 = 幽灵/残留单成交)
 
 	wt_hashmap<std::string, double> _undone_qty;	//未完成数量
 

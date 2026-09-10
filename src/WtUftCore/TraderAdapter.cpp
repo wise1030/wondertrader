@@ -1893,6 +1893,8 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 		char* userTag = (char*)orderInfo->getUserTag();
 		userTag += _order_pattern.size() + 1;
 		localid = strtoul(userTag, NULL, 10);
+		// R15-c: 本进程下过单的 localid 记入已知集合(孤儿成交告警的"在册"判据)
+		_known_localids.insert(localid);
 	}
 
 	//如果是wt发出去的单子则需要更新内部数据
@@ -1956,11 +1958,19 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 		userTag += _order_pattern.size() + 1;
 		localid = strtoul(userTag, NULL, 10);
 
-		//double oldQty = _undone_qty[stdCode];
-		//double newQty = oldQty - tradeRecord->getVolume()*(isBuy ? 1 : -1);
-		//_undone_qty[stdCode] = newQty;
-		//WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO, 
-		//	"[{}] {} qty of undone orders updated, {} -> {}", _id.c_str(), stdCode.c_str(), oldQty, newQty);
+		// R15-c(2026-09-10): 孤儿成交告警 —— usertag 匹配本通道但 localid 不在本进程
+		// 历史在册集合 = 幽灵/残留单成交 (如节末撤单 ack 丢失后隔夜存续、次日竞价成交)。
+		// 此类成交引擎/策略账本均无法归因, 是账本漂移的第一现场, 必须显式暴露。
+		// 09-08/09-10 实证: 隔夜残留单竞价成交 10 手, 本地账本静默, 漂移 ~16 手。
+		if (_known_localids.find(localid) == _known_localids.end())
+		{
+			WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+				"[{}] ORPHAN FILL: trade localid {} not tracked by this process (ghost/leftover order filled, "
+				"ledger drift expected) - instrument: {}, usertag: {}, trdqty: {}, trdprice: {}",
+				_id.c_str(), localid, stdCode.c_str(), tradeRecord->getUserTag(),
+				tradeRecord->getVolume(), tradeRecord->getPrice());
+		}
+
 		updateUndone(stdCode.c_str(), -tradeRecord->getVolume());
 	}
 
