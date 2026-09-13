@@ -4114,3 +4114,42 @@ v1 写的判据是：「20:40 cron 重启重建干净缓存 → 若今夜拒单�
 
 **验证**：TestUnits 全量（基线 180/182）→ v5 冒烟（`< /dev/null`，mocker 不经
 TraderAdapter 预期零关联）→ Release 隔离启动验证 → 生产部署
+
+### 12. v3.2 实施+部署记录（2026-09-13，P1+E④+**ABI 错配根因终案**，已部署）
+
+**🔑 ASAN 根因定位（R15-c 以来"布局敏感堆溢出"终结）**：
+- 隔离目录对照实验：**仅**替换 libWtUftCore.so（v3.2，较 runner 多 8B 成员）→ 启动
+  确定性 `malloc(): invalid size` + bus error；同树 ASAN 构建同路径复现 →
+  **heap-buffer-overflow 实锤**：`WtUftRunner.cpp:330 new TraderAdapter()` 按 runner
+  编译期 sizeof=808B 分配，libWtUftCore 内构造函数按 816B 布局写成员
+  （wt_hashmap 成员构造恰好越界 8B 写堆元数据）
+- 真相：**runner 可执行文件与 libWtUftCore.so 的 TraderAdapter 布局不一致
+  （ABI/ODR 错配）**——凡 TraderAdapter.h 增删成员而 runner 未同步重编译即炸。
+  R15-c（+_known_localids 成员）同一机制；F-core 纯 static 方法无成员故未炸；
+  v3.1 对子（09-12 02:04 成对部署）同源一致故未炸
+- **部署铁律（新增，强制）**：WtUftCore 头文件成员变更后，WtUftRunner 与
+  libWtUftCore.so 必须**同树重编译、成对部署、成对备份**（md5 双双校验）；
+  其它 include TraderAdapter.h 的二进制（WtPorter/WtExecMon/TraderDumper/延迟工具）
+  同理。根治方向（后续裁决）：创建工厂化（new 移入库内编译单元）或 PIMPL
+
+**P1（ORPHAN FILL 钝化修复，随本批）**：`_known_localids` 写入点收拢为
+doEntrust/doQuoteEntrust 两处（下单点）；删除 releaseCloseAvail/onRspOrders/
+onPushOrder 三处旧写入——幽灵单（非本进程所下）的成交恢复触发 ORPHAN FILL；
+C5 own 判定由台账播种/冻结条目覆盖，语义不变。
+
+**E④（周期再基线，采纳增强）**：onPushOrder 入口惰性 10min 节拍 →
+`requestPosRefresh("periodic")`（自带 10s 节流 + AS_ALLREADY 门）——治"沉默的保守
+泄漏"（他源扣减只降不升、永不产生拒单、事件触发永不命中）；C7 巡检行随周期重查
+每 10min 盘中落盘（P2 观测缺口顺带闭合）。
+
+**验证**：TestUnits 180/182（基线一致，零回归）；v5 冒烟 417 笔（405-417 带内）、
+0 HALT/zombie/error；隔离目录成对部署 75s 无崩溃（对照组仅换 lib 必崩）。
+
+**部署**：WtUftRunner md5 `5ed33e19` + libWtUftCore.so md5 `9d587429`
+（备份 WtUftRunner.bak_20260913_v32 / libWtUftCore.so.bak_20260913_v32）；
+21:11 重启存活（CPU 16% 正常）。SimNow 周日前置静默（registerFront 后无回应，
+交易日自会登录；09-12 02:04 v3.1 对子同路径登录正常）。
+
+**首时段门控（周一 09-14）**：CTP-50/51 ≤10/日（基线 672）；双边覆盖率 ≥85%
+（基线 2-6%）；台账巡检行每 10min 出现且 rebaseline 计数递增；若仍现拒单，
+取该 localid 的 reserve/release/clamped/unmatched 台账轨迹归因留存路径。

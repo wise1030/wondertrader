@@ -238,7 +238,15 @@ double TraderAdapter::enumPosition(const char* stdCode /* = "" */)
 	 */
 	double ret = 0;
 	bool bAll = (strlen(stdCode) == 0);
-	for (auto it = _positions.begin(); it != _positions.end(); it++)
+	// F-core v3.1 D(方案2): 锁内取快照, 锁外回调(sink 内可能反向进入 adapter)
+	std::vector<std::pair<std::string, PosItem>> snapshot;
+	{
+		SpinLock lock(_mtx_pos);
+		snapshot.reserve(_positions.size());
+		for (auto it = _positions.begin(); it != _positions.end(); it++)
+			snapshot.emplace_back(it->first, it->second);
+	}
+	for (auto it = snapshot.begin(); it != snapshot.end(); it++)
 	{
 		if (!bAll && strcmp(it->first.c_str(), stdCode) != 0)
 			continue;
@@ -257,6 +265,8 @@ double TraderAdapter::enumPosition(const char* stdCode /* = "" */)
 
 double TraderAdapter::getPosition(const char* stdCode, bool bValidOnly, int32_t flag /* = 3 */)
 {
+	// F-core v3.1 D: 持仓账本跨线程串行化(短临界区)
+	SpinLock lock(_mtx_pos);
 	auto it = _positions.find(stdCode);
 	if (it == _positions.end())
 		return 0;
@@ -303,9 +313,25 @@ OrderMap* TraderAdapter::getOrders(const char* stdCode)
 
 void TraderAdapter::updateUndone(const char* stdCode, double qty)
 {
-	double& undone = _undone_qty[stdCode];
-	double oldQty = undone;
-	undone += qty;
+	// F-core v3.1 D: 未完成量跨线程串行化(短临界区)
+	SpinLock lock(_mtx_pos);
+	updateUndoneLocked(stdCode, qty);
+}
+
+// F-core v3.1 D: 加锁版本的裸更新(叶子函数, 不调用回调/API)
+void TraderAdapter::updateUndoneLocked(const char* stdCode, double qty)
+{
+	_undone_qty[stdCode] += qty;
+}
+
+// F-core v3.1 D: 持仓快照(锁内拷贝) —— 下单拆分借它决策, 不持锁跨越发单
+TraderAdapter::PosItem TraderAdapter::getPosSnapshot(const char* stdCode)
+{
+	SpinLock lock(_mtx_pos);
+	auto it = _positions.find(stdCode);
+	if (it == _positions.end())
+		return PosItem();
+	return it->second;
 }
 
 uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
@@ -334,6 +360,10 @@ uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] Order placing failed: {}", _id, ret);
 		return UINT_MAX;
 	}
+	// R15-c/v3.2-P1: 本进程所下订单在此(唯一下单点)登记在册集合 —— ORPHAN FILL 判据.
+	//   不再于登录回放/任意推送处写入: 幽灵单(非本进程所下)的成交必须触发告警,
+	//   适配器侧账本已由 C6 台账覆盖, 告警专司策略侧不可归因的暴露.
+	_known_localids.insert(localid);
 	//else if(_risk_mon_enabled)
 	//{
 	//	int64_t now = TimeUtils::getLocalTimeNow();
@@ -378,6 +408,8 @@ uint32_t TraderAdapter::doQuoteEntrust(WTSEntrust* bidEntrust, WTSEntrust* askEn
 			"[{}] Quote placing failed: {}", _id, ret);
 		return UINT_MAX;
 	}
+	// R15-c/v3.2-P1: quote 下单点对称登记在册集合(与 doEntrust 同语义)
+	_known_localids.insert(localid);
 	return localid;
 }
 
@@ -493,14 +525,24 @@ void TraderAdapter::deductCloseAvail(PosItem& pItem, bool isLong, bool isToday, 
 	}
 }
 
-void TraderAdapter::restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty)
+// F-core v3.1 C4(2026-09-11): 归还一律钳制, 防残余泄漏造成可用量无界膨胀(幻影);
+// 返回 true = 发生钳制(说明账本与柜台发散, 调用方须告警)
+bool TraderAdapter::restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty)
 {
 	double& newavail = isLong ? pItem.l_newavail : pItem.s_newavail;
 	double& preavail = isLong ? pItem.l_preavail : pItem.s_preavail;
 	double  prevol   = isLong ? pItem.l_prevol   : pItem.s_prevol;
+	double  newvol   = isLong ? pItem.l_newvol   : pItem.s_newvol;
+	bool    clamped  = false;
+
 	if (isToday)
 	{
 		newavail += qty;
+		if (newavail > newvol)
+		{
+			newavail = newvol;
+			clamped = true;
+		}
 	}
 	else
 	{
@@ -509,8 +551,112 @@ void TraderAdapter::restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday,
 		{
 			newavail += (preavail - prevol);
 			preavail = prevol;
+			if (newavail > newvol)
+			{
+				newavail = newvol;
+				clamped = true;
+			}
 		}
 	}
+	return clamped;
+}
+
+// F-core v3.1 C2: 平仓下单成功即预冻结(可用量 - 委托量) 并登记台账.
+//   唯一冻结点在 closeLong/closeShort, 覆盖报价拆分路径与 stra_exit_* 直通道
+void TraderAdapter::freezeCloseAvail(const char* stdCode, bool isLong, bool isToday, double qty, uint32_t localid)
+{
+	if (qty <= 0.0 || localid == UINT_MAX)
+		return;
+
+	// F-core v3.1 D: 持仓账本串行化(短临界区, 叶子函数)
+	SpinLock lock(_mtx_pos);
+	freezeCloseAvailLocked(stdCode, isLong, isToday, qty, localid);
+}
+
+// 加锁版本: 冻结登记 + 可用量扣减(调用方已持 _mtx_pos)
+void TraderAdapter::freezeCloseAvailLocked(const char* stdCode, bool isLong, bool isToday, double qty, uint32_t localid)
+{
+	if (!_close_freeze.reserve(localid, stdCode, isLong, isToday, qty))
+	{
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+			"[{}] close freeze reserve FAILED (dup/invalid localid): {} localid={} qty={}",
+			_id.c_str(), stdCode, localid, qty);
+		return;
+	}
+
+	PosItem& pItem = _positions[stdCode];
+	deductCloseAvail(pItem, isLong, isToday, qty);
+}
+
+// F-core v3.1 D: 他源/残留平仓单的可用量扣减(含打印), 短锁
+void TraderAdapter::deductCloseAvailByCode(const char* stdCode, bool isLong, bool isToday, double qty)
+{
+	SpinLock lock(_mtx_pos);
+	PosItem& pItem = _positions[stdCode];
+	deductCloseAvail(pItem, isLong, isToday, qty);
+	printPosition(stdCode, pItem);
+}
+
+// F-core v3.1 C3: 拒单/撤单按台账 exactly-once 归还.
+//   未命中台账 = 重复推送/乱序回报/他源镜像单 -> 一律不归还(只计数), 幻影注入在结构上不可能
+bool TraderAdapter::releaseCloseAvail(uint32_t localid)
+{
+	CloseFreezeLedger::Entry entry;
+	double relQty = 0.0;
+	if (!_close_freeze.release(localid, entry, relQty))
+	{
+		// F-core v3.1 E: 终态事件未命中台账(重复推送/乱序/他源) -> 触发节流重查兜底
+		requestPosRefresh("ledger miss");
+		return false;
+	}
+
+	bool clamped = false;
+	{
+	// F-core v3.1 D: 归还与 md 线程预扣互斥(短临界区, 不跨回调/API)
+	SpinLock lock(_mtx_pos);
+	if (relQty > 0.0)
+	{
+		PosItem& pItem = _positions[entry.stdCode];
+		clamped = restoreCloseAvail(pItem, entry.isLong, entry.isToday, relQty);
+		if (clamped)
+			_close_freeze.noteClamp();
+		printPosition(entry.stdCode.c_str(), pItem);
+	}
+	}
+	if (clamped)
+	{
+		// F-core v3.1 E: 归还被钳制 = 账本与柜台发散 -> 触发节流重查(锁外发起)
+		requestPosRefresh("restore clamp");
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+			"[{}] close avail restore CLAMPED (ledger/broker divergence): {} localid={} isLong={} isToday={} restore_qty={}",
+			_id.c_str(), entry.stdCode.c_str(), localid, entry.isLong, entry.isToday, relQty);
+	}
+	return true;
+}
+
+// F-core v3.1 E(2026-09-12): 平仓异常 -> 节流重查持仓再基线(自愈兜底).
+//   触发: ① 平仓单被拒 ② 台账归还未命中(unmatched) ③ 归还被钳制(clamped)
+//   动作: >=10s 才真正发起 queryPositions; 回包由 onRspPosition 按 C6 规则重放
+//         (柜台净值 - 在途台账量, 再钳制), 恒为保守方向, 绝不放大可平量
+//   不做: 降级重报(平今被拒改开仓重发)、错误码解析
+void TraderAdapter::requestPosRefresh(const char* reason)
+{
+	if (_trader_api == NULL || _state != AS_ALLREADY)
+		return;
+
+	uint64_t now = TimeUtils::getLocalTimeNow();
+	if (_pos_refresh_last_ms != 0 && now - _pos_refresh_last_ms < 10000ULL)
+	{
+		_pos_refresh_skipped++;
+		return;
+	}
+
+	_pos_refresh_last_ms = now;
+	_pos_refresh_count++;
+	WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+		"[{}] position re-query triggered by {} (count={}, skipped={})",
+		_id.c_str(), reason ? reason : "unknown", _pos_refresh_count, _pos_refresh_skipped);
+	_trader_api->queryPositions();
 }
 
 OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int flag, bool bForceClose, WTSContractInfo* cInfo /* = NULL */)
@@ -530,7 +676,8 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 
 	// WTSLogger::log_dyn("trader", _id.c_str(), LL_DEBUG, "[{}] Buying {} of quantity {}", _id.c_str(), stdCode, qty);
 
-	PosItem& pItem = _positions[stdCode];
+	// F-core v3.1 D(方案2): 拆分只读快照, 不持锁跨越发单
+	PosItem pItem;
 	WTSTradeStateInfo* statInfo = (WTSTradeStateInfo*)_stat_map->get(stdCode);
 	if (statInfo == NULL)
 	{
@@ -548,6 +695,7 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 
 	for (auto it = ruleGP.begin(); it != ruleGP.end(); it++)
 	{
+		pItem = getPosSnapshot(stdCode);	// 每条 rule 取最新快照(前序 rule 的预冻结可见)
 		const ActionRule& curRule = (*it);
 		if (curRule._atype == AT_Open && !bForceClose)
 		{
@@ -630,9 +778,6 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 					uint32_t localid = closeShort(stdCode, price, curQty, (commInfo->getCoverMode() == CM_CoverToday), flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
-					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-					if (localid != UINT_MAX)
-						deductCloseAvail(pItem, false, commInfo->getCoverMode() == CM_CoverToday, curQty);
 
 					leftQty -= curQty;
 
@@ -679,9 +824,6 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 					uint32_t localid = closeShort(stdCode, price, curQty, false, flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
-					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-					if (localid != UINT_MAX)
-						deductCloseAvail(pItem, false, false, curQty);
 
 					leftQty -= curQty;
 
@@ -723,9 +865,6 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 						uint32_t localid = closeShort(stdCode, price, curQty, false, flag);
 						ret.emplace_back(localid);
 
-						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-						if (localid != UINT_MAX)
-							deductCloseAvail(pItem, false, false, curQty);
 
 						leftQty -= curQty;
 
@@ -753,9 +892,6 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 						uint32_t localid = closeShort(stdCode, price, curQty, false, flag);
 						ret.emplace_back(localid);
 
-						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-						if (localid != UINT_MAX)
-							deductCloseAvail(pItem, false, false, curQty);
 
 						leftQty -= curQty;
 
@@ -782,9 +918,6 @@ OrderIDs TraderAdapter::buy(const char* stdCode, double price, double qty, int f
 						uint32_t localid = closeShort(stdCode, price, curQty, true, flag);
 						ret.emplace_back(localid);
 
-						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-						if (localid != UINT_MAX)
-							deductCloseAvail(pItem, false, true, curQty);
 
 						leftQty -= curQty;
 
@@ -828,7 +961,8 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 	if (cInfo == NULL) cInfo = getContract(stdCode);
 	WTSCommodityInfo* commInfo = cInfo->getCommInfo();
 
-	PosItem& pItem = _positions[stdCode];
+	// F-core v3.1 D(方案2): 拆分只读快照, 不持锁跨越发单
+	PosItem pItem;
 	WTSTradeStateInfo* statInfo = (WTSTradeStateInfo*)_stat_map->get(stdCode);
 	if (statInfo == NULL)
 	{
@@ -847,6 +981,7 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 
 	for (auto it = ruleGP.begin(); it != ruleGP.end(); it++)
 	{
+		pItem = getPosSnapshot(stdCode);	// 每条 rule 取最新快照(前序 rule 的预冻结可见)
 		const ActionRule& curRule = (*it);
 		if (curRule._atype == AT_Open && !bForceClose)
 		{
@@ -927,9 +1062,6 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 					uint32_t localid = closeLong(stdCode, price, curQty, (commInfo->getCoverMode() == CM_CoverToday), flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
-					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-					if (localid != UINT_MAX)
-						deductCloseAvail(pItem, true, commInfo->getCoverMode() == CM_CoverToday, curQty);
 
 					leftQty -= curQty;
 
@@ -974,9 +1106,6 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 					uint32_t localid = closeLong(stdCode, price, curQty, false, flag);//如果不支持平今, 则直接下平仓标记即可
 					ret.emplace_back(localid);
 
-					// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-					if (localid != UINT_MAX)
-						deductCloseAvail(pItem, true, false, curQty);
 
 					leftQty -= curQty;
 
@@ -1014,9 +1143,6 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 						uint32_t localid = closeLong(stdCode, price, curQty, false, flag);
 						ret.emplace_back(localid);
 
-						// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-						if (localid != UINT_MAX)
-							deductCloseAvail(pItem, true, false, curQty);
 
 						leftQty -= curQty;
 
@@ -1045,9 +1171,6 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 							uint32_t localid = closeLong(stdCode, price, curQty, false, flag);
 							ret.emplace_back(localid);
 
-							// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-							if (localid != UINT_MAX)
-								deductCloseAvail(pItem, true, false, curQty);
 
 							leftQty -= curQty;
 
@@ -1076,9 +1199,6 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 							uint32_t localid = closeLong(stdCode, price, curQty, true, flag);
 							ret.emplace_back(localid);
 
-							// F-core: 下单即预扣可平量(桥接柜台首推送窗口)
-							if (localid != UINT_MAX)
-								deductCloseAvail(pItem, true, true, curQty);
 
 							leftQty -= curQty;
 
@@ -1287,6 +1407,9 @@ uint32_t TraderAdapter::closeLong(const char* stdCode, double price, double qty,
 	updateUndone(stdCode, qty);
 
 	uint32_t ret = doEntrust(entrust);
+	// F-core v3.1 C2: 下单成功即预冻结平仓可用量(所有平仓入口唯一冻结点)
+	if (ret != UINT_MAX)
+		freezeCloseAvail(stdCode, true, isToday, qty, ret);
 	entrust->release();
 	return ret;
 }
@@ -1316,6 +1439,9 @@ uint32_t TraderAdapter::closeShort(const char* stdCode, double price, double qty
 	updateUndone(stdCode, qty);
 
 	uint32_t ret = doEntrust(entrust);
+	// F-core v3.1 C2: 下单成功即预冻结平仓可用量(所有平仓入口唯一冻结点)
+	if (ret != UINT_MAX)
+		freezeCloseAvail(stdCode, false, isToday, qty, ret);
 	entrust->release();
 	return ret;
 }
@@ -1396,29 +1522,44 @@ void TraderAdapter::onRspEntrust(WTSEntrust* entrust, WTSError *err)
 		//实盘中发现错误单有时候会推送两次
 		//所以这里加一个检查未完成单的逻辑
 		//如果有错单，正常情况下未完成单一定不为0
-		//如果未完成订单为0，则说明这一次是重复通知，则不再处理了
-		double oldQty = _undone_qty[stdCode];
-		if (decimal::eq(oldQty, 0))
-			return;
+		//如果未完成订单为0，则说明这一次是重复通知，则不再通知策略
+		// F-core v3.1 D: 短锁读取未完成量(md 线程可能并发更新)
+		double oldQty = getUndoneQty(stdCode.c_str());
+		bool dupNotify = decimal::eq(oldQty, 0);
+		if (!dupNotify)
+			updateUndone(stdCode.c_str(), -qty);
 
-		updateUndone(stdCode.c_str(), -qty);
-
-		// F-core: 报单被拒(柜台从未冻结) -> 归还下单时的预扣可平量
-		//   (放在重复通知早退之后: 同一拒单的重复推送会被 oldQty==0 拦截, 恢复只执行一次)
-		if (!isOpen)
+		// 本通道 userTag -> localid (仅本通道订单参与本通道账本)
+		uint32_t localid = 0;
+		bool ownOrder = strlen(entrust->getUserTag()) > 0
+			&& StrUtil::startsWith(entrust->getUserTag(), _order_pattern.c_str(), true);
+		if (ownOrder)
 		{
-			PosItem& pItem = _positions[stdCode];
-			restoreCloseAvail(pItem, isLong, isToday, qty);
-			printPosition(stdCode.c_str(), pItem);
+			const char* userTag = entrust->getUserTag() + _order_pattern.size() + 1;
+			localid = strtoul(userTag, NULL, 10);
 		}
 
-
-		if (strlen(entrust->getUserTag()) > 0)
+		// F-core v3.1 C3: 报单被拒(柜台从未冻结) -> 按台账 exactly-once 归还预冻结可用量.
+		//   与上面的重复推送去重解耦: 台账自身保证"同一拒单最多归还一次";
+		//   未命中台账(重复推送/乱序回报/他源镜像单) 一律不归还, 只计数告警
+		if (!isOpen && localid != 0)
 		{
-			char* userTag = (char*)entrust->getUserTag();
-			userTag += _order_pattern.size() + 1;
-			uint32_t localid = strtoul(userTag, NULL, 10);
+			if (!releaseCloseAvail(localid))
+			{
+				WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+					"[{}] close freeze release MISS (unmatched reject: duplicate/out-of-order/foreign): {} localid={} qty={}",
+					_id.c_str(), stdCode.c_str(), localid, qty);
+			}
+			// F-core v3.1 E: 任何平仓被拒 -> 触发节流重查(自愈兜底)
+			requestPosRefresh("close reject");
+		}
 
+		// 重复推送不再通知策略(保持既有去重语义)
+		if (dupNotify)
+			return;
+
+		if (ownOrder)
+		{
 			for(auto sink : _sinks)
 				sink->on_entrust(localid, stdCode.c_str(), false, err->getMessage());
 		}
@@ -1450,24 +1591,42 @@ void TraderAdapter::onRspPosition(const WTSArray* ayPositions)
 
 			std::string stdCode = cInfo->getFullCode();
 
+			// F-core v3.1 D: 短锁写入本合约持仓(重基线)
+			SpinLock lockPos(_mtx_pos);
 			PosItem& pos = _positions[stdCode];
+			// F-core v3.1 C6: 柜台 avail 是"查询处理时刻"的净值(已含当时在途冻结).
+			//   本进程台账中仍在途的平仓单必须再扣一次, 否则快照回包会把下单时点的
+			//   预冻结抹掉(查询在途期间的预扣丢失) -> 超量平仓窗口. 方向恒为保守:
+			//   在途单终态(撤/拒)时由台账归还, 恰好抵回.
 			if (pItem->getDirection() == WDT_LONG)
 			{
-				pos.l_newavail = pItem->getAvailNewPos();
 				pos.l_newvol = pItem->getNewPosition();
-				pos.l_preavail = pItem->getAvailPrePos();
 				pos.l_prevol = pItem->getPrePosition();
+				pos.l_newavail = std::max(0.0, std::min(
+					pItem->getAvailNewPos() - _close_freeze.pendingQty(stdCode, true, 0), pos.l_newvol));
+				pos.l_preavail = std::max(0.0, std::min(
+					pItem->getAvailPrePos() - _close_freeze.pendingQty(stdCode, true, 1), pos.l_prevol));
 			}
 			else
 			{
-				pos.s_newavail = pItem->getAvailNewPos();
 				pos.s_newvol = pItem->getNewPosition();
-				pos.s_preavail = pItem->getAvailPrePos();
 				pos.s_prevol = pItem->getPrePosition();
+				pos.s_newavail = std::max(0.0, std::min(
+					pItem->getAvailNewPos() - _close_freeze.pendingQty(stdCode, false, 0), pos.s_newvol));
+				pos.s_preavail = std::max(0.0, std::min(
+					pItem->getAvailPrePos() - _close_freeze.pendingQty(stdCode, false, 1), pos.s_prevol));
 			}
 		}
 
-		for (auto it = _positions.begin(); it != _positions.end(); it++)
+		// F-core v3.1 D(方案2): 锁内快照 -> 锁外回调(sink 可能反向进入 adapter)
+		std::vector<std::pair<std::string, PosItem>> posSnapshot;
+		{
+			SpinLock lockPos(_mtx_pos);
+			posSnapshot.reserve(_positions.size());
+			for (auto it = _positions.begin(); it != _positions.end(); it++)
+				posSnapshot.emplace_back(it->first, it->second);
+		}
+		for (auto it = posSnapshot.begin(); it != posSnapshot.end(); it++)
 		{
 			const char* stdCode = it->first.c_str();
 			const PosItem& pItem = it->second;
@@ -1481,6 +1640,15 @@ void TraderAdapter::onRspPosition(const WTSArray* ayPositions)
 	}
 
 	WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO,"[{}] Position data updated", _id.c_str());
+
+	// F-core v3.1 C7: 平仓预冻结台账巡检计数(冻结/归还/全成交/未命中/钳制)
+	{
+		auto st = _close_freeze.stats();
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO,
+			"[{}] close-freeze ledger: live={} reserved={} released={} filled_out={} unmatched={} clamped={} released_qty={} rebaseline={} rebaseline_skipped={}",
+			_id.c_str(), _close_freeze.size(), st.reserved, st.released, st.filled_out,
+			st.unmatched, st.clamped, st.released_qty, _pos_refresh_count, _pos_refresh_skipped);
+	}
 
 	if (_state == AS_LOGINED)
 	{
@@ -1497,7 +1665,14 @@ void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 		if (_orders == NULL)
 			_orders = OrderMap::create();
 
-		_undone_qty.clear();
+		{
+			// F-core v3.1 D: 短锁清空未完成量
+			SpinLock lockPos(_mtx_pos);
+			_undone_qty.clear();
+		}
+		// F-core v3.1 C6: 登录/重连的订单回放是"本通道存活单"的权威口径 —— 台账在此
+		//   整体重置后按回放播种, 使重启/重连语义闭合(避免旧条目与新快照重复计算)
+		_close_freeze.clear();
 
 		for (auto it = ayOrders->begin(); it != ayOrders->end(); it++)
 		{
@@ -1590,19 +1765,40 @@ void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 			userTag += _order_pattern.size() + 1;
 			uint32_t localid = strtoul(userTag, NULL, 10);
 
+			// F-core v3.1 C5/C6: 存活平仓单台账播种
+			//   (其冻结已含在登录持仓查询的 avail 净值中 -> 视同已预扣)
+			// v3.2-P1: 此处不再写入 _known_localids —— 登录回放单非本进程所下,
+			//   其成交属幽灵/残留成交, 必须保留 ORPHAN FILL 告警能力;
+			//   C5 own 判定由台账播种条目覆盖, 不受影响
+			if (orderInfo->getOffsetType() != WOT_OPEN)
+			{
+				_close_freeze.seed(localid, stdCode,
+					orderInfo->getDirection() == WDT_LONG,
+					orderInfo->getOffsetType() == WOT_CLOSETODAY,
+					orderInfo->getVolLeft());
+			}
+
 			{
 				SpinLock lock(_mtx_orders);
 				_orders->add(localid, orderInfo);
 			}
 
-			double& curQty = _undone_qty[stdCode];
-			curQty += orderInfo->getVolLeft();
+			// F-core v3.1 D: 短锁累加未完成量
+			updateUndone(stdCode.c_str(), orderInfo->getVolLeft());
 		}
 
-		for (auto it = _undone_qty.begin(); it != _undone_qty.end(); it++)
+		// F-core v3.1 D: 锁内快照, 锁外打印
+		std::vector<std::pair<std::string, double>> undoneSnapshot;
+		{
+			SpinLock lockPos(_mtx_pos);
+			undoneSnapshot.reserve(_undone_qty.size());
+			for (auto it = _undone_qty.begin(); it != _undone_qty.end(); it++)
+				undoneSnapshot.emplace_back(it->first, it->second);
+		}
+		for (auto it = undoneSnapshot.begin(); it != undoneSnapshot.end(); it++)
 		{
 			const char* stdCode = it->first.c_str();
-			const double& curQty = _undone_qty[stdCode];
+			const double& curQty = it->second;
 
 			WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO, 
 				"[{}]{} undone quantity {}", _id.c_str(), stdCode, curQty);
@@ -1713,10 +1909,22 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 	if (orderInfo == NULL)
 		return;
 
-
 	WTSContractInfo* cInfo = _bd_mgr->getContract(orderInfo->getCode(), orderInfo->getExchg());
 	if (cInfo == NULL)
 		return;
+
+	// F-core v3.2 E④(2026-09-13): 周期再基线 — 惰性时间检查(piggyback 推送入口, 无新线程).
+	//   事件触发(拒单/钳制/miss)治不了"沉默的保守泄漏"(他源扣减等只降不升的漂移
+	//   永不产生拒单); 周期 10min 重查让事件记账退化为两次基线间的优化.
+	//   requestPosRefresh 自带 10s 节流与 AS_ALLREADY 门, 此处只做 10min 节拍.
+	{
+		uint64_t now_probe = TimeUtils::getLocalTimeNow();
+		if (now_probe - _pos_refresh_periodic_ms >= 600000ULL)
+		{
+			_pos_refresh_periodic_ms = now_probe;
+			requestPosRefresh("periodic");
+		}
+	}
 
 	std::string stdCode = cInfo->getFullCode();
 
@@ -1782,6 +1990,14 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 
 	WTSLogger::log_dyn("trader", _id.c_str(), LL_DEBUG,"[{}] Order notified, instrument: {}, usertag: {}, state: {}", _id.c_str(), stdCode.c_str(), orderInfo->getUserTag(), stateToName(orderInfo->getOrderState()));
 
+	// 本通道 userTag -> localid (一次解析, 供台账归还与"在册集合"共用)
+	uint32_t localid = 0;
+	if (StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
+	{
+		const char* userTag = orderInfo->getUserTag() + _order_pattern.size() + 1;
+		localid = strtoul(userTag, NULL, 10);
+	}
+
 	//如果订单撤销, 并且是wt的订单, 则要先更新未完成数量
 	if (orderInfo->getOrderState() == WOS_Canceled && StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
 	{
@@ -1822,80 +2038,60 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 				bool isToday = (orderInfo->getOffsetType() == WOT_CLOSETODAY);
 				double qty = orderInfo->getVolume();
 
-				PosItem& pItem = _positions[stdCode];
-				// F-core: 本通道报出的平仓单(usertag 带本通道标识)已在下单时预扣,
-				//   首笔推送跳过扣减, 防止重复扣冻结;
-				//   非本通道单(盘前遗留/柜台侧他源)保持原扣减逻辑
-				bool ownOrder = StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true);
+				// F-core v3.1 C5: own 判定改以"本进程在册集合/平仓台账"为准 —— usertag
+				//   前缀在跨进程场景会误判(上一实例残留单/同账户镜像推送).
+				//   own 单: 下单时已预冻结 -> 首推送跳过扣减(防重复扣);
+				//   非在册单(盘前遗留/他源): 保持原扣减逻辑(保守方向) + 节流告警
+				bool ownOrder = (localid != 0)
+					&& (_close_freeze.contains(localid)
+						|| _known_localids.find(localid) != _known_localids.end());
 				if (!ownOrder)
 				{
-					deductCloseAvail(pItem, isLong, isToday, qty);
-					printPosition(stdCode.c_str(), pItem);
+					// F-core v3.1 D: 短锁内扣减(helper 自持锁)
+					deductCloseAvailByCode(stdCode.c_str(), isLong, isToday, qty);
+
+					// 出现即意味着"本通道收到了非本进程报出的平仓单": 残留幽灵单或
+					//   他源镜像推送. 保守按扣减处理, 并节流(60s)告警以便追查
+					static uint64_t s_last_foreign_log_ms = 0;
+					uint64_t now_ms = TimeUtils::getLocalTimeNow();
+					if (now_ms > s_last_foreign_log_ms + 60000)
+					{
+						s_last_foreign_log_ms = now_ms;
+						WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+							"[{}] FOREIGN close push (not placed by this process, deducted conservatively): {} localid={} qty={}",
+							_id.c_str(), stdCode.c_str(), localid, qty);
+					}
 				}
 				else if (orderInfo->getOrderState() == WOS_Canceled)
 				{
-					// 接受推送丢失、首见即撤单终态: 下单预扣需归还(柜台确曾冻结后释放)
-					restoreCloseAvail(pItem, isLong, isToday, qty - orderInfo->getVolTraded());
-					printPosition(stdCode.c_str(), pItem);
+					// F-core v3.1 C3: 接受推送丢失、首见即撤单终态 -> 按台账 exactly-once 归还
+					// (柜台确曾冻结后释放); 未命中台账不归还
+					if (localid == 0 || !releaseCloseAvail(localid))
+					{
+						WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+							"[{}] close freeze release MISS (first-push canceled, unmatched): {} localid={} qty={}",
+							_id.c_str(), stdCode.c_str(), localid, qty - orderInfo->getVolTraded());
+					}
 				}
 			}
 		}
 		else if (orderInfo->getOrderState() == WOS_Canceled && orderInfo->getOffsetType() != WOT_OPEN)
 		{
-			//如果订单不是第一次推送, 且撤销了, 则要更新可平量
-			//const char* code = orderInfo->getCode();
-			bool isLong = (orderInfo->getDirection() == WDT_LONG);
-			bool isToday = (orderInfo->getOffsetType() == WOT_CLOSETODAY);
-			double qty = orderInfo->getVolume() - orderInfo->getVolTraded();
-
-			PosItem& pItem = _positions[stdCode];
-			if (isLong)	//平多
+			// F-core v3.1 C3: 重复推送中的撤单终态 -> 同上, 统一按台账归还
+			//   (原内联归还算术无钳制、无幂等, 是幻影注入的第二条路径, 已废弃)
+			if (localid == 0 || !releaseCloseAvail(localid))
 			{
-				if (isToday)
-				{
-					pItem.l_newavail += qty;	//如果是平今, 则只需要更新可平今仓
-				}
-				else
-				{
-					pItem.l_preavail += qty;
-					if (pItem.l_preavail > pItem.l_prevol)
-					{
-						pItem.l_newavail += (pItem.l_preavail - pItem.l_prevol);
-						pItem.l_preavail = pItem.l_prevol;
-					}
-				}
+				WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+					"[{}] close freeze release MISS (repeat-push canceled, unmatched): {} localid={} qty={}",
+					_id.c_str(), stdCode.c_str(), localid,
+					orderInfo->getVolume() - orderInfo->getVolTraded());
 			}
-			else //平空
-			{
-				if (isToday)
-				{
-					pItem.s_newavail += qty;
-				}
-				else
-				{
-					pItem.s_preavail += qty;
-					if (pItem.s_preavail > pItem.s_prevol)
-					{
-						pItem.s_newavail += (pItem.s_preavail - pItem.s_prevol);
-						pItem.s_preavail = pItem.s_prevol;
-					}
-				}
-			}
-			printPosition(stdCode.c_str(), pItem);
 		}
 	}
 
-	uint32_t localid = 0;
-
-	//先看看是不是wt发出去的单子
-	if (StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
-	{
-		char* userTag = (char*)orderInfo->getUserTag();
-		userTag += _order_pattern.size() + 1;
-		localid = strtoul(userTag, NULL, 10);
-		// R15-c: 本进程下过单的 localid 记入已知集合(孤儿成交告警的"在册"判据)
-		_known_localids.insert(localid);
-	}
+	// R15-c/v3.2-P1: 本进程所下订单仅由 doEntrust/doQuoteEntrust 登记在册集合.
+	//   此处(任意推送)不再写入 —— 推送侧写入会让幽灵单(非本进程所下)混入在册集合,
+	//   使其后续成交不再触发 ORPHAN FILL 告警(告警对该首要场景哑火)
 
 	//如果是wt发出去的单子则需要更新内部数据
 	if(localid != 0)
@@ -1972,8 +2168,15 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 		}
 
 		updateUndone(stdCode.c_str(), -tradeRecord->getVolume());
+
+		// F-core v3.1 C3: 成交只累计"不可归还量"(撤单归还 qty-traded); 全成交由台账销账
+		_close_freeze.onTrade(localid, tradeRecord->getVolume());
 	}
 
+	// F-core v3.1 D: 短锁内更新持仓/可用量(锁外再做 sink 回调)
+	double vol = tradeRecord->getVolume();
+	{
+	SpinLock lockPos(_mtx_pos);
 	PosItem& pItem = _positions[stdCode];
 	WTSTradeStateInfo* statInfo = (WTSTradeStateInfo*)_stat_map->get(stdCode.c_str());
 	if (statInfo == NULL)
@@ -1982,7 +2185,6 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 		_stat_map->add(stdCode, statInfo, false);
 	}
 
-	double vol = tradeRecord->getVolume();
 	if(isLong)
 	{
 		if (isOpen)
@@ -2028,6 +2230,7 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 	}
 
 	printPosition(stdCode.c_str(), pItem);
+	}
 
 
 	uint32_t offset;

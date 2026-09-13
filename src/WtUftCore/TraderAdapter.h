@@ -15,6 +15,8 @@
 #include "../Share/StdUtils.hpp"
 #include "../Includes/WTSCollection.hpp"
 #include "../Share/SpinMutex.hpp"
+#include "CloseFreezeLedger.h"
+#include <mutex>
 
 NS_WTP_BEGIN
 class WTSVariant;
@@ -133,7 +135,23 @@ private:
 	//   平今→只动 newavail; 平昨→先 preavail、溢出动 newavail (预扣);
 	//   归还反向: preavail 加回到 prevol 封顶、溢出加 newavail。
 	static void deductCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty);
-	static void restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty);
+	// F-core v3.1 C4: 归还一律钳制(newavail<=newvol / preavail<=prevol); 返回 true = 发生钳制
+	static bool restoreCloseAvail(PosItem& pItem, bool isLong, bool isToday, double qty);
+
+	// F-core v3.1 C2/C3: 平仓预冻结与按台账 exactly-once 归还
+	void freezeCloseAvail(const char* stdCode, bool isLong, bool isToday, double qty, uint32_t localid);
+	bool releaseCloseAvail(uint32_t localid);
+
+	// F-core v3.1 E(D-batch-E): 平仓异常(拒单/台账未命中/归还钳制) -> 节流重查持仓再基线
+	void requestPosRefresh(const char* reason);
+
+	// F-core v3.1 D(方案1/2): 持仓/未完成量账本串行化
+	//   SpinMutex 短临界区; 全部为叶子函数(不调用回调/API), 无递归加锁;
+	//   下单拆分改读"快照"(锁内拷贝, 锁外发单), 回调遍历同样先快照后回调
+	void updateUndoneLocked(const char* stdCode, double qty);
+	void freezeCloseAvailLocked(const char* stdCode, bool isLong, bool isToday, double qty, uint32_t localid);
+	PosItem getPosSnapshot(const char* stdCode);
+	void deductCloseAvailByCode(const char* stdCode, bool isLong, bool isToday, double qty);
 
 	const RiskParams* getRiskParams(const char* stdCode);
 
@@ -143,6 +161,8 @@ public:
 	OrderMap* getOrders(const char* stdCode);
 	inline double getUndoneQty(const char* stdCode)
 	{
+		// F-core v3.1 D: 未完成量跨线程串行化(短临界区; MdSpi/TdSpi 两侧都会读)
+		SpinLock lock(_mtx_pos);
 		auto it = _undone_qty.find(stdCode);
 		if (it != _undone_qty.end())
 			return it->second;
@@ -277,12 +297,27 @@ private:
 	ActionPolicyMgr*	_policy_mgr;
 
 	wt_hashmap<std::string, PosItem> _positions;
+	// F-core v3.1 C1: 平仓可用量预冻结台账 (可用量 = 柜台基线 - 在途平仓未终态量)
+	CloseFreezeLedger _close_freeze;
+	// F-core v3.1 D(2026-09-13 复核修订): 持仓/未完成量的跨线程串行化
+	//   MdSpi 发单路径(下单即预冻结) 与 TdSpi 回报路径(归还/成交/快照) 并发访问同一容器;
+	//   改用项目惯用 SpinMutex + 短临界区(无递归): 所有持锁函数均为叶子函数
+	mutable SpinMutex _mtx_pos;
+
+	// F-core v3.1 E: 持仓重查(自愈兜底)节流与计数
+	uint64_t	_pos_refresh_last_ms = 0;	///< 上次触发时刻(ms), 0=尚未触发
+	uint32_t	_pos_refresh_count = 0;		///< 累计触发次数
+	uint32_t	_pos_refresh_skipped = 0;	///< 节流窗口内被跳过次数
+	// F-core v3.2 E④(2026-09-13): 周期再基线节拍(piggyback onPushOrder, 10min)
+	uint64_t	_pos_refresh_periodic_ms = 0;
 
 	SpinMutex	_mtx_orders;
 	OrderMap*	_orders;
 	wt_hashset<std::string> _orderids;	//主要用于标记有没有处理过该订单
-	wt_hashset<uint32_t> _known_localids;	// R15-c(2026-09-10): 本进程历史下过单的 localid 集合
-											// (孤儿成交告警判据: usertag 匹配本通道但不在册 = 幽灵/残留单成交)
+	// R15-c(2026-09-10): 本进程所下订单的 localid 集合 —— v3.2-P1 起仅 doEntrust/doQuoteEntrust 写入
+	// (孤儿成交告警判据: usertag 匹配本通道但不在册 = 幽灵/残留单成交;
+	//  不再于登录回放/任意推送写入, 避免幽灵单被误判"已知"而哑火)
+	wt_hashset<uint32_t> _known_localids;
 
 	wt_hashmap<std::string, double> _undone_qty;	//未完成数量
 
