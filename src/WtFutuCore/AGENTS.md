@@ -3322,7 +3322,7 @@ protect_ticks 热参文件=1.0 vs 配置=-1.0（热参覆盖生效中——价�
 - **今晚事故链**：22:14 冻结（腐坏）→外部 kill→三次重启均撞确定性启动崩溃→membin
   隔离无效→二分定位 TraderAdapter→回滚恢复。夜盘 22:14-23:10 损失 ~56 分钟。
 
-## 当前方案（2026-09-11，F-core 完善包：平仓可用量账本对称化，待用户确认，未动代码）
+## ~~当前方案（2026-09-11，F-core 完善包：平仓可用量账本对称化）~~【v1，已被 09-11 夜盘后的 v2 修订取代，暂缓执行】
 
 ### 背景（09-11 覆盖率崩塌诊断结案）
 
@@ -3389,3 +3389,728 @@ protect_ticks 热参文件=1.0 vs 配置=-1.0（热参覆盖生效中——价�
 - 拒单降级重报（closetoday 被拒 → 自动改 open 重发）：改变报单语义，单独裁决
 - 策略层"单次平仓拒单 = 60s 全量停报"语义复核：阻塞在框架分类（F3-full）之后
 - 同 burst 双平仓（B 项）不单独修：缓存准确后第二笔拆分自然读到正确 avail
+
+## 方案修订（2026-09-11 夜盘后，F-core v2：先判别共享仓位池，再修账本，最后压放大器）
+
+> 上一节 v1（F-core 完善包：平仓可用量账本对称化）**暂缓执行**，其前置判据已被
+> 09-11 夜盘自然实验证伪。本节为 v2 修订案，待用户确认后再动代码。
+
+### 0. v1 前置判据证伪（09-11 夜盘实测）
+
+v1 写的判据是：「20:40 cron 重启重建干净缓存 → 若今夜拒单≈0 且覆盖率回到 90%+，
+诊断坐实；若仍大量拒单 → 诊断不完整，暂缓部署本包」。实测结果：
+
+- 21 点拒单 136 次、22 点 54+（22:31 仍在循环），全部 `closetoday long/short`；
+  20:40 干净缓存重启**没有**消除拒单
+- [BILATERAL_STATS] 22:24：2611 bil=264 / 2612 bil=742（会话已过 5040s）≈ 5% / 15%；
+  基线日（09-07/08/10）同口径 12-18%，段口径 94-99%
+- 09-11 全天：拒单 889 / 暂停 889 / 自动恢复 448 次，节拍精确 60s（退避上限恒 60s）
+  → 说明进入了 **拒单↔停报自维持循环**，且与缓存是否"干净"无关
+
+### 1. 09-10（昨日）与 09-11 日志问题清单（合并口径）
+
+| 日期 | 拒单 | 错误码/动作 | 起病时点 | 覆盖率(段口径参考) | 通道丢失 |
+|---|---|---|---|---|---|
+| 09-07 | 0 | — | — | 11-18%（健康，成交 319） | 27 次 |
+| 09-09 | 373 | **31 资金不足**（开盘 lon） | 09:02:33 | 0.4%/0.003%/5.8% | 15 次 |
+| 09-10 | 100 | 50 平仓不足（closetoday） | **23:03:32** | 日盘 12-17%（健康） | 9 次 |
+| 09-11 | 889 | 50/51 平仓不足（closetoday/old） | 00:00 起全天 | 0.06%-3.1% | 9 次 |
+
+昨日（09-10）单独的日志问题：
+
+1. **日盘 13:32:04 通道丢失 → 13:43:43 才 ready，中断 11.6 分钟**（交易时段内实停）；
+   15:48:10、19:40:09 两次丢失直到 20:40 cron 重启才恢复（无进程内自愈告警）
+2. **22:14 进程冻结被外部 kill → 连续三次重启撞启动崩溃 → 23:10 回滚**（R15-c，已立案）
+3. **23:03:28 重启加载 `generated/outputs/futu_mm_ao_live/position.membin` 本地持仓，
+   23:03:32 立刻出现第一笔平仓拒单**，随后每 60s 一笔到收盘 → 循环起点与"带着本地
+   漂移账本重启"强相关
+4. ZOMBIE 43 次、通道丢失 9 次；日盘本身零拒单、覆盖率健康 → 故障是**状态驱动**的，
+   不是全天恒定的链路问题
+
+### 2. 修订后的根因模型（三层；v1 只覆盖 L2 的一半）
+
+- **L1 状态层**：账本里存在"平不掉的仓位"——隔夜幽灵成交、他源仓位、历史漂移；
+  本地 membin 会把这批仓位带过重启（09-10 23:03 实证）
+- **L2 机制层**：框架 actpolicy 的平仓拆分读的是**账户级可用量**
+  （`TraderAdapter::sell` 的 `min(left, l_newavail/l_preavail)`，
+  TraderAdapter.cpp:910/:957），而该可用量来自**登录时一次性查询**
+  （TraderAdapter.cpp:1358；09-11 全天只有 2 条 `Position data updated`：08:40:04、
+  20:40:05），之后仅靠本地 deduct/restore 维护 → 与柜台瞬时真实可用量必然发散
+- **L3 放大层**：单笔平仓拒单 → 策略 ERROR 全量停报 60s（退避上限）→ 探测发出的还是
+  同一批平仓腿 → 再撞同一状态 → 循环 → 覆盖率崩塌
+
+09-11 夜盘两条拒单轨迹（L2 直接证据）：
+
+| 时点 | 拆分行 | 实际下单 | 柜台返回 |
+|---|---|---|---|
+| 21:00:17 | `Closing old long of quantity 3`（昨仓=3） | WOT_CLOSE 3 | 51 |
+| 22:25:35 | `Closing new long of quantity 6`（今仓=6） | WOT_CLOSETODAY 6 | 50 |
+
+拆分取到的量**恰好等于柜台持仓量**（3/6/5/5），不是被"幻影注水"放大的量（否则
+`min(left=10, avail)` 会打印 10 而非 6）→ v1 的机制③（同 burst 缓存注水）方向不对，
+真正的第二笔差异来自"他源在两次拆分之间冻结了同一仓位池"。
+
+**账户共享事实（2026-09-11 用户裁定：不影响 ao 合约）**：
+
+- 两套系统同账户：我方与 cta_turtle 的登录行同为 `[TraderCTP][9999-048363]`、
+  AppID `simnow_client_test`；cta_turtle 实际交易 DCE m/p，ao2611/ao2612 不是它的
+  交易标的
+- 其 Trader 日志里大量 `SHFE.ao.2612` 行，经 usertag 交叉比对（`000001#4137998747#…`
+  中段 = **我方** 20:40 会话号）判定为**我方报单被镜像推送到它的会话**，非它下单
+- 20:40:05 登录查询返回 `ec2609 空94(昨)`、`ao2610 多733(昨)`、`ao2609 多285(昨)`：
+  这些是账户内其它策略的仓位，与 ao2611/ao2612 的可用量无关
+- 仍成立的两点：①账户级保证金/流控是全账户共享的；②同账户会话互相可见对方报单
+  （我方侧实测无越界影响）
+
+**证据强度校正（2026-09-11 复核）**：
+
+| 候选机制 | 证据 | 强度 |
+|---|---|---|
+| M1 框架可用量高估（登录快照 + 本地增减维护，无周期重查） | 拒单量恒等于账户持仓量；框架全天仅 2 次持仓查询 | 间接、**仍待定向取证** |
+| M2 本地预扣/归还不对称产生幻影 | 我方账本 `newavail>newvol` 计数 = **0**（09-10: 0/6791 行，09-11: 0/3110 行） | **被削弱**（打印口径未见幻影，但不排除未打印态） |
+| M3 自有在途/僵尸单冻结未反映到账本 | 21:00 开盘 6 笔撤单 ack 超时→ZOMBIE；每轮 burst 内 scout+义务层同时平仓 | 待定向取证 |
+| M4 持仓归属/漂移（幽灵成交未入本地账本） | R15-c-2 已实证隔夜幽灵单竞价成交 10 手 | 已证实（但属 L1 状态层，不是拒单直接因） |
+
+柜台错误文本已解码确认：`CTP:平今仓位不足(50)`（09-10 23:03:32、09-11 00:00:20 等
+均为该码），逐字对应"平今腿超量"，与拆分口径问题一致。
+
+### 3. 分阶段修改清单（v2）
+
+#### 阶段 0：判别实验（**2026-09-11 用户裁决：E1 取消**）
+
+- ~~E1 隔离他源~~：**用户已核实 cta_turtle 的交易合约与 WtFutuCore 不同，两套策略
+  互不影响，E1 取消**。（保留一条事实备查：两者仍共用 SimNow 账户 9999-048363，
+  故账户级保证金/流控仍共享；且同账户各会话会互相收到对方报单推送——我方通道日志中
+  `000001#` 出现 0 次，说明我方侧无越界影响，但该现象值得在事后留意）
+- **E2 干净状态窗口**：清 membin + 与柜台仓对齐（或明确授权带漂移运行）后再观察
+  循环是否复现 → 区分 L1 状态触发 与 L2 机制持续触发
+- **E3 指标基线固化**：拒单 / 暂停 / 自动恢复 / 覆盖率 / 通道丢失时长 / ZOMBIE
+  六项按日采集脚本化，作为阶段 1-2 的验收口径
+- 产出：判定表（E2 结果决定"状态驱动"与"机制常驻"哪个是主线）
+
+#### 阶段 1：策略层（`src/WtFutuCore/` 内，可独立先行，不需框架授权）
+
+1. **S1 停报语义分级（压 L3 放大器）**：停报范围由"全量"改为"受影响合约+方向"；
+   退避上限 60s → 5s；恢复探测先用最小手数。不解析柜台错误码/文本，仍属策略自身
+   风控范畴（§2 边界之内）
+2. **S2 报价腿不再依赖框架对"账户池"的拆分**：报价侧由 `stra_buy/stra_sell`
+   （FutuQuoter.cpp:379/:403，走 actpolicy 账户池拆分）改为显式
+   `stra_enter_*/stra_exit_*`（OrderRouter.cpp:139/:168 已有接口），平今/平昨可用量
+   由策略自维护 → 从根上避免"平他源仓位"和超量平仓。**需先出详细设计再改**
+3. **S3 账本健康闸门 + 开机对账**：`|本地净仓 − 柜台净仓| > N`（默认 5 手）→ 只停
+   新开仓、不阻断平仓，并升级告警；membin 加载完成后立即对账，超阈值不得静默交易
+4. **S4 观测修正**：PERF 汇总 quote/fill 口径（现报 `quotes=0, fills=0` 与实际不符）；
+   停报期统计冻结（09-11 22:09 与 22:14 读数逐位相同）在行内标注"暂停中"
+5. 验收：`_ec_5d` 回测行为零回归 + TestUnits 全量 + 生产 A/B（拒单/覆盖率/成交）
+
+#### 阶段 2：框架层（`WtUftCore`，**需用户明示授权**，未授权不动）
+
+1. **F1 预扣下沉 / F2 exactly-once 台账**：保留 v1 条目；定位改为"账本正确性修复"，
+   不再与覆盖率恢复绑定验收（代码事实成立：`stra_exit_*` 直通道只 restore 不 deduct）
+2. ~~**F4（新增，关键）**：平仓拆分口径可切换为"策略自有可用量"（分策略拆分）+ 周期
+   持仓重查~~ **2026-09-11 用户裁决：F4 暂不做**（框架层本轮冻结）。若 S2（策略侧
+   自带平仓腿计算）落地，F4 的必要性下降；若 S2 不做，则 M1 只能靠"周期持仓重查"
+   旁路证伪，需重新提请授权。
+3. **F5（原 F3-min）**：拒单负反馈触发持仓重查；须写明收益上限——重查回来的仍是
+   账户级可用量，只能降频不能消除
+4. **前置（硬依赖）**：ASAN 定位 TraderAdapter 布局敏感堆越界（R15-c 已证）；未完成
+   前任何"加成员"的改动不得部署
+5. 验收：逐比特 A/B + TestUnits + 生产 A/B；部署物逐文件 md5 比对
+
+#### 阶段 3：运维与可观测（与阶段 1/2 并行）
+
+- O1 通道丢失恢复时长监控（>60s 告警）；排查 09-10 11.6 分钟恢复的根因
+- O2 节末 `cancelAll` 等待终态（R15-c 入口①）+ 开机孤儿单对账（C 链，需框架透传）
+- O3 `[HOTPARAM-DRIFT] protect_ticks`（config=-1.0 vs hotparams=1.0）口径确认
+- O4 ORPHAN FILL 告警重发（依赖阶段 2 的 ASAN 修复）
+- O5 TSC non-invariant 告警处理；期间延迟直方图不得作为验收依据
+
+### 4. 验收指标（基线 = 09-11）
+
+| 指标 | 基线 | 目标 |
+|---|---|---|
+| 平仓拒单/日 | 889 | ≤50（S1+S3 后）；S2 落地后进一步 ≤5 |
+| 全量停报次数/日 | 889 | ≤10 |
+| 覆盖率（段口径） | 0.06%-3%（日盘） | ≥90% |
+| 通道丢失恢复时长 | 最长 4.9h（等 cron） | ≤60s |
+| ZOMBIE/日 | 37 | ≤5（开盘 ack 治理后） |
+
+### 5. 明确不做（维持 v1 结论）
+
+- 拒单降级重报（closetoday 被拒 → 自动改 open 重发）：改变报单语义，单独裁决
+- 策略层解析柜台错误码/文本做分类：属框架层职责（§2）
+
+### 6. 待用户裁决（2026-09-11 二次更新；S1/S2/S3/F4 均已撤销）
+
+1. **是否授权本轮框架层 F-core 改动**（改动面：TraderAdapter + 新增 CloseFreezeLedger）
+2. **ASAN 前置排期**：v3 必须加成员，需先修掉 R15-c 那个布局敏感越界，否则部署会再引爆
+3. **C1 落点**：台账做成 `TraderAdapter` 内部类（改动小）还是独立 `CloseFreezeLedger.h`
+   （可单测、可复用）——建议独立头文件
+4. **C5 是否同批恢复 ORPHAN FILL 告警**（与"localid 在册集合"天然共用一套成员，
+   但同为加成员改动，须排在 ASAN 之后）
+5. **C4 钳制告警级别**：WARN（默认，仅提示账本发散）或 ERROR（视为账本事故）
+
+### 7. 阶段 1 详细改动清单（**已被下方 v3 修订取代：S1/S2/S3 经用户裁定撤销**）
+
+> 用户裁决：S1 授权；F4 不做；E1 取消。以下清单按"可直接开工"粒度列出，
+> 每项独立 PR，**默认参数一律等于旧行为**，先在远程以新参数启用验证。
+
+#### S1 拒单停报分级（已授权，最高优先）
+
+现状锚点：`FutuRuntimeOps::onEntrustEvent` 失败分支（FutuRuntimeOps.cpp:833-910）——
+**任何一次报单失败**都执行 `setQuotingPhase(QuotingPhase::ERROR)` + 置
+`_quoting_paused_since`，全局阻断报价；`_order_error_count >= threshold` 分支额外
+`cancelAll`。恢复端 `UftFutuMmStrategy::handleQuotingAutoResume`
+（UftFutuMmStrategy.cpp:517-540）退避 = `10s << min(count,5)`，上限 60s → 实盘恒 60s。
+
+1. **S1.1 退避上限参数化**：新增 `order_control.errorBackoffMaxMs`（默认 60000 =
+   旧行为；生产置 5000）。锚点 `FutuConfigLoader.cpp:132` 读取区 + 上文 :521-529。
+2. **S1.2 停报范围分级**：新增 `order_control.errorPauseScope`（`all|contract|side`，
+   默认 `all`）。非 `all` 时**不翻全局 phase**，改为把 (code, side) 记入轻量停报表
+   （复用 `PreTradeDecision.side_pause_bid/ask` + FutuRiskMonitor 的
+   `same_side_pause_ms` 语义）；全局 ERROR 仅保留给 threshold 硬分支。
+3. **S1.3 探测式恢复**：停报到期先只发 `probeQty`（默认 1）手，在受影响 side 探测，
+   成功再恢复整档；失败按 S1.1 上限重排。
+4. **S1.4 升级兜底**：同一 code+side 连续拒单 ≥ N（默认 5）→ 自动升级为全局停报，
+   防止局部停报掩盖持续故障。
+5. **日志**：每次进入/退出停报打印 `(scope, code, side, count, duration_ms)`。
+6. **测试**：新增 `TestUnits/test_order_error_pause.cpp`（上限参数化 / scope=side 只停
+   一侧 / probe 成功恢复 / probe 失败重排 / threshold 硬分支不变 / 升级兜底）；
+   `_ec_5d` 回测 A/B 须零差异（默认参数路径）。
+
+#### S2 报价平仓腿自有可用量（**候选，需用户点头**）
+
+- 现状：`FutuQuoter.cpp:379/:403/:454/:493` 走 `stra_buy/stra_sell`，平仓腿由框架
+  按账户/框架账本拆分，策略无法控制腿大小。
+- 改法：策略侧自维护 per-contract 平今/平昨可平量（成交/撤单/拒单事件驱动），报价腿
+  改由 `OrderRouter` 显式 `stra_exit_long/short` + `stra_enter_long/short`
+  （OrderRouter.cpp:139/:168 已有封装）。
+- 影响面：报价主路径 + closeout/taker 语义一致性；需独立设计文档与回测 A/B，
+  建议 S1 验收后再排期。
+- 与 F4 的关系：F4 被否后，这是唯一能从策略侧绕开"框架按账户池拆分"的手段。
+
+#### S3 账本对账与闸门
+
+1. **S3.1 开机对账**：membin 本地持仓加载完成后，与引擎/柜台持仓对账，差值超阈值
+   （默认 5 手）→ ERROR 日志 + **只停新开仓**（不阻断平仓），并标注本次会话"带漂移运行"。
+2. **S3.2 会话内漂移动作**：`shadow-book true divergence` 已有检测
+   （FutuRuntimeOps.cpp:126-146，`markShadowStale` + `broadcastCostBasisStale`），
+   补"超阈值 → 只停新开仓 + 告警升级 + 节流"，把"有检测无动作"补齐。
+3. 目的：切断 09-10 23:03「带漂移账本重启 → 立刻进拒单循环」的路径。
+
+#### S4 拒单现场诊断埋点（本轮新增，直接给 M1/M3 定性）
+
+- 在 `onEntrustEvent` 失败分支增加一次性 WARN（**只记录上下文，不解析错误码/文本**，
+  不违反 §2）：`localid / code / side / offset / qty` + 策略本地净仓 +
+  `UnifiedOrderTracker` 该合约同向 pending 合计 + 本轮 burst 已发同向平仓量。
+- 判据：若「本笔平仓量 + 同向在途平仓量 > 本地净仓」→ **M3**（自有在途/僵尸冻结
+  未反映）成立；若两者均正常仍被拒 → **M1**（框架账本高估可用量）成立。
+- 价值：下一次实盘拒单即可闭环定性，不必再靠推断；也是日后决定是否重启 F4 议题的
+  直接依据。
+
+#### S5 观测修正（低风险，随 S1 一起）
+
+- PERF 汇总 quote/fill 口径（现 `Cumulative: quotes=0, fills=0` 与实际不符）。
+- 停报期双边统计冻结标注（`[BILATERAL_STATS] … frozen`），避免冻结读数被当作覆盖。
+
+#### 验收与上线流程
+
+- 每项独立 PR（Conventional Commits，scope `futu`）；先合"默认关闭/旧行为"版本，
+  远程再开参数，保证可回退。
+- 部署：Release 构建 → 逐文件 md5 比对 → 远程备份 `.bak_YYYYMMDD_xxx` → 单实例重启
+  （轮询等进程退出）→ 重点观察 **21:00 夜盘开盘** 与 **次日 09:00 集合竞价后** 两段。
+- 观察指标：拒单/日、停报次数与累计停报时长、覆盖率（段口径）、S4 判据命中次数。
+
+## 方案修订 v3（2026-09-11 夜盘后用户裁定：**只完善 F-core 平仓可用量冻结语义**）【当前执行版 = v3.1，合并结论见本节 §7】
+
+> 本节取代上面 v2 的阶段 1 清单。用户裁定：
+> ① SimNow 的订单状态回报延迟/丢失属**环境问题**，生产环境不应出现；若频繁发生即网络
+> 异常，**高频系统应当停止报单并告警** → 现有 zombie / 撤单 ack 超时 / ZOMBIE 升级 /
+> 停报与退避语义**保持原样，一行不改**；
+> ② S1（停报分级/退避上限）、S2（报价腿改自有可用量）、S3（漂移闸门）**撤销/暂缓**；
+> ③ F4（拆分口径改"分策略可用量"）**不做**；
+> ④ 本轮唯一改动面 = 框架层 F-core：**"报单即预冻结" 与 "等待订单状态回报后冻结"
+> 这一对语义的完整化**。
+
+### 1. 设计抉择：维持"报单即预冻结"，但做成完整的不变量
+
+**结论：可用量 = 柜台基线 − 本通道在途平仓未终态量**；预冻结在**下单成功那一刻**建立
+（reserve-at-send），订单回报只负责"归还 / 转换 / 对账"，**不负责建立冻结**。
+
+理由（本轮实证 + 机理）：
+
+- 09-11 22:25:35 同一 burst 内 scout(1 手) 与义务层(10 手) 各自按**未扣减的可用量**
+  拆出平仓腿（拆出 `Closing new long of quantity 6`，柜台实际只剩 5）→
+  `CTP:平今仓位不足(50)`；21:00:17 同构（`Closing old long 3` → 51）
+- 若改成"等回报才冻结"：在回报延迟/丢失窗口内（SimNow 常态、生产网络亦可能抖动），
+  同 burst 的后续订单会看到未扣减的可用量 → **必然超量平仓**；正确性被建立在"回报时延"
+  这一不可控量上，方向错误
+- 回报延迟/丢失只应影响"冻结何时释放"，不应影响"冻结何时建立"；据此，SimNow 的
+  异常回报由现有 zombie/停报机制处理（停止报单 + 告警），账本语义保持可证明正确
+
+### 2. v1/v2 的完整性缺口（9 项，v3 逐项补）
+
+| # | 缺口 | 现状证据（框架层） | v3 处置 |
+|---|---|---|---|
+| 1 | 冻结入口不全 | deduct 只在 `buy()/sell()` 的 10 处（TraderAdapter.cpp:635/684/728/758/787/932/979/1019/1050/1081）；`stra_exit_long/short`（UftStraContext.cpp:924/938）走 closeLong/closeShort **只归还不预扣** | 冻结下沉到 `closeLong/closeShort` 内部，删除 10 处调用点 |
+| 2 | 幂等靠数量代理 | onRspEntrust 用 `_undone_qty[stdCode]==0` 去重（:1400），做市常驻在途时失效 | 改 **localid 台账**命中判定 |
+| 3 | 归还无上限 | `restoreCloseAvail` 的 isToday 分支 `newavail += qty` 无 cap（:496-512） | 归还一律钳制（newavail≤newvol、preavail≤prevol），超限 WARN |
+| 4 | "首见即撤单终态"归还无去重 | onPushOrder 撤单分支（:1838 段）无任何幂等保护 | 同上，台账命中才归还 |
+| 5 | own 判定依赖 usertag 前缀 | `startsWith(orderInfo->getUserTag(), _order_pattern)`（:1830 段） | 改 **localid 在册/台账**判定；usertag 仅留审计 |
+| 6 | 登录快照直接覆写 | onRspPosition（:1440-1465）整体覆写 `_positions`，抹掉在途预冻结 | 改为**基线 + 台账重放**（见 §3 C6） |
+| 7 | 部分成交生命周期未定义 | 台账若按委托量登记，撤单归还 `qty−traded`，成交额不可归还 | 台账登记委托量并记录 traded；成交只减"可归还量"，不归还 |
+| 8 | **并发无保护** | `_positions`（TraderAdapter.h:279）/`_undone_qty`（:287）无锁，md 线程预扣 ↔ trader 回调线程归还/成交 | 台账与可用量操作串行化（单锁或单线程投递） |
+| 9 | 乱序回报 | 若 doEntrust 内同步回报（mocker / 低延迟柜台），台账尚未登记 | 预登记占位（合约+方向+量）→ doEntrust 后回填 localid |
+
+### 3. 详细改动清单（框架层 `WtUftCore`，需用户授权；本轮唯一改动面）
+
+- **C1 台账组件**：新增 `CloseFreezeLedger`（TraderAdapter 内部类或独立 .h，便于单测）：
+  `localid → {stdCode, isLong, isToday, order_qty, traded_qty, state}`；
+  API：`reserveSlot(合约占位)` / `bind(localid)` / `onTrade(localid, vol)` /
+  `onReject(localid)` / `onCancel(localid)` / `onSnapshot(合约, 柜台值)` / `stats()`
+- **C2 冻结下沉**：`closeLong/closeShort` 内（`doEntrust` 成功后）统一 `reserve+bind`；
+  删除 `buy()/sell()` 的 10 处 `deductCloseAvail` 调用
+- **C3 归还 exactly-once**：`onRspEntrust`（:1400 段）与 `onPushOrder` 撤单分支
+  （:1838 段）统一改为"台账命中 → 归还并销账"；**删除 `_undone_qty` 代理 guard**
+- **C4 钳制与告警**：`restoreCloseAvail` 加 cap，超限 WARN + 计数器（防幻影，兼作
+  "账本与柜台发散"探针）
+- **C5 own 判定**：改按 localid 在册集合（配合 R15-c 拟恢复的 ORPHAN FILL 告警复用同一
+  在册集合）；同账户跨会话**镜像推送**的单不进本账本
+- **C6 快照基线重放**：`onRspPosition` 不再直接覆写 → 以柜台值为基线，扣除台账中该合约
+  同向在途量，再做 cap；登录回放（`onRspOrders` :1498 段）对**本通道存活平仓单播种台账**
+  （其冻结已含在登录查询的 avail 净值内，视同已预扣）→ 重启语义闭合
+- **C7 可观测**：冻结数 / 归还数 / 钳制次数 / 台账失配数，随 `Position data updated`
+  一并输出（供巡检与验收）
+- **C8 明确不动**：zombie 判定、撤单 ack 重试与 ZOMBIE 升级、停报与退避语义、告警通道
+
+### 4. 前置（硬依赖，未完成不得部署）
+
+- **ASAN 定位 TraderAdapter 布局敏感堆越界**（R15-c 已证：加成员即引爆启动崩溃）。
+  v3 同样要往 TraderAdapter 加成员 → 必须先修复该越界，否则布局位移可能再次引爆
+- Release 构建 + TestUnits + 逐比特 A/B（方法沿用 B+③ 先例）
+
+### 5. 验证
+
+- **单测（抽离 CloseFreezeLedger 组件，TestUnits）**：下单冻结 → 成交 / 拒单 / 拒单重复
+  推送 / 撤单 / 部分成交后撤 / 回报乱序（先回报后绑定）/ 快照重放（含在途）/
+  归还钳制 / 多入口覆盖（buy-sell 拆分 + stra_exit_*）/ 并发（md 预扣 vs 回报归还）
+- **回归**：TestUnits 全量基线 171/173；`_ec_5d` 回测（mocker 不经 TraderAdapter）
+  应**逐比特零差异**——证明未触及回测行为
+- **生产 A/B**：平仓拒单/日、钳制 WARN 次数、台账失配计数；zombie 数与停报次数应
+  **保持现状**（本方案不改该语义，若变化说明越界）
+
+### 6. 本轮不做
+
+- 不改 zombie / 停报 / 退避 / 告警语义（SimNow 网络异常 → 停止报单并告警 = 正确行为）
+- 不做 S1（停报分级）、S2（报价腿自有可用量）、S3（漂移闸门）、F4（分策略拆分）
+- 不做拒单降级重报（closetoday 被拒 → 改 open 重发）；策略层不解析柜台错误码/文本
+
+### 7. v3.1 合并结论（2026-09-11 用户确认：v1 的 F3-min/R15-c 并入 v3）
+
+> 用户确认「合并结论」。v1 的 **F1 ≡ C2**、**F2 ≡ C1+C3**（v3 已原样收录并扩展），
+> 故 v1 不再单列；v1 表内真正属于增量的 **F3-min** 与 **R15-c** 正式并入本轮，
+> 其中 F3-min 按下述"改造版"实现。
+
+#### 7.1 F3-min → F3-min'（改造版，纳入本轮）
+
+- **定位变更**：由"幻影自愈"改为"**账本泄漏与柜台发散的自愈兜底**"。前提是 C6 的
+  "柜台基线 + 在途台账重放"先落地——现状 `onRspPosition`（TraderAdapter.cpp:1440-1465）
+  整体覆写 `_positions`，若无 C6 直接做重查，会抹掉在途预冻结、制造新的超量平仓窗口
+- **触发条件（不解析柜台错误码/文本）**：① 任何平仓单被拒；② C4 钳制计数上升；
+  ③ C7 台账失配计数上升 —— 任一命中即触发
+- **动作**：按合约节流（≥10s）触发一次持仓重查 → 回调**按 C6 规则**重放再基线
+  （柜台值 − 在途台账量，再做 cap）；重查超时/不可用则只记日志、不改状态
+- **硬约束**：再基线后的可用量**不得低于在途冻结量**（绝不因重基线放大可平量）；
+  不做降级重报（closetoday 被拒 → 改 open 重发）
+- **可观测**：`rebaseline_count` / `rebaseline_clamped_count` 与 C7 一并在
+  `Position data updated` 输出
+
+#### 7.2 R15-c ORPHAN FILL 随 C5 同批
+
+- C5 需要"localid 在册集合"判定 own；R15-c 需要同一集合识别"usertag 匹配但 localid
+  未知"的成交 → **同一成员、同批实现**
+- 顺序：必须排在 ASAN 修复之后（同属"给 TraderAdapter 加成员"）
+
+#### 7.3 实施批次与依赖（开工顺序）
+
+| 批次 | 内容 | 依赖 |
+|---|---|---|
+| A | C1 台账组件（独立头文件）+ C2 冻结下沉 + C3 exactly-once 归还 | ASAN |
+| B | C4 归还钳制与告警 + C7 计数器 | A |
+| C | C5 own 判定（在册集合）+ C6 快照基线重放 + 登录回放播种 | A |
+| D | 并发串行化（缺口#8）+ 乱序"预登记占位/回填 localid"（缺口#9） | A/B/C |
+| E | F3-min'（改造版自愈兜底） | **C（必须）** |
+| F | R15-c ORPHAN FILL（与 C5 同成员） | ASAN + C5 |
+
+- 每批独立 PR（Conventional Commits，scope `futu`）；回测路径（mocker 不经
+  TraderAdapter）必须保持逐比特零差异
+- 生产门槛：ASAN 修复完成 + A/B 批逐比特 A/B 通过 → 上生产；E/F 可与下一批同版本
+
+#### 7.4 v3.1 验收指标
+
+| 指标 | 基线（09-11） | 目标 |
+|---|---|---|
+| 平仓拒单/日 | 889 | ≤50（A-D 后）、≤5（E 后） |
+| C4 归还钳制次数 | 未埋点 | 有读数且逐迭代下降 |
+| C7 台账失配计数 | 未埋点 | 0 |
+| F3-min' 重基线次数 | — | 有读数；单合约 ≤1 次/10s |
+| zombie 数 / 停报次数 | 37 / 889 | **保持现状不变**（本方案不改该语义，变了即越界） |
+
+#### 7.5 待用户裁决（收敛为 3 条）
+
+1. **ASAN 排期**：A 批及后续所有"加成员"改动的硬前置（R15-c 事故已证加成员即引爆）
+2. **推进节奏**：是否 A→D 先落"账本核心"，E/F 随后同版本或下一版本（建议 A-D 先上，
+   观察钳制/失配计数归零后再上 E/F）
+3. **台账落点**：建议独立 `src/WtUftCore/CloseFreezeLedger.h`（便于单测与复用），
+   而非 TraderAdapter 内部类
+
+### 8. 执行记录：Batch A 已实施（2026-09-12，**未部署**）
+
+#### 8.1 落地内容（C1 + C2 + C3 + C4）
+
+| 项 | 文件 | 内容 |
+|---|---|---|
+| C1 | **新增** `src/WtUftCore/CloseFreezeLedger.h` | 台账组件（header-only，自持 `std::mutex`）：`reserve / release / onTrade / seed / contains / pendingQty / stats`；`release` 未命中只计数不归还 |
+| C2 | `TraderAdapter.h/.cpp` | 新增 `freezeCloseAvail()`；在 `closeLong/closeShort` 内 `doEntrust` 成功后**唯一冻结点**；删除 `buy()/sell()` 的 **10 处** `deductCloseAvail` 调用点 |
+| C3 | `TraderAdapter.cpp` | `releaseCloseAvail()`（台账命中才归还并销账）；接入 3 条终态路径：`onRspEntrust` 拒单、`onPushOrder` 首见即撤单、`onPushOrder` 重复推送撤单（原内联归还算术**已删除**）；`onPushTrade` 记 `traded` |
+| C4 | `TraderAdapter.cpp` | `restoreCloseAvail` 改返回 `bool` + **一律钳制**（`newavail<=newvol`、`preavail<=prevol`），钳制即 WARN（账本/柜台发散探针） |
+| C5-前置 | `TraderAdapter.cpp` | `onPushOrder` 入口**统一解析一次** localid（原先两处重复解析），供归还与 `_known_localids` 共用 |
+
+#### 8.2 关键语义决策
+
+1. **fail-closed**：终态事件未命中台账（重复推送 / 乱序回报 / 他源镜像单）**一律不归还**，
+   只计数 + WARN。方向是"可用量偏保守"，不会制造幻影；残余泄漏由 F3-min'（E 批）自愈。
+2. **台账是归还量的唯一来源**：归还 qty 取台账的 `qty - traded`（不再用推送报文里的字段
+   自行推断），`isLong/isToday` 同样取台账登记值。
+3. **重复推送去重语义保持**：`_undone_qty==0` 仍用于"不再重复通知策略"，但**不再兼任
+   账本幂等**（归还由台账保证 exactly-once）。
+4. **`_undone_qty` 代理 guard 从账本路径移除**，使"做市单常驻在途"不再削弱幂等。
+
+#### 8.3 验证结果（本地）
+
+- 编译：`WtUftCore` / `WtFutuCore` / `TestUnits` 全部 Built，零 error
+- 单测：**新增 `src/TestUnits/test_close_freeze_ledger.cpp` 8 用例全过**（冻结→归还一次、
+  重复终态免疫、部分成交后撤单归还余量、全成交销账后撤单不归还、登录播种可归还、
+  未知 localid 不归还、非法/重复登记拒绝、在途量聚合、4 线程并发冒烟）
+- 全量：`TestUnits` **179/181 通过**（基线 171/173 + 新增 8；2 个既有环境性失败
+  `test_session.test_allday` / `test_shm.test_sharehelper` 不变）
+- 回测：`configbt_v5` 冒烟通过，成交 409 笔（历史噪声带 405-411 内），
+  **0 拒单 / 0 HALT / 0 ZOMBIE**（mocker 不经 TraderAdapter，路径本应零关联）
+
+#### 8.4 未完成项（按批次计划）
+
+- **未接线**：C6 快照基线重放与登录回放播种（API `seed/pendingQty` 已就绪，待 C 批接线）；
+  C5 的"按 localid 在册集合判定 own"（现仍按 usertag 前缀判定 own，非 own 单仍走原扣减）；
+  C7 计数器未输出到 `Position data updated`（台账 `stats()` 已具备）
+- **未做**：D 批 `_positions` 并发串行化（当前仅台账自持锁；`_positions` 读写仍跨线程无锁，
+  与改前一致，未加剧）；E 批 F3-min' 自愈兜底；F 批 R15-c 告警（**注：本仓库 HEAD 已含
+  `_known_localids` 成员与 ORPHAN FILL 告警代码**，属回滚前遗留，需与 ASAN 一并处理）
+- **部署门槛**：ASAN 未完成前**不得部署**。且 HEAD 自带的 R15-c 成员意味着
+  任何 Release 构建都绕不开该前置
+
+### 9. 执行记录：Batch B + C 已实施（2026-09-12，**未部署**）
+
+#### 9.1 落地内容（C7 + C5 + C6）
+
+| 项 | 文件 | 内容 |
+|---|---|---|
+| C7 | `CloseFreezeLedger.h` / `TraderAdapter.cpp` | 台账新增 `Stats.clamped` + `noteClamp()`；`restoreCloseAvail` 钳制时登记；`onRspPosition` 末尾输出巡检行 `close-freeze ledger: live/reserved/released/filled_out/unmatched/clamped/released_qty` |
+| C5 | `TraderAdapter.cpp` | `onPushOrder` 的 own 判定由 **usertag 前缀** 改为 **`台账命中 ∪ 在册集合`**；非在册单保持原扣减（保守方向）并新增 60s 节流 WARN；`releaseCloseAvail` 把 localid 写入在册集合（防已终态单的后续推送被误判为他源而重复扣减） |
+| C6 | `TraderAdapter.cpp` | `onRspPosition` 不再直接覆写：`avail = 柜台净值 − 本台账在途量`，再钳制到 `[0, vol]`（净值口径见 9.2）；`onRspOrders` 登录/重连回放先 `clear()` 台账，再对存活平仓单 `seed()`（重启/重连语义闭合）+ 登记在册集合 |
+
+#### 9.2 两处语义决策（与初版计划的差异，已在实现中固化）
+
+1. **C6 采用保守口径**：`avail = 柜台净值 − 台账在途量`。理论上"柜台净值"已含
+   查询处理时刻的在途冻结，再扣一次会使可用量短暂偏小；方向恒为保守（绝不因重基线
+   **放大**可平量），且在途单终态归还时恰好抵回。取舍理由：Fail-closed 优先于精确等值。
+2. **C5 的他源单保持扣减**（未按初版"完全不进本账本"实现）：若他源单不扣减，可用量
+   会偏高 → 朝"超量平仓/CTP 50-51"方向发展（更危险）；改为扣减 + 节流告警，先保证安全方向。
+
+#### 9.3 验证结果（本地）
+
+- 编译：`WtUftCore` / `WtFutuCore` / `TestUnits` 全部 Built，零 error
+- 单测：台账用例增至 **9 个全过**（新增 `ClampCounterIsObservable`：钳制计数 + clear
+  只清在途条目、累计巡检计数保留）
+- 全量：`TestUnits` **180/182**（尚未跑新增用例前基线 171/173 + 9 新增；2 个既有环境性
+  失败不变）→ 零回归
+- 回测：`configbt_v5` 冒烟 408 笔（噪声带 405-411），**0 拒单 / 0 HALT / 0 ZOMBIE**
+
+#### 9.4 ASAN（前置批次）进展
+
+- 已建独立构建树 `src/build_asan`（`-fsanitize=address -fno-omit-frame-pointer -g`），
+  与既有 `build_all` 完全隔离，不影响生产/既有产物
+- ASAN 版 `TestUnits` 已编译并运行：**全量 180/182、零 ASAN 报告**（9 个台账用例亦零报告）
+- **结论**：单测路径不覆盖 R15-c 的启动越界（该越界在 runner 启动路径触发）。下一步需
+  在 ASAN 树中构建 `WtUftRunner` 并复现启动路径；复现环境待定：
+  ① 本地用不可达前置（不连 SimNow，零生产影响）；② 本地连 SimNow（会产生第三个会话，
+  需用户批准）；③ 远程周末无交易窗口（需用户排期）
+- **未完成**：D 批（`_positions` 并发串行化）、E 批（F3-min' 自愈兜底）、F 批（R15-c 与 ASAN 收口）
+
+### 10. ASAN 前置批次：复现结果（2026-09-12 凌晨，闭市窗口）
+
+#### 10.1 环境搭建（均在生产服务器隔离目录，未触碰 dist）
+
+| 项 | 内容 |
+|---|---|
+| 本地构建树 | `src/build_asan`（`-fsanitize=address -fno-omit-frame-pointer -g`），与 `build_all` 隔离 |
+| 远程隔离运行目录 | `~/projects/wt_asan_run`（ASAN 版）/ `~/projects/wt_rel_run`（Release 版）；配置与 `common/` 从 dist **只读复制**，`notifier.url` 改为 `ipc:///tmp/wt_asan_mm.ipc` 避免与生产争用 |
+| 运行方式 | `LD_LIBRARY_PATH=. ./WtUftRunner -c config.yaml -l logcfg.yaml`（CWD 隔离 → Logs/generated/data 全部落在隔离目录） |
+
+**ASAN 运行三个必备开关与一个必备缺件**（踩坑记录，后续复现必看）：
+
+1. `ASAN_OPTIONS=allow_user_segv_handler=0` —— 否则应用自带崩溃处理器**抢先捕获 SIGSEGV**，
+   ASAN 报告不落盘（只会看到 "Exit flag is true" + "segmentation violation" 刷屏）；
+2. `detect_odr_violation=0` —— WTSTools 的 `m_setDynLoggers` 在 runner 与 `uft/libWtFutuCore.so`
+   各有一份（既有多份静态链接形态），ASAN 默认按 ODR 冲突 abort；
+3. `alloc_dealloc_mismatch=0` —— 第三方 `thosttraderapi_se.so` 退出期析构 `new[]` 配 `delete`，
+   属 CTP 库自身问题，退出码 134 与业务无关；
+4. **必须补齐** `traders/thosttraderapi_se.so` 与 `parsers/thostmduserapi_se.so`：缺失时
+   `CreateTraderApi/CreateMdApi` 返回空 → 启动即 SEGV（pc=0x0 空函数指针），属**环境缺件**，
+   不是代码缺陷。
+
+#### 10.2 复现结果：当前源码在两种构建下均**不崩**
+
+测试对象 = 当前 HEAD（含 R15-c 的 `_known_localids` 成员 + Batch A/B/C 全部改动）。
+
+| 构建 | 结果 |
+|---|---|
+| ASAN（Debug+x64） | 登录 SimNow 成功 → `Position data updated` → 新台账巡检行输出 → `Trading channel ready`；运行 100s 无崩溃、**无 ASAN 内存报告**（唯一报告为 CTP 库退出期析构） |
+| Release（build_release） | 隔离目录连 SimNow 运行 60s：登录/持仓/策略初始化全部正常，**无 `malloc(): invalid size`**、无 segv |
+
+台账巡检行实测（隔离实例，空账本）：
+`[trader_ctp] close-freeze ledger: live=0 reserved=0 released=0 filled_out=0 unmatched=0 clamped=0 released_qty=0`
+
+**结论（重要，避免误读）**：
+
+1. R15-c 的「加成员即启动确定性崩溃」在**当前布局下不复现** → 该越界属**布局敏感潜伏**，
+   本轮改动的布局位移绕开了它，**不等于已修复**；
+2. 启动 → 登录 → 持仓查询 → 策略初始化这段路径**未发现内存错误**（ASAN 覆盖）；
+3. **交易路径（tick/报价/成交/撤单）本轮未覆盖**（测试窗口为闭市时段，无行情），
+   潜伏越界若在交易热路径，仍需在有行情时做 ASAN 覆盖（需独占账户窗口或独立账户）；
+4. 两次隔离实例会话期间**生产实例未受影响**（PID 2516504 持续运行、CPU 正常、
+   日志无新增异常）。
+
+#### 10.3 部署判断（待用户裁决）
+
+- 原 ASAN 门槛的表述是"定位并修复该越界后再部署"。实际达成的是：**当前构建在启动路径
+  不复现该崩溃**（ASAN+Release 双验证），但越界本身未定位。
+- 因此部署属于**判断项**而非机械放行，两个选项：
+  - **① 按常规流程部署 Batch A/B/C（推荐）**：备份 `.bak_YYYYMMDD_xxx` + 逐文件 md5 校验 +
+    单实例重启；启动即刻校验（进程稳定、台账巡检行出现、无 crash 刷屏），异常可秒级回滚。
+    附带收益：ORPHAN FILL 告警随本次构建一并回归（F 批内容已在 HEAD 中）。
+  - **② 暂缓**：等有行情窗口做交易路径 ASAN 覆盖后再部署（P0 覆盖率崩塌问题继续存在）。
+- 隔离目录（`~/projects/wt_asan_run` 320M / `~/projects/wt_rel_run` 18M）保留待用，
+  后续 ASAN 复现/回归可直接复用；确认不需要后可整目录删除。
+
+### 11. 部署尝试与回滚（2026-09-12 01:52，**已回滚，部署冻结**）
+
+用户指令"直接替换生产版本尝试启动"后执行，结果如下：
+
+#### 11.1 时间线
+
+| 时刻 | 事件 |
+|---|---|
+| 01:52:4x | 备份旧库 `libWtUftCore.so.bak_20260912_fcoreABC`（md5 `5a127283…`）→ 替换为 Batch A/B/C 的 Release 库（md5 `53fc7829…`），逐文件 md5 校验通过 |
+| 01:52:44 | `monitor/wt_restart.sh` 重启；启动日志走到 `Reading trader config from tdtraders.yaml...` 后 **`bus error`**（与 R15-c 同型） |
+| 01:52:5x | 新实例**卡死在信号处理器**：`%CPU=0`、`futex_wait`、日志停更、线程数 2 |
+| 01:53:5x | 回滚：`kill -9` 卡死实例 → 恢复旧库（md5 `5a127283…`）→ 重启 |
+| 01:53:53 | 生产恢复：`Login succeed` → `Position data updated` → `Trading channel ready`；单实例（PID 2593484）、日志正常推进 |
+
+#### 11.2 结论（推翻 ASAN 阶段的乐观结论）
+
+1. **Batch A/B/C 构建在生产启动路径复现 R15-c 崩溃**（bus error + 信号处理器自锁死）；
+2. 同一库在**隔离环境**（空 `generated/`、IPC 改为 `/tmp/wt_asan_mm.ipc`、`data/` 为空）
+   却能正常启动 → **触发条件与生产状态相关**。首选嫌疑：`generated/outputs/futu_mm_ao_live/`
+   下的 `position/order/trade/round.membin` 真实本地簿加载路径（隔离环境是空目录，未覆盖）；
+   次选：monitor 的 IPC 对端、`data/` 行情库、生产 CWD 时序。
+3. §10.2 的表述需按此修正：ASAN"启动路径未发现内存错误"**仅对空状态环境成立**，
+   对生产状态**不成立**。
+4. **部署继续冻结**，直到"生产状态可复现 → 定位 → 修复"闭环完成。
+
+#### 11.3 运维教训（必须遵守）
+
+`pkill -f` / `pgrep -f "WtUftRunner.*config.yaml"` 会**匹配到 ssh 命令自身的 shell**
+（其命令行里含同一字符串）→ 误杀自己的会话：本次脚本报告"停止旧进程: 2592360"实际是
+我的 ssh bash，会话随即中断（ssh 255），后续命令未执行、生产一度处于停止状态。
+今后启停纪律：
+
+1. 枚举真实 runner 一律用 `/proc/*/exe`（`readlink` 判定，不信命令行）；
+2. 终止一律用**精确 PID**（`kill -9 <pid>`），不用 `pkill -f`；
+3. 调用 `wt_restart.sh` 时，**发起命令行里不得出现其 pgrep 匹配串**。
+
+#### 11.4 下一步（待确认）
+
+把生产 `generated/`（含 membin）与 `data/` 复制进隔离目录，用同一 Release 库复现 →
+复现后用 ASAN 版在同一状态上运行取报告 → 定位越界写入点 → 修复后再评估部署。
+
+### 12. **根因定性 + 部署完成**（2026-09-12 02:04）
+
+#### 12.1 真正的根因：**新旧构建集混用**（不是"加成员引爆潜伏越界"）
+
+隔离目录对照实验（生产状态：membin/配置/模块齐备）：
+
+| 组合 | 结果 |
+|---|---|
+| 新 runner + 新 `libWtUftCore.so`（同一套件，8 次 + 换现网模块 3 次） | **11/11 正常启动**（login → position → channel ready） |
+| **现网 runner（8/6 构建）+ 新 `libWtUftCore.so`** | **2/2 复现崩溃**：`malloc_consolidate(): invalid chunk size` + `bus error`，停在 `Reading trader config from tdtraders.yaml...` 之后 |
+
+→ R15-c 时"部署新 `libWtUftCore.so` → 启动确定性崩溃"的真实机制是：
+**旧 runner 与新框架库不是同一版本构建**，在交易通道初始化阶段堆结构不一致 →
+堆腐坏 → SIGBUS → 应用崩溃处理器自锁死（0% CPU + futex + 日志停更）。
+原"TraderAdapter 加成员触发布局敏感越界"的判断**应判定为误诊**（ASAN 阶段未复现的原因
+也在此：隔离环境一直用的是同套件的新 runner）。
+
+#### 12.2 部署结果（02:04，**新版本已在生产运行**）
+
+- 替换方式：**整套件替换**（先停实例，再覆盖；运行中覆盖会 `Text file busy` 且可能
+  损坏在跑进程的映射）
+- 现网版本：`WtUftRunner d3ce62c3` + `libWtUftCore.so 53fc7829`（含 Batch A/B/C）+
+  `libWtShareHelper.so b502ea5e` + `parsers/libParserCTP.so c593c03b`；
+  `traders/libTraderCTP.so` 与 `uft/libWtFutuCore.so` 与旧版逐字节一致（无需更换）
+- 启动验证（实测日志）：
+  `Login succeed` → `Position data updated` → **`close-freeze ledger: live=0 reserved=0
+  released=0 filled_out=0 unmatched=0 clamped=0 released_qty=0`** → `Trading channel ready`
+- 稳定性：PID 2598679 单实例，CPU 17.6%，观察期内无 `bus error`/`segmentation`
+- 回滚备份：`WtUftRunner.bak_20260912_set`、`libWtShareHelper.so.bak_20260912_set`、
+  `parsers/libParserCTP.so.bak_20260912_set`、`traders/libTraderCTP.so.bak_20260912_set`、
+  `libWtUftCore.so.bak_20260912_fcoreABC`(=`.bak_20260912_set`)
+
+#### 12.3 部署规程修正（**以后必须遵守**）
+
+1. **凡改动落在 `WtUftCore`（含其头文件）→ 必须连同 `WtUftRunner` 一起部署**，
+   两者必须出自同一版本构建；推荐直接整套件替换（runner + libWtUftCore + 相关模块）。
+   **禁止只替换 `libWtUftCore.so`**（本次两次启动崩溃即由此产生）。
+2. 先停实例、确认进程完全退出后再覆盖文件；运行中覆盖会出现 `Text file busy`，
+   并使在跑进程的映射处于混用/半覆盖状态（本次已发生一次，属高风险操作）。
+3. 回滚：恢复上述 `.bak_*` 五个文件 → 停实例 → 启动（备份齐全，可秒级回滚）。
+
+#### 12.4 待观察（开工后验收）
+
+- 09:00 日盘：**平仓拒单数**（基线 889/日）、覆盖率、台账巡检计数
+  （`unmatched`/`clamped` 应为 0，`reserved/released` 随报价增长）
+- 08:40 cron 将用**同一套件**重启（流程安全：其命令行不含 pgrep 匹配串）
+- 若出现 `close freeze release MISS` 告警或 `clamped` 增长，按 §7.1 F3-min'（E 批）
+  计划排查；D 批（`_positions` 并发串行化）与 E 批尚未实施
+
+## 13. 执行记录：Batch D + E 已实施（2026-09-12，本地/隔离验证）
+
+### 13.1 D 批：持仓/未完成量账本跨线程串行化（缺口#8）—— **2026-09-13 按方案1+2 重写**
+
+**为什么必须加锁（用户复核后的结论）**：`_positions` 不止在 TdSpi 回调线程改。
+`OrderApiGuard.h` 明确记载"实盘 **MdSpi（quoter/takerReduce/closeout 发单）** 与
+**TdSpi（requoteAfterFill/AUTO REDUCE/残腿对冲 发单）** 并发 `stra_buy/sell/cancel`
+是框架级竞态"，而 **C2 的"下单即预冻结"就在发单线程改 `_positions`**（
+`buy/sell → closeLong/closeShort → freezeCloseAvail`），与 TdSpi 的
+`onPushOrder/onPushTrade/onRspPosition/onRspEntrust` 并发 → 同一容器两线程读写，
+`_positions[stdCode]` 插入/重哈希与遍历并发即 UB。原来那层策略侧 `orderApiMutex`
+只串行化策略发起的 `stra_*`，挡不住框架自身回报路径。
+
+**方案1（锁实现）+ 方案2（窄临界区）落地**：
+
+- 锁类型改回项目惯用 **`SpinMutex _mtx_pos` + `SpinLock`**，去掉递归锁；
+- 新增叶子函数（不调用回调/API，无递归加锁）：
+  `updateUndoneLocked` / `freezeCloseAvailLocked` / `getPosSnapshot` /
+  `deductCloseAvailByCode`；`updateUndone`、`freezeCloseAvail`、`releaseCloseAvail`
+  退化为"加锁 + 调叶子"；
+- **下单拆分改读快照**（方案2）：`buy/sell` 不再持锁跨越发单，改为**每条 action rule
+  取一次 `getPosSnapshot`**（前序 rule 的预冻结仍可见）；
+- **回调遍历先快照后回调**（方案2）：`enumPosition` 与 `onRspPosition` 的
+  print/sink 循环改为"锁内拷贝 → 锁外 `sink->on_position`"，避免持锁跨 sink；
+  `onRspOrders` 的 undone 汇总同理；
+- 专项短锁：`onRspEntrust` 读 undone、`onRspPosition` 逐合约写重基线、
+  `onRspOrders` 清空/累加、`onPushOrder` 他源扣减、`onPushTrade` 持仓更新块、
+  公开 `getUndoneQty`（原无锁，UftStraContext 会调用）；
+- 锁内**不发起** API：E 批的 `requestPosRefresh` 移出临界区（钳制分支先置标志后触发）
+
+**验证（本机）**：`WtUftCore` / `WtFutuCore` / `TestUnits` 全部编译通过；
+台账 9 用例全过（全量失败面与改动前构建一致，见 13.3 环境性说明）
+
+### 13.1' D 批（初版，已被上面的方案1+2 重写取代）：递归锁版
+
+- 新增 `mutable std::recursive_mutex _mtx_pos;`（`TraderAdapter.h`）
+- 加锁点（全部为短临界区，含同线程内嵌递归）：
+  `getPositionAll` / `getPosition` / `updateUndone` / `freezeCloseAvail` /
+  `releaseCloseAvail` / `buy` / `sell` / `openLong` / `openShort` / `closeLong` /
+  `closeShort` / `onRspEntrust` / `onRspPosition` / `onRspOrders` / `onPushOrder` /
+  `onPushTrade`
+- **锁序约定**：`_mtx_pos` 之外只可能再取台账内部锁（pos→ledger），且台账锁
+  **绝不跨越** 对 `_positions` 的访问；`releaseCloseAvail` 先取台账明细（锁已释放）
+  再进 pos → 无环、无死锁
+- 采用递归锁的原因：`buy/sell` 内部会调用 `closeLong/openLong/updateUndone`，
+  回调路径同一线程会经 sink 反向回到 adapter（`sink->on_order/on_trade/...`）
+
+### 13.2 E 批：平仓异常 → 节流重查再基线（F3-min'，自愈兜底）
+
+- 新增 `void requestPosRefresh(const char* reason)`：
+  - **触发**：① 任何平仓单被拒（`onRspEntrust` 的 close 分支）
+    ② 台账归还未命中（`releaseCloseAvail` unmatched）
+    ③ 归还被钳制（C4 clamp）
+  - **节流**：≥10s 才真正发起；被跳过时计 `_pos_refresh_skipped`
+  - **前置**：仅 `_state == AS_ALLREADY` 后生效（避免打乱登录状态机）
+  - **动作**：`queryPositions()`；回包由 C6 规则重放（柜台净值 − 在途台账量 → 钳制），
+    恒为保守方向，**绝不放大可平量**
+  - **不做**：降级重报、错误码/文本解析（§2 边界）
+- C7 巡检行扩展：`... rebaseline={} rebaseline_skipped={}`（`onRspPosition` 输出）
+
+### 13.3 验证结果（本地）
+
+- 编译：`WtUftCore` / `WtFutuCore` / `TestUnits` 全部 Built，零 error
+- 单测：台账 9 用例全过；全量 **160/182**，其中 **22 个失败为环境性**——
+  用**改动前构建的 ASAN 版 TestUnits** 复核，出现**完全相同的失败面**
+  （`test_v10_r7a` / `MarketDataWiring` / `FutuConfigRead` / `ConfigLoaderFailFast` /
+  `HotParam*` 等，均为 `WTSVariant` 配置对象创建返回 NULL），
+  判定与本次改动**无关**（本机环境变化，例如容器重启导致；09-12 凌晨同一批测试为 180/182）
+- 回测（mocker 不经 TraderAdapter）：本轮**未重跑**，D/E 不触及回测路径；
+  部署前应补跑 `configbt_v5` 冒烟做零回归确认
+
+### 13.4 隔离冒烟（远程 ~/projects/wt_de_run，Release 套件 6777c5bb / a9d26259）
+
+- 启动链路正常：配置加载 → 策略创建/校验 → `Trading day 20260914 begun` →
+  `1 parsers started` / `1 trading channels started`（front 注册）→ 30s/75s 后
+  受超时 TERM 优雅退出（`app terminated`）；**全程无 bus error / segmentation**
+- **未完成 SimNow 登录**（周末窗口，生产实例仍在线占用同账户）：登录/回调路径本轮
+  未覆盖 → D/E 的功能验收（锁竞争、节流触发、巡检计数）**须待开盘后**
+
+### 13.5 待部署（需用户确认）
+
+- 生产当前运行 **A/B/C 套件**；D/E 套件需**整套件替换**（规程见 §12.3）
+- 替换前应先备份当前在跑套件为 `*.bak_20260913_abc`，替换清单：
+  `WtUftRunner` + `libWtUftCore.so` + `libWtShareHelper.so` +
+  `traders/libTraderCTP.so` + `parsers/libParserCTP.so`（`uft/libWtFutuCore.so` 逐字节相同）
+
+### 11. v3.2 增补方案（2026-09-13，用户确认三项：P1 随部署同批 / E 批采纳周期再基线 / 现在部署）
+
+**背景补充（09-13 评审实证）**：周五夜盘（20:40 干净重启后）拒单 561 笔、覆盖率仍 2-6%、
+开盘 17 秒首拒——"重启清缓存即自愈"前提证伪，注入机制为运行时即时活跃；v2 文档
+"拆分量=持仓量故无幻影"的推理有缺陷（打印上限是 min(left,avail)，证明的是缓存值
+而非柜台值）。v3.1 已闭合全部已识别运行时注入路径（stra_exit_* 绕过/拒单重复推送/
+归还无上限/快照覆写），闭合后缓存只朝保守方向偏离。
+
+**修改清单（框架层 WtUftCore，用户已授权）**：
+
+1. **P1（ORPHAN FILL 钝化修复，随部署同批）**：`_known_localids` 写入点收拢为
+   **仅 doEntrust**（+doQuote 对称）；删除三处写入：releaseCloseAvail(:562)、
+   onRspOrders 登录播种(:1666)、onPushOrder 尾部任意推送(:1970)。
+   - 语义：集合="本进程所下订单"——幽灵单（登录播种进台账但非本进程所下）的成交
+     重新触发 ORPHAN FILL 告警（其适配器侧账本已由 C6 正确记账，告警专司策略侧
+     不可归因的暴露）
+   - C5 own 判定不受影响：本进程平仓单在台账（下单播种），登录残留平仓单在台账
+     （回放播种），开仓单不参与扣减路径
+2. **E 批（F3-min' + 周期再基线，采纳增强版）**：TraderAdapter 新增
+   `maybeRebaseline(reason)`：
+   - 触发：①平仓单被拒（onRspEntrust 非开仓错误）②归还被钳制（releaseCloseAvail
+     clamp 分支）③台账归还 miss ④**周期 10 分钟**（piggyback onPushOrder 入口的
+     惰性时间检查，无新线程）
+   - 动作：全局 ≥10s 节流后 `_trader_api->queryPositions()`（**仅查持仓**，不触发
+     queryOrders/台账 clear——onRspPosition 的 _state==AS_ALLREADY 分支天然跳过
+     登录态转移）；响应按 C6 规则再基线（柜台净值 − 台账在途，clamp [0,vol]，绝不放大）
+   - 观测：`_rebaseline_count` 并入 C7 巡检行；**顺带解决 P2**——周期重查使
+     "Position data updated"（及台账巡检行）每 10 分钟盘中落盘，clamped/unmatched
+     计数器盘中可见
+3. **部署（今日周日窗口）**：Release 构建 → 远程隔离目录（wt_rel_run）启动验证
+   （60s 无崩溃+台账巡检行）→ 生产备份 .bak_20260913_v32 + 原子替换 + 重启 +
+   5 分钟存活验证 → 首时段门控：CTP-50/51 ≤10/日、覆盖率 ≥85%；若仍现拒单，
+   取该 localid 台账轨迹（reserve/release/clamped/unmatched）归因留存路径
+
+**验证**：TestUnits 全量（基线 180/182）→ v5 冒烟（`< /dev/null`，mocker 不经
+TraderAdapter 预期零关联）→ Release 隔离启动验证 → 生产部署
