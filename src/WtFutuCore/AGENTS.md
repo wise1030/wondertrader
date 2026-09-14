@@ -4104,7 +4104,9 @@ v1 写的判据是：「20:40 cron 重启重建干净缓存 → 若今夜拒单�
    - 动作：全局 ≥10s 节流后 `_trader_api->queryPositions()`（**仅查持仓**，不触发
      queryOrders/台账 clear——onRspPosition 的 _state==AS_ALLREADY 分支天然跳过
      登录态转移）；响应按 C6 规则再基线（柜台净值 − 台账在途，clamp [0,vol]，绝不放大）
-   - 观测：`_rebaseline_count` 并入 C7 巡检行；**顺带解决 P2**——周期重查使
+   - 观测：`_pos_refresh_count` / `_pos_refresh_skipped` 并入 C7 巡检行（日志字段
+     `rebaseline=` / `rebaseline_skipped=`；**文档旧称 `_rebaseline_count` 已作废**）；
+     **顺带解决 P2**——周期重查使
      "Position data updated"（及台账巡检行）每 10 分钟盘中落盘，clamped/unmatched
      计数器盘中可见
 3. **部署（今日周日窗口）**：Release 构建 → 远程隔离目录（wt_rel_run）启动验证
@@ -4153,3 +4155,27 @@ C5 own 判定由台账播种/冻结条目覆盖，语义不变。
 **首时段门控（周一 09-14）**：CTP-50/51 ≤10/日（基线 672）；双边覆盖率 ≥85%
 （基线 2-6%）；台账巡检行每 10min 出现且 rebaseline 计数递增；若仍现拒单，
 取该 localid 的 reserve/release/clamped/unmatched 台账轨迹归因留存路径。
+
+### 13. v3.2-P1 死锁热修（2026-09-14 盘中事故，已部署恢复）
+
+**事故**：09-14 09:00:30（日盘首笔 tick → 首笔报单）全进程死锁：43+ 分钟零报单、
+零 tick 处理（分钟条计时线程独活）。gdb 实锤：tick 报单线程自旋于
+markKnownLocalId、CTP 持仓回报线程（E④ 首次 re-query 回报恰同时到达）自旋于
+onRspPosition，各烧 63% CPU；重启无法自救（首笔报单必死锁）。
+
+**根因（v3.2 P1 引入）**：TraderAdapter::markKnownLocalId 包装函数取 _mtx_pos 后
+调用**同名同签名函数（自身）**，尾调用优化为死循环 → 不可重入 SpinLock 二次
+加锁 → 永久自旋。E④ 仅是并发受害者/目击者，非成因。
+**为何验证链全漏**：BT 冒烟不走 TraderAdapter（回测模拟撮合）；TestUnits 仅测
+CloseFreezeLedger 组件；适配器报单路径**零测试覆盖**——热修链（构建→TestUnits
+→BT）对框架适配层不设防，需在评审清单中固化"新锁包装函数禁止自调用"检查项。
+
+**修复**：:341 自调用 → `_known_localids.insert(localid)`（一行）。.h 未动，
+runner 无需重编（ABI 对子成立）。TestUnits 180/182 零回归。
+
+**部署**：libWtUftCore.so md5 `a0c03695dad4`（备份 .bak_20260914_hotfix），
+14:49 重启盘中完成：登录→持仓回放→台账行→14:51 通道 ready→**报单流恢复**
+（usertag 递增、Smtting→UnTrd 正常），自旋线程消失，CPU 16.7%。
+**损失**：09:00-14:49 做市缺席（仓位无变化，无异常单）。
+**待验（夜盘）**：E④ 周期再基线 10min 节拍应每 10min 打点（本日白天节拍被死锁
+掩盖）；P1 幽灵单 ORPHAN FILL 告警能力。

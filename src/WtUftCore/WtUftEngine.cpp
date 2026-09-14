@@ -327,6 +327,19 @@ void WtUftEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 	if(_data_mgr)
 		_data_mgr->handle_push_quote(stdCode, curTick);
 
+	// F-core v3.2 E④(2026-09-13 修订): 周期再基线由 tick 入口驱动(每 tick 一次时间比较;
+	//   10min 到点才真正 queryPositions). 停报/无订单推送期间同样生效.
+	if (_adapter_mgr != NULL)
+	{
+		const auto& adapters = _adapter_mgr->getAdapters();
+		for (auto it = adapters.begin(); it != adapters.end(); it++)
+		{
+			auto& adapter = it->second;
+			if (adapter)
+				adapter->onTickPiggyback();
+		}
+	}
+
 	{
 		auto sit = _tick_sub_map.find(stdCode);
 		if (sit != _tick_sub_map.end())

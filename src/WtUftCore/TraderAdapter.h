@@ -152,6 +152,10 @@ private:
 	void freezeCloseAvailLocked(const char* stdCode, bool isLong, bool isToday, double qty, uint32_t localid);
 	PosItem getPosSnapshot(const char* stdCode);
 	void deductCloseAvailByCode(const char* stdCode, bool isLong, bool isToday, double qty);
+	// F-core v3.2 修复(2026-09-13): _known_localids 因 P1 变为跨线程(发单线程写 / 回报线程读)
+	//   -> 读写统一走短锁(叶子函数), 杜绝 wt_hashset 并发 insert/find(rehash) 的 UB
+	void markKnownLocalId(uint32_t localid);
+	bool isKnownLocalId(uint32_t localid) const;
 
 	const RiskParams* getRiskParams(const char* stdCode);
 
@@ -169,6 +173,11 @@ public:
 
 		return 0;
 	}
+
+	// F-core v3.2 E④(2026-09-13 修订): 周期再基线改由 **tick 入口** 驱动
+	//   (原 piggyback onPushOrder 在停报/无推送期间失效, 恰是需要自愈的场景);
+	//   引擎每 tick 调用, 内部仅一次时间比较, 10min 到点才发 queryPositions
+	void onTickPiggyback();
 
 	uint32_t getInfos(const char* stdCode);
 

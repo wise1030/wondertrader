@@ -334,6 +334,35 @@ TraderAdapter::PosItem TraderAdapter::getPosSnapshot(const char* stdCode)
 	return it->second;
 }
 
+// F-core v3.2 修复: 在册集合登记(下单点调用, 发单线程) —— 短锁
+void TraderAdapter::markKnownLocalId(uint32_t localid)
+{
+	SpinLock lock(_mtx_pos);
+	_known_localids.insert(localid);
+}
+
+// F-core v3.2 修复: 在册集合查询(回报线程调用) —— 短锁
+bool TraderAdapter::isKnownLocalId(uint32_t localid) const
+{
+	SpinLock lock(_mtx_pos);
+	return _known_localids.find(localid) != _known_localids.end();
+}
+
+// F-core v3.2 E④(修订): 周期再基线 —— 由引擎 tick 入口驱动.
+//   事件触发(拒单/钳制/miss)治不了"沉默的保守泄漏"(他源扣减等只降不升、永不产生拒单);
+//   10min 周期重查让事件记账退化为"两次基线之间的优化". tick 入口在停报/无推送期间
+//   同样生效(原 piggyback onPushOrder 恰在该场景失效).
+//   requestPosRefresh 自带 10s 节流与 AS_ALLREADY 门, 此处只做 10min 节拍.
+void TraderAdapter::onTickPiggyback()
+{
+	uint64_t now = TimeUtils::getLocalTimeNow();
+	if (now - _pos_refresh_periodic_ms < 600000ULL)
+		return;
+
+	_pos_refresh_periodic_ms = now;
+	requestPosRefresh("periodic(tick)");
+}
+
 uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 {
 	_trader_api->makeEntrustID(entrust->getEntrustID(), 64);
@@ -363,7 +392,7 @@ uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 	// R15-c/v3.2-P1: 本进程所下订单在此(唯一下单点)登记在册集合 —— ORPHAN FILL 判据.
 	//   不再于登录回放/任意推送处写入: 幽灵单(非本进程所下)的成交必须触发告警,
 	//   适配器侧账本已由 C6 台账覆盖, 告警专司策略侧不可归因的暴露.
-	_known_localids.insert(localid);
+	markKnownLocalId(localid);
 	//else if(_risk_mon_enabled)
 	//{
 	//	int64_t now = TimeUtils::getLocalTimeNow();
@@ -1913,19 +1942,6 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 	if (cInfo == NULL)
 		return;
 
-	// F-core v3.2 E④(2026-09-13): 周期再基线 — 惰性时间检查(piggyback 推送入口, 无新线程).
-	//   事件触发(拒单/钳制/miss)治不了"沉默的保守泄漏"(他源扣减等只降不升的漂移
-	//   永不产生拒单); 周期 10min 重查让事件记账退化为两次基线间的优化.
-	//   requestPosRefresh 自带 10s 节流与 AS_ALLREADY 门, 此处只做 10min 节拍.
-	{
-		uint64_t now_probe = TimeUtils::getLocalTimeNow();
-		if (now_probe - _pos_refresh_periodic_ms >= 600000ULL)
-		{
-			_pos_refresh_periodic_ms = now_probe;
-			requestPosRefresh("periodic");
-		}
-	}
-
 	std::string stdCode = cInfo->getFullCode();
 
 	bool isBuy = (orderInfo->getDirection() == WDT_LONG && orderInfo->getOffsetType() == WOT_OPEN) || (orderInfo->getDirection() == WDT_SHORT && orderInfo->getOffsetType() != WOT_OPEN);
@@ -2044,7 +2060,7 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 				//   非在册单(盘前遗留/他源): 保持原扣减逻辑(保守方向) + 节流告警
 				bool ownOrder = (localid != 0)
 					&& (_close_freeze.contains(localid)
-						|| _known_localids.find(localid) != _known_localids.end());
+						|| isKnownLocalId(localid));
 				if (!ownOrder)
 				{
 					// F-core v3.1 D: 短锁内扣减(helper 自持锁)
@@ -2158,7 +2174,7 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 		// 历史在册集合 = 幽灵/残留单成交 (如节末撤单 ack 丢失后隔夜存续、次日竞价成交)。
 		// 此类成交引擎/策略账本均无法归因, 是账本漂移的第一现场, 必须显式暴露。
 		// 09-08/09-10 实证: 隔夜残留单竞价成交 10 手, 本地账本静默, 漂移 ~16 手。
-		if (_known_localids.find(localid) == _known_localids.end())
+		if (!isKnownLocalId(localid))
 		{
 			WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
 				"[{}] ORPHAN FILL: trade localid {} not tracked by this process (ghost/leftover order filled, "
