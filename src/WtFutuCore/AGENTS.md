@@ -4179,3 +4179,35 @@ runner 无需重编（ABI 对子成立）。TestUnits 180/182 零回归。
 **损失**：09:00-14:49 做市缺席（仓位无变化，无异常单）。
 **待验（夜盘）**：E④ 周期再基线 10min 节拍应每 10min 打点（本日白天节拍被死锁
 掩盖）；P1 幽灵单 ORPHAN FILL 告警能力。
+
+### 14. 批准方案：Z1+Z3 zombie 修复 + S1+S3 skew driver 纯化 + C 批覆盖率指标修订（2026-09-15，合并一次实施/部署）
+
+**背景实证（09-15 全天）**：13:30:08 双合约 HALT_QUOTING[zombie-cancel-latch] 致下午 88min 停报
+（覆盖率 0.2%、收盘清算 27 手等值）；每个小节边界均触发升级（09:00/10:30/13:30/21:00 四次），
+09:00/10:30 秒级自愈、13:30 因 insert 丢失永不自愈。skew 翻转与库存脱钩实锤（翻转-成交相关 0-9%），
+根因 = hedge_ratio 逐 tick 价格重算污染 driver。覆盖率 avg 字段为多档全深度加权宽度（非缺陷，需增打 L0 口径）。
+
+**Z1（WtUftCore/TraderAdapter.cpp，无 .h 改动）**：onTraderError 收到 WEC_ORDERCANCEL+action 时：
+(a) 本地订单缓存命中且已终态→克隆重推唤醒 tracker 对账；(b) 命中但非终态→跳过（可能在场，交给重试链）；
+(c) 未命中（insert 丢失，交易所无此单）→用 action.usertag（makeAction 已回填 eidCache 映射）合成
+WOS_Canceled 骨架终态推送（stateMsg 标注 cancel-err-resolved），强制清账无敞口风险。
+
+**Z3a+Z3c（WtFutuCore/StrategyCoordinator）**：闩锁置位时记录 since；持有期每 60s 打点遥测
+（count/oldest/since）；每 45s cancelAll 重探一次（bounded，不再无限等待）。配置键
+zombieLatch.reprobeMs/telemetryMs（默认 45000/60000）。
+
+**S1+S3（WtFutuCore）**：SignalContext 新增 contract_position_util（纯手数/合约 delta 上限，仅成交驱动）
+与 total_delta_skew（Σ position×hr_slow）；hr_slow = hedge_ratio 的 5min EMA（逐 tick 更新、系数 dt/300s，
+首个 tick 播种）；SpreadOptimizer 第 4 节 r_p/r_c 与穿越授权全部改用纯化口径（保留 w_p=0.5/w_c=1.0/γ=1.0
+与量化滞环结构不变）；QUOTE 行增打 r_p/r_c 分量。配置键 skewDriver.hrSlowWindowMs（默认 300000）。
+
+**C2+C3+C1-w0（WtFutuCore/BilateralQuoteStats.h + FutuQuoter）**：C2 快照行增打 el=<段内已过秒> 与
+cov=bil/el（保留旧 ratio 兼容）；C3 update() 增加时间轴断点钳制（>120s 间隙或回绕：段记账只记到
+_last_update_units 并重播起点，消灭盘前种子与 bil>100% 异常）；C1 快照增补 best_bid/best_ask（L0），
+统计行增打 w0=<L0 瞬时宽度均值>（avg 保留为全深度加权口径并在注释中说明语义）。
+
+**验证门控**：TestUnits 全量（基线 180/182）；v5 BT 冒烟带内零 HALT/zombie；夜盘实测——
+小节边界升级后闩锁应 ≤45s 自愈（今日 88min 为基线）、翻转率 <0.1 次/min（基线 2-2.4）、
+翻转-成交相关度趋近 100%（基线 0-9%）、零逆方向成交不回退、覆盖 cov 口径夜盘 ≥90%。
+**部署**：libWtFutuCore.so + libWtUftCore.so（TraderAdapter.h 未动，runner 不需重编，无 ABI 对子问题）；
+20:40 cron 前完成。
