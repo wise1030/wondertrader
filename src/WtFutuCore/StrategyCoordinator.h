@@ -140,6 +140,14 @@ struct ModuleParams
     uint32_t cancel_retry_interval_ms = 300; ///< 撤单 ack 超时重发间隔 (ms)
     uint32_t cancel_max_retries = 3;         ///< 撤单最大重试次数, 达到后 zombie 升级
 
+    // F-core Z3(2026-09-15): zombie 闩锁限时重探 + 遥测 (2026-09-15 13:30 双合约
+    //   88min 停报实证: 无限等 zombie 清账不可接受, 需 bounded 恢复)
+    uint32_t zombie_latch_reprobe_ms = 45000;   ///< 闩锁持有超此时长则 cancelAll 重探一次
+    uint32_t zombie_latch_telemetry_ms = 60000; ///< 闩锁持有期遥测打点间隔
+    // F-core S1(2026-09-15): hedge_ratio 慢化 EMA 窗口 (skew driver 纯化 --
+    //   hr 逐 tick 价格重算污染 driver, 翻转-成交相关仅 0-9%, 见当日评估)
+    uint32_t hr_slow_window_ms = 300000;        ///< hedge_ratio 慢化 EMA 窗口 (5min)
+
     // AdaptiveParam (仍需保留)
 
     // Alpha influence (仍需保留，由 StrategyCoordinator 使用)
@@ -495,6 +503,15 @@ private:
     std::unordered_map<std::string, CachedQuote> _last_quote_params;
     std::unordered_map<std::string, uint64_t> _last_requote_ms;
     std::unordered_map<std::string, uint64_t> _last_bilateral_log_ms;
+
+    // F-core Z3(2026-09-15): zombie 闩锁生命周期观测与限时重探
+    //   _zombie_latch_ms: code -> 本进程首次置位时刻(ms); isZombieHalted==false 即清除
+    //   (Md 线程单写: processAutoCancel 为唯一触碰点, 无需加锁)
+    std::unordered_map<std::string, uint64_t> _zombie_latch_ms;
+    uint64_t _last_zombie_tele_ms = 0;
+    // F-core S1(2026-09-15): hedge_ratio 慢化 EMA (skew driver 纯化, Md 线程单写)
+    std::unordered_map<std::string, double> _hr_slow;
+    std::unordered_map<std::string, uint64_t> _hr_slow_last_ms;
 
     // V10-R9: live 墙钟提供器 (HHMM) —— 空则回退 ctx tick 钟 (回测/默认)
     std::function<uint32_t()> _wallclock_hhmm;

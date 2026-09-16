@@ -121,9 +121,12 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     //==========================================================================
     // 4. Delta Skew (R14-2026-09-07: tick 量化档位)
     //    驱动量(保留双驱动加权结构与符号相抵语义):
-    //      r_p = total_delta / portfolio_max_delta   (组合带符号利用率)
-    //      r_c = contract_realized_delta_util        (合约已实现口径带符号利用率)
+    //      r_p = total_delta_skew / portfolio_max_delta  (组合带符号利用率, S1 纯化口径)
+    //      r_c = contract_position_util                  (合约纯手数口径带符号利用率)
     //      driver = w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ
+    //    S1(2026-09-15) 纯化: hr 逐 tick 价格重算使旧口径 (position×hr) 随行情抖动,
+    //      翻转-成交相关仅 0-9% 实测; skew 驱动改用 纯手数合约项 + hr_slow(5min EMA)
+    //      组合项, 消费方语义不变 (direction/sign 混合保留 R14 双驱动结构)
     //    幅度映射(整档量化, 消灭 sub-tick 死偏移 —— 09-07 夜盘实证:
     //      util=1.0 撞限总 skew 仅 0.67t, 未穿越 mid, 7 分钟只减 1 手):
     //      k = clamp(round(k_max × driver), ±k_max), 滞环 h=skew_hysteresis
@@ -133,14 +136,19 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     //==========================================================================
     double half_spread = result.base_spread / 2.0;
 
-    double totalDelta = pCtx ? pCtx->total_delta : 0;
+    // S1: 驱动输入纯化 (total_delta_skew 无效/未注入时回退旧口径, 保底不空转)
+    double portfolio_delta_skew = (pCtx && pCtx->total_delta_skew != 0.0)
+                                      ? pCtx->total_delta_skew
+                                      : (pCtx ? pCtx->total_delta : 0.0);
     double contract_util_signed =
-        (pCtx && pCtx->contract_realized_delta_util_valid) ? pCtx->contract_realized_delta_util : 0.0;
+        (pCtx && pCtx->contract_position_util_valid) ? pCtx->contract_position_util
+        : ((pCtx && pCtx->contract_realized_delta_util_valid) ? pCtx->contract_realized_delta_util : 0.0);
 
-    double r_p_signed = (params.portfolio_max_delta > 0) ? totalDelta / params.portfolio_max_delta : 0.0;
+    double r_p_signed =
+        (params.portfolio_max_delta > 0) ? portfolio_delta_skew / params.portfolio_max_delta : 0.0;
     bool cross_authorized = (std::abs(r_p_signed) >= 1.0) || (std::abs(contract_util_signed) >= 1.0);
 
-    double driver = computeDeltaSkewDriver(totalDelta, contract_util_signed);
+    double driver = computeDeltaSkewDriver(portfolio_delta_skew, contract_util_signed);
     // 符号约定: driver>0 (多头库存) → skew<0 (整梯下移: bid 拉远防堆积, ask 压向/穿过 mid 减仓)
     int k = -quantizeSkewTicks(params.skew_tick_max * driver);
 
@@ -203,9 +211,10 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     //==========================================================================
     // 10. Debug Log
     //==========================================================================
+    // F-core S3(2026-09-15): 增打 skew 驱动分量 r_p/r_c (纯化口径), 供翻转归因
     WTSLogger::debug("[QUOTE] {} mid={:.2f} | alpha={:.4f}(conf={:.2f},adj={:.2f}) | "
                      "skew={:.2f}(d_skew={:.2f}) | "
-                     "spread={:.2f}(mult={:.2f}) | bid={:.2f} ask={:.2f}",
+                     "spread={:.2f}(mult={:.2f}) | bid={:.2f} ask={:.2f} | r_p={:.3f} r_c={:.3f}",
                      _code,
                      midPrice,
                      alpha,
@@ -216,7 +225,9 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
                      result.base_spread,
                      spread_mult,
                      result.bid_price,
-                     result.ask_price);
+                     result.ask_price,
+                     r_p_signed,
+                     contract_util_signed);
 
     // if (ctx.alpha.valid || ctx.book_imbalance.valid) {
     //     WTSLogger::debug("[SIGNAL] {} alpha={:.4f}(conf={:.2f}) | "

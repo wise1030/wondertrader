@@ -51,9 +51,13 @@ struct ValidQuoteSnapshot
     double weighted_bid_price; ///< bid 侧累计加权价
     double weighted_ask_price; ///< ask 侧累计加权价
     double tick_size;          ///< 合约最小变动价位
+    // F-core C1-w0(2026-09-15): L0 最优档报价价 (avg 为全深度加权口径, w0 为 L0 口径)
+    double best_bid_price;
+    double best_ask_price;
 
     ValidQuoteSnapshot()
-        : has_valid_bid(false), has_valid_ask(false), weighted_bid_price(0), weighted_ask_price(0), tick_size(1.0)
+        : has_valid_bid(false), has_valid_ask(false), weighted_bid_price(0), weighted_ask_price(0), tick_size(1.0),
+          best_bid_price(0), best_ask_price(0)
     {}
 
     /// 计算累计加权 spread（tick 数）
@@ -62,6 +66,14 @@ struct ValidQuoteSnapshot
         if (!has_valid_bid || !has_valid_ask || tick_size <= 0)
             return 0.0;
         return (weighted_ask_price - weighted_bid_price) / tick_size;
+    }
+
+    /// F-core C1-w0: L0 最优档 spread（tick 数）
+    inline double getL0SpreadTicks() const
+    {
+        if (!has_valid_bid || !has_valid_ask || tick_size <= 0)
+            return 0.0;
+        return (best_ask_price - best_bid_price) / tick_size;
     }
 };
 
@@ -99,7 +111,9 @@ public:
         : _session_info(nullptr)
           ,
           _bilateral_start_units(0), _total_bilateral_units(0), _session_total_secs(0), _is_bilateral(false),
-          _bilateral_switch_count(0), _total_spread_ticks(0), _spread_sample_count(0)
+          _bilateral_switch_count(0), _total_spread_ticks(0), _spread_sample_count(0),
+          _section_start_units((uint64_t)-1), _last_update_units((uint64_t)-1),
+          _total_l0_spread_ticks(0), _l0_sample_count(0)
     {}
 
     /// 设置配置
@@ -234,6 +248,23 @@ public:
         if (now_units == INVALID_UNITS)
             return; // 非交易时段，丢弃
 
+        // F-core C3(2026-09-15): 时间轴断点钳制 —— 间隙(>120s, 休市/停报)或回绕时,
+        //   进行中的双边段只记账到最后真实观测点并重播起点; 消灭盘前 tick 种下
+        //   会话外起点导致的 bil>100% 异常与跨间隙虚增。
+        if (_last_update_units != INVALID_UNITS &&
+            (now_units <= _last_update_units || now_units - _last_update_units > 120))
+        {
+            if (_is_bilateral && _bilateral_start_units != INVALID_UNITS &&
+                _last_update_units >= _bilateral_start_units)
+                _total_bilateral_units += (_last_update_units - _bilateral_start_units);
+            _bilateral_start_units = now_units;
+        }
+        _last_update_units = now_units;
+
+        // C2: 段起点惰性播种 (首个观测点; flushSection 在段末刷新并重置)
+        if (_section_start_units == INVALID_UNITS)
+            _section_start_units = now_units;
+
         bool new_bilateral = checkBilateral(snapshot);
         if (!new_bilateral)
             countInvalidReason(snapshot);
@@ -259,6 +290,12 @@ public:
             if (spread_ticks > 0) {
                 _total_spread_ticks += spread_ticks;
                 _spread_sample_count++;
+            }
+            // F-core C1-w0: L0 最优档宽度样本 (与全深度加权口径并行统计)
+            double l0_ticks = snapshot.getL0SpreadTicks();
+            if (l0_ticks > 0) {
+                _total_l0_spread_ticks += l0_ticks;
+                _l0_sample_count++;
             }
         }
     }
@@ -328,13 +365,24 @@ public:
 
         double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
         double ratio = (_session_total_secs > 0) ? (double)bil / _session_total_secs : 0.0;
+        // F-core C2(2026-09-15): 段内已过秒与段内覆盖率 (cov=bil/el) —— 分母不再
+        //   混用全交易日 ses, section flush 后各段可自解释
+        uint64_t el = (_section_start_units != INVALID_UNITS && now_units >= _section_start_units)
+                          ? (now_units - _section_start_units)
+                          : 0;
+        double cov = (el > 0) ? (double)bil / (double)el : 0.0;
+        // F-core C1-w0: L0 最优档瞬时宽度均值
+        double w0 = (_l0_sample_count > 0) ? _total_l0_spread_ticks / _l0_sample_count : 0.0;
         return makeSnapshotString("live",
                                   uTime_HHMM,
                                   sec_in_min,
                                   bil,
                                   _session_total_secs,
                                   ratio,
+                                  el,
+                                  cov,
                                   avg,
+                                  w0,
                                   _spread_sample_count,
                                   _bilateral_switch_count);
     }
@@ -356,13 +404,22 @@ public:
 
         double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
         double ratio = (_session_total_secs > 0) ? (double)_total_bilateral_units / _session_total_secs : 0.0;
+        // F-core C2: 段内已过秒 (flush 前) 与段内覆盖率
+        uint64_t el = (_section_start_units != INVALID_UNITS && now_units >= _section_start_units)
+                          ? (now_units - _section_start_units)
+                          : 0;
+        double cov = (el > 0) ? (double)_total_bilateral_units / (double)el : 0.0;
+        double w0 = (_l0_sample_count > 0) ? _total_l0_spread_ticks / _l0_sample_count : 0.0;
         std::string line = makeSnapshotString("section",
                                               uTime_HHMM,
                                               sec_in_min,
                                               _total_bilateral_units,
                                               _session_total_secs,
                                               ratio,
+                                              el,
+                                              cov,
                                               avg,
+                                              w0,
                                               _spread_sample_count,
                                               _bilateral_switch_count);
 
@@ -373,6 +430,9 @@ public:
         _bilateral_switch_count = 0;
         _total_spread_ticks = 0;
         _spread_sample_count = 0;
+        _total_l0_spread_ticks = 0;
+        _l0_sample_count = 0;
+        _section_start_units = now_units; // C2: 新段起点 = flush 时刻
         _inv_both_empty = 0;
         _inv_no_bid = 0;
         _inv_no_ask = 0;
@@ -398,6 +458,11 @@ public:
         _bilateral_switch_count = sw;
         _total_spread_ticks = avg * static_cast<double>(smp);
         _spread_sample_count = smp;
+        // F-core C2/C3: 重启续算后段起点/间隙锚点待首个观测点重新播种
+        _section_start_units = INVALID_UNITS;
+        _last_update_units = INVALID_UNITS;
+        _total_l0_spread_ticks = 0;
+        _l0_sample_count = 0;
         _inv_both_empty = inv[0];
         _inv_no_bid = inv[1];
         _inv_no_ask = inv[2];
@@ -424,13 +489,21 @@ public:
 
         double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
         double ratio = (_session_total_secs > 0) ? (double)bil / _session_total_secs : 0.0;
+        uint64_t el = (_section_start_units != INVALID_UNITS && now_units >= _section_start_units)
+                          ? (now_units - _section_start_units)
+                          : 0;
+        double cov = (el > 0) ? (double)bil / (double)el : 0.0;
+        double w0 = (_l0_sample_count > 0) ? _total_l0_spread_ticks / _l0_sample_count : 0.0;
         return makeSnapshotString(type,
                                   uTime_HHMM,
                                   sec_in_min,
                                   bil,
                                   _session_total_secs,
                                   ratio,
+                                  el,
+                                  cov,
                                   avg,
+                                  w0,
                                   _spread_sample_count,
                                   _bilateral_switch_count);
     }
@@ -444,14 +517,17 @@ private:
                                    uint64_t bil,
                                    uint64_t ses,
                                    double ratio,
+                                   uint64_t el,
+                                   double cov,
                                    double avg,
+                                   double w0,
                                    uint64_t smp,
                                    uint32_t sw) const
     {
-        char buf[512];
+        char buf[560];
         snprintf(buf,
                  sizeof(buf),
-                 "ts=%04u:%02u type=%s code=%s bil=%llu ses=%llu ratio=%.6f avg=%.4f smp=%llu sw=%u inv=%llu,%llu,%llu,%llu,%llu",
+                 "ts=%04u:%02u type=%s code=%s bil=%llu ses=%llu ratio=%.6f el=%llu cov=%.6f avg=%.4f w0=%.4f smp=%llu sw=%u inv=%llu,%llu,%llu,%llu,%llu",
                  uTime_HHMM,
                  sec_in_min,
                  type,
@@ -459,7 +535,10 @@ private:
                  (unsigned long long)bil,
                  (unsigned long long)ses,
                  ratio,
+                 (unsigned long long)el,
+                 cov,
                  avg,
+                 w0,
                  (unsigned long long)smp,
                  sw,
                  (unsigned long long)_inv_both_empty,
@@ -491,6 +570,9 @@ private:
     uint64_t _bilateral_start_units; ///< 当前双边段的起始 session-累计秒
     uint64_t _total_bilateral_units; ///< 双边累计秒
     uint64_t _session_total_secs;    ///< session 总秒数（trading section 之和）
+    // F-core C2/C3(2026-09-15)
+    uint64_t _section_start_units;   ///< 当前统计段起点 (flushSection 刷新; 惰性播种)
+    uint64_t _last_update_units;     ///< 最近一次 update 的 session-累计秒 (间隙钳制锚点)
 
     bool _is_bilateral;
     uint32_t _bilateral_switch_count;
@@ -498,6 +580,9 @@ private:
     // Spread 样本
     double _total_spread_ticks;
     uint64_t _spread_sample_count;
+    // F-core C1-w0: L0 最优档宽度样本
+    double _total_l0_spread_ticks;
+    uint64_t _l0_sample_count;
 
     // v7.1 诊断: 非双边原因计数
     uint64_t _inv_both_empty = 0;

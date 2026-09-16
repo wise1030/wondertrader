@@ -2266,6 +2266,89 @@ void TraderAdapter::onTraderError(WTSError* err, void* pData /* = NULL */)
 {
 	if(err)
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,"[{}] Error of trading channel occured: {}", _id.c_str(), err->getMessage());
+
+	// F-core Z1(2026-09-15): 撤单错误应答 -> 订单终态对账, 根治 zombie 闩锁来源.
+	//   CTP "报单已全成交或已撤销,不能再撤"/"报单不存在" 类撤单错误是订单终态的权威
+	//   证据, 但框架此前仅透传 WTSError 而丢失终态推送, tracker 的 pending_cancel
+	//   条目永远等不到回报 -> zombie 升级 -> 闩锁(2026-09-15 13:30 双合约 88min 停报
+	//   实证). 分三种情形(仅在 _state==AS_ALLREADY 且带 action 时处理):
+	//   a) 本地缓存命中且已终态: 原样重推, 唤醒 tracker 对账(语义无损, 统计或有重复计数)
+	//   b) 缓存命中但非终态: 跳过 -- 订单可能在场, 属流控等瞬时错误, 交给既有重试链
+	//   c) 缓存未命中(insert 丢失, 交易所无此单): 用 action 的 usertag(TraderCTP
+	//      makeAction 已从 eidCache 回填)合成 WOS_Canceled 骨架终态推送, 强制清账;
+	//      direction/price 未知取默认值, stateMsg 标注 cancel-err-resolved 供审计.
+	//      从未有回报 => 交易所无此单 => 无敞口风险.
+	if (err == NULL || err->getErrorCode() != WEC_ORDERCANCEL || pData == NULL || _state != AS_ALLREADY)
+		return;
+
+	WTSEntrustAction* action = (WTSEntrustAction*)pData;
+	const char* usertag = action->getUserTag();
+	if (usertag == NULL || !StrUtil::startsWith(usertag, _order_pattern.c_str(), true))
+		return;
+
+	uint32_t localid = strtoul(usertag + _order_pattern.size() + 1, NULL, 10);
+	if (localid == 0)
+		return;
+
+	WTSContractInfo* cInfo = _bd_mgr->getContract(action->getCode(), action->getExchg());
+	if (cInfo == NULL)
+		return;
+	std::string stdCode = cInfo->getFullCode();
+
+	// 短锁查找(grab 引用计数), 锁外走 onPushOrder 既有管线 —— 与 cancel() 同模式;
+	//   ⚠️ 严禁在此临界区内调用 getOrders()(其内部自取 _mtx_orders, 不可重入
+	//   SpinLock 递归加锁 = 2026-09-16 11:16 死锁事故, P1 同款教训)
+	WTSOrderInfo* cached = NULL;
+	{
+		SpinLock lock(_mtx_orders);
+		if (_orders != NULL)
+			cached = (WTSOrderInfo*)_orders->grab(localid);
+	}
+
+	if (cached != NULL)
+	{
+		WTSOrderState st = cached->getOrderState();
+		if (st == WOS_AllTraded || st == WOS_Canceled)
+		{
+			// (a) 已终态: 原样重推
+			WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+				"[{}] cancel-error resolved: re-pushing terminal order {} (state={})",
+				_id.c_str(), usertag, stateToName(st));
+			onPushOrder(cached);
+		}
+		else
+		{
+			// (b) 非终态: 订单可能在场, 不合成, 交给重试链
+			WTSLogger::log_dyn("trader", _id.c_str(), LL_DEBUG,
+				"[{}] cancel-error on live order {}, left to retry chain",
+				_id.c_str(), usertag);
+		}
+		cached->release();
+		return;
+	}
+
+	// (c) 缓存未命中: insert 丢失, 合成骨架终态
+	WTSOrderInfo* synth = WTSOrderInfo::create();
+	synth->setContractInfo(cInfo);
+	synth->setCode(action->getCode());
+	synth->setExchange(action->getExchg());
+	synth->setUserTag(usertag);
+	wt_strcpy(synth->getEntrustID(), action->getEntrustID());
+	synth->setDirection(WDT_LONG);
+	synth->setOffsetType(WOT_OPEN);
+	synth->setPrice(0.0);
+	synth->setVolume(0.0);
+	synth->setVolTraded(0.0);
+	synth->setVolLeft(0.0);
+	synth->setOrderState(WOS_Canceled);
+	synth->setStateMsg("cancel-err-resolved");
+	synth->setOrderDate(_trading_day);
+	synth->setOrderTime(TimeUtils::makeTime(_trading_day, 0));
+	WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
+		"[{}] cancel-error resolved: synthesized terminal order {} (insert lost, no exchange record)",
+		_id.c_str(), usertag);
+	onPushOrder(synth);
+	synth->release();
 }
 
 IBaseDataMgr* TraderAdapter::getBaseDataMgr()

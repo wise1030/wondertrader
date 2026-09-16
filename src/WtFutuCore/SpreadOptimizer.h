@@ -167,12 +167,21 @@ struct PortfolioContext
     //   语义原则: skew 响应已实现库存, 义务/数量响应前瞻库存(含在途)。
     double contract_realized_delta_util;
     bool contract_realized_delta_util_valid;
+    // F-core S1(2026-09-15): skew driver 纯化口径 —— hedge_ratio 逐 tick 价格重算
+    //   (CorrelationManager (p1*m1*beta)/(p2*m2)) 使 delta() 随行情抖动, 翻转-成交
+    //   相关仅 0-9%(2026-09-15 实测)。skew 驱动改用:
+    //   contract_position_util = position手数 / contract_max_delta  (纯手数, 仅成交驱动)
+    //   total_delta_skew       = Σ position_c × hr_slow_c           (hr 5min EMA, 慢变)
+    double contract_position_util;
+    bool contract_position_util_valid;
+    double total_delta_skew;
     std::vector<RelatedInventory> related;
 
     PortfolioContext()
         : total_delta(0), total_exposure(0), current_multiplier(1), current_hedge_ratio(1), current_price(1),
           contract_max_delta(0), contract_delta_util(0), contract_delta_util_valid(false),
-          contract_realized_delta_util(0), contract_realized_delta_util_valid(false)
+          contract_realized_delta_util(0), contract_realized_delta_util_valid(false),
+          contract_position_util(0), contract_position_util_valid(false), total_delta_skew(0)
     {}
     void clear()
     {
@@ -183,6 +192,9 @@ struct PortfolioContext
         contract_delta_util_valid = false;
         contract_realized_delta_util = 0;
         contract_realized_delta_util_valid = false;
+        contract_position_util = 0;
+        contract_position_util_valid = false;
+        total_delta_skew = 0;
     }
     void addRelated(const std::string& c, double inv, double corr, double hr, double mult, double px)
     {

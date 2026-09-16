@@ -851,6 +851,9 @@ ValidQuoteSnapshot FutuQuoter::getValidQuoteSnapshot() const
         for (const auto& level : _bid_levels) {
             if (!level.hasOrders() || level.qty <= 0)
                 continue;
+            // F-core C1-w0: 首个有效档 = L0 最优报价价
+            if (snapshot.best_bid_price <= 0.0)
+                snapshot.best_bid_price = level.price;
             double remain = target - cum_qty;
             if (remain <= 0)
                 break;
@@ -873,6 +876,9 @@ ValidQuoteSnapshot FutuQuoter::getValidQuoteSnapshot() const
         for (const auto& level : _ask_levels) {
             if (!level.hasOrders() || level.qty <= 0)
                 continue;
+            // F-core C1-w0: 首个有效档 = L0 最优报价价
+            if (snapshot.best_ask_price <= 0.0)
+                snapshot.best_ask_price = level.price;
             double remain = target - cum_qty;
             if (remain <= 0)
                 break;

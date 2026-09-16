@@ -188,6 +188,18 @@ coordinator:
                                    # CTP 应答 >300ms 致 3 次重试在真实撤响前耗尽, 当日 63 笔误升 zombie)
       cancelMaxRetries: 3          # 最大重试次数, 达到后 zombie 升级 (halt合约+cancelAll兜底)
 
+    # --- F-core Z3(2026-09-15): zombie 闩锁生命周期 (bounded 恢复) ---
+    #   2026-09-15 13:30 双合约闩锁 88min 停报实证: insert 丢失类 zombie 永无终态回报,
+    #   持有期需可观测 + 限时 cancelAll 重探
+    zombieLatch:
+      reprobeMs: 45000             # 闩锁持有超此时长 -> cancelAll 重探一次 (0=禁用)
+      telemetryMs: 60000           # 持有期遥测打点间隔 (0=禁用)
+
+    # --- F-core S1(2026-09-15): skew driver 纯化 ---
+    #   hr 逐 tick 价格重算污染 driver (翻转-成交相关 0-9% 实测), 组合项 hr 慢化
+    skewDriver:
+      hrSlowWindowMs: 300000       # hedge_ratio 慢化 EMA 窗口 (5min)
+
     # --- 相关性管理器 ---
     correlationManager:
       windowSize: 100              # 相关性计算窗口

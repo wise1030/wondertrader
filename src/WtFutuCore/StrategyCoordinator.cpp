@@ -322,6 +322,20 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
                 readUInt32(autoCancel, "cancelMaxRetries", _cfg.modules.cancel_max_retries);
         }
 
+        // F-core Z3/S1(2026-09-15): zombie 闩锁生命周期 + hr 慢化窗口
+        if (wtp::WTSVariant* zl = modules->get("zombieLatch"))
+        {
+            _cfg.modules.zombie_latch_reprobe_ms =
+                readUInt32(zl, "reprobeMs", _cfg.modules.zombie_latch_reprobe_ms);
+            _cfg.modules.zombie_latch_telemetry_ms =
+                readUInt32(zl, "telemetryMs", _cfg.modules.zombie_latch_telemetry_ms);
+        }
+        if (wtp::WTSVariant* sd = modules->get("skewDriver"))
+        {
+            _cfg.modules.hr_slow_window_ms =
+                readUInt32(sd, "hrSlowWindowMs", _cfg.modules.hr_slow_window_ms);
+        }
+
         // SelfTradePrevention: 已迁移到 StpConfig::fromVariant
 
 
@@ -1161,6 +1175,46 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
             //   穿越授权同步收紧 (主动减仓不被未成交挂单预授权)
             p_ctx.contract_realized_delta_util = cs->delta() / cs->contract_max_delta;
             p_ctx.contract_realized_delta_util_valid = true;
+            // F-core S1(2026-09-15): skew driver 纯化 —— hr 逐 tick 价格重算使
+            //   delta() 随行情抖动(翻转-成交相关仅 0-9%), skew 驱动改纯手数口径;
+            //   hr_slow = 当前 hedge_ratio 的 5min EMA (首个 tick 播种, Md 单写)
+            p_ctx.contract_position_util = cs->position / cs->contract_max_delta;
+            p_ctx.contract_position_util_valid = true;
+            {
+                double hr_now = cs->hedge_ratio;
+                if (hr_now > 0 && std::isfinite(hr_now))
+                {
+                    auto it = _hr_slow.find(tc.code);
+                    if (it == _hr_slow.end())
+                    {
+                        _hr_slow.emplace(tc.code, hr_now);
+                        _hr_slow_last_ms[tc.code] = tc.timestamp;
+                    }
+                    else
+                    {
+                        uint64_t& last = _hr_slow_last_ms[tc.code];
+                        double dt = (tc.timestamp > last) ? double(tc.timestamp - last) : 0.0;
+                        double alpha = std::min(1.0, dt / std::max(1.0, (double)_cfg.modules.hr_slow_window_ms));
+                        it->second += (hr_now - it->second) * alpha;
+                        last = tc.timestamp;
+                    }
+                }
+                // 纯化组合 delta: Σ position_c × hr_slow_c (本策略合约集合)
+                double tot = 0.0;
+                if (_quoters)
+                {
+                    for (const auto& kv : *_quoters)
+                    {
+                        const ContractState* pcs = _portfolio ? _portfolio->getContract(kv.first) : NULL;
+                        if (pcs == NULL)
+                            continue;
+                        auto hit = _hr_slow.find(kv.first);
+                        double hr = (hit != _hr_slow.end()) ? hit->second : pcs->hedge_ratio;
+                        tot += pcs->position * hr;
+                    }
+                }
+                p_ctx.total_delta_skew = tot;
+            }
         }
     }
 
@@ -1313,6 +1367,8 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
                          fc);
         if (_risk_monitor)
             _risk_monitor->setZombieHalt(zcode);
+        // F-core Z3(2026-09-15): 记录闩锁起始时刻(重复置位不覆盖首次时间)
+        _zombie_latch_ms.emplace(zcode, tc.timestamp);
         orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
     }
 
@@ -1321,6 +1377,46 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
     // 释放该合约的 halt 闩锁; 无断连场景 (流控吞单) 无需等通道重连/重启。
     if (_risk_monitor)
         _risk_monitor->retainZombieHalts(_order_tracker->getAliveZombieContracts());
+
+    // F-core Z3a+Z3c(2026-09-15): 闩锁持有期遥测 + 限时 cancelAll 重探 (bounded 恢复)
+    //   2026-09-15 13:30 双合约闩锁 88min 停报实证: insert 丢失类 zombie 永无终态回报,
+    //   retainZombieHalts 永不释放 -> 需要 (a) 每 telemetryMs 一次持有期打点 (可观测),
+    //   (b) 每 reprobeMs 重发一次 stra_cancel_all (对 insert-lost 无害, 对迟到的
+    //   可撤单是二次消解机会)。释放后清 _zombie_latch_ms。
+    if (!_zombie_latch_ms.empty())
+    {
+        for (auto it = _zombie_latch_ms.begin(); it != _zombie_latch_ms.end();)
+        {
+            const std::string& code = it->first;
+            if (_risk_monitor == NULL || !_risk_monitor->isZombieHalted(code))
+            {
+                it = _zombie_latch_ms.erase(it);
+                continue;
+            }
+            uint64_t held = tc.timestamp > it->second ? tc.timestamp - it->second : 0;
+            if (_cfg.modules.zombie_latch_reprobe_ms > 0 &&
+                held >= (uint64_t)_cfg.modules.zombie_latch_reprobe_ms)
+            {
+                std::string fc = stdCodeToFullCode(code);
+                WTSLogger::warn("[RISK] {} zombie latch holding {}ms -> re-probe cancelAll({})",
+                                code, held, fc);
+                orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
+                it->second = tc.timestamp; // 重置计时, 下一个 reprobe 周期再探
+            }
+            ++it;
+        }
+        if (!_zombie_latch_ms.empty() && tc.timestamp >= _last_zombie_tele_ms &&
+            (uint64_t)_cfg.modules.zombie_latch_telemetry_ms > 0 &&
+            tc.timestamp - _last_zombie_tele_ms >= (uint64_t)_cfg.modules.zombie_latch_telemetry_ms)
+        {
+            uint64_t oldest = UINT64_MAX;
+            for (const auto& kv : _zombie_latch_ms)
+                oldest = std::min(oldest, tc.timestamp > kv.second ? tc.timestamp - kv.second : 0);
+            WTSLogger::warn("[RISK] zombie latch telemetry: {} contract(s) halted, oldest holding {}ms",
+                            _zombie_latch_ms.size(), oldest == UINT64_MAX ? 0 : oldest);
+            _last_zombie_tele_ms = tc.timestamp;
+        }
+    }
 
     // V10-R7e/P2-14: Router 撤单侧 B+ 化 —— 非做市单 (arb/hedge/closeout) 的
     // pending_cancel 超宽限未终态时重发撤单 (tracker 的 B+ 重试只覆盖 MM 单);

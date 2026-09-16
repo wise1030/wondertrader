@@ -4211,3 +4211,45 @@ _last_update_units 并重播起点，消灭盘前种子与 bil>100% 异常）；
 翻转-成交相关度趋近 100%（基线 0-9%）、零逆方向成交不回退、覆盖 cov 口径夜盘 ≥90%。
 **部署**：libWtFutuCore.so + libWtUftCore.so（TraderAdapter.h 未动，runner 不需重编，无 ABI 对子问题）；
 20:40 cron 前完成。
+
+### 15. Z1+Z3+S1+C 批实施与部署记录（2026-09-16，含二次死锁事故与热修，已部署）
+
+**实施**（commit 2b9e1b7c 方案入档后逐项落地）：
+- Z1（TraderAdapter.cpp onTraderError）：撤单错误应答 → 终态对账三情形（a 命中终态重推/
+  b 非终态跳过/c 未命中合成骨架终态推送）
+- Z3a+Z3c（StrategyCoordinator）：_zombie_latch_ms 生命周期表 + 60s 遥测 + 45s cancelAll
+  重探；配置键 zombieLatch.reprobeMs/telemetryMs
+- S1+S3（StrategyCoordinator/SpreadOptimizer）：skew driver 纯化——contract_position_util
+  （纯手数）+ total_delta_skew（Σ position×hr_slow，hr 5min EMA）；穿越授权同口径；
+  QUOTE 行增打 r_p/r_c；配置键 skewDriver.hrSlowWindowMs
+- C2/C3/C1-w0（BilateralQuoteStats/FutuQuoter）：el/cov 字段、间隙钳制（>120s 重播起点）、
+  w0=L0 瞬时宽度均值；avg 保留全深度加权口径（**勘误**：avg=4.75t 非度量伪影，是多档
+  报价全深度加权的设计语义，2026-09-15 评估中"陈旧侧摊薄"判断有误）
+
+**🔴 二次死锁事故（2026-09-16 11:16，Z1 引入，本人全责——P1 同款教训复犯）**：
+- Z1 首版在自身 `SpinLock(_mtx_orders)` 临界区内调用 `getOrders(stdCode)`——该函数
+  内部自取同一把 **不可重入 SpinLock** → CTP 回报线程（OnRspOrderAction→onTraderError）
+  自旋死锁；tick 线程 cancel() 等锁全部冻结（11:08 重启 → 11:16 首个撤单错误即触发；
+  连分钟条计时线程也冻结，较 P1 事故冻结面更大）。gdb 实锤两线程锁链。
+- **修复**：改用 cancel() 同款模式——全局 `_orders`（localid 键）直接 `grab`；
+  临界区内禁止任何自带锁的函数调用（评审规则"新锁包装禁止自调用"的推广版：
+  **临界区内禁止调用任何非注明的无锁叶子函数**）。
+- **修复版** md5 `cfcd902d`（备份链 .bak_20260916_z1s1c→死锁版在盘 40min 已被替换，
+  回滚基线=fix 后版本）；11:39 午休窗口重启恢复（PID 4173902）。
+- **流程教训**：新引入锁的代码必须在隔离环境用"触发路径真实存在"的数据验证——
+  本次部署前 v5 冒烟不含 TraderAdapter 路径（BT 不走适配器），TestUnits 不覆盖
+  onTraderError，与 P1 死锁的验证盲区完全同构。适配器层热路径改动需在评审清单中
+  增加"锁域调用图审计"强制项。
+
+**部署与验证**：
+- 部署物：libWtFutuCore.so `e985881a` + libWtUftCore.so（终版 `cfcd902d`）；
+  TraderAdapter.h 未动，WtUftRunner 保持 `5ed33e19` 不换（ABI 对子成立）；
+  coordinator.yaml 手术插入 zombieLatch/skewDriver 两节（备份 .bak_20260916_z1s1c）
+- 验证：TestUnits 180/182 零回归（修复后复跑）；v5 冒烟 EXIT=0/0 HALT/zombie、
+  430 笔（S1 行为面：基线 405-417 +2.9%，skew 驱动口径变化的预期效应）、资金收敛、
+  BILATERAL 新格式 el/cov/w0 生效
+- 实盘：11:39 重启后 channel ready/resume 正常，QUOTE 行已输出纯化分量
+  （r_p=-0.800 r_c=-0.433 实测）；重启后至午休 ZOMBIE=0
+- **待验（13:30 小节边界 = Z1+Z3a 酸测）**：昨日 88min 停报的同一触发点——
+  期望：升级后闩锁 ≤45s 遥测可见 + cancel-error resolved 路径清账自愈；
+  翻转率 <0.1 次/min 与 r_p/r_c 分量归因待全天数据
