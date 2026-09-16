@@ -112,7 +112,7 @@ public:
           ,
           _bilateral_start_units(0), _total_bilateral_units(0), _session_total_secs(0), _is_bilateral(false),
           _bilateral_switch_count(0), _total_spread_ticks(0), _spread_sample_count(0),
-          _section_start_units((uint64_t)-1), _last_update_units((uint64_t)-1),
+          _section_start_units((uint64_t)-1), _section_bil_baseline(0), _last_update_units((uint64_t)-1),
           _total_l0_spread_ticks(0), _l0_sample_count(0)
     {}
 
@@ -162,6 +162,8 @@ public:
     {
         _bilateral_start_units = INVALID_UNITS;
         _total_bilateral_units = 0;
+        // F-core D1(2026-09-16): 段内覆盖率基线随会话清零 (cov 口径 = 段内增量/段内已过秒)
+        _section_bil_baseline = 0;
         _is_bilateral = false;
         _bilateral_switch_count = 0;
         _total_spread_ticks = 0;
@@ -365,12 +367,15 @@ public:
 
         double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
         double ratio = (_session_total_secs > 0) ? (double)bil / _session_total_secs : 0.0;
-        // F-core C2(2026-09-15): 段内已过秒与段内覆盖率 (cov=bil/el) —— 分母不再
-        //   混用全交易日 ses, section flush 后各段可自解释
+        // F-core C2(2026-09-15): 段内已过秒与段内覆盖率
+        // F-core D1(2026-09-16): 分子改段内增量 (bil - _section_bil_baseline)。原 bil/el
+        //   在 seed(重启续算, 全交易日累计 bil) 后必然 >100% (2026-09-16 日盘实测 3.5-13.8);
+        //   夜盘因 seed_tdate 无文件而"碰巧正确"。基线化后两段口径一致。
         uint64_t el = (_section_start_units != INVALID_UNITS && now_units >= _section_start_units)
                           ? (now_units - _section_start_units)
                           : 0;
-        double cov = (el > 0) ? (double)bil / (double)el : 0.0;
+        uint64_t bil_section = (bil > _section_bil_baseline) ? (bil - _section_bil_baseline) : 0;
+        double cov = (el > 0) ? (double)bil_section / (double)el : 0.0;
         // F-core C1-w0: L0 最优档瞬时宽度均值
         double w0 = (_l0_sample_count > 0) ? _total_l0_spread_ticks / _l0_sample_count : 0.0;
         return makeSnapshotString("live",
@@ -405,10 +410,14 @@ public:
         double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
         double ratio = (_session_total_secs > 0) ? (double)_total_bilateral_units / _session_total_secs : 0.0;
         // F-core C2: 段内已过秒 (flush 前) 与段内覆盖率
+        // F-core D1(2026-09-16): 分子同样改段内增量, 与 live 行口径统一
         uint64_t el = (_section_start_units != INVALID_UNITS && now_units >= _section_start_units)
                           ? (now_units - _section_start_units)
                           : 0;
-        double cov = (el > 0) ? (double)_total_bilateral_units / (double)el : 0.0;
+        uint64_t bil_sec = (_total_bilateral_units > _section_bil_baseline)
+                               ? (_total_bilateral_units - _section_bil_baseline)
+                               : 0;
+        double cov = (el > 0) ? (double)bil_sec / (double)el : 0.0;
         double w0 = (_l0_sample_count > 0) ? _total_l0_spread_ticks / _l0_sample_count : 0.0;
         std::string line = makeSnapshotString("section",
                                               uTime_HHMM,
@@ -433,6 +442,7 @@ public:
         _total_l0_spread_ticks = 0;
         _l0_sample_count = 0;
         _section_start_units = now_units; // C2: 新段起点 = flush 时刻
+        _section_bil_baseline = 0;        // D1: 新段基线随段清零
         _inv_both_empty = 0;
         _inv_no_bid = 0;
         _inv_no_ask = 0;
@@ -454,6 +464,9 @@ public:
 
         _bilateral_start_units = INVALID_UNITS;
         _total_bilateral_units = bil;
+        // F-core D1(2026-09-16): 续算注入的是全交易日累计, 作为本段 cov 基线 —— 否则重启后
+        //   首个段内覆盖率 = (累计 + 段内)/段内已过秒, 必然虚高 >100%
+        _section_bil_baseline = bil;
         _is_bilateral = false;
         _bilateral_switch_count = sw;
         _total_spread_ticks = avg * static_cast<double>(smp);
@@ -572,6 +585,8 @@ private:
     uint64_t _session_total_secs;    ///< session 总秒数（trading section 之和）
     // F-core C2/C3(2026-09-15)
     uint64_t _section_start_units;   ///< 当前统计段起点 (flushSection 刷新; 惰性播种)
+    // F-core D1(2026-09-16)
+    uint64_t _section_bil_baseline;  ///< 段起点处的全交易日累计 bil (cov 分子基线)
     uint64_t _last_update_units;     ///< 最近一次 update 的 session-累计秒 (间隙钳制锚点)
 
     bool _is_bilateral;

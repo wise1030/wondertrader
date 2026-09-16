@@ -11,6 +11,7 @@
 #include <atomic>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include "../Includes/WTSMarcos.h"
 #include "../Includes/FasterDefs.h"
 
@@ -144,6 +145,10 @@ struct ModuleParams
     //   88min 停报实证: 无限等 zombie 清账不可接受, 需 bounded 恢复)
     uint32_t zombie_latch_reprobe_ms = 45000;   ///< 闩锁持有超此时长则 cancelAll 重探一次
     uint32_t zombie_latch_telemetry_ms = 60000; ///< 闩锁持有期遥测打点间隔
+    // F-core B2(2026-09-16): 闩锁续期封顶 —— 2026-09-16 14:13 双合约 136s 停报实证:
+    //   闩锁期间 cancelAll 风暴新造 ZOMBIE 会把重探计时反复重置, 停报时长无上界.
+    //   持有超此值即停止重探风暴 (保持停报 + 一次性高优告警), 恢复走 zombie 清账路径.
+    uint32_t zombie_latch_max_hold_ms = 120000; ///< 闩锁持有上限 (ms), 0=不封顶
     // F-core S1(2026-09-15): hedge_ratio 慢化 EMA 窗口 (skew driver 纯化 --
     //   hr 逐 tick 价格重算污染 driver, 翻转-成交相关仅 0-9%, 见当日评估)
     uint32_t hr_slow_window_ms = 300000;        ///< hedge_ratio 慢化 EMA 窗口 (5min)
@@ -287,6 +292,8 @@ private:
     /// 5A-1: _cfg → _phase_mgr 配置同步 (loadConfig/setConfig 后调用)
     void syncPhaseConfig();
     void flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs);
+    /// F-core D2(2026-09-16): 排空周期行 I/O 积压 (段末 + 每 5min 周期采点各一次)
+    void flushBilateralIoBacklog();
     void logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const TickContext& tc);
 
 public:
@@ -508,6 +515,10 @@ private:
     //   _zombie_latch_ms: code -> 本进程首次置位时刻(ms); isZombieHalted==false 即清除
     //   (Md 线程单写: processAutoCancel 为唯一触碰点, 无需加锁)
     std::unordered_map<std::string, uint64_t> _zombie_latch_ms;
+    // F-core B1(2026-09-16): 闩锁单调起点 (emplace 首次置位, 永不重置) —— 遥测/封顶以此计时;
+    //   _zombie_latch_ms 退化为"重探倒计时". capped 集合保证 EXCEEDED 告警每闩锁一次.
+    std::unordered_map<std::string, uint64_t> _zombie_latch_since_ms;
+    std::unordered_set<std::string> _zombie_latch_capped;
     uint64_t _last_zombie_tele_ms = 0;
     // F-core S1(2026-09-15): hedge_ratio 慢化 EMA (skew driver 纯化, Md 线程单写)
     std::unordered_map<std::string, double> _hr_slow;

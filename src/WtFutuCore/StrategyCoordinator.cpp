@@ -329,6 +329,9 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
                 readUInt32(zl, "reprobeMs", _cfg.modules.zombie_latch_reprobe_ms);
             _cfg.modules.zombie_latch_telemetry_ms =
                 readUInt32(zl, "telemetryMs", _cfg.modules.zombie_latch_telemetry_ms);
+            // F-core B2(2026-09-16): 闩锁续期封顶 (0 = 不封顶, 保持旧行为)
+            _cfg.modules.zombie_latch_max_hold_ms =
+                readUInt32(zl, "maxHoldMs", _cfg.modules.zombie_latch_max_hold_ms);
         }
         if (wtp::WTSVariant* sd = modules->get("skewDriver"))
         {
@@ -1369,6 +1372,8 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
             _risk_monitor->setZombieHalt(zcode);
         // F-core Z3(2026-09-15): 记录闩锁起始时刻(重复置位不覆盖首次时间)
         _zombie_latch_ms.emplace(zcode, tc.timestamp);
+        // F-core B1(2026-09-16): 单调起点单独记账 (重探只重置 _zombie_latch_ms 倒计时)
+        _zombie_latch_since_ms.emplace(zcode, tc.timestamp);
         orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
     }
 
@@ -1390,16 +1395,44 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
             const std::string& code = it->first;
             if (_risk_monitor == NULL || !_risk_monitor->isZombieHalted(code))
             {
+                _zombie_latch_since_ms.erase(code);
+                _zombie_latch_capped.erase(code);
                 it = _zombie_latch_ms.erase(it);
                 continue;
             }
-            uint64_t held = tc.timestamp > it->second ? tc.timestamp - it->second : 0;
-            if (_cfg.modules.zombie_latch_reprobe_ms > 0 &&
-                held >= (uint64_t)_cfg.modules.zombie_latch_reprobe_ms)
+            // F-core B1/B2(2026-09-16): held_total = 自首次置位的单调持有 (遥测/封顶用);
+            //   held_reprobe = 自上次重探的间隔 (重探调度用)。此前二者混用一个变量,
+            //   导致重探把"持有时间"重置, 遥测退回 15s/30s 且停报时长无上界
+            //   (2026-09-16 14:13 双合约 136s 停报实证)。
+            auto sit = _zombie_latch_since_ms.find(code);
+            uint64_t since = (sit != _zombie_latch_since_ms.end()) ? sit->second : it->second;
+            uint64_t held_total = tc.timestamp > since ? tc.timestamp - since : 0;
+            uint64_t held_reprobe = tc.timestamp > it->second ? tc.timestamp - it->second : 0;
+
+            const bool capped = (_cfg.modules.zombie_latch_max_hold_ms > 0 &&
+                                 held_total >= (uint64_t)_cfg.modules.zombie_latch_max_hold_ms);
+            if (capped)
+            {
+                // 停止 reprobe 风暴 (撤单风暴本身会新造 ZOMBIE 并续期闩锁), 保持停报不放开;
+                //   恢复仍由 retainZombieHalts 的 zombie 清账路径驱动, 告警每闩锁一次。
+                if (_zombie_latch_capped.insert(code).second)
+                {
+                    std::string fc = stdCodeToFullCode(code);
+                    WTSLogger::error("[RISK] {} zombie latch EXCEEDED maxHold {}ms (held {}ms) -> "
+                                     "reprobe storm halted, quoting stays halted until cancel ack/terminal "
+                                     "clears (engine cancelAll({}) not resent)",
+                                     code,
+                                     _cfg.modules.zombie_latch_max_hold_ms,
+                                     held_total,
+                                     fc);
+                }
+            }
+            else if (_cfg.modules.zombie_latch_reprobe_ms > 0 &&
+                     held_reprobe >= (uint64_t)_cfg.modules.zombie_latch_reprobe_ms)
             {
                 std::string fc = stdCodeToFullCode(code);
                 WTSLogger::warn("[RISK] {} zombie latch holding {}ms -> re-probe cancelAll({})",
-                                code, held, fc);
+                                code, held_total, fc);
                 orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
                 it->second = tc.timestamp; // 重置计时, 下一个 reprobe 周期再探
             }
@@ -1411,7 +1444,11 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
         {
             uint64_t oldest = UINT64_MAX;
             for (const auto& kv : _zombie_latch_ms)
-                oldest = std::min(oldest, tc.timestamp > kv.second ? tc.timestamp - kv.second : 0);
+            {
+                auto sit = _zombie_latch_since_ms.find(kv.first);
+                uint64_t since = (sit != _zombie_latch_since_ms.end()) ? sit->second : kv.second;
+                oldest = std::min(oldest, tc.timestamp > since ? tc.timestamp - since : 0);
+            }
             WTSLogger::warn("[RISK] zombie latch telemetry: {} contract(s) halted, oldest holding {}ms",
                             _zombie_latch_ms.size(), oldest == UINT64_MAX ? 0 : oldest);
             _last_zombie_tele_ms = tc.timestamp;
@@ -1746,13 +1783,27 @@ void StrategyCoordinator::flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hh
     }
 
     // V8-R6/R6-b: 定点(安静期)排空周期行积压 —— 移出 tick 热路径的补偿写入
+    // F-core D2(2026-09-16): 统一走 flushBilateralIoBacklog(); 另有周期采点排空 (见下)
+    if (!_bilateral_io_backlog.empty()) {
+        size_t n = _bilateral_io_backlog.size();
+        flushBilateralIoBacklog();
+        WTSLogger::info("[BILATERAL_STATS] flushed {} periodic lines at section boundary", n);
+    }
+}
+
+// F-core D2(2026-09-16): 段内周期行不落盘的原设计只在段末排空 —— 进程被杀即丢
+//   整段证据 (2026-09-16 实测文件 10:10 -> 13:30 断档, 10:30-11:15 随死锁进程丢失)。
+//   现改为周期采点 (每 bilateral_stats_log_interval_sec, 默认 5min) 也排空一次:
+//   每 5min 至多 2 次 open+write+close (~几十 us), 相对该点已有的 WTSLogger::info
+//   同量级, 不构成 tick 热路径负担; 换来的是一段完整可审计的覆盖率时间序列。
+void StrategyCoordinator::flushBilateralIoBacklog()
+{
+    if (_bilateral_io_backlog.empty())
+        return;
+
     for (const auto& [bdate, bline] : _bilateral_io_backlog)
         appendBilateralLine(_cfg.bilateral_stats_log_dir, bdate, bline);
-    if (!_bilateral_io_backlog.empty()) {
-        WTSLogger::info("[BILATERAL_STATS] flushed {} periodic lines at section boundary",
-                        _bilateral_io_backlog.size());
-        _bilateral_io_backlog.clear();
-    }
+    _bilateral_io_backlog.clear();
 }
 
 void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const TickContext& tc)
@@ -1784,6 +1835,8 @@ void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const
     WTSLogger::info("[BILATERAL_STATS] {}", line);
     // V8-R6/R6-b: 文件写入改内存积压 (定点排空), 控制台日志保持周期实时
     _bilateral_io_backlog.emplace_back(tradingDateOf(tc.date, cur_hhmm), line);
+    // F-core D2(2026-09-16): 周期采点即排空 (本函数已被 5min 节流, 此行每 5min 至多一次)
+    flushBilateralIoBacklog();
 }
 
 void StrategyCoordinator::seedBilateralStatsFromFile(uint32_t tdate)

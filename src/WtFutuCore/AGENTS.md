@@ -4272,3 +4272,84 @@ QUOTE 行 r_p/r_c 分量正常输出（库存归因可观测）。零逆方向�
 **时钟核对（用户质询）**：服务器 NTP 已同步（chrony 活跃源、毫秒级偏差、RTC 对齐），
 时钟准确；此前"12:38"读数与用户本地 13:37 的差异系本会话长 sleep 被中止后真实时间
 正常流逝所致，非服务器时钟问题。
+
+### 16. 最终修复方案：环境异常分级熔断 + 停报上界 + 证据/口径（2026-09-16 夜盘批准）
+
+**用户裁定原则（本方案的最高约束，2026-09-16 夜盘对话）**：
+1. 终端状态回报延迟/丢失 **是 SimNow 环境产物**，生产不应出现；即使出现，**现有 Z1 兜底即为最终处置**
+   —— **禁止继续在"终态跟踪/撤单语义"上深挖完善**。
+2. 若该现象出现在生产，属系统/网络级故障，应触发**严重告警，甚至暂停交易报单**。
+3. 与交易活性强耦合的既有逻辑（异常即停报并告警）保持不变。
+
+**取消项（原 Batch F 全部撤销，勿再开挖）**：`_recent_terminal` 终态留痕、Z1 分支细化
+（recent/synth 分流）、`cancel()` 终态短路、ZOMBIE 升级前订单查询确认。
+副作用为正：不触碰 `TraderAdapter` 终态/撤单语义 → `TraderAdapter.h` 不动 → 无 ABI 对子风险。
+
+**证据基线（2026-09-16）**：日盘 HALT 35 次/ZOMBIE 76/ack 超时 839/合成终态 338（分支 a=0,b=0,c=338）；
+夜盘 21:00:16 双合约闩锁 8 个 ZOMBIE → 21:00:18 自愈（2s），此后 1h47m 零 HALT；
+下午最差闩锁 14:13:09→14:15:25 = **136s**（>45s 门控），根因 = 闩锁期间 cancelAll 风暴新造
+ZOMBIE → 闩锁**续期重置计时**，停报时长无上界；影子簿 `realized` 漂移 23→37→49 次/日递增
+（`pre_book==expected_pre`，净仓无误），每次把日亏不可逆熔断降级；C2 `cov` 日盘 >100%
+（seed 全交易日累计 bil ÷ 段内 el）；统计行仅段末落盘（实测 10:30–11:15 随进程被杀丢失）。
+
+#### 16.1 Batch D（低风险，先落地）
+
+- **D1 `cov` 段内基线化**（`BilateralQuoteStats.h`）：新增 `_section_bil_baseline`，
+  `seedFrom()` 置为入参 bil、`flushSection()`/`onSessionStart()` 置 0；
+  `formatLiveString()` 与 `flushSection()` 的 `cov` 一律改 `(bil - baseline)/el`。
+  语义：`bil`/`ratio` 仍是全交易日累计（对外口径不变），`cov` 改为**段内**真实覆盖率。
+- **D2 backlog 周期落盘**（`StrategyCoordinator.cpp`）：抽出 `flushBilateralIoBacklog()`，
+  在 `logBilateralStatsPeriodic()` 落当前行后调用（即每 5min 排空一次），
+  消除"段末才落盘、进程被杀即丢证据"（原 V8-R6/R6-b 只保证段内积压不丢在 tick 热路径）。
+
+#### 16.2 Batch B（停报上界，与 D 同批）
+
+- **B1 闩锁计时单调化**：新增 `_zombie_latch_since_ms`（`emplace` 首次置位，**永不重置**），
+  `_zombie_latch_ms` 退化为"重探倒计时"。遥测 `oldest holding` 改用单调起点
+  （现状因重探重置计时，遥测读数会退回 15s/30s，掩盖真实持有）。
+- **B2 续期封顶**：`zombieLatch.maxHoldMs`（默认 120000）。单一合约闩锁持有超此值后：
+  停止该合约 reprobe 风暴、打一条 `[RISK] ... zombie latch EXCEEDED maxHold` 高优告警（每闩锁一次），
+  **保持停报**（不自动放开），恢复仍走 `retainZombieHalts` 的 zombie 清账路径。
+
+#### 16.3 Batch A（分级熔断，B 观察一个交易日后）
+
+滑动窗口统计 `ack 超时数/合成终态数/闩锁最长持有`（夜盘常态 ≈2 次/5min，风暴实测 26–42 次/5min）：
+
+| 级别 | 条件（任一） | 动作 |
+|---|---|---|
+| WARN | 5min 内 ack 超时 ≥5 或合成终态 ≥5 | 巡检行 + 告警，不停报 |
+| SEVERE | 5min 内 ≥20，或任一合约闩锁 >120s | EventNotifier 严重告警 + **暂停报单**（复用 HALT），60s 探针，连续 3 窗口无异常自动恢复 |
+| SEVERE 复发 | 恢复后 10min 内再次 SEVERE | 升级不可逆 HALT，需人工放行 |
+
+#### 16.4 Batch C（风控软化，最后）
+
+影子簿 `realized` 漂移对齐（净仓无误、仅 realized 口径差）；对齐前保持"仍 HALT、仅类别降为可逆"，
+巡检行输出 drift/stale 计数与频次。落地需单日观察。
+
+#### 16.5 实施记录
+
+**2026-09-16 夜盘 23:03（D+B 已部署）**
+
+- 改动：`BilateralQuoteStats.h`（D1：`_section_bil_baseline` + live/section 两处 cov 基线化）、
+  `StrategyCoordinator.h/.cpp`（B1：`_zombie_latch_since_ms` 单调起点；B2：`maxHoldMs` 封顶 +
+  `EXCEEDED` 一次性高优告警 + 停止 reprobe 风暴；D2：`flushBilateralIoBacklog()` +
+  周期采点排空）、`coordinator.yaml` 新增 `zombieLatch.maxHoldMs: 120000`。
+  全部在策略层，**未触碰框架层**（无 ABI 对子问题）。
+- 构建/验证：Release `make WtFutuCore` 无告警（仅存量 TimeUtils deprecation）；
+  TestUnits **180/182**（同基线，2 例为环境性）；v5 BT 冒烟 `EXIT=0`、HALT/ZOMBIE/ack超时 = 0、
+  trades 419 行（基线 405-430 带内）、cov 全 ≤1、资金收敛。
+- 部署：`libWtFutuCore.so` md5 **468f381d**（备份 `.bak_20260916_db`；coordinator.yaml 同后缀备份）；
+  23:02:53 `wt_restart.sh` 单实例切换，新 PID 172272，登录成功（trading date 20260917）。
+- 实测（23:03–23:22，19min）：
+  - **D2 生效**：`Logs/bilateral_stats_20260917.log` 于 23:02:59 立即创建，随后 23:07:59 /
+    23:12:59 / 23:17:59 每 5min 落盘（原设计需等 00:55 段末，进程被杀即丢整夜证据）。
+  - **D1 生效**：`cov` 0.957/0.965/0.974（ao2611）、0.983/0.980/0.986（ao2612），全 ≤1 且 el=300/600/900 自洽。
+  - **零回归**：重启后 HALT/ZOMBIE/ack 超时/合成终态/平今拒单 全 0；台账 `unmatched=0 clamped=0`；
+    E④ 10min 重查与报价活跃度（ao2611 950 / ao2612 896 QUOTE 行）正常。
+  - **D2 无延迟代价**：CRITICAL 告警只在重启预热段 23:03（26）/23:04（41）出现，
+    23:05–23:22 为 **0**；且三个 5min 落盘时刻附近 0 条 CRITICAL —— 证明周期落盘未进入延迟敏感路径。
+- 遗留待观察：夜间若再现 zombie（如 23:00:04 那次 1s 自愈），确认 telemetry `oldest holding`
+  按单调起点读数（不再退回 15s/30s），且持有 ≥120s 时输出 `EXCEEDED maxHold` 且不再有 reprobe 日志。
+
+**下一批（未实施）**：A（分级熔断：WARN/SEVERE + 暂停报单 + 探针恢复）与 C（影子簿 realized 漂移对齐），
+按 §16.3/§16.4 在 D+B 观察满一个交易日后分别落地。
