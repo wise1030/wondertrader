@@ -267,12 +267,16 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 
 节点缺失时整组默认并 warn。baseSpread/tick_size/portfolio_max_delta 不读本节点。
 
+> **R14（2026-09-08）整档量化重构**：deltaSkewThreshold/deltaSkewFactor/inventorySkewGain 三键
+> **已删除**（连续幂 skew → 整档量化：`k=clamp(round(k_max×driver),±k_max)` + 滞环）。
+> deltaSkewPower 默认 1.5→**1.0**（γ 保留可配置）。
+
 | 键路径 | 示例 | fromVariant 缺省 | 说明 |
 |---|---|---|---|
-| phi | 0.20 | 0.20 | 波动率加价系数（实际角色=A4 澄清；库存厌恶由 delta_skew_* 承担）。热参可覆盖 |
-| deltaSkewThreshold | 0.3 | 0.3 | 组合 skew 触发 util（死区）。热参可覆盖 |
-| deltaSkewFactor | 1.5 | 1.5 | 组合 skew 强度。热参可覆盖 |
-| deltaSkewPower | 1.5 | 1.5 | 两维 skew 幂次（fastPow 特化 1.5/2.0/1.0/0.5） |
+| phi | 0.20 | 0.20 | 波动率加价系数（实际角色=A4 澄清）。热参可覆盖 |
+| deltaSkewPower | **1.0** | 1.0 | skew 驱动幂次 γ（R14 改默认；fastPow 特化 1.5/2.0/1.0/0.5） |
+| **skewTickMax** | 4.0 | 4.0 | 整档 skew 最大档位（撞限穿越=减仓侧 mid−3t 可成交） |
+| **skewHysteresis** | 0.05 | 0.05 | 档位切换滞环（防边界振荡换单风暴；翻转仍多时上调 0.10-0.15） |
 | maxSpreadMult / minSpreadMult | 3.0/1.0 | 同左 | spread clamp 区间（min>max 由 crossCheck warn）。热参可覆盖 |
 | confidenceWeightMin / Max | 0.3/1.0 | **0.2**/1.0 | 公允价置信度插值权重。热参可覆盖 |
 | lowConfidenceThreshold / lowConfidenceSpreadFactor | 0.3/2.0 | 同左 | 低置信扩价(M8)。后者热参可覆盖 |
@@ -280,9 +284,13 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | depthSensitivityScale / depthNormalization / noDepthSpreadMult | 0.2/100/1.5 | 同左 | 深度项辅助参数 |
 | volScale / volPercentileScale | 5.0/50.0 | 同左 | φσ² 缩放/分位归一分母 |
 | pauseSpreadMultRatio | 0.9 | 0.9 | spread_mult≥max×此值→暂停报价(SpreadOptimizer.cpp:217)；V10-R10 起 toxicitySpreadFactor/toxicityMinScore 键已删除 |
-| inventorySkewGain | 1.0 | 1.0 | 归一化库存 skew 增益（1.0=util≥1 贴 mid） |
-| skewCrossMaxTicks | 3.0 | 3.0 | util≥1 减仓侧穿越 mid 的最大 tick（须<obligationMaxSpreadTicks） |
-| portfolioSkewWeight / contractSkewWeight | 0.5/1.0 | 同左 | 双维 skew 权重（C1 后同 ticks 量纲=稳定相对力度；和≤0 退回 max 模式） |
+| skewCrossMaxTicks | 3.0 | 3.0 | 授权（\|r_p\|/\|r_c\|≥1.0）减仓侧穿越 mid 的最大 tick（须<obligationMaxSpreadTicks） |
+| portfolioSkewWeight / contractSkewWeight | 0.5/1.0 | 同左 | 双驱动权重 w_p/w_c（R14 保留；S1 后输入=total_delta_skew 纯化口径/contract_position_util 纯手数） |
+
+> **S1（2026-09-15）driver 输入纯化**：`r_c = position手数/contract_max_delta`（仅成交驱动）、
+> `r_p = Σ position×hr_slow / portfolio_max_delta`（hr_slow=5min EMA）——隔离 hedge_ratio
+> 逐 tick 价格重算噪声（实测翻转-成交相关 0-9% → 纯化后 0.04 次/min）。可观测：[QUOTE] 行
+> 增打 r_p/r_c。
 
 ### 3.6 其余 modules 节点
 
@@ -299,6 +307,9 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | autoCancel.staleExtensionTicks | 2.0 | 2.0 | **B1 新键**：STALE 延寿价格偏离阈值(ticks)——偏离≤此值的挂单不被 auto-cancel 判死（原 sticky×2 隐式值显式化；旧 priceDeviation 键删除=死接口清理） |
 | autoCancel.cancelRetryIntervalMs | 1000 | 1000 | B+ 撤单 ack 超时重发间隔 ms |
 | autoCancel.cancelMaxRetries | 3 | 3 | 最大重试次数，达到→IS_ZOMBIE 升级 |
+| **zombieLatch.reprobeMs** | 45000 | 45000 | **Z3a(2026-09-15)**：闩锁持有超此时长→cancelAll 重探一次（0=禁用；09-15 88min 停报→46s 的关键键） |
+| **zombieLatch.telemetryMs** | 60000 | 60000 | **Z3c**：闩锁持有期遥测打点间隔（0=禁用） |
+| **skewDriver.hrSlowWindowMs** | 300000 | 300000 | **S1**：hedge_ratio 慢化 EMA 窗口（skew driver 纯化，隔离逐 tick 价格噪声） |
 | correlationManager.windowSize/minCorrelation/spreadZThreshold | 100/0.5/2.0 | 同左 | CorrelationManager.h:57-59 |
 
 ---
@@ -327,8 +338,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | confidence_weight_min | 0.3 | GLFTParams | [0,1] | GLFTParams |
 | confidence_weight_max | 1.0 | GLFTParams | [0,1] | GLFTParams |
 | phi | 0.20 | GLFTParams | [0.01,2.0] | GLFTParams |
-| delta_skew_threshold | 0.3 | GLFTParams | [0,0.9] | GLFTParams |
-| delta_skew_factor | 1.5 | GLFTParams | [0,100] | GLFTParams |
+| ~~delta_skew_threshold~~ / ~~delta_skew_factor~~ | — | — | — | **R14 已删除**（skew 整档量化取代：skewTickMax=4/skewHysteresis=0.05/deltaSkewPower=1.0 走 coordinator.yaml 非热参；S1 后驱动输入=contract_position_util+total_delta_skew） |
 | max_spread_mult | 3.0 | GLFTParams | [0,100] | GLFTParams |
 | min_spread_mult | 1.0 | GLFTParams | [0,100] | GLFTParams |
 | depth_sensitivity | 0.5 | GLFTParams | [0,1000] | GLFTParams |

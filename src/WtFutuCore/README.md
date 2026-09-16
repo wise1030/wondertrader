@@ -32,6 +32,7 @@
   - 4.18 套利子系统（Arb 三件套）
   - 4.19 Closeout 平仓族（Trigger/Orchestrator/Executor）
   - 4.20 性能与监控
+  - 4.21 框架适配层协同（TraderAdapter / CloseFreezeLedger，F-core 批次）
 - [5. 关键设计裁决与语义边界](#5-关键设计裁决与语义边界)
 - [6. 构建 / 回测 / 部署](#6-构建--回测--部署)
 - [7. 测试体系](#7-测试体系)
@@ -227,7 +228,7 @@ UftFutuMmStrategy::on_tick (cpp:615) ── _cb_mtx ─────────�
 |---|---|---|
 | `TickContext` | 价格/时间/组件指针缓存/cs 快照/组合聚合值 | 56-103 |
 | `ProcessingResult` | processed/quote_placed/order_canceled/closeout_executed/耗时 | 106-120 |
-| `ModuleParams` | portfolio_max_delta(:126)/toxicity_cooloff_ms(:129)/auto_cancel_max_age_ms(:132)/**stale_extension_ticks(:136,B1)**/cancel_retry_interval_ms(:138)/cancel_max_retries(:139)/alpha_sensitivity(:144)/cold_start_confidence_factor(:145) | 123-146 |
+| `ModuleParams` | portfolio_max_delta/toxicity_cooloff_ms/auto_cancel_max_age_ms/stale_extension_ticks(B1)/cancel_retry_interval_ms/cancel_max_retries/alpha_sensitivity/cold_start_confidence_factor；**Z3**: zombie_latch_reprobe_ms(45s)/zombie_latch_telemetry_ms(60s)；**S1**: hr_slow_window_ms(5min) | 123-155 |
 | `CoordinatorConfig` | 开关+taker 减仓三键+requote 限频+section break 秒+双边统计参数；`_raw_variant` 存档(:191, 装配期 8 处使用) | 149-202 |
 | `CoordinatorDeps` | B7 一次性依赖注入结构（15 setter 合一） | 213-235 |
 | `_quote_chain` | QuotePolicyChain 五策略（§4.9） | 438 |
@@ -236,7 +237,7 @@ UftFutuMmStrategy::on_tick (cpp:615) ── _cb_mtx ─────────�
 
 #### loadConfigFromVariant 解析行号（.cpp:201-348）
 
-raw 存档 :206｜根级开关 :237-239｜modules 开关 :242-270（MM=false 级联关 toxicity/spreadOptimizer :260-264）｜pipeline :273-280（paramUpdateInterval=0 强制改 1 防 SIGFPE :277）｜toxicity cooloffMs :289-292｜autoCancel 四键 :299-310｜taker 减仓 :321-323｜requote 限频 :326-327｜sectionBreak 秒/分钟兼容 :331-335｜双边统计 :338-341。
+raw 存档 :206｜根级开关 :237-239｜modules 开关 :242-270（MM=false 级联关 toxicity/spreadOptimizer :260-264）｜pipeline :273-280（paramUpdateInterval=0 强制改 1 防 SIGFPE :277）｜toxicity cooloffMs :289-292｜autoCancel 四键 :299-310｜**zombieLatch 两键 / skewDriver.hrSlowWindowMs（Z3/S1, :312-326）**｜taker 减仓 :321-323｜requote 限频 :326-327｜sectionBreak 秒/分钟兼容 :331-335｜双边统计 :338-341（行号已漂移，以键名检索为准）。
 
 ---
 
@@ -326,13 +327,21 @@ raw 存档 :206｜根级开关 :237-239｜modules 开关 :242-270（MM=false 级
 ③ 公允价 = mid + alphaSensitivity × alpha × confidence_weight × tick_size
    confidence_weight = min + (max-min)×confidence                :117-118
    alpha_adjustment 截断 ≤ half_spread_price                     :122-125
-④ delta skew（双维加权, 全 ticks 量纲 C1 后）:
-   cross_authorized = |contract_realized_delta_util| ≥ 1.0
-     （C2: realized 口径——主动减仓不被未成交挂单预授权）          :140-141
-   contract_skew = f(contract_realized_delta_util, half_spread)  :147-150
-   portfolio_skew = f(total_delta, half_spread)                  :153
-   合成: 权重和>0 → w_p×portfolio + w_c×contract
-         否则退回 max 模式(向前兼容)                             :159-164
+④ delta skew（R14 整档量化 + S1 纯化, 双驱动加权结构保留）:
+   输入纯化(S1, 2026-09-15): hedge_ratio 逐 tick 价格重算(CorrelationManager
+     (p1×m1×β)/(p2×m2))曾使旧口径 position×hr 随行情抖动——实测翻转-成交相关
+     仅 0-9%、翻转 2.4 次/min 与库存无关。skew 驱动改用:
+     r_c = contract_position_util = position手数/contract_max_delta (纯手数, 仅成交驱动)
+     r_p = total_delta_skew / portfolio_max_delta
+         total_delta_skew = Σ position_c × hr_slow_c (hr_slow=5min EMA, skewDriver.hrSlowWindowMs)
+   driver = w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ    （w_p=0.5/w_c=1.0/γ=1.0）
+   整档量化(R14): k = clamp(round(k_max×driver), ±k_max)      （skew_tick_max=4）
+     滞环 quantizeSkewTicks: 档边界 ±h(skew_hysteresis=0.05) 内不换档, 允许多档直跳
+     |driver|<~0.125 自然归零（消灭 sub-tick 死偏移——09-07 撞限 7min 只减 1 手实证）
+   穿越授权: |r_p|≥1.0 或 |r_c|≥1.0 → |k|≤k_max（减仓侧可穿 mid 至多 cross_max_ticks）;
+     未授权 → |k| ≤ floor(half_spread)（至多贴 mid, 义务合规）
+   符号约定: driver>0(多头)→skew<0(整梯下移: bid 拉远防堆积, ask 压向/穿过 mid 减仓)
+   可观测: [QUOTE] 行增打 r_p/r_c 分量(S3)——翻转归因不再盲猜
 ⑤ 总偏移截断: clamp_limit = cross_authorized ?
      half_spread + skew_cross_max_ticks : half_spread            :173-174
 ⑦ bid/ask = fair_value ∓ half_spread_price + skew_price
@@ -359,25 +368,23 @@ spread = base_spread × depth_adj
 clamp [base×min_mult, base×max_mult]
 ```
 
-**computeContractDeltaSkew**（:269-292）——库存厌恶主通道：
+**computeDeltaSkewDriver / quantizeSkewTicks**（.cpp）——库存厌恶主通道（R14 整档量化后形态）：
 ```
-util = |signed_util|;  direction = 多头→-1 空头→+1
-norm = util^delta_skew_power × inventory_skew_gain      (:284)
-cap  = util≥1 && cross_max>0 ? 1+cross_max/half : 1.0   (:287-290)
-     （util<1 时 cap=1 保证义务合规——减仓侧最多贴 mid）
-return direction × norm × half_spread_ticks
-示例(gain=1,power=1.5): util=0.5→0.35×half, 0.8→0.72×half, 1.0→贴mid,
-                        >1→穿越 mid 至多 cross_max_ticks(:281-283 注释)
+computeDeltaSkewDriver(portfolio_delta_signed, contract_util_signed):
+  r_p = portfolio_delta_signed / portfolio_max_delta
+  return w_p·sign(r_p)·|r_p|^γ + w_c·sign(r_c)·|r_c|^γ
+  （对冲腿相抵语义：组合同向腿两分量叠加→强 skew；反向腿相抵→弱 skew）
+quantizeSkewTicks(raw):
+  k = clamp(round(raw), ±k_max); k==_last → 直接返回
+  滞环: raw 越过 (last±0.5) 边界再 ±h 才换档（防边界振荡换单风暴）
+实例: util 撞限(r_p≈1) → driver≈0.955 → k≈4 → ask=mid+half−4t=mid−3t 主动减仓
+      （旧连续版仅 0.33t 死偏移, 7 分钟减不了 1 手——R14 立案实证）
+【S1 后实盘】翻转率 2.4→0.04 次/min（~60×, 2026-09-16 下午盘实测）
 ```
 
-**computePortfolioDeltaSkew**（:294-311）：
-```
-util = |total_delta|/portfolio_max_delta;  ≤threshold(delta_skew_threshold)→0
-excess = util - threshold
-return direction × delta_skew_factor × excess^power × half_spread_ticks
-【C1 修正】×half_spread 归一到 ticks——此前返回无纲量被隐式当 ticks 与
-contract 分量相加，相对力度随价差宽度漂移（与"contract 主导"注释矛盾）
-```
+> 历史勘误：R13 之前的 computeContractDeltaSkew（inventory_skew_gain/power 连续幂）与
+> computePortfolioDeltaSkew（threshold/factor 分段）已被 R14 整档量化整体取代（函数删除，
+> 参数收敛：删 threshold/factor/gain，留 w_p/w_c/γ，增 skewTickMax/skewHysteresis）。
 
 ---
 
@@ -501,6 +508,8 @@ V10-R11 观测行 (warn 级): [TOXIC-EPISODE] <code> enter / exit duration=<ms> 
 
 **义务报价语义**：义务层需要提前性——其 qty 衰减/force_obligation 用**前瞻口径**（含 pending 投影，computeInventoryStrategyInputs）；与 skew 的已实现口径形成刻意的分工（C2 语义固化）。
 
+**R15-b 双边统计驱动**：refreshQuotes 每 tick 采样一次槽位快照 → `BilateralQuoteStats.update()`（此前仅 onOrder/onEntrustAck 回调驱动，平静市冻结假象——见 §4.20）。QuoteRequest 携带 uTime/sec_in_min（`stra_get_time()/stra_get_secs()` 约定）；同刻重复调用幂等。
+
 ---
 
 ### 4.11 UnifiedOrderTracker（订单槽状态机 B+）— UnifiedOrderTracker.h/.cpp
@@ -519,7 +528,18 @@ V10-R11 观测行 (warn 级): [TOXIC-EPISODE] <code> enter / exit duration=<ms> 
 | getAliveZombieContracts | .cpp | zombie 清零合约重置 `_zombie_escalated` 去重（重新武装升级） |
 | getPendingBuyQty/SellQty(AllSources) | :549/:558 | maxPendingPerSide 闸门输入（MM-only vs 全源两个口径） |
 
-zombie 升级动作链（StrategyCoordinator processAutoCancel）：error 日志 → RiskMonitor.setZombieHalt 闩锁 → `stra_cancel_all(fullCode)` 引擎侧兜底（**必须 fullCode 或空串**，见 §8）。
+zombie 升级动作链（StrategyCoordinator processAutoCancel）：error 日志 → RiskMonitor.setZombieHalt 闩锁（记录 `_zombie_latch_ms` 起始时刻）→ `stra_cancel_all(fullCode)` 引擎侧兜底（**必须 fullCode 或空串**，见 §8）。
+
+**Z3 闩锁生命周期（2026-09-15，bounded 恢复）**：09-15 13:30 双合约闩锁 88min 停报实证
+（insert 丢失类 zombie 永无终态回报 → retainZombieHalts 永不释放）后新增：
+- **Z3c 遥测**：闩锁持有期每 telemetryMs(60s) 打点 `[RISK] zombie latch telemetry: N halted, oldest Xms`
+- **Z3a 重探**：持有超 reprobeMs(45s) → 重发 `stra_cancel_all` 一次并重置计时（不降级缩量——
+  R16 裁决：义务深度不可破，暂停本身是正确响应，重探只是消解机会）
+- 释放仍由 retainZombieHalts（存活 zombie 清空）驱动；`_zombie_latch_ms` 在 isZombieHalted==false 时清除
+- **Z1 终态对账**（TraderAdapter，框架层）：撤单错误应答（"报单已全成交/已撤销/不存在"）经
+  onTraderError 转换为终态订单推送——(a) 缓存命中且已终态：重推唤醒 tracker；(b) 命中非终态：
+  交给重试链；(c) 未命中（insert 丢失）→ 用 action.usertag 合成 WOS_Canceled 骨架推送强制清账。
+  实战：09-16 13:30 同款触发，闩锁 88min→**46s**（遥测→重探→释放全程可见，详见 AGENTS §15）
 
 ---
 
@@ -536,7 +556,7 @@ zombie 升级动作链（StrategyCoordinator processAutoCancel）：error 日志
 | POSITION_NET | \|net\| > maxPosition（per-contract, position 口径） | violation→BLOCK_SIDE/HALT |
 | block_add | \|delta\| ≥ contract_max_delta × positionHardBlockRatio（delta 口径, :1262-1270） | 仅 flexible 加仓侧跳过（策略库存管理非风控措施） |
 | SideFillBreaker | 同侧连续成交 maxConsecutiveSameSide/窗口 sameSideWindowMs | 撤该合约全单+side_pause（CLOSEOUT 豁免, RuntimeOps :86-97） |
-| zombie halt 闩锁 | setZombieHalt(:255)/retainZombieHalts(:268) | per-contract 闩锁至清扫 |
+| zombie halt 闩锁 | setZombieHalt(:255)/retainZombieHalts(:268) | per-contract 闩锁；**Z3 bounded 生命周期**（45s 重探/60s 遥测，Z1 终态对账清源——§4.11） |
 
 **halt/recover 域**（WS-A 收编：`_halt_category` atomic + `_halt_domain_lock` 递归临界区）：
 
@@ -709,7 +729,7 @@ logDriftSummary (on_init initial applyAll 后无条件调用, 回测也打印):
 
 **启动期语义**：initial applyAll 先把共享内存残留旧值盖到 config 初始化值上（"重启不丢上次热更结果"，UftFutuMmStrategy.cpp:383-395）；实盘 ~1s 内 watcher 首轮又以文件为准覆盖。27 键按名注册天然兼容旧共享内存布局。
 
-边界表收紧原则（2026-08-24）：loader error 级→热路径拒收同界（base_spread{0.5,20}/base_qty{1e-6,100}/level_step{1e-6,100}/max_delta{1e-6,1e8}/phi{0.01,2}/delta_skew_threshold{0,0.9}）；sticky_threshold{0.01,10}（0=churn 防呆拒收）、protect_ticks{0.5,1e4}（<半 tick 无意义，关闭走 price_protection 开关）；warn 口径保持宽松交给交叉复查。
+边界表收紧原则（2026-08-24）：loader error 级→热路径拒收同界（base_spread{0.5,20}/base_qty{1e-6,100}/level_step{1e-6,100}/max_delta{1e-6,1e8}/phi{0.01,2}；delta_skew_threshold 已随 R14 删除）；sticky_threshold{0.01,10}（0=churn 防呆拒收）、protect_ticks{0.5,1e4}（<半 tick 无意义，关闭走 price_protection 开关）；warn 口径保持宽松交给交叉复查。
 
 ---
 
@@ -748,9 +768,9 @@ ArbExecutionBridge (桥)
 
 | 组件 | 职责 |
 |---|---|
-| CloseoutTrigger | 触发判定：currentTime ≥ close_time - minutesBefore×60s（白盘/夜盘双时刻自动推导 Assembler:771-805）；processTick Stage 0 |
+| CloseoutTrigger | 触发判定：currentTime ≥ close_time - minutesBefore×60s（白盘/夜盘双时刻自动推导 Assembler:771-805）；processTick Stage 0；FAILED 重试门依赖 `tc.is_trading_session`（R8-c(1)：于 tc 构建处统一赋值，消除对 preCheck 执行顺序的隐式依赖——closeout 活跃期 Stage 0 提前 return 曾使重试永不武装，08-31 仓位过夜实证） |
 | CloseoutOrchestrator | 状态编排（依赖 RiskMonitor CloseoutSub 状态机）；策略 `_closeout_orch.onTick` 每 tick 驱动；夜盘收市恢复报价分支（Coordinator:554-560）|
-| CloseoutExecutor | 渐进平仓执行：depthRatioPassive/Mid/Aggressive 三档比率+sweep 判定(sweepThresholdMs/sweepTicks)+FAK+drainTimeoutMs+maxRetries |
+| CloseoutExecutor | 渐进平仓执行：depthRatioPassive/Mid/Aggressive 三档比率+sweep 判定(sweepThresholdMs/sweepTicks)+FAK+drainTimeoutMs+maxRetries；**FAK 保底对触价**（R8-c：BUY≥ask1/SELL≤bid1——被动价 FAK=必然瞬间全杀单，08-31 实证）；settle_quiesce_ms 结算静止窗+**DRAIN 超时不重叠续跑**（2×timeout 硬截止，R7-e）；**closeOnly 开关**（默认 false：remaining 向零截到 anchor 实际仓位，"宁可留尾不翻向开仓"） |
 
 Fix4 裁决：CLOSEOUT 相位豁免 REVERSIBLE halt（保证收盘减仓不被锁死）；IRREVERSIBLE 在 closeout 窗口不强平。
 
@@ -761,7 +781,55 @@ Fix4 裁决：CLOSEOUT 相位豁免 REVERSIBLE halt（保证收盘减仓不被�
 - **PerformanceMonitor**：rdtsc 埋点（_tsc_tick0 on_tick 入口）；RingBuffer p99 分位数(P999 别名已删, Percentile 仅 P50/P90/P95/P99)；checkThresholds 1s 节拍分级告警（warn/critical ns 阈值）；ThroughputStats 全 atomic。
 - **PerformanceAnalyzer**：绩效统计（spread_at_trade 兜底查配置 tick_size×2，R7）；时钟统一 replay `_exchange_time_ms`（R3-残余修复量纲）。
 - **BilateralStats**：双边报价统计——周期行内存积压 `_bilateral_io_backlog`（MdSpi 专属免锁），section-break/closeout TRIGGERED 定点排空落盘（R6-b 移出热路径）；当日文件 seed 重启续算（框架 session_end 生产不触发，见 §8）。
+  **R15-b**：refreshQuotes 每 tick 采样槽位快照喂统计（原仅 onOrder/onEntrustAck 回调驱动——
+  平静市 STICKY 跳过重挂时无回调 → 统计时钟冻结假象）。
+  **C 批（2026-09-15）**：行内增打 `el=<段内已过秒> cov=bil/el`（段口径自解释，不再被 ses=27900
+  全交易日分母稀释）；`w0=<L0 最优档瞬时宽度均值>`（**avg 保留为多档全深度按量加权宽度**——
+  与义务考核对齐的设计语义，非 L0 成交宽度，两者并存）；update() 时间轴断点钳制（>120s 间隙
+  或回绕：双边段只记账到最后真实观测点并重播起点——消灭盘前 tick 种下会话外起点导致的
+  bil>100% 异常）。
 - **MonitorBridge**：WtMonSvr GUI 数据桥（框架层 initEvtNotifier 补丁依赖，§8）。
+
+---
+
+### 4.21 框架适配层协同（TraderAdapter / CloseFreezeLedger，F-core 批次）
+
+> 本节为 WtUftCore 框架层（经用户授权的越界批次 F-core v1→v3.2 + Z1）的行为契约。
+> 策略层不经此处发单语义变化，但**平仓可用量、拒单、闩锁自愈**直接由本层决定。
+
+#### 平仓可用量冻结台账（CloseFreezeLedger.h，框架 OMS 层）
+
+- **不变量**：可用量 = 柜台基线 − 本通道在途平仓未终态量；冻结在**下单成功瞬间**建立
+  （reserve-at-send，`closeLong/closeShort` 内唯一冻结点），回报只负责归还/转换/对账。
+  理由：冻结建立不能依赖回报时延（同 burst 多档并发平仓必然超卖——09-11 实证 889 拒单/日）。
+- **exactly-once 归还**：撤单终态/首见即撤/拒单统一走台账（`localid → {合约,方向,平今昨,委托量,traded}`）
+  命中才归还并销账；未命中一律不归还（fail-closed，朝保守方向偏离）+ WARN 计数。
+  归还一律钳制（avail ≤ vol），钳制即 WARN（账本/柜台发散探针）。
+- **C6 快照重放**：`onRspPosition` 不再覆写——`avail = 柜台净值 − 台账在途量` 再钳制 [0,vol]
+  （保守方向，绝不放大）；`onRspOrders` 登录回放对存活平仓单 `seed()` 播种（重启语义闭合）。
+- **E④ 周期再基线**：事件触发（平仓拒单/钳制/台账 miss）+ **10min 周期**（tick 入口惰性驱动）
+  → `queryPositions()`（≥10s 节流）→ C6 规则重放。治"沉默的保守泄漏"（他源扣减只降不升）。
+- **P1 ORPHAN FILL**：`_known_localids` 仅在下单点（doEntrust/doQuoteEntrust）写入——
+  非本进程所下订单的成交触发 ORPHAN FILL WARN（幽灵单第一现场）。
+- **巡检行**：每次 `Position data updated` 输出
+  `close-freeze ledger: live/reserved/released/filled_out/unmatched/clamped/released_qty/rebaseline/rebaseline_skipped`
+  （unmatched/clamped 应恒 0，非零即账本事故信号）。
+
+#### Z1 撤单错误终态对账
+
+见 §4.11（zombie 生命周期）。要点：撤单错误应答 = 订单终态的权威证据，此前被框架丢弃 →
+tracker 永久等待 → zombie 闩锁焊死（09-15 88min 实证）。三情形处理（a 重推/b 跳过/c 合成骨架）。
+
+#### 并发与纪律（两次死锁事故的固化规则）
+
+- `_mtx_pos`（SpinMutex）串行化持仓账本全部读写（D 批）；叶子函数（*Locked/getPosSnapshot）
+  锁内禁发 API；下单拆分读快照、回调先快照后 sink（持锁不跨回调）。
+- **锁域调用图审计（强制评审项）**：不可重入 SpinLock 临界区内**禁止调用任何自带锁的函数**
+  ——两次生产死锁同源：P1（markKnownLocalId 自调用，09-14，43min）与 Z1（临界区内调
+  getOrders()，09-16，14min）。适配器层锁改动必须画出"锁内调用图"再动手。
+- **ABI 对子铁律**：WtUftCore 头文件成员变更后，WtUftRunner 与 libWtUftCore.so 必须**同树
+  重编译、成对部署**（new TraderAdapter 在 runner 侧按旧 sizeof 分配即堆越界——09-13 ASAN
+  实锤 808B vs 816B）。TraderAdapter.h 未动时 runner 无需重编。
 
 ---
 
@@ -779,6 +847,10 @@ Fix4 裁决：CLOSEOUT 相位豁免 REVERSIBLE halt（保证收盘减仓不被�
 | 8 | stra_cancel_all 必须传 fullCode 或空串 | 实盘 TraderAdapter::cancelAll 用 getFullCode 匹配，stdCode 永不匹配静默全不撤（§8） |
 | 9 | QuotePolicyChain 固定顺序即优先级 | RiskWiden tickSoft 与 onHardWiden 同 tick 覆盖关系由链序保证 |
 | 10 | 热参交叉复查 warn 不阻断 | 避免热调参被误卡死 |
+| 11 | skew driver 用纯手数口径 + hr 慢化（S1） | hr 逐 tick 价格重算污染驱动：翻转-成交相关仅 0-9%；skew 响应"已实现库存"必须以成交为唯一驱动源 |
+| 12 | zombie 闩锁 bounded 恢复（Z3），不做缩量降级 | R16 裁决：义务深度不可破（缩量即违约），暂停本身是正确响应；Z3a 重探只是消解机会，Z1 从源头清账 |
+| 13 | 适配器锁域调用图审计（强制评审项） | 两次死锁同源：不可重入 SpinLock 临界区内调用自带锁函数（P1 自调用/Z1 getOrders）；BT 不走适配器、单测不覆盖回调 = 验证链结构性盲区 |
+| 14 | WtUftCore 头文件成员变更 ⇒ runner+lib 成对部署 | ABI/ODR 错配 = runner 旧 sizeof 分配 + lib 新布局写入 = 堆越界（09-13 ASAN 实锤） |
 
 ## 6. 构建 / 回测 / 部署
 
@@ -807,19 +879,23 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner \
 ## 7. 测试体系
 
 - GoogleTest 于 `src/TestUnits`；构建目标 TestUnits 后运行二进制。
-- 当前基线 **140 过 / 2 个既有环境性失败**（test_session.test_allday、test_shm.test_sharehelper）。
+- 当前基线 **180 过 / 2 个既有环境性失败**（test_session.test_allday、test_shm.test_sharehelper）。
 - 关键测试文件与守护点：
 
 | 文件 | 守护点 |
 |---|---|
+| test_close_freeze_ledger.cpp | 平仓冻结台账：冻结→归还 exactly-once/重复终态免疫/部分成交/登录播种/钳制计数/并发（9 用例） |
+| test_order_slot_bplus.cpp | B+ 槽状态机/zombie 升级重武装（9 用例） |
+| test_v10_r14_skew_ticks.cpp | 整档量化映射/对冲腿相抵/滞环防抖/穿越 vs 贴 mid（5 用例） |
+| test_v10_r13_arb_gate.cpp | 方向感知仓位闸门/减险豁免/MR 超时优先/策略名映射（4 用例） |
+| test_v10_r10_toxicity_simplify.cpp | TOXICITY 相位语义（4 用例；旧 test_toxicity_direction.cpp 已随 R10 删除） |
+| test_v10_r8a/r8b | ORDER_RATE 持续违规护栏 / 竞价时段挂单门（FN0100/FD0900 语义锁定） |
 | test_hot_param_manager.cpp | parse 校验/边界拒收/pending apply |
 | test_hot_param_hardening.cpp | 边界收紧表驱动+crossCheck 五项+drift 计数（16 用例） |
-| test_toxicity_direction.cpp | 方向分类/停边映射/warmup 门（10 用例） |
-| test_v8_r1_p0 / r3_coverage / r5_fixes / v9_r6a | 各轮修复回归 |
-| test_order_slot_bplus.cpp | B+ 槽状态机/zombie 升级重武装（9 用例） |
 | test_inventory_delta_separation.cpp | delta/position 口径分离（8 用例） |
-| test_skew_dimensionality.cpp | C1/C2 量纲与口径（6 用例） |
-| test_error_single_track.cpp | D1 单轨契约（ERROR 可恢复/HALT 守卫/closeout 正交，3 用例） |
+| test_skew_dimensionality.cpp | skew 量化语义（R14 后改写，6 用例） |
+| test_error_single_track.cpp | D1 单轨契约（3 用例） |
+| test_v8_r1_p0 / r3_coverage / r5_fixes / v9_r6a / v10_r7* | 各轮修复回归 |
 
 - 回测判据（§8 勘误后）：统计带（笔数 ±1.5%）+健康度（0 HALT/zombie/error、session end Delta=0、资金收敛）。**不存在逐比特判据**。
 
@@ -839,8 +915,22 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner \
    翻转数百事件）——该指标解读须按 O(±15%) 噪声带。R5 簿记 2,770 已被第二轮复现精确
    匹配（单边 284 亦与 R2 记录吻合），**无 R6 系回归**。
 9. **去大锁收官清单**（WS-C/none 切换验收）：TSAN 全量→_ec_5d 逐比特 A/B(big vs none)→refreshQuotes 持锁埋点→灰度 p99/p999→删 _cb_mtx（单独 commit）。
+10. **WtUftCore/TraderAdapter ABI 对子铁律**（2026-09-13 ASAN 实锤）：WtUftCore 头文件成员
+    变更后，WtUftRunner 与 libWtUftCore.so 必须同树重编译、成对部署（runner 旧 sizeof 分配 +
+    lib 新布局写入 = 堆越界启动崩溃）。TraderAdapter.h 未动时 runner 无需重编（§4.21）。
+11. **适配器层验证链结构性盲区**：BT 不走 TraderAdapter（mocker 模拟撮合）、TestUnits 仅覆盖
+    CloseFreezeLedger 组件——适配器回调/锁路径的改动（onTraderError/onPushOrder 等）BT 与
+    单测均不设防，必须"锁域调用图审计"+实盘观察窗验收（两次死锁事故教训，§5 裁决 13）。
+12. **SimNow 撤单竞态土壤**：撤单 ack 延迟/丢失/回报迟到为常态（"报单已全成交或已撤销，不能再撤"
+    日均数百条为良性竞态）——zombie 闩锁/停报语义是为此设计的保护（用户裁决：高频在坏链路上
+    交易=送钱，暂停正确）；Z1/Z3 后影响有界化（46s 量级）。
+13. **BilateralStats avg/w0 双口径**：avg=多档报价全深度按量加权宽度（与义务考核对齐，实测 ~4.7t）；
+    w0=L0 最优档瞬时宽度（实测 ~2.8t）——两者皆为真实语义，勿混用为"同一宽度的测量误差"。
 
 ---
 
-*文档生成：2026-08-24③。行号锚点基于当时 HEAD（d963a44e 之后工作树）；后续提交可能漂移，
-以方法名检索为准。配置字段逐键说明见 CONFIG.md。*
+*文档生成：2026-08-24③；**对齐更新：2026-09-16**（R12-R16/F-core v1-v3.2/Z1+Z3/S1+S3/C 批后
+全量对齐：R14 整档 skew、S1 纯化驱动、Z3 闩锁生命周期、CloseFreezeLedger 冻结台账、Bilateral
+el/cov/w0 双口径）。行号锚点基于 08-24 HEAD（d963a44e），后续提交已漂移，以方法名检索为准。
+配置字段逐键说明见 CONFIG.md 与 src/WtFutuCore/config/ 内注释（zombieLatch/skewDriver 两节
+2026-09-15 新增）。生产运行态权威 = 远程 dist 配置（§6）。*
