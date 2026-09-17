@@ -136,6 +136,7 @@ std::unique_ptr<PerformanceMonitor> FutuComponentFactory::createPerformanceMonit
     monitor->setWarnThresholdNs(config.perf_warn_threshold_ns);
     monitor->setCriticalThresholdNs(config.perf_critical_threshold_ns);
     monitor->setLogInterval(config.perf_log_interval);
+    monitor->setAlertThrottleMs(config.perf_alert_throttle_ms); // F-core P2(2026-09-17)
     return monitor;
 }
 

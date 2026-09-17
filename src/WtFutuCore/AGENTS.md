@@ -4353,3 +4353,104 @@ ZOMBIE → 闩锁**续期重置计时**，停报时长无上界；影子簿 `rea
 
 **下一批（未实施）**：A（分级熔断：WARN/SEVERE + 暂停报单 + 探针恢复）与 C（影子簿 realized 漂移对齐），
 按 §16.3/§16.4 在 D+B 观察满一个交易日后分别落地。
+
+### 17. 方案：P2 延迟指标修正 + A 分级熔断 + C 影子簿对齐 + P1 持仓核查（2026-09-17 待确认，**未实施**）
+
+**背景证据（交易日 2026-09-17 = 09-16 夜盘 23:03→01:00 + 09-17 日盘；含今晚 21:00-21:20）**
+- D+B 达标：平今拒单 0；台账 39 行 `unmatched=0 clamped=0`；闩锁 9 次全部 ≤43s（26/42/43/15/5/31s），
+  `EXCEEDED maxHold`=0（无 >120s 持有，B2 分支实盘未触发）；D2 落盘自 23:02:59 起每 5min 连续；
+  D1 `cov` 全 ≤1（夜 0.933/0.946、日早 0.817/0.850、日下午 0.920/0.874，日早偏低由市场 `wide`=216/315 解释）。
+- P2：`exceeds CRITICAL` 15448 行/日（09-16 为 5192），10:42 起每秒 2 行持续到收盘；
+  根因 = `PerformanceMonitor` 16384 样本定长环形窗（~4 tick/s ⇒ ≈70min），`checkThresholds` 每 1s 限频
+  ⇒ 越线即每秒重复打印；11:30 与 13:30 p99 完全相同（2806.2）证明午休不衰减，重启才归零（21:00=1208.2）。
+  真实尖峰仅个别点（10:41:01 `High tick-to-quote 5592us`），瞬时 >500us 告警全天 ~1200 次（与 09-16 同量级）。
+- C：`shadow-book true divergence` 09-16=53 → 09-17=92；`COST_BASIS_STALE` 50 → 78，形态恒为
+  `pre_book == expected_pre` 且 `realized_drift=true`。
+- P1：账户口径 ao2612 净 **+25**（自 09-15 起 1→9→23→29 递增）、ao2611 ±14 锁仓、ao2610 733 / ec2609 94
+  三天不变；本策略 20:40 启动同步 `ao2611 net=-1, ao2612 net=+1`、`Total delta after sync: 0`，
+  14:58 与 00:58 两次清算均 `No position to hedge (Delta=0)`，日内净成交≈0 ⇒ 账户该 25 手非本策略所开。
+
+#### 17.1 P2 延迟指标口径与告警（低风险，第一批）
+
+- 文件：`PerformanceMonitor.h/.cpp`、`StrategyCoordinator.cpp`(657-666)。
+- 改动：
+  1. **时间窗化**：新增 `resetLatencyWindows()`，在 `StrategyCoordinator` 输出 `getSummary()` 之后调用
+     （现为 1 次/分钟）⇒ p99/mean 等统计改为"最近一个汇总周期"，窗口结束自然回落，
+     不再出现跨午休残留与整日单调爬升。
+  2. **告警限频**：`checkThresholds` 增 `_last_alert_ms[channel]`，同通道 ≤1 条/`perf.alertThrottleMs`（默认 60000）。
+  3. **计数器**：新增 `_critical_episodes[2] / _warn_episodes[2] / _max_p99_ns[2]`，
+     随每 5min 巡检行输出（`perf: t2q_p99=... fc_p99=... crit_ep=... warn_ep=... max=...`）。
+  4. 降噪：连续 ≥2 个周期越线才计 1 个 EPISODE（避免单点尖峰刷计数）。
+- 语义：`p99` = 最近汇总周期内样本的分位值；`EPISODE` = 持续超限事件（跨周期聚合），二者都进 KPI。
+- 验证：TestUnits 零回归；夜盘 1 天：CRITICAL 行数应大幅下降（目标 <100 行/日）、
+  巡检行出现且 p99 在午休/非交易时段回落；避免把真实劣化掩盖（EPISODE 计数保留）。
+
+#### 17.2 A 环境异常分级熔断（中风险，第二批）
+
+- 文件：`StrategyCoordinator.h/.cpp`（窗口计数+状态机）、`UnifiedOrderTracker.h/.cpp`（只读累计计数）、
+  `FutuRuntimeOps.cpp`（把 tracker 计数喂给 coordinator，tick 入口）。
+- 指标（1s 采样、滑动窗口，默认 5min）：`ack_to_w`（撤单 ack 超时，取 tracker 累计差值）、
+  `zombie_w`（新 zombie 升级数，复用 `getZombieEscalations`）、`latch_max`（B1 单调持有）。
+- 分级（阈值按两日实测标定：常态 ~2 次/5min，风暴 26–42 次/5min）：
+
+  | 级别 | 触发（任一） | 动作 |
+  |---|---|---|
+  | WARN | 5min `ack_to_w` ≥5 或 `zombie_w` ≥2 | 巡检行 + 告警，**不停报** |
+  | SEVERE | 5min `ack_to_w` ≥20，或任一合约闩锁 >120s | ① `[RISK] ENV_SEVERE` 高优告警（EventNotifier）② **全策略暂停报单**（撤单+停报，复用 HALT 语义）③ 60s 探针（cancelAll），连续 3 个干净窗口自动恢复 |
+  | SEVERE 复发 | 恢复后 10min 内再次 SEVERE | 升级不可逆 HALT，需人工放行 |
+
+- 配置：`risk.envGuard: { windowMs:300000, warnAckTimeout:5, severeAckTimeout:20, maxLatchHoldMs:120000, probeMs:60000, cleanWindows:3, recurMs:600000 }`（缺省即上表）。
+- 与既有机制分工：zombie 闩锁 = 单合约秒级局部动作（本日 5–43s 场景不升级）；ENV_SEVERE = 全策略分钟级环境熔断。
+- 验证：BT 无僵尸不触发；夜盘以真实风暴验证 SEVERE 停报/恢复/复发升级三条路径；与 17.1 计数器互证。
+
+#### 17.3 C 影子簿 realized 漂移（中风险，第三批）
+
+- 机制推断：`FutuPortfolio::setShadowFromEngine()` 每次成交都把引擎 realized 镜像为权威值；
+  而 `FutuRuntimeOps` 的漂移判定只在 OPEN 成交时比较"上次镜像值 vs 当前引擎值"，
+  上一笔为 CLOSE 时引擎 realized 更新滞后于回调 ⇒ 下一次 OPEN 必然检出差（与实测 100% `realized_drift=true` 且净仓无差相符）。
+- 处置（倾向 ①）：
+  ① **净仓漂移 → `markShadowStale`（不变）；仅 realized 差 → 直接采用引擎值 + 计数 `realized_lag_events`**，
+     不再置 stale、不再把日亏熔断降级为可逆；
+  ② 或在 ContractState 记录 `last_offset`，仅当上一笔非 CLOSE 时比较 realized。
+- 验证：`realized_lag_events` 与 `COST_BASIS_STALE` 应趋 0；用 BT 用例确认日亏熔断分级（不可逆路径）不受影响。
+
+#### 17.4 P1 账户持仓核查（**只读核查，不动代码**）
+
+- 核查步骤：① 向 cta_turtle 侧确认 ao2612 持仓与当日增减；② 用本策略停报窗口（09-16 11:16–11:39 等）
+  比对账户该合约净值是否变化；③ 查 CTP 投资者持仓明细的今/昨与交易日归属，判断 25 手起始日。
+- 若确认为他源：评估两项风险并按需立项——(a) 共享平今/平昨可用量（历史 50/51 风暴的疑似来源，
+  现由台账"柜台净值 − 台账在途"兜住）；(b) 共享保证金被 ao2610 733 手占用，极端行情可能触发资金不足。
+- 若排除他源 ⇒ 本策略账簿漂移（严重）：需在启动/日切时以柜台持仓重建本地持仓簿，单独立项，不在本轮实施。
+
+**执行顺序**：17.1 → 17.2 → 17.3（17.4 并行只读核查）；每批独立部署并观察 ≥1 个交易日。
+**本轮仅入档方案，未改任何代码**（用户 2026-09-17 明确）。
+
+**❌ 17.2（A 分级熔断）已取消**：用户 2026-09-17 决定不做（"17.2 不做 17.1 和 17.3 先执行"）。
+该节保留仅为记录决策，**不得据其改代码**；SimNow 环境异常继续按"Z1 兜底 + 既有告警"处理。
+
+#### 17.5 实施记录（2026-09-17 夜盘，17.1 + 17.3 已落地）
+
+**改动清单（全部策略层，未触碰框架层）**
+
+| 文件 | 改动 |
+|---|---|
+| `PerformanceMonitor.h/.cpp` | 17.1：新增窗口环 `_win_tick_to_quote/_win_signal_to_order`（`record*` 同步写入）、`evaluateAndResetWindow()`、`formatKpi()`、`setAlertThrottleMs()`、`_last_alert_ms/_crit_episodes/_warn_episodes/_max_p99_ns/_last_win_p99_ns/_last_win_count`；`checkThresholds` 改用窗口环 + 每通道日志限频（判定返回值不受限频影响）；`reset()/resetLatency()` 同步复位窗口 |
+| `StrategyCoordinator.h/.cpp` | 17.1：60s 汇总后调用 `evaluateAndResetWindow()`（窗口=汇总周期）；新增 5min 巡检行 `[PERF] kpi t2q_p99=.. fc_p99=.. n=../.. crit_ep=../.. warn_ep=.. max_p99=.. reallag=<窗口增量>`；新增 `perf_alert_throttle_ms`(默认 300000) 与 `_last_kpi_ms/_last_reallag` |
+| `UftFutuMmStrategy.h` / `FutuConfigLoader.cpp` / `FutuModuleAssembler.cpp` / `FutuComponentFactory.cpp` | 配置键 `performance.alertThrottleMs`（默认 300000ms）全链路接线 |
+| `FutuPortfolio.h/.cpp` | 17.3：`ContractState::realized_lag_events` + `_realized_lag_total` + `noteRealizedLag()` + `getRealizedLagEvents()`（仅计数，不置 stale） |
+| `FutuRuntimeOps.cpp` | 17.3：漂移判定拆分 —— `net_drift` 维持 `markShadowStale + broadcastCostBasisStale + resyncPosition`；**仅 realized 差** ⇒ `noteRealizedLag()` + `clearShadowStale()`（不再置 stale、不再降级日亏熔断类别） |
+| `src/TestUnits/test_futu_perf_window.cpp` | 新增 4 个用例：crit_ep 结窗计数与"最近已结窗"读数、warn 分级与样本<100 守卫、限频不影响 critical 返回值、max_p99 跟踪 |
+
+**语义澄清（17.3 机制实证）**：`setShadowFromEngine()` 每次成交都把引擎 realized 镜像为权威值，而判定只在 OPEN 成交时比较"上次镜像值 vs 当前引擎值"；上一笔为 CLOSE 时引擎 realized 在回报后一拍才更新 ⇒ 下一次 OPEN 必然检出差（日志形态恒为 `pre_book == expected_pre`，即净仓无差）。该差异属**引擎口径滞后**，不代表成本基不可信，故降级为计数。
+
+**验证**
+- TestUnits：**186 项 / 184 通过**（基线 182+4 新增；2 项 `test_session.test_allday`、`test_shm.test_sharehelper` 为既有环境性失败）。
+- v5 BT 冒烟（`configbt_v5.yaml`）：`EXIT=0`、trades 409 行（基线带内）、资金收敛、HALT/ZOMBIE=0。
+- 线上实测（22:09 部署后 14.5min，PID 505917，lib `c4532a7c`）：
+  - **告警刷屏消除**：`window p99=` 告警仅 4 条（原 ~2 条/秒 ⇒ 15448 行/日），格式与限频生效；旧格式行 0 条（仅剩进程退出瞬间 2 条）。
+  - **5min 巡检行生效**：`[PERF] kpi ... crit_ep=1/1 max_p99=1221.8/1771.2us reallag=0` —— 窗口化后真实劣化仍被 EPISODE/max_p99 捕获。
+  - **17.3 生效**：部署后 `shadow-book true divergence`=0、`COST_BASIS_STALE`=0（部署前日均 92/78 次）。
+  - 无回归：HALT/ZOMBIE=0；台账 `unmatched=0 clamped=0 rebaseline=1`。
+- **已知小瑕疵（已修，待生效）**：KPI 行在结窗后打印，最初版本报的是空窗口 `p99=0.0us`；已改为报"最近已结窗"读数 + 样本数 `n=../..`。该修正版 lib `3e12ea37` 已静默落盘（备份 `.bak_20260917_p2c`），**由 08:40 cron 重启时生效**（不在盘中再重启）。
+
+**待观察（次日起）**：① `[PERF] kpi` 行每 5min 出现且 `n` 随行情量级合理；② `crit_ep` 只在真实劣化窗口增长；③ `reallag` 逐日累计 ≈ 原 divergence 量级（50–90/日）而 `COST_BASIS_STALE` 归零；④ 日亏熔断的不可逆路径未被误伤（需在有 NET 漂移的交易日复核）。

@@ -194,6 +194,8 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
         _config.perf.log_interval = readUInt32(cfgPerformance, "logInterval", 1000);
         _config.perf.warn_threshold_ns = readUInt32(cfgPerformance, "warnThresholdNs", 10000);
         _config.perf.critical_threshold_ns = readUInt32(cfgPerformance, "criticalThresholdNs", 50000);
+        // F-core P2(2026-09-17): 告警日志限频 (默认 5min)
+        _config.perf.alert_throttle_ms = readUInt32(cfgPerformance, "alertThrottleMs", 300000);
     }
 
     //------------------------------------------------------------

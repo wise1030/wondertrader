@@ -665,6 +665,19 @@ ProcessingResult StrategyCoordinator::processTick(
         if (tc.timestamp - _last_summary_ms >= 60000) {
             WTSLogger::info("[PERF] {}", _perf_monitor->getSummary());
             _last_summary_ms = tc.timestamp;
+            // F-core P2(2026-09-17): 汇总即结窗 —— 告警判定样本改为"最近一个汇总周期"
+            //   (原按 16384 样本累计环判定, 越线后每秒重复打印且午休不衰减, 09-17 达 15448 行/日)
+            _perf_monitor->evaluateAndResetWindow();
+        }
+
+        // F-core P2(2026-09-17): 5min 健康巡检行 —— 窗口 p99 + 超限 EPISODE 计数 + 影子簿 realized 滞后计数
+        if (tc.timestamp - _last_kpi_ms >= 300000) {
+            uint64_t reallag = _portfolio ? _portfolio->getRealizedLagEvents() : 0;
+            WTSLogger::info("[PERF] kpi {} reallag={}",
+                            _perf_monitor->formatKpi(),
+                            reallag >= _last_reallag ? (reallag - _last_reallag) : reallag);
+            _last_reallag = reallag;
+            _last_kpi_ms = tc.timestamp;
         }
     }
 

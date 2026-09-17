@@ -130,7 +130,12 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
             bool realized_drift =
                 isOpen && std::abs(cs_before_sync.realized_pnl - shadow_realized) > 0.01;
 
-            if (net_drift || realized_drift) {
+            // F-core C(2026-09-17): 拆分两类差异的语义 ——
+            //   净仓漂移 = 真漂移 (成本基不可信, 风控应降级) → 维持原处置;
+            //   realized 差 = 引擎口径滞后 (上一笔 CLOSE 的 realized 在回报后一拍才进引擎,
+            //   而本判定只在 OPEN 时比较, 故必然检出差; 实测 100% 净仓无差) → 仅计数,
+            //   引擎值已由 setShadowFromEngine 采用为权威值, 不置 stale、不降级日亏熔断。
+            if (net_drift) {
                 _portfolio->markShadowStale(stdCode);
                 if (_risk_monitor)
                     _risk_monitor->broadcastCostBasisStale(stdCode);
@@ -143,6 +148,8 @@ void FutuRuntimeOps::processTradeFill(UftFutuMmStrategy& s,
                                 realized_drift);
                 _portfolio->resyncPosition(stdCode, local_net);
             } else {
+                if (realized_drift)
+                    _portfolio->noteRealizedLag(stdCode);
                 _portfolio->clearShadowStale(stdCode);
             }
         }

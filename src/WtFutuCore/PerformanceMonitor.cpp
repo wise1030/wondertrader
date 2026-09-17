@@ -20,6 +20,10 @@ void PerformanceMonitor::recordTickToQuote(uint64_t latencyNs)
         return;
 
     _tick_to_quote_history.push(latencyNs);
+    // F-core P2(2026-09-17): 同步写告警窗口环 (结窗清空; 容量与累计环同, 只需 push)
+    if (_win_tick_to_quote.full())
+        _win_tick_to_quote.pop();
+    _win_tick_to_quote.push(latencyNs);
     _current_latency_ns[static_cast<int>(LatencyType::TICK_TO_QUOTE)].store(latencyNs, std::memory_order_relaxed);
 
     // H5: 改用 yaml 配置的 _latency_threshold_ns (此前硬编码 100000, yaml 调整无效)
@@ -63,6 +67,10 @@ void PerformanceMonitor::recordSignalToOrder(uint64_t latencyNs)
         return;
 
     _signal_to_order_history.push(latencyNs);
+    // F-core P2(2026-09-17): 告警窗口同步
+    if (_win_signal_to_order.full())
+        _win_signal_to_order.pop();
+    _win_signal_to_order.push(latencyNs);
     _current_latency_ns[static_cast<int>(LatencyType::SIGNAL_TO_ORDER)].store(latencyNs, std::memory_order_relaxed);
 }
 
@@ -317,6 +325,13 @@ void PerformanceMonitor::reset()
     _quote_to_fill_history.clear();
     _cancel_to_ack_history.clear();
     _signal_to_order_history.clear();
+    // F-core P2(2026-09-17): 窗口环与 EPISODE 计数一并复位
+    _win_tick_to_quote.clear();
+    _win_signal_to_order.clear();
+    _last_alert_ms[0] = _last_alert_ms[1] = 0;
+    _crit_episodes[0] = _crit_episodes[1] = 0;
+    _warn_episodes[0] = _warn_episodes[1] = 0;
+    _max_p99_ns[0] = _max_p99_ns[1] = 0.0;
 
     for (int i = 0; i < 5; ++i) {
         _current_latency_ns[i].store(0, std::memory_order_relaxed);
@@ -331,6 +346,7 @@ void PerformanceMonitor::resetLatency(LatencyType type)
     switch (type) {
     case LatencyType::TICK_TO_QUOTE:
         _tick_to_quote_history.clear();
+        _win_tick_to_quote.clear(); // F-core P2
         break;
     case LatencyType::ORDER_TO_ACK:
         _order_to_ack_history.clear();
@@ -343,6 +359,7 @@ void PerformanceMonitor::resetLatency(LatencyType type)
         break;
     case LatencyType::SIGNAL_TO_ORDER:
         _signal_to_order_history.clear();
+        _win_signal_to_order.clear(); // F-core P2
         break;
     }
 
@@ -352,32 +369,88 @@ void PerformanceMonitor::resetLatency(LatencyType type)
 bool PerformanceMonitor::checkThresholds(uint64_t now_ms)
 {
     // V8-R3: warn/critical 阈值接线 -- 此前配置注入后无任何逻辑读取
+    if (!_enabled)
+        return false;
     if (now_ms < _last_threshold_log_ms || now_ms - _last_threshold_log_ms < _log_interval_ms)
         return false;
     _last_threshold_log_ms = now_ms;
 
     bool has_critical = false;
-    const LatencyType channels[] = {LatencyType::TICK_TO_QUOTE, LatencyType::SIGNAL_TO_ORDER};
     const char* names[] = {"TickToQuote", "FullChain"};
 
     for (int i = 0; i < 2; i++) {
-        auto stats = getLatencyStats(channels[i]);
-        if (stats.count < 100) // 样本不足不告警 (启动期噪声)
+        // F-core P2(2026-09-17): 判定样本 = 窗口环 (最近一个汇总周期), 非累计环
+        auto stats = (i == 0) ? calculateStats(_win_tick_to_quote) : calculateStats(_win_signal_to_order);
+        if (stats.count < 100) // 样本不足不告警 (启动期/窗口样本稀疏)
             continue;
-        if (stats.p99_ns > static_cast<double>(_critical_threshold_ns)) {
+
+        const bool over_critical = stats.p99_ns > static_cast<double>(_critical_threshold_ns);
+        const bool over_warn = !over_critical && stats.p99_ns > static_cast<double>(_warn_threshold_ns);
+        if (!over_critical && !over_warn)
+            continue;
+
+        if (over_critical)
             has_critical = true;
-            WTSLogger::error("[PERF] {} p99={:.1f}us exceeds CRITICAL threshold ({}us)",
+
+        // F-core P2: 同通道日志限频 (默认 5min); 统计不受限频影响 (见 evaluateAndResetWindow)
+        if (_alert_throttle_ms > 0 && _last_alert_ms[i] != 0 && now_ms >= _last_alert_ms[i] &&
+            now_ms - _last_alert_ms[i] < static_cast<uint64_t>(_alert_throttle_ms))
+            continue;
+        _last_alert_ms[i] = now_ms;
+
+        if (over_critical) {
+            WTSLogger::error("[PERF] {} window p99={:.1f}us exceeds CRITICAL threshold ({}us)",
                              names[i],
                              stats.p99_ns / 1000.0,
                              _critical_threshold_ns / 1000.0);
-        } else if (stats.p99_ns > static_cast<double>(_warn_threshold_ns)) {
-            WTSLogger::warn("[PERF] {} p99={:.1f}us exceeds warn threshold ({}us)",
+        } else {
+            WTSLogger::warn("[PERF] {} window p99={:.1f}us exceeds warn threshold ({}us)",
                             names[i],
                             stats.p99_ns / 1000.0,
                             _warn_threshold_ns / 1000.0);
         }
     }
     return has_critical;
+}
+
+void PerformanceMonitor::evaluateAndResetWindow()
+{
+    if (!_enabled)
+        return;
+
+    // F-core P2(2026-09-17): 结窗 —— 窗口 p99 越线计 1 个 EPISODE, 记录历史最大, 然后清窗口。
+    //   EPISODE 口径与日志限频解耦: 日志按分钟级限频, EPISODE 逐窗口统计, 真实劣化仍可见。
+    for (int i = 0; i < 2; i++) {
+        auto stats = (i == 0) ? calculateStats(_win_tick_to_quote) : calculateStats(_win_signal_to_order);
+        // F-core P2: 留存本窗口读数 (KPI 行在结窗之后打印, 需报刚关闭窗口的值)
+        _last_win_p99_ns[i] = stats.count > 0 ? stats.p99_ns : 0.0;
+        _last_win_count[i] = static_cast<uint32_t>(stats.count);
+        if (stats.count >= 100) {
+            const double p99 = stats.p99_ns;
+            if (p99 > _max_p99_ns[i])
+                _max_p99_ns[i] = p99;
+            if (p99 > static_cast<double>(_critical_threshold_ns))
+                ++_crit_episodes[i];
+            else if (p99 > static_cast<double>(_warn_threshold_ns))
+                ++_warn_episodes[i];
+        }
+    }
+
+    _win_tick_to_quote.clear();
+    _win_signal_to_order.clear();
+}
+
+std::string PerformanceMonitor::formatKpi() const
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1);
+    // F-core P2: 报"最近已结窗"的读数 (结窗即清空窗口, 实时窗口恒为空)
+    oss << "t2q_p99=" << (_last_win_p99_ns[0] / 1000.0) << "us fc_p99=" << (_last_win_p99_ns[1] / 1000.0)
+        << "us n=" << _last_win_count[0] << "/" << _last_win_count[1]
+        << "us crit_ep=" << _crit_episodes[0] << "/" << _crit_episodes[1]
+        << " warn_ep=" << _warn_episodes[0] << "/" << _warn_episodes[1]
+        << " max_p99=" << (_max_p99_ns[0] / 1000.0) << "/" << (_max_p99_ns[1] / 1000.0) << "us";
+    return oss.str();
 }
 
 } // namespace futu

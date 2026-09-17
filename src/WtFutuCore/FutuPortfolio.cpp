@@ -263,6 +263,21 @@ bool FutuPortfolio::isShadowStale(const std::string& code) const
     return cs ? cs->shadow_stale : false;
 }
 
+// F-core C(2026-09-17): realized 滞后事件 —— 只计数。
+//   机制: setShadowFromEngine() 每次成交都把引擎 realized 镜像为权威值, 而 FutuRuntimeOps 的
+//   漂移判定只在 OPEN 成交时比较"上一次镜像值 vs 当前引擎值"; 上一笔是 CLOSE 时引擎 realized
+//   在回报后一拍才更新 ⇒ 下一次 OPEN 必然检出差 (实测 100% realized_drift=true 且净仓无差,
+//   09-17 达 92 次/日)。该差异属引擎口径滞后, 不代表成本基不可信, 故不置 shadow_stale、
+//   不触发日亏熔断降级 (后者此前被这类事件常态化降级为 REVERSIBLE)。
+void FutuPortfolio::noteRealizedLag(const std::string& code)
+{
+    RecursiveSpinGuard _g(_lock);
+    ContractState* cs = getContract(code);
+    if (cs)
+        ++cs->realized_lag_events;
+    _realized_lag_total.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool FutuPortfolio::hasStaleCostBasis() const
 {
     RecursiveSpinGuard _g(_lock);

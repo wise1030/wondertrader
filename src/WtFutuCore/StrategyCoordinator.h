@@ -182,6 +182,8 @@ struct CoordinatorConfig
     uint32_t perf_log_interval;          // propagated from config.yaml via FutuMmConfig
     uint32_t perf_warn_threshold_ns;     // propagated from config.yaml via FutuMmConfig
     uint32_t perf_critical_threshold_ns; // propagated from config.yaml via FutuMmConfig
+    // F-core P2(2026-09-17): 告警日志同通道限频 (ms, 默认 5min)
+    uint32_t perf_alert_throttle_ms;
 
     // perf fields: propagated from config.yaml via FutuMmConfig, not read by StrategyCoordinator itself
     uint64_t perf_monitor_latency_threshold;
@@ -211,7 +213,8 @@ struct CoordinatorConfig
           param_update_interval(100), closeout_minutes_before(5), close_time(150000),
           closeout_flatten_position(true), night_close_time(0), night_minutes_before(5), perf_enabled(true),
           perf_log_interval(1000), perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000),
-          perf_monitor_latency_threshold(100000), bilateral_stats_log_interval_sec(300),
+          perf_alert_throttle_ms(300000), perf_monitor_latency_threshold(100000),
+          bilateral_stats_log_interval_sec(300),
           bilateral_stats_log_dir("./Logs")
     {}
 };
@@ -470,6 +473,9 @@ private:
     // 日志限频
     uint64_t _last_perf_ms = 0;                 // v7.7 C3: perf 统计节流 (原 static, 跨实例共享)
     uint64_t _last_summary_ms = 0;              // v7.7 C3: 60s 摘要节流 (原 static)
+    // F-core P2(2026-09-17): 5min 健康巡检行节流 + realized 滞后计数基线
+    uint64_t _last_kpi_ms = 0;
+    uint64_t _last_reallag = 0;
     uint64_t _nan_tick_cnt = 0;                 // v7.7 C3: nan tick 计数 (原 static thread_local)
     uint64_t _limit_skip_cnt = 0;               // 锁板单边盘口 skip 计数 (日志节流)
     uint64_t _last_pause_diag_ms = 0;           // 上次shouldPause诊断日志时间戳(ms)

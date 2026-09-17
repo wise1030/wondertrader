@@ -195,9 +195,11 @@ struct FutuMmConfig
         uint32_t log_interval;
         uint32_t warn_threshold_ns;
         uint32_t critical_threshold_ns;
+        // F-core P2(2026-09-17): 同通道告警日志限频 (ms, 默认 5min; 0=不限频)
+        uint32_t alert_throttle_ms;
         Perf()
             : monitor_latency_threshold(100000), enabled(true), log_interval(1000), warn_threshold_ns(10000),
-              critical_threshold_ns(50000)
+              critical_threshold_ns(50000), alert_throttle_ms(300000)
         {}
     } perf;
 

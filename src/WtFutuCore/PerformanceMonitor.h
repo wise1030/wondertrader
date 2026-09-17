@@ -178,15 +178,27 @@ public:
     void setWarnThresholdNs(uint64_t ns) { _warn_threshold_ns = ns; }
     void setCriticalThresholdNs(uint64_t ns) { _critical_threshold_ns = ns; }
     void setLogInterval(uint32_t ms) { _log_interval_ms = ms; }
+    /// F-core P2(2026-09-17): 同通道告警日志限频 (ms); 0=不限频
+    void setAlertThrottleMs(uint32_t ms) { _alert_throttle_ms = ms; }
     uint64_t getWarnThresholdNs() const { return _warn_threshold_ns; }
     uint64_t getCriticalThresholdNs() const { return _critical_threshold_ns; }
     uint32_t getLogInterval() const { return _log_interval_ms; }
 
     /// V8-R3: warn/critical 阈值接线 (此前 set 注入后无任何逻辑读取) --
     /// 全链路(TICK_TO_QUOTE/SIGNAL_TO_ORDER) p99 超阈输出告警,
-    /// _log_interval_ms 限频; 返回 true = 存在 critical 超限。
+    /// _log_interval_ms + _alert_throttle_ms 限频; 返回 true = 存在 critical 超限。
     /// 由 StrategyCoordinator 1s 节拍调用 (perf_on 时)。
+    /// F-core P2(2026-09-17): 判定样本改用"窗口环"(_win_*), 与 16384 样本累计环解耦 ——
+    ///   原实现按累计环算 p99, 越线后每秒重复打印且午休不衰减 (实测 09-17 15448 行/日,
+    ///   11:30 与 13:30 的 p99 完全相同 = 2806.2us), 告警淹没真实趋势。
     bool checkThresholds(uint64_t now_ms);
+
+    /// F-core P2(2026-09-17): 结窗评估 —— 用窗口样本算 p99, 累计 EPISODE / 历史最大 p99, 随后清窗口。
+    /// 调用点 = 每次输出 60s 汇总之后 (窗口即汇总周期)。
+    void evaluateAndResetWindow();
+
+    /// F-core P2(2026-09-17): 巡检 KPI 行 (窗口 p99 + 超限 EPISODE + 历史最大 p99)
+    std::string formatKpi() const;
 
     //==========================================================================
     // Latency Recording (nanosecond precision)
@@ -272,6 +284,19 @@ private:
     uint64_t _critical_threshold_ns = 50000;
     uint32_t _log_interval_ms = 1000;
     mutable uint64_t _last_threshold_log_ms = 0; ///< V8-R3: 阈值告警限频
+
+    // F-core P2(2026-09-17): 告警窗口 (仅保留最近一个汇总周期的样本; 结窗清空)
+    RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _win_tick_to_quote;
+    RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _win_signal_to_order;
+    uint32_t _alert_throttle_ms = 300000; ///< 同通道日志限频 (默认 5min)
+    uint64_t _last_alert_ms[2] = {0, 0};
+    uint32_t _crit_episodes[2] = {0, 0}; ///< p99>critical 的窗口计数
+    uint32_t _warn_episodes[2] = {0, 0}; ///< p99>warn 的窗口计数
+    double _max_p99_ns[2] = {0.0, 0.0};  ///< 历史最大窗口 p99
+    /// F-core P2: 最近一个已结窗的 p99/样本数 —— 结窗后窗口已清空, KPI 行必须报这两个值
+    ///   (否则 5min 巡检行打印的是空窗口的 0.0us, 掩盖真实窗口读数)
+    double _last_win_p99_ns[2] = {0.0, 0.0};
+    uint32_t _last_win_count[2] = {0, 0};
 
     // Latency history (using RingBuffer for O(1) operations)
     RingBuffer<uint64_t, LATENCY_HISTORY_SIZE> _tick_to_quote_history;

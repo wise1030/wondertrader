@@ -110,6 +110,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         coord_cfg.perf_log_interval = _config.perf.log_interval;
         coord_cfg.perf_warn_threshold_ns = _config.perf.warn_threshold_ns;
         coord_cfg.perf_critical_threshold_ns = _config.perf.critical_threshold_ns;
+        coord_cfg.perf_alert_throttle_ms = _config.perf.alert_throttle_ms;
         _coordinator->setConfig(coord_cfg);
     }
 

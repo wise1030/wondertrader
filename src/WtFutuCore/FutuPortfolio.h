@@ -74,6 +74,9 @@ struct ContractState
     double shadow_net = 0.0;
     double shadow_realized_pnl = 0.0;
     double shadow_unrealized_pnl = 0.0;
+    /// F-core C(2026-09-17): realized 滞后事件计数 (引擎 realized 在成交回报后一拍才更新,
+    ///   属"口径滞后"而非成本基不可信) —— 只做遥测, 不再驱动 shadow_stale/风控降级
+    uint64_t realized_lag_events = 0;
     bool shadow_stale = false; ///< 影子簿或成本基不可信，风控应降级处理
     double day_open_unrealized = 0.0;       ///< 当日首次引擎浮盈锚点
     bool day_unrealized_anchor_valid = false;
@@ -321,6 +324,10 @@ public:
     void markShadowStale(const std::string& code);
     void clearShadowStale(const std::string& code);
     bool isShadowStale(const std::string& code) const;
+    /// F-core C(2026-09-17): 记录一次 realized 口径滞后事件 (仅计数, 不置 stale)
+    void noteRealizedLag(const std::string& code);
+    /// 累计 realized 滞后事件数 (巡检 KPI 用)
+    uint64_t getRealizedLagEvents() const { return _realized_lag_total.load(std::memory_order_relaxed); }
     bool hasStaleCostBasis() const;
     double getShadowNet(const std::string& code) const;
     double getShadowRealizedPnl(const std::string& code) const;
@@ -543,6 +550,8 @@ private:
 
     PortfolioParams _params;
     std::string _anchor_code;
+    /// F-core C(2026-09-17): realized 滞后事件累计 (无锁读写, 仅遥测)
+    std::atomic<uint64_t> _realized_lag_total{0};
 
     std::vector<ContractState> _contracts;
 
