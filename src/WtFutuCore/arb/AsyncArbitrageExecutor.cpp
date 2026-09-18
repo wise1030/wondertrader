@@ -66,6 +66,7 @@ void AsyncArbitrageExecutor::stop()
 
     // 唤醒线程以便快速退出
     _tick_available.store(true, std::memory_order_release);
+    _wait_cv.notify_all(); // F-core P0-A: 事件驱动模式下立即唤醒
 
     if (_arb_thread.joinable()) {
         _arb_thread.join();
@@ -103,8 +104,9 @@ bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, uin
         // 增加tick计数
         _tick_count.fetch_add(1, std::memory_order_relaxed);
 
-        // 唤醒套利线程 (busy polling 将检测到此标志)
+        // 唤醒套利线程 (busy polling 将检测到此标志; 事件驱动模式靠 notify)
         _tick_available.store(true, std::memory_order_release);
+        _wait_cv.notify_one(); // F-core P0-A
     }
 
     return success;
@@ -222,21 +224,56 @@ void AsyncArbitrageExecutor::arbThreadFunc()
 
     while (!_stop_requested.load(std::memory_order_acquire)) {
         // ================================================================
-        // 自适应自旋轮询 (Adaptive Spin-Polling) 替代 condition_variable
+        // F-core P0-A(2026-09-18): 空闲等待 —— 默认事件驱动, 可选保留旧自旋环。
+        //   旧环 = 1000×_mm_pause + 1000×sched_yield + sleep(50us) 循环: 实测单线程
+        //   5352 CPU-s / 6368s 墙钟 (84% 核), 其中 80% 为内核态 (sched_yield ~2 万次/秒),
+        //   而策略实际 tick 仅 ~3/s —— 属与行情无关的刚性消耗, 且与行情线程争抢 CPU。
+        //   事件驱动后空闲近零 CPU; 语义不变 (唤醒后仍 popAll 全量处理 + 同一时间轴触发信号)。
         // ================================================================
-        uint32_t spin_count = 0;
-        while (!_tick_available.load(std::memory_order_acquire) && !_stop_requested.load(std::memory_order_acquire)) {
-            if (spin_count < 1000) {
+        if (_config.wait_mode == AsyncArbConfig::WAIT_SPIN) {
+            uint32_t spin_count = 0;
+            while (!_tick_available.load(std::memory_order_acquire) &&
+                   !_stop_requested.load(std::memory_order_acquire))
+            {
+                if (spin_count < 1000) {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
-                _mm_pause();
+                    _mm_pause();
 #endif
-                spin_count++;
-            } else if (spin_count < 2000) {
-                std::this_thread::yield();
-                spin_count++;
-            } else {
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
-                spin_count = 0;
+                    spin_count++;
+                } else if (spin_count < 2000) {
+                    std::this_thread::yield();
+                    spin_count++;
+                } else {
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
+                    spin_count = 0;
+                }
+            }
+        } else {
+            // 事件驱动: 等 pushTick 的 notify, 上限 = min(距下次时间轴信号, max_wait_us)。
+            //   时间上限保证即使无 tick 也能按 signal_interval_us 触发时间轴信号检查。
+            std::unique_lock<std::mutex> lk(_wait_mtx);
+            if (!_tick_available.load(std::memory_order_acquire) &&
+                !_stop_requested.load(std::memory_order_acquire))
+            {
+                uint64_t wait_us = _config.max_wait_us > 0 ? _config.max_wait_us : 10000;
+                if (_config.signal_interval_us > 0) {
+                    const uint64_t now_us = arbNowUs(_replay_now_us);
+                    const uint64_t since = (last_process_time > 0 && now_us > last_process_time)
+                                               ? (now_us - last_process_time)
+                                               : 0;
+                    const uint64_t remain = (since < _config.signal_interval_us)
+                                                ? (_config.signal_interval_us - since)
+                                                : 0;
+                    if (remain > 0 && remain < wait_us)
+                        wait_us = remain;
+                }
+                _wait_cv.wait_for(
+                    lk,
+                    std::chrono::microseconds(wait_us),
+                    [this] {
+                        return _tick_available.load(std::memory_order_acquire) ||
+                               _stop_requested.load(std::memory_order_acquire);
+                    });
             }
         }
 

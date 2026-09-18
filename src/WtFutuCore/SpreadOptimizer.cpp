@@ -1,5 +1,6 @@
 // src/WtFutuCore/SpreadOptimizer.cpp
 #include "SpreadOptimizer.h"
+#include "HotLogGate.h" // F-core P0-B: 热路径日志闸门
 #include "../../WTSTools/WTSLogger.h"
 #include <algorithm>
 #include <cmath>
@@ -212,7 +213,9 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     // 10. Debug Log
     //==========================================================================
     // F-core S3(2026-09-15): 增打 skew 驱动分量 r_p/r_c (纯化口径), 供翻转归因
-    WTSLogger::debug("[QUOTE] {} mid={:.2f} | alpha={:.4f}(conf={:.2f},adj={:.2f}) | "
+    // F-core P0-B(2026-09-18): 热路径日志闸门 (默认 1/10 采样; 原每 tick 一行 ≈87.5k 行/日)
+    if (futu::HotLogGate::hit()) {
+        WTSLogger::debug("[QUOTE] {} mid={:.2f} | alpha={:.4f}(conf={:.2f},adj={:.2f}) | "
                      "skew={:.2f}(d_skew={:.2f}) | "
                      "spread={:.2f}(mult={:.2f}) | bid={:.2f} ask={:.2f} | r_p={:.3f} r_c={:.3f}",
                      _code,
@@ -228,6 +231,7 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
                      result.ask_price,
                      r_p_signed,
                      contract_util_signed);
+    }
 
     // if (ctx.alpha.valid || ctx.book_imbalance.valid) {
     //     WTSLogger::debug("[SIGNAL] {} alpha={:.4f}(conf={:.2f}) | "

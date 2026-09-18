@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "../HotLogGate.h" // F-core P0-B: 热路径日志闸门
 #include <string>
 #include <vector>
 #include <deque>
@@ -648,7 +649,9 @@ private:
         // V8 §5#2: %50 降采样对齐 toxicity 日志 (logcfg 开 debug 时每 tick
         // 每合约一次 fmt+落盘, 热路径浪费)
         if (++_decomp_log_count % 50 == 0) {
-            WTSLogger::debug("[SIGNAL_DECOMP] {} mid={:.2f} | "
+            // F-core P0-B(2026-09-18): 热日志闸门 (与既有 1/50 降采样叠加)
+            if (futu::HotLogGate::hit()) {
+                WTSLogger::debug("[SIGNAL_DECOMP] {} mid={:.2f} | "
                              "ofi={:.4f} trade={:.4f} book={:.4f} mom={:.4f} ll={:.4f} | "
                              "alpha={:.4f} conf={:.4f} valid={}",
                              _ctx.code,
@@ -661,6 +664,7 @@ private:
                              _ctx.alpha.alpha,
                              _ctx.alpha.confidence,
                              _ctx.alpha.valid ? 1 : 0);
+            }
         }
 
         // 保存当前 alpha 用于下次 EWMA 衰减

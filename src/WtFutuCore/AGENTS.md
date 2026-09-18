@@ -4454,3 +4454,86 @@ ZOMBIE → 闩锁**续期重置计时**，停报时长无上界；影子簿 `rea
 - **已知小瑕疵（已修，待生效）**：KPI 行在结窗后打印，最初版本报的是空窗口 `p99=0.0us`；已改为报"最近已结窗"读数 + 样本数 `n=../..`。该修正版 lib `3e12ea37` 已静默落盘（备份 `.bak_20260917_p2c`），**由 08:40 cron 重启时生效**（不在盘中再重启）。
 
 **待观察（次日起）**：① `[PERF] kpi` 行每 5min 出现且 `n` 随行情量级合理；② `crit_ep` 只在真实劣化窗口增长；③ `reallag` 逐日累计 ≈ 原 divergence 量级（50–90/日）而 `COST_BASIS_STALE` 归零；④ 日亏熔断的不可逆路径未被误伤（需在有 NET 漂移的交易日复核）。
+
+### 18. P0 修复方案：轮询线程事件化 + 热路径日志闸门（2026-09-18 夜盘，用户"先修复 P0"）
+
+**背景实测（2026-09-17 22:26 / 09-18 22:26 两次采样，同一结论）**
+- 进程总 CPU ≈ **1.15 核常驻**，其中 user 434s / **sys 1636s（79% 内核态）**；
+  单线程 tid 821479 = **5352 CPU-秒 / 6368s 墙钟 ≈ 84% 核**，另有一线程 ≈9.2%（疑框架 ShareManager 轮询）。
+- 代码级定位：`arb/AsyncArbitrageExecutor.cpp:223-243` 空闲环 = `while(!_tick_available)` 内
+  **1000×`_mm_pause()` + 1000×`std::this_thread::yield()` + `sleep_for(50µs)`** 循环；
+  `yield()` 是 `sched_yield` 系统调用 ⇒ 约 2 万次/秒系统调用，解释"84% 核 + 80% 内核态"。
+  线上 `useAsyncArbThread: true`，该线程常驻。
+- 日志实测（09-17 单日）：Runner 342,544 行 / 47MB，debug 占 86.6%；热路径
+  `[QUOTE]` 87.5k + `[STICKY]` 74.7k + `[REQUOTE]` 7.4k + `[SIGNAL_DECOMP]` 1.8k + `[TOXIC]` 1.8k ≈ **166k 行/日**
+  （每行 fmt::format 10+ 字段并同步落盘）。
+
+#### 18.1 P0-A 套利线程空闲等待事件化（策略层）
+
+- 文件：`arb/AsyncArbitrageExecutor.h/.cpp`。
+- 新增 `AsyncArbConfig::wait_mode`（0=事件驱动 **默认**，1=保留原自适应自旋），配置键
+  `spreadArbitrage.arbWaitMode: event|spin`（缺省 event）。
+- 事件驱动实现：`std::mutex _wait_mtx + std::condition_variable _wait_cv`；
+  `pushTick()` 与 `stop()` 在置位后 `notify_one()`；线程在 `_tick_available==false` 时
+  `wait_for(min(距下次 signal_interval_us, max_wait_us))`，谓词 = tick 到 / stop。
+  语义不变：唤醒后仍 `popAll` 处理全部待处理 tick，并按 `ticks_per_signal / signal_interval_us`
+  判定是否生成信号（时间轴节拍仍在 ±100µs 内，原自旋为 ±50µs）。
+- 预期：该线程 84% → <1% 核；进程 1.15 核 → ~0.25 核；同时减少与行情线程的调度争抢
+  （对实测 1.0–1.8ms 的窗口 p99 有正面作用）。
+- 回退：`arbWaitMode: spin` 一键恢复旧行为。
+
+#### 18.2 P0-B 热路径日志闸门（策略层）
+
+- 新增 `HotLogGate.h`（header-only，静态原子开关 + thread_local 采样计数 + emitted/skipped 统计）：
+  默认 `enabled=true, sampleEvery=10`；配置键 `logging.hotQuoteEnabled` / `logging.hotQuoteSampleEvery`。
+- 门控 5 个热路径调用点：`SpreadOptimizer.cpp:215 [QUOTE]`、`FutuQuoter.cpp:356 [STICKY]`、
+  `StrategyCoordinator.cpp:1073 [TOXIC]`、`StrategyCoordinator.cpp:1646 [REQUOTE]`、
+  `signals/SignalAggregator.h:651 [SIGNAL_DECOMP]`（`if (HotLogGate::hit()) { WTSLogger::debug(...); }`）。
+- 5min 巡检 KPI 行追加 `hotlog=<emitted>/<skipped>`；KPI 行其余字段不变。
+- 预期：策略侧热日志 166k → ~17k 行/日；Runner 日志总量 342k → ~190k 行/日。
+- 语义：仅决定"是否落日志"，不改变任何交易/风控行为。
+
+#### 18.3 明确不在本轮范围（需你授权或属运维决策）
+
+- 框架 `ShareManager` 轮询（≈9.2% 核，`start_watching(microsecs)`）——框架层，需明示授权。
+- 插件侧 `trader` 模块日志（`Order notified` 75k 行/日）：可由 `logcfg.yaml` 的
+  `trader.level: debug → info` 零代码过滤，但会失去逐单回报诊断，属运维取舍。
+
+**验证门控**：TestUnits 全量零回归（186 项基线）+ v5 BT 冒烟（trades/资金带内、HALT/ZOMBIE=0）→
+Release 构建 → 线上备份并重启 → 实测门控：① 该线程 CPU 占比 <1%（`/proc/<tid>/stat`）②
+进程总 CPU <0.4 核 ③ `[PERF] kpi` 行出现 `hotlog=..` ④ Runner 日志行数/小时显著下降 ⑤
+报价与套利功能面无异常（cov、报单数、成交数、`useAsyncArbThread` 路径的 arb 信号仍产生）。
+
+#### 18.4 实施记录（2026-09-18 夜盘 22:41 部署，实测达标）
+
+**改动清单（全部策略层）**
+
+| 文件 | 改动 |
+|---|---|
+| `arb/AsyncArbitrageExecutor.h/.cpp` | P0-A：`AsyncArbConfig::wait_mode`（`WAIT_EVENT` 默认 / `WAIT_SPIN` 保留旧环）；新增 `_wait_mtx/_wait_cv`；`pushTick()`/`stop()` 置位后 `notify_one/all()`；空闲等待改 `wait_for(min(距 signal_interval, max_wait_us))` 谓词等待；原自旋环整段保留在 `WAIT_SPIN` 分支 |
+| `HotLogGate.h`（新增，header-only） | P0-B：静态原子开关 + thread_local 采样 + emitted/skipped 统计 |
+| `SpreadOptimizer.cpp` / `FutuQuoter.cpp` / `StrategyCoordinator.cpp` / `signals/SignalAggregator.h` | 5 处热路径日志点包 `if (futu::HotLogGate::hit())`：`[QUOTE]`/`[STICKY]`/`[REQUOTE]`/`[TOXIC]`/`[SIGNAL_DECOMP]` |
+| `UftFutuMmStrategy.h` / `FutuConfigLoader.cpp` / `FutuModuleAssembler.cpp` | 配置键 `logging.hotQuoteEnabled`（默认 true）/`logging.hotQuoteSampleEvery`（默认 10）→ `HotLogGate::configure()`，启动打印生效值 |
+| `StrategyCoordinator.cpp` | 5min KPI 行追加 `hotlog=<emitted>/<skipped>` |
+| `src/TestUnits/test_futu_hotlog_gate.cpp`（新增） | 4 用例：关=全不落且计数 skipped；开=严格 1/10；sampleEvery=1 全通过；0 视作 1 |
+
+**偏差说明**：① 计划中的 `spreadArbitrage.arbWaitMode` 配置键未接线 —— 现有
+`createAsyncArbitrageExecutor()` 不消费任何 yaml 键（全部为编译期默认），为避免再增 4 处
+配置管道，改为代码默认 `WAIT_EVENT`，回退 = 把 `wait_mode` 默认值改回 `WAIT_SPIN`（一行）。
+② P0-B 采用"闸门 + 采样"而非"改日志级别"：保持 logcfg 不动、可运行时 configure、且不丢审计链。
+
+**验证**
+- TestUnits：**190 项 / 188 通过**（基线 186 + 新增 4；2 项为既有环境性失败）。
+- v5 BT 冒烟：`EXIT=0`、trades 416 行（基线带内）、资金收敛、HALT/ZOMBIE=0；
+  热日志采样精度实测（同一次回测）：`[QUOTE]` 222,440 → **22,089（10.07×）**、
+  `[STICKY]` 186,614 → 18,773（9.94×）、`[SIGNAL_DECOMP]` 8,073 → 875（9.2×，叠加既有 1/50）。
+- 线上实测（22:41:43 重启，PID 849864，lib `9ba83458`）：
+  - **CPU：进程 115% 核 → 16.9% 核（约 7× 降）**；原先 84% 核的满核线程消失，
+    剩余最高线程 ≈11.9% 核（syscall 采样 159/200 为 `clock_nanosleep` = 框架侧 sleep 轮询，
+    属 §18.3 需授权范围）。
+  - **日志：845 行/分 → 约 399 行/分**；`hotlog=233/2106`（= 严格 1/10 采样，KPI 行实测）。
+  - **尾延迟同步改善**：窗口 `t2q_p99=264.3us / fc_p99=292.0us`、`crit_ep=0/0`
+    （P2 改造后可比口径；修复前同类窗口曾达 1.0–1.8ms）。
+  - 功能面无异常：报单 377 次、成交 6 笔、台账 `unmatched=0`、HALT/ZOMBIE/平今拒单 = 0。
+- **已知显示瑕疵（已修，待生效）**：KPI 行 `n=../..us` 多一个 `us`（Formatting only），
+  修正版随下次重启生效（下一窗口 = 周一 08:40 cron；周五夜盘后无交易时段，不做额外重启）。

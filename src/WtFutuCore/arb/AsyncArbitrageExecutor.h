@@ -27,6 +27,8 @@
 
 #include <thread>
 #include <atomic>
+#include <mutex>               // F-core P0-A: 事件驱动等待
+#include <condition_variable>  // F-core P0-A
 #include <functional>
 #include <memory>
 #include <cstring>
@@ -125,11 +127,22 @@ struct ArbPositionSync
 
 struct AsyncArbConfig
 {
+    /// F-core P0-A(2026-09-18): 空闲等待模式
+    ///   EVENT(0, 默认) = 条件变量事件驱动 —— 空闲近零 CPU
+    ///   SPIN(1)        = 旧自适应自旋 (1000×pause + 1000×sched_yield + 50us sleep)
+    ///                    实测该环占满 1 核且 80% 为内核态 (sched_yield 约 2 万次/秒)
+    enum WaitMode : uint32_t
+    {
+        WAIT_EVENT = 0,
+        WAIT_SPIN = 1
+    };
+
     uint32_t tick_queue_size;        ///< Tick queue size (power of 2)
     uint32_t order_queue_size;       ///< Order queue size (power of 2)
     uint32_t signal_interval_us;     ///< Signal generation interval (microseconds)
     uint32_t max_wait_us;            ///< Max wait time for condition variable (microseconds)
     uint32_t ticks_per_signal;       ///< Generate signal every N ticks
+    uint32_t wait_mode;              ///< F-core P0-A: 0=EVENT(默认) 1=SPIN(旧行为)
     std::atomic<bool> enabled{true}; ///< atomic — arb线程读, 主线程写(setConfig)
 
     AsyncArbConfig()
@@ -138,13 +151,16 @@ struct AsyncArbConfig
           max_wait_us(10000) // 10ms 最大等待
           ,
           ticks_per_signal(5) // 每5个tick检查一次信号
+          ,
+          wait_mode(WAIT_EVENT) // F-core P0-A: 默认事件驱动
     {}
 
     // copy/move需特殊处理atomic字段
     AsyncArbConfig(const AsyncArbConfig& other)
         : tick_queue_size(other.tick_queue_size), order_queue_size(other.order_queue_size),
           signal_interval_us(other.signal_interval_us), max_wait_us(other.max_wait_us),
-          ticks_per_signal(other.ticks_per_signal), enabled(other.enabled.load())
+          ticks_per_signal(other.ticks_per_signal), wait_mode(other.wait_mode),
+          enabled(other.enabled.load())
     {}
 
     AsyncArbConfig& operator=(const AsyncArbConfig& other)
@@ -154,6 +170,7 @@ struct AsyncArbConfig
         signal_interval_us = other.signal_interval_us;
         max_wait_us = other.max_wait_us;
         ticks_per_signal = other.ticks_per_signal;
+        wait_mode = other.wait_mode;
         enabled.store(other.enabled.load());
         return *this;
     }
@@ -382,6 +399,12 @@ private:
 
     // Flag for tick notification
     std::atomic<bool> _tick_available;
+
+    // F-core P0-A(2026-09-18): 事件驱动等待原语 (wait_mode=EVENT 时使用)
+    //   与 _tick_available 配合: 置位后 notify_one() 唤醒 arb 线程;
+    //   谓词仍以 _tick_available/_stop_requested 为准 (避免丢唤醒)。
+    std::mutex _wait_mtx;
+    std::condition_variable _wait_cv;
 
     //==========================================================================
     // State (for arb thread)

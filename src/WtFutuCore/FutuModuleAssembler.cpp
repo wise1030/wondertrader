@@ -26,6 +26,7 @@
 #include "TscClock.h"
 #include "SpreadArbitrageManager.h"
 #include "FutuComponentFactory.h"
+#include "HotLogGate.h" // F-core P0-B: 热路径日志闸门
 #include "SelfTradePrevention.h"
 #include "OrderRouter.h"
 #include "StrategyCoordinator.h"
@@ -113,6 +114,13 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         coord_cfg.perf_alert_throttle_ms = _config.perf.alert_throttle_ms;
         _coordinator->setConfig(coord_cfg);
     }
+
+    // F-core P0-B(2026-09-18): 热路径日志闸门配置注入 (默认 true + 1/10 采样)
+    //   仅决定热路径 debug 日志是否落盘, 不改变交易/风控语义。
+    HotLogGate::configure(_config.logging.hot_quote_enabled, _config.logging.hot_quote_sample_every);
+    WTSLogger::info("HotLogGate: enabled={}, sampleEvery={} (hot path logs: QUOTE/STICKY/REQUOTE/TOXIC/SIGNAL_DECOMP)",
+                    _config.logging.hot_quote_enabled,
+                    _config.logging.hot_quote_sample_every);
 
     // V10-R9: 实盘注入 live 墙钟 —— 会话门 (isOrderSubmissionAllowed) 用本地墙钟,
     // 休市期 ctx tick 时间冻结会把整个休市窗口判为可交易; 回测保持 tick 钟复现。

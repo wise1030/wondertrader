@@ -447,7 +447,7 @@ std::string PerformanceMonitor::formatKpi() const
     // F-core P2: 报"最近已结窗"的读数 (结窗即清空窗口, 实时窗口恒为空)
     oss << "t2q_p99=" << (_last_win_p99_ns[0] / 1000.0) << "us fc_p99=" << (_last_win_p99_ns[1] / 1000.0)
         << "us n=" << _last_win_count[0] << "/" << _last_win_count[1]
-        << "us crit_ep=" << _crit_episodes[0] << "/" << _crit_episodes[1]
+        << " crit_ep=" << _crit_episodes[0] << "/" << _crit_episodes[1]
         << " warn_ep=" << _warn_episodes[0] << "/" << _warn_episodes[1]
         << " max_p99=" << (_max_p99_ns[0] / 1000.0) << "/" << (_max_p99_ns[1] / 1000.0) << "us";
     return oss.str();

@@ -6,6 +6,7 @@
 #include "OrderApiGuard.h"
 #include "UnifiedOrderTracker.h"
 #include "BilateralQuoteStats.h"
+#include "HotLogGate.h" // F-core P0-B: 热路径日志闸门
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
 #include <cstring>
@@ -353,10 +354,13 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
     bool bid_cancel_only = (qr.bidQty == 0) && bid_level.hasOrders();
     bool ask_cancel_only = (qr.askQty == 0) && ask_level.hasOrders();
     if (!bid_need && !ask_need && !bid_cancel_only && !ask_cancel_only) {
-        WTSLogger::debug("[STICKY] {} skip requote (bid={} ask={} within threshold, depth ok)",
-                         _cfg.code,
-                         bid_level.price,
-                         ask_level.price);
+        // F-core P0-B(2026-09-18): 热路径日志闸门 (默认 1/10 采样; 原每 tick 一行 ≈74.7k 行/日)
+        if (futu::HotLogGate::hit()) {
+            WTSLogger::debug("[STICKY] {} skip requote (bid={} ask={} within threshold, depth ok)",
+                             _cfg.code,
+                             bid_level.price,
+                             ask_level.price);
+        }
         return 0;
     }
 

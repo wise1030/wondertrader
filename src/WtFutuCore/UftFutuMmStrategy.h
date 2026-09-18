@@ -203,6 +203,16 @@ struct FutuMmConfig
         {}
     } perf;
 
+    // F-core P0-B(2026-09-18): 热路径日志闸门配置 (config.yaml 的 logging 段)
+    //   热路径 [QUOTE]/[STICKY]/[REQUOTE]/[TOXIC]/[SIGNAL_DECOMP] 默认 1/10 采样,
+    //   仅决定是否落日志, 不改变交易语义。
+    struct Logging
+    {
+        bool hot_quote_enabled;
+        uint32_t hot_quote_sample_every;
+        Logging() : hot_quote_enabled(true), hot_quote_sample_every(10) {}
+    } logging;
+
     struct Modules
     {
         bool use_spread_optimizer;

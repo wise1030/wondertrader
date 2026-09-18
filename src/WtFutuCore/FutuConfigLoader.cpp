@@ -199,6 +199,18 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     }
 
     //------------------------------------------------------------
+    // F-core P0-B(2026-09-18): 热路径日志闸门 (logging 段)
+    //   背景: 2026-09-17 单日 Runner 日志 342,544 行 / 47MB, debug 占 86.6%,
+    //   热路径 [QUOTE]/[STICKY]/[REQUOTE]/[TOXIC]/[SIGNAL_DECOMP] ≈166k 行/日。
+    //   默认 enabled=true + sampleEvery=10 (保留 1/10 样本); 仅影响日志, 不影响交易语义。
+    //------------------------------------------------------------
+    if (WTSVariant* cfgLogging = cfg->get("logging"))
+    {
+        _config.logging.hot_quote_enabled = readBool(cfgLogging, "hotQuoteEnabled", true);
+        _config.logging.hot_quote_sample_every = readUInt32(cfgLogging, "hotQuoteSampleEvery", 10);
+    }
+
+    //------------------------------------------------------------
     // 注意：以下模块参数已移至独立配置文件:
     //   - SpreadArbitrage -> spread_arbitrage.yaml
     //   - SelfTradePrevention -> coordinator.yaml modules

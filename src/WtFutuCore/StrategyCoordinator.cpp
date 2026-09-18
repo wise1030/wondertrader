@@ -43,6 +43,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "HotLogGate.h" // F-core P0-B: 热路径日志闸门
+
 namespace futu
 {
 
@@ -673,9 +675,11 @@ ProcessingResult StrategyCoordinator::processTick(
         // F-core P2(2026-09-17): 5min 健康巡检行 —— 窗口 p99 + 超限 EPISODE 计数 + 影子簿 realized 滞后计数
         if (tc.timestamp - _last_kpi_ms >= 300000) {
             uint64_t reallag = _portfolio ? _portfolio->getRealizedLagEvents() : 0;
-            WTSLogger::info("[PERF] kpi {} reallag={}",
+            WTSLogger::info("[PERF] kpi {} reallag={} hotlog={}/{}",
                             _perf_monitor->formatKpi(),
-                            reallag >= _last_reallag ? (reallag - _last_reallag) : reallag);
+                            reallag >= _last_reallag ? (reallag - _last_reallag) : reallag,
+                            HotLogGate::emitted(),
+                            HotLogGate::skipped());
             _last_reallag = reallag;
             _last_kpi_ms = tc.timestamp;
         }
@@ -1070,11 +1074,14 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
         // 每tick输出毒性分数（debug级别）— 降采样: 每 50 tick 一次,
         // 热路径上避免每 tick fmt 格式化开销
         if ((_tick_count % 50) == 0) {
-            WTSLogger::debug("[TOXIC] {} score={:.4f} vpin={:.4f} is_toxic={}",
-                             tc.code,
-                             tox.toxic_score,
-                             tox.predictive_toxicity,
-                             tox.is_toxic);
+            // F-core P0-B(2026-09-18): 热日志闸门 (与既有 1/50 降采样叠加)
+            if (futu::HotLogGate::hit()) {
+                WTSLogger::debug("[TOXIC] {} score={:.4f} vpin={:.4f} is_toxic={}",
+                                 tc.code,
+                                 tox.toxic_score,
+                                 tox.predictive_toxicity,
+                                 tox.is_toxic);
+            }
         }
 
         if (tox.is_toxic)
@@ -1643,7 +1650,9 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
         }
     }
 
-    WTSLogger::debug("[REQUOTE] {} fill eroded obligation depth (bid_valid={} ask_valid={}), "
+    // F-core P0-B(2026-09-18): 热路径日志闸门 (默认 1/10 采样; 原 ≈7.4k 行/日)
+    if (futu::HotLogGate::hit()) {
+        WTSLogger::debug("[REQUOTE] {} fill eroded obligation depth (bid_valid={} ask_valid={}), "
                      "re-quoting: fresh mid={:.2f} (cached={:.2f}) delta={:.2f} -> bid={:.2f} ask={:.2f}, "
                      "retreat bidActive={}/bidApplied={} askActive={}/askApplied={}, "
                      "util L={:.2f}/S={:.2f} hardB={}/hardA={}",
@@ -1663,6 +1672,7 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
                      decision.strategy.short_delta_util,
                      decision.strategy.block_add_long,
                      decision.strategy.block_add_short);
+    }
 
     // V8-R6/P2-6: best_bid/ask 用最新盘口刷新 (缓存值来自上一 quote tick, 成交后
     // 盘口已动 —— 对手价保护/价格保护基于陈旧 best 会错位)。upper/lower 保留缓存:
