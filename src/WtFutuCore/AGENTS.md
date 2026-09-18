@@ -940,6 +940,10 @@ _cb_mtx 的写者）；_closeout_state 当前全部读写点在持 _cb_mtx 回�
      重计算，写中重试复杂度高。默认不做，留性能轮评估。
 
 3. **WS-C TradingState 单写者收敛（启用既有 C10 EventDispatcher 计划）**
+   > **⚠️ 2026-09-19 裁决 A1：由 §19 P1-6 承接**（用户裁定 P1-6 取代本项）。
+   > 本条的既定收敛（"15 写点/6 类 → 1 集中写者"）与"低频处置类事件投递 + SPSC ring +
+   > tick 域唯一写者、恢复类保留直写白名单"两条款**整体并入 §19.3 P1-6 阶段 1**；
+   > 不再按本条目单独实施，避免两套所有权模型并存。原文保留为设计参考。
    - 低频处置类转移（closeout 进入、zombie halt、MARKET/TOXICITY 进入等）
      改为事件投递 → SPSC ring → tick 线程唯一 TradingStateWriter 执行 CAS 转移。
    - 恢复类语义敏感转移（resumeFromRisk/unblock 系列）保留原线程内 CAS 直写白名单。
@@ -4537,3 +4541,210 @@ Release 构建 → 线上备份并重启 → 实测门控：① 该线程 CPU �
   - 功能面无异常：报单 377 次、成交 6 笔、台账 `unmatched=0`、HALT/ZOMBIE/平今拒单 = 0。
 - **已知显示瑕疵（已修，待生效）**：KPI 行 `n=../..us` 多一个 `us`（Formatting only），
   修正版随下次重启生效（下一窗口 = 周一 08:40 cron；周五夜盘后无交易时段，不做额外重启）。
+
+### 19. 方案：P1-4 配置单一来源 + P1-6 风控与清算收敛（2026-09-18 评审后修订，**待用户确认，未实施**）
+
+本方案由用户评审后修订定稿（评审意见：方向正确、事实底座基本准确，需补 4 个设计缺口 + 2 条执行约束）。
+**编码人日与观察窗分开计**；**未确认前不得改代码**。
+
+#### 19.1 事实底座（实测，作为迁移勾选清单）
+
+**状态分散现状（引用数 / 其中 .cpp 实际调用 / 头文件声明注释）**
+
+| API | 总引用 | .cpp 调用 |
+|---|---|---|
+| `isTradingHalted` | 16 | 14 |
+| `isOrderSubmissionAllowed` | 7 | 5 |
+| `isZombieHalted` | 4 | 2 |
+| `isQuotingPaused` | 3 | 1 |
+| `isCloseoutTriggered` | 6 | 5 |
+| `canRecover` | 8 | 5 |
+| `setQuotingPhase` | 20 | 16 |
+
+> 措辞修正（评审指出）：上表为"引用/调用点"计数，非"门禁读点"；阶段 2 勾选清单以 .cpp 调用列为准。
+
+**状态持有者**：`FutuRiskMonitor`（`_trading_halted/_quoting_paused/_long_blocked/_short_blocked/_zombie_halts/
+_halt_category/_halt_since` + closeout 子态）、`TradingState`（`phase/qphase/long_blocked/short_blocked`，
+其中 long/short block 与 RiskMonitor **重复**）、`StrategyCoordinator`（`_halt_quoting_state`、`_zombie_latch_*`）、
+`FutuQuoter`/`RiskCoordinator`（side_pause、RiskVerdict、`_rate_breach_since_ms`）。
+**清算状态三处存放**：`CloseoutTrigger` FSM、`CloseoutExecutor::_phase`、`FutuRiskMonitor::_closeout_state`
+（`CloseoutSub` 枚举定义在 FutuRiskMonitor.h:182）。
+
+**配置现状**：`config.yaml` 68 键（FutuConfigLoader）+ `coordinator.yaml` 30 键（StrategyCoordinator::loadConfig）；
+两结构靠 FutuModuleAssembler **19 行手写桥**连接；`coordinator.yaml` 被 7 个文件触及，`hotparams.yaml` 5 个，
+`spread_arbitrage.yaml` 5 个；实证缺陷：`alertThrottleMs` 需 5 处编辑、"注入后无逻辑读取"至少 3 次
+（V8-R3 perf 阈值、A10 `setMinProfitThreshold` 无调用者、本周 `arbWaitMode` 无 yaml 入口）。
+
+#### 19.2 P1-4 配置单一来源（先做，低风险）
+
+**阶段 1：单一内存权威 + 读取审计（编码 ~2 人日）**
+1. 4 个 yaml 仍为来源，但**只允许一个解析入口** `FutuConfigLoader::load()`，产出单一 `FutuSettings`
+   （子结构 `strategy/quoting/risk/arb/logging/perf/signals` + **热参覆盖层**，见 19.5#2）。
+   `StrategyCoordinator` 停止自读 coordinator.yaml；其余读取者（FutuComponentFactory / ISignalCombiner /
+   UftFutuMmStrategy）改为从 `FutuSettings` 取值。
+2. 删除 19 行手写桥，替换为**唯一映射函数** `toCoordinatorConfig(const FutuSettings&)`。
+3. **配置审计三档**（评审约束 2 落实）：
+   - 生产配置：**只统计 + WARN + 白名单**（死键清单见 `CONFIG.md §7`；运行态差异键如远程
+     `enabled:true`、`orderErrorThreshold=1000` 临时值必须白名单）；
+   - fixture（单测）：`unknown == 0` 硬断言；
+   - BT 配置：跳过已归档死键。
+   审计范围必须含 `hotparams.yaml` 与两个路径键（`coordinatorConfig` / `spreadArbitrageConfig`），
+   并对 BT/live 文件缺失容错。
+
+**阶段 2：键所有权与去重（编码 ~2 人日）**
+4. 建键所有权表（写本文档）：`键 | 权威文件 | 消费组件 | 是否热更`；先显式化既有重叠：
+   `max_delta`、`enabled`、`min_profit_threshold_ticks`、arb `signalInterval/maxWait`（当前无 yaml 入口）。
+5. 派生值单向化：`min_profit_threshold_ticks` 改为 executor 实时读 manager（去初始化拷贝）；
+   保留 Quoter→BilateralStats "挂在哪=统到哪"为样板。
+6. 热参注册表化：`FutuHotParamManager::applyAll` 由手写分发改为 `{key, target, setter}` 注册表驱动。
+
+**阶段 3：契约测试（编码 ~1 人日）**
+7. `test_futu_config_contract.cpp`：fixture 全键 → (a) unknown==0、(b) 关键派生关系、(c) `toCoordinatorConfig`
+   逐字段覆盖（防漏桥）。
+8. 门控：TestUnits 全量 + v5 BT 冒烟。**观察窗：2–3 个交易日**（只看配置解析/生效面无行为漂移）。
+
+#### 19.3 P1-6 风控与清算收敛（并行启动阶段 0+1，安全关键）
+
+**开工前置裁决**
+
+- **✅ 裁决 A = A1（2026-09-19 用户裁定）：P1-6 取代 WS-C**。
+  - C10 EventDispatcher 计划**整体并入 P1-6 阶段 1**：低频处置类转移（closeout 进入、zombie halt、
+    MARKET/TOXICITY 进入、以及本方案新增的 halt reason 请求）→ `postCommand` 事件投递 →
+    在 tick 域由唯一 writer 应用；语义敏感的恢复类转移（`resumeFromRisk` / unblock 系列）
+    保留原线程直写白名单。
+  - WS-C 原条目已在上方"去大锁"节标注"由 §19 P1-6 承接"，不再独立实施。
+  - **✅ 裁决 B = 已确认（2026-09-19）：reason 集不引入新锁 + tick 域单写者**（用户确认）。
+  - **⚠️ B 的实现细节修正（本次核验发现，必须记录以免实现走偏）**：既有 C10 产物
+    `EventDispatcher.h` 明确写着 **"synchronous listener, NOT queue bus… A disruptor/queue would be a
+    negative optimization"**，即该 dispatcher **当前是同步直调、仅作信息发布**。因此 B 的正确落地是
+    **两层结构**，而非"把 halt 也塞进队列"：
+    1) **门禁用 reason 位图**：`std::atomic<uint64_t> halt_reason_bits`，
+       写入用 `fetch_or`/`fetch_and`（无锁、多线程安全、读侧一次 atomic load）——
+       这一层**不要求单写者**，也没有队列延迟，符合"不引入新锁"的裁决；
+    2) **低频处置类的元数据**（reason 的 since/ttl_ms/source；即 WS-C 所指 15 写点/6 类）走
+       "SPSC ring → tick 域唯一 writer 应用"，与既有 WS-C 条款一致；
+       **恢复类语义敏感转移**（`resumeFromRisk`/unblock）保持原线程内 CAS 直写白名单。
+    - `EventDispatcher` 保持同步信息发布角色；**热路径不得引入队列往返**（否则违背本仓
+      "同步 tick-to-quote 是延迟优势来源"的既定裁决）。
+  - **影子双写必须走同一通道**（bits 用 fetch_or/fetch_and，元数据走 ring），否则影子层自身即竞态；
+    影子不一致计数入 5min KPI。
+
+**阶段 0：状态清单化（0.5 人日，纯文档）**
+9. 建表：`状态项 | 权威组件 | 写入者 | 读取者 | 恢复条件 | 可逆性`（预计 12–15 项、约 40 个读写点）。
+
+**阶段 1：单一 halt 权威 + 理由集（编码 ~3 人日，行为零变更）**
+10. `TradingState` 扩展为唯一权威：`requestHalt(HaltReason, RiskCategory, ttl_ms, source)` /
+    `clearHalt(HaltReason)`；`isOrderSubmissionAllowed()` = 既有 `canQuote()` ∧ reasons 求值。
+11. **reason 集优先级/聚合语义（本文档新增第 1 条补充）**：不可逆 > 可逆；全局 > 合约级；
+    `CLOSEOUT 豁免 REVERSIBLE halt` 只在此处表达一次——这是收敛的核心收益点。
+12. 所有既有写入者**双写**（旧 API 保持行为 + 新 reason 集），影子期 **≥3 个交易日且不一致 = 0** 才进入阶段 2。
+13. **影子观测方式（新增第 2 条补充）**：不一致以 **5min KPI 计数**输出（沿用 `[PERF] kpi` 行模式），
+    **不得逐事件打日志**（否则会重新抬升本周 P0 刚压下去的内核态与日志量）。
+14. `long_blocked/short_blocked` 统一到 TradingState，RiskMonitor 改为视图 getter。
+
+**阶段 2：读取侧切换（编码 ~2 人日）**
+15. 门禁读点按 19.1 调用清单逐点切换到只读 `TradingState`；`FutuRiskMonitor::isTradingHalted()` 保留为委托
+    并标 deprecated。每点独立提交 + v5 冒烟 + 一夜观察（影子不一致必须为 0）。
+
+**阶段 3：清算收敛（编码 ~3 人日）**
+16. 唯一职责链与唯一状态：`CloseoutTrigger`（唯一 FSM/sub-state owner）→ `CloseoutOrchestrator`（驱动+对账）
+    → `CloseoutExecutor`（执行并回报结果，**不再自持 `_phase`**）；RiskMonitor 的 `isCloseoutTriggered`
+    改为投影。
+17. **会话清态改 session begin（评审缺口 2）**：`is_night_closeout / night_closeout_done` 并入 Trigger 后
+    **必须由 `FutuRuntimeOps::onSessionBegin`（已调 resetDaily/resetDailyPnl/_closeout_orch.resetSession/
+    coordinator.resetSession）清理**；严禁依赖 `on_session_end`（已知外部限制：生产不触发，
+    WtUftTicker.cpp:183）。同理，收盘 flush/清态只能由 **section-break 或 closeout COMPLETED** 驱动。
+18. **锁域继承（评审缺口 4）**：closeout 子态当前受 `_halt_domain_lock`（RecursiveSpinLock）保护，
+    `getCloseoutSubInfo()` 锁内按值返回是 R6-a 的防撕裂契约。迁移时二选一：**沿用同一把叶子锁（传递引用）**
+    或"域状态单一 owner + 其余投影"；**禁止新建第二把锁后再交叉调用**（`Trigger.onTick → RiskMonitor.*`
+    与反向调用构成 AB-BA 死锁风险）。
+19. **前置回归**：R8-c 用例（`is_trading_session` 时序 + FAK 保底触价 + 停滞带）与 09-16 Z1+Z3 的
+    13:30 小节边界酸测风格死锁回归必须纳入阶段 3 门控；安全关键路径**一夜观察不足**，影子期按历史事故经验
+    需数日才显形。
+
+**阶段 4：删旧标志 + 表驱动测试（编码 ~2 人日）**
+20. 删除 RiskMonitor `_trading_halted/_quoting_paused` 与重复 block 标志（`_zombie_halts` 保留为合约级理由）。
+21. `test_futu_halt_reasons.cpp`：每个 `HaltReason` × {触发/恢复/不可逆/收盘豁免} 断言唯一权威状态与门禁一致
+    （沿用 CloseFreezeLedger 9 用例风格）。
+
+#### 19.4 TTL 语义表（评审缺口 3 落实，必须与实现同批落测）
+
+| 场景 | 现状行为 | 引入 `ttl_ms` 后 |
+|---|---|---|
+| `ttl_ms == 0` | — | **永久**（等同现有全部 halt） |
+| `ttl_ms > 0` 到期 | 无此能力 | 自动清 reason，**不消耗** recovery budget，不动 `canRecover` 计数 |
+| IRREVERSIBLE | 永久（仅 `autoClearIrreversibleOnReset`，生产 false） | **忽略 TTL**，语义不变 |
+| REVERSIBLE | `canRecover` + `max_recovery_count=3/session` + cooldown 30s | 不变；TTL 到期与 canRecover 是两条独立路径，不得互相消耗 |
+| ERROR 相位 | D1 后单轨自探（`handleQuotingAutoResume`），不消耗 recovery budget | **不进 reason 集**，保持单轨 |
+| 影子比较口径 | — | **只比 reason 集**，不比恢复决策/相位（避免语义漂移产生假不一致） |
+
+#### 19.5 执行约束（评审约束 1/2 + 第 3 条补充）
+
+1. **冻结 none 切换**：P1-6 阶段 1–2 期间**不得**将 `FUTU_CB_LOCK_BIG` 切 0（宏默认 1，
+   UftFutuMmStrategy.cpp:72-78；硬阻断项清单见 PerformanceMonitor.h:37/88、SelfTradeCalibrator.h:246、
+   UftFutuMmStrategy.h:450）。精确边界：WS-A 已合入 ⇒ halt/closeout 域自身安全，阻塞项 = **新增 reason 集未加锁
+   + WS-B/C/D/E 未完成**；若必须切，先完成裁决 A/B 与 reason 集加锁。
+2. **审计假阳性**：见 19.2 阶段 1 的三档口径；`FutuSettings` 必须显式建"静态层 + 热参覆盖层"，
+   并**复用**既有 `FutuHotParamManager.h:163` 的启动期漂移摘要，不重建。
+3. **审计覆盖与容错**：audit 覆盖 `hotparams.yaml` 与 `coordinatorConfig`/`spreadArbitrageConfig` 路径键，
+   BT/live 文件缺失不报错只记账。
+
+#### 19.6 工作量与节奏（编码人日 + 观察窗分开报）
+
+| 批次 | 编码 | 观察窗 | 交付 |
+|---|---|---|---|
+| P1-4 阶段 1 | 2 人日 | — | 单入口 + 审计（可独立交付价值） |
+| P1-4 阶段 2+3 | 3 人日 | 2–3 交易日 | 键所有权 + 契约测试 |
+| P1-6 裁决 A/B + 阶段 0 | 0.5 人日 | — | WS-C 裁决、锁方案、状态清单 |
+| P1-6 阶段 1 | 3 人日 | **≥3 交易日影子窗** | reason 集双写 + KPI 影子计数 |
+| P1-6 阶段 2 | 2 人日 | ≥1 交易日/读点批次 | 门禁切换 |
+| P1-6 阶段 3 | 3 人日 | ≥3 交易日（含 R8-c + 13:30 酸测回归） | 清算单状态 |
+| P1-6 阶段 4 | 2 人日 | ≥1 交易日 | 删旧标志 + 表驱动测试 |
+
+**墙钟合计 4–6 周**（编码 ~15.5 人日 + 观察窗为主）。
+
+#### 19.7 明确不做
+
+- 不拆类/不拆文件（R4b 裁决兼容，AGENTS:655）；只收敛状态归属与配置读取点。
+- 不改 delta/position 语义边界（§2）；不改检测内核/阈值/响应语义。
+- 不合并 yaml 文件、不引入外部配置框架。
+- P1-6 阶段 3 前不切 none 模式；不做"逐事件日志式"影子观测。
+
+#### 19.8 阶段 0 状态清单（本次先行产出，纯文档；行号=实测位置）
+
+**底座复用**：`EventDispatcher.h` 头部已有 **"15 write points / 6 classes / 2 threads"** 的
+TradingState 转换矩阵（C10 前置审计产物），本清单在其上补全"非 TradingState 的 halt/pause 状态"，
+**不重建**。
+
+| # | 状态项 | 权威持有者 | 写入者（线程） | 读取者（.cpp 调用） | 恢复条件 | 可逆性 |
+|---|---|---|---|---|---|---|
+| 1 | 整体停交易 halt | `FutuRiskMonitor::_trading_halted` + `_halt_category/_halt_since` | RiskCoordinator:248（MdSpi）、FutuRuntimeOps:1046（TdSpi）、RiskMonitor:937（内在） | `isTradingHalted` ×14 | REVERSIBLE：`canRecover`（预算 3/session + cooldown 30s）；IRREVERSIBLE：人工 / `autoClearIrreversibleOnReset`（生产 false） | 可逆+不可逆 |
+| 2 | 报价暂停 | `FutuRiskMonitor::_quoting_paused` | RiskMonitor:937、RiskCoordinator:297/316 | `isQuotingPaused` ×1（RiskCoordinator:362） | `resumeQuoting`（RiskMonitor:662 / FutuRuntimeOps:540 / RiskCoordinator:372） | 可逆 |
+| 3 | 方向软禁 long/short | **双份**：RiskMonitor `_long_blocked/_short_blocked` + TradingState `long_blocked/short_blocked` | RiskMonitor:415-432 及 673-674/703-704；FutuRuntimeOps:378-379 | `isLongBlocked/isShortBlocked`、`canBuy/canSell` | `unblockLong/unblockShort` | 可逆 |
+| 4 | 合约级 zombie 闩锁 | `FutuRiskMonitor::_zombie_halts`（`_zombie_halt_lock` 叶子锁） | StrategyCoordinator:1392 `setZombieHalt` / FutuRuntimeOps:455 `clearZombieHalts` / `retainZombieHalts` | `isZombieHalted` ×2 | zombie 清账 + §18-B2 `maxHoldMs` 封顶 | 可逆（有界） |
+| 5 | 报价相位 `qphase` | `TradingState::qphase`（atomic） | `setQuotingPhase` ×16（MdSpi：RiskCoordinator 相位；TdSpi：FutuRuntimeOps ERROR/RISK_HALTED） | `canQuote/isActive/tryResumeFrom` | NORMAL 直写 / `tryResumeFrom`（显式来源）/ `resumeFromRisk` | 可逆为主 |
+| 6 | 做市相位 `phase`(MmPhase) | `TradingState::phase`（atomic） | `enterCloseout`（CloseoutTrigger.cpp:110、CloseoutOrchestrator.cpp:35） | `isCloseoutActive`、FutuRuntimeOps:367 | closeout COMPLETED 后退出 | 会话内单向 |
+| 7 | 逐合约 HALT 日志态 | `StrategyCoordinator::_halt_quoting_state` | 自身（MdSpi） | 自身（**仅限频日志，非门禁**） | 跟随 halt 释放 | 纯观测 |
+| 8 | zombie 闩锁计时/续期 | `StrategyCoordinator::_zombie_latch_ms/_since_ms/_capped` | 自身（MdSpi） | 自身（遥测/封顶） | 清账后 erase | 纯观测/限流 |
+| 9 | 清算子态 | ★三处：`FutuRiskMonitor::_closeout_state`（`_halt_domain_lock`）+ `CloseoutExecutor::_phase` + `CloseoutTrigger` FSM | CloseoutTrigger/Orchestrator/Executor（TdSpi+MdSpi 混）、`transitionCloseoutSub` | `getCloseoutSubInfo`（锁内按值）、`isCloseoutTriggered` ×5 | COMPLETED / FAILED→重试；**session begin 清**（见 19.3#17） | 会话内单向 |
+| 10 | 速率违约计时 | `RiskCoordinator::_rate_breach_since_ms` | 自身（MdSpi） | 自身 | 违约恢复 | 可逆 |
+| 11 | 会话相位 | `SessionPhaseManager`（CLOSED/CONTINUOUS/SECTION_BREAK/CLOSEOUT_WINDOW） | MdSpi tick | 报价门 | 时间驱动自动迁移 | 可逆 |
+| 12 | 逐边暂停 `side_pause` | `RiskVerdict`（无独立状态，每 tick 重算） | RiskCoordinator 生成 | FutuQuoter.cpp:552 | verdict 消失即恢复 | 每 tick 重算 |
+| 13 | 日亏不可逆标记 | RiskMonitor `_was_loss_triggered` / category | `checkRisk`（MdSpi） | 恢复路径 | 人工 / 日界（`resetDaily`） | 不可逆 |
+
+**收敛映射（阶段 1 起）**：1/2/3/4/5/9/13 → reason 集（位图 + 元数据）；6/11 → 相位/会话门（保留现ownership）；
+7/8/12 → 纯观测或每 tick 重算，**不进 reason 集**。
+
+#### 19.9 状态
+
+**裁决 A、B 均已落定（2026-09-19）；方案整体待用户确认后开工。**
+
+- ✅ **裁决 A = A1**：P1-6 承接 WS-C（C10 计划并入阶段 1）；WS-C 原条目已标注承接。
+- ✅ **裁决 B = 已确认**：reason 集不引入新锁 + tick 域单写者；
+  实现细节按 19.3 的"两层结构"修正（位图 fetch_or/fetch_and 门禁 + 低频元数据走 SPSC ring，
+  热路径禁止队列往返，`EventDispatcher` 保持同步信息发布角色）。
+- ✅ **阶段 0 状态清单已产出**（19.8，纯文档，复用既有 C10 写点矩阵）。
+- ⏳ **待确认（唯一阻塞项）**：方案整体确认 → 即可开工 **P1-4 阶段 1**（配置单入口 + 审计，2 人日）。
+
+每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
+代码改动前本方案须保持"已确认"状态。
