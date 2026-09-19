@@ -8,6 +8,11 @@
 > - `启动`——进程启动读取一次，改后需重启
 > - `热更`——实盘由 watcher 1Hz 轮询 hotparams.yaml 生效（回测不生效！）
 > - `共享内存`——重启后残留旧值立即生效（见 §4 优先级链）
+>
+> **2026-09-19 更新（P1-4 配置单一来源）**：新增 §9「配置审计与单一来源」；
+> 线上/回测配置的 `read_missing` 与 `unknown` 均已归零（四源：config / coordinator / hotparams / spread_arbitrage）；
+> 键所有权表见 `AGENTS.md §19.12`；本次补录 `logging.*`、`performance.alertThrottleMs`、
+> `zombieLatch.maxHoldMs`、`spread_arbitrage.asyncExecutor.*` 四组新键。
 
 ---
 
@@ -21,6 +26,7 @@
 - [§6 套利配置 spread_arbitrage.yaml](#6-套利配置-spread_arbitrageyaml)
 - [§7 死键清单（配了也不生效）](#7-死键清单)
 - [§8 易错点与排障速查](#8-易错点与排障速查)
+- [§9 配置审计与单一来源（P1-4）](#9-配置审计与单一来源p1-4)
 
 ---
 
@@ -38,6 +44,15 @@ WtBtRunner/WtUftRunner -c <主配置.yaml>
 
 读值语义(V8-R5): FutuConfig::readDouble/readBool 对 键缺失/VT_Null/空串/类型错
   回落默认值; readBool 支持数值型(YAML `1`→true)   (FutuConfig.cpp:16-75)
+
+P1-4(2026-09-19) 增补：
+ ├ **单一插桩点**：全部 readX 均经 `FutuConfig::readDouble/readUInt32/readBool/readString`
+ │    （FutuConfig.cpp），即审计的读取记账点；各文件不再自带本地 readX 副本
+ │    （spread_arbitrage 的局部助手已改走 FutuConfig，`SpreadArbitrageManagerInit.cpp`）
+ ├ **读取审计**：`ConfigAudit`（FutuConfigAudit.cpp）按源展开键路径，启动打印
+ │    `[CONFIG-AUDIT] tag=startup source=… present/read/unknown/read_missing`，见 §9
+ └ **覆盖映射唯一化**：策略层 → 协调器配置的 11 个字段覆盖集中在
+      `FutuConfigMap::applyStrategyOverrides`（FutuConfigMap.cpp；原内联 11 行）
 ```
 
 ---
@@ -185,6 +200,14 @@ WtBtRunner/WtUftRunner -c <主配置.yaml>
 | enabled | bool | false | true | 开关（实际装配仍以 coordinator.usePerformanceMonitor 为准） |
 | logInterval | uint32 | 60000 | 1000(ms) | 输出间隔 |
 | warnThresholdNs / criticalThresholdNs | uint32 | 100000/500000 | 10000/50000 | 分级告警(ns) |
+| **alertThrottleMs** | uint32 | 300000 | 300000 | **P2(2026-09-17)**：同通道 CRITICAL 告警日志限频 ms（原每秒重复打印达 15448 行/日；0=不限频）。判定口径见 §9.3 窗口化说明 |
+
+#### logging 节（P0-B，2026-09-18）
+
+| 键 | 类型 | 示例 | 缺省 | 说明 |
+|---|---|---|---|---|
+| hotQuoteEnabled | bool | true | true | 热路径 debug 日志（`[QUOTE]/[STICKY]/[REQUOTE]/[TOXIC]/[SIGNAL_DECOMP]`）总开关；false=全不落盘 |
+| hotQuoteSampleEvery | uint32 | 10 | 10 | 采样：每 N 次落 1 条（1=全落）。实测 1/10 使策略侧热日志 166k → 17k 行/日；采样精确度已在回测中验证（QUOTE 222,440→22,089） |
 
 ---
 
@@ -309,14 +332,23 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | autoCancel.cancelMaxRetries | 3 | 3 | 最大重试次数，达到→IS_ZOMBIE 升级 |
 | **zombieLatch.reprobeMs** | 45000 | 45000 | **Z3a(2026-09-15)**：闩锁持有超此时长→cancelAll 重探一次（0=禁用；09-15 88min 停报→46s 的关键键） |
 | **zombieLatch.telemetryMs** | 60000 | 60000 | **Z3c**：闩锁持有期遥测打点间隔（0=禁用） |
+| **zombieLatch.maxHoldMs** | 120000 | 120000 | **B2(2026-09-16)**：闩锁持有上限 ms —— 超此值停止 reprobe 风暴 + 一次 `EXCEEDED maxHold` 高优告警，**保持停报**（0=不封顶）。缘起 09-16 14:13 双合约 136s 停报（重探被新 zombie 反复续期、停报时长无上界） |
 | **skewDriver.hrSlowWindowMs** | 300000 | 300000 | **S1**：hedge_ratio 慢化 EMA 窗口（skew driver 纯化，隔离逐 tick 价格噪声） |
 | correlationManager.windowSize/minCorrelation/spreadZThreshold | 100/0.5/2.0 | 同左 | CorrelationManager.h:57-59 |
 
 ---
 
-## 4. 热更新配置 hotparams.yaml（26 参数）
+## 4. 热更新配置 hotparams.yaml（24 个注册参数；文件 26 键）
 
 **唯一的热更文件**（实盘 watcher 1Hz；回测完全不生效）。snake_case 键名。
+
+> **P1-4 阶段 2 增补（2026-09-19）**：
+> - 注册表 `paramNames()`（FutuHotParamManager.h）是**稳态权威**；`applyAll` 末尾新增
+>   **"注册即应用"覆盖自检**——某个已注册参数若在 applyAll 中从未被取用，打 error 级
+>   `[HOTPARAM] param ... registered but NEVER applied`（防"热更静默失效"，与死键同类的反向缺陷）。
+> - 文件里写了但未注册的键 = **死键**（当前 2 个：`delta_skew_threshold`/`delta_skew_factor`，见 §7）。
+> - `min_profit_threshold_ticks` 不在热参表内：其权威是 `spread_arbitrage.yaml`，executor 现在
+>   **实时读 manager**（P1-4 阶段 2 去掉了 assembly 期拷贝），改 yaml + 重启即生效。
 
 ### 4.1 参数总表
 
@@ -424,7 +456,12 @@ crossCheckIssues 五检查项 (:349-444):
 | maxTotalPosition / maxPairs | 组合限制 |
 | minSignalConfidence | **单键双层统一**：Manager 放行闸 + executor 丢弃阈（R3 统一，dist=0.5） |
 | signalCooldownMs | 信号冷却 |
-| minProfitThresholdTicks | 平仓利润阈值(ticks) |
+| minProfitThresholdTicks | 平仓利润阈值(ticks)。**P1-4 阶段 2：唯一权威** —— executor 实时读 `SpreadArbitrageManager::getConfig()`（不再持 assembly 期拷贝）；`setMinProfitThreshold()` 仅作 manager 未接线时的回退 |
+| **asyncExecutor.signalIntervalUs** | **P1-4 阶段 2 新增**：时间轴信号检查间隔 us（缺省 5000） |
+| **asyncExecutor.maxWaitUs** | 空闲等待上限 us（缺省 10000）；事件驱动模式取 `min(距下次时间轴, 本值)` |
+| **asyncExecutor.ticksPerSignal** | 每 N 个 tick 触发一次信号检查（缺省 5） |
+| **asyncExecutor.waitMode** | `event`(默认)/`spin`。**P0-A(2026-09-18)**：event=条件变量事件驱动（空闲近零 CPU）；spin=旧自适应自旋（1000×pause+1000×sched_yield+50µs，实测占满 1 核且 80% 内核态，仅供排障）。**此前该组参数只有编译期默认（"无入口键"），本键组补齐 yaml 入口** |
+| **asyncExecutor.tickQueueSize / orderQueueSize** | 队列容量（2 的幂；缺省 1024/256） |
 | arb_close.enabled | 平仓总开关（**出厂 disabled——回测零覆盖来源**，灰度前需专项验证） |
 | arb_close.allow_signals.* | 允许触发平仓的信号类型 |
 | arb_close.stop_loss_policy.order_flag + timeout_ms | 止损单标记+超时 |
@@ -447,6 +484,10 @@ crossCheckIssues 五检查项 (:349-444):
 
 ## 7. 死键清单（配了也不生效）
 
+> **自动发现（P1-4，2026-09-19）**：启动日志的 `[CONFIG-AUDIT] … unknown=N` 行 + 逐条
+> `UNKNOWN key '…'` WARN 即当前死键/拼错键清单，无需人工维护本节；本节只登记**已裁定为
+> "保留但不生效"**的键（白名单口径，见 §9.2）。
+
 | 键 | 位置 | 状态 |
 |---|---|---|
 | `modules:` 整节 + 根级 `stpMinPriceGap` | 主配置 yaml | **零读取**——开关/毒性/STP 权威全在 coordinator.yaml（V8-R6 起） |
@@ -455,6 +496,11 @@ crossCheckIssues 五检查项 (:349-444):
 | useHedging（注释提及） | coordinator 根级 | 代码无读取点（Assembler coordBool 仅根级 Hedging 有） |
 | _ec_5d 内嵌 modules.toxicityDetector.adverseThreshold=0.14/vpinThreshold=0.07 | _ec_5d.yaml | **不生效**！实际 0.75/0.60 来自 coordinator.yaml——排查毒性阈值勿看错文件 |
 | env.slippage | 主配置(env) | 仅 cta/sel mocker 用，UFT 忽略 |
+| `delta_skew_threshold` / `delta_skew_factor` | hotparams.yaml | **死键（2026-09-19 审计确认）**：不在 `paramNames()` 注册表内 ⇒ 热更不生效；coordinator.yaml:138 注释已记 "R14 已删除 deltaSkewThreshold/deltaSkewFactor 键"。建议从 hotparams.yaml 删除（当前白名单豁免） |
+| `contracts[].alias` | 主配置 | **说明性键**：人工可读别名（ao2611/ao2612），代码无消费点（白名单） |
+| `quoting.maxObligationSpread` / `obligationOnlyL0` / `qtyDecay`；`risk.frequency.flattenThreshold` / `pauseThreshold` | 历史 BT 配置（configbt_v5 旧版 / _ec_5d 系） | **归档死键**：代码已删（config.yaml:112 注释：旧 obligationOnlyL0/alwaysObligation 已从代码移除）；现行键为 `obligationMaxSpreadTicks` / `positionBreach*` / `sameSide*`（白名单） |
+| `spread_arbitrage.arb_close.*` | spread_arbitrage.yaml | **未启用特性的子键**：`arb_close.enabled:false` ⇒ 子键暂无消费（白名单；启用后其键会被正常读取，不受白名单影响） |
+| `spread_arbitrage.statistical.pairsTrading(.entryZThreshold)` | spread_arbitrage.yaml | **休眠子策略**：当前 primaryStrategy=mean_reversion ⇒ pairsTrading 子块不被读取（白名单，同上） |
 
 ## 8. 易错点与排障速查
 
@@ -468,6 +514,49 @@ crossCheckIssues 五检查项 (:349-444):
 | HALT 后不恢复 | IRREVERSIBLE?（daily-loss/arb EMERGENCY）/ maxRecoveryCount 耗尽?/ cooldown 未过?/ D1 后下单错误只走 ERROR 自探恢复（10s×2^n≤60s） |
 | 撤单"消失"但交易所还在 | zombie 升级链（cancelRetryIntervalMs×cancelMaxRetries→IS_ZOMBIE→闩锁+stra_cancel_all fullCode 兜底） |
 | CSV 对比不上昨天 | **不存在逐比特判据**（splitVolume srand(time(NULL))）——用统计带 ±1.5% + 健康度指标 |
+| **"配置写了不生效"/键名拼错** | 看启动 `[CONFIG-AUDIT]` 三行：`unknown=N`（配了无读取点，多为拼错/死键）+ `read_missing=N`（代码读了但文件没配→静默用默认值）。生产口径只告警不阻断；详见 §9 |
+| 热更某个参数没反应 | ① 是回测吗（watcher 不跑）② 看 `[HOTPARAM-DRIFT]`（热参覆盖静态键）③ 看有没有 `[HOTPARAM] param … registered but NEVER applied`（P1-4 新增覆盖自检，error 级） |
+| 套利线程占了 1 个核 | `spread_arbitrage.yaml` 的 `asyncExecutor.waitMode` —— `spin` 是旧自旋环（实测满核 + 80% 内核态）；改回 `event`（默认）即事件驱动、空闲近零 CPU（P0-A） |
+| 延迟告警刷屏 / 看不到真实趋势 | `performance.alertThrottleMs`（默认 300000=5min 限频）；p99 现为"最近一个汇总周期"窗口值，`[PERF] kpi` 行含 `crit_ep/warn_ep/max_p99`（P2） |
+
+---
+
+## 9. 配置审计与单一来源（P1-4，2026-09-19）
+
+### 9.1 四个源与读取入口
+
+| 源文件 | 内容 | 读取入口 | 审计源名 |
+|---|---|---|---|
+| 主配置（configbt_v5.yaml / dist/config.yaml） | 策略身份 + 业务参数（contracts/quoting/risk/portfolio/closeout/performance/logging/monitor/order_control） | `FutuConfigLoader::load` → `FutuMmConfig` | `config.yaml` |
+| coordinator.yaml | 模块开关 + 模块参数（含 signalAggregator/toxicity/autoCancel/zombieLatch/skewDriver） | `StrategyCoordinator::loadConfig`（**唯一解析点**）→ `CoordinatorConfig` | `coordinator.yaml` |
+| hotparams.yaml | 24 个注册热参（稳态权威，覆盖静态键） | `FutuHotParamManager`（共享内存 + watcher） | `hotparams.yaml` |
+| spread_arbitrage.yaml | 套利 pair/风控/子策略 + **asyncExecutor** | `SpreadArbitrageManager::loadConfig` | `spread_arbitrage.yaml` |
+
+规则（**硬性**）：任何新增的 coordinator.yaml 读者必须走 `FutuConfigLoader`（含审计源登记）；
+`StrategyCoordinator::loadConfig` 保持唯一解析点。策略层 → 协调器的字段覆盖集中在
+`FutuConfigMap::applyStrategyOverrides`（11 字段，改动需同步 `test_futu_config_map.cpp`）。
+
+### 9.2 审计口径（三档）
+
+| 场景 | 口径 |
+|---|---|
+| 生产运行 | 每源输出 `present/read/unknown/read_missing` 统计；`unknown` 逐条 WARN；**不阻断启动** |
+| fixture 单测 | `unknown == 0` 硬断言（`test_futu_config_audit.cpp`） |
+| BT 配置 | 同生产口径；归档死键由白名单前缀兜住（BT 夹具键已补齐，四源亦为 0） |
+
+白名单三类（`UftFutuMmStrategy.cpp::registerConfigAuditWhitelist`）：① CONFIG.md §7 死键；
+② 框架/外部拥有键（replayer/data/parsers/traders/basefiles/bspolicy/env/share_domain/notifier/writer）；
+③ 归档死键与文档化可选键（`contracts.alias|multiplier|tickSize`、`delta_skew_*`、休眠子配置）。
+
+**已知审计盲区**：仅在父节点存在时才读取的键（如 `logging.*`、`performance.*` 的部分键）在父节点
+缺失时不会出现在 `read_missing` 中 —— 因此 §2.4 的键表仍是权威清单，本次已把 `logging` 节显式写入两侧配置。
+
+### 9.3 与性能/日志相关的三处口径（顺带记录）
+
+- `performance.alertThrottleMs`：CRITICAL 告警同通道日志限频（默认 5min）；p99 判定样本 = 最近一个 60s 汇总周期（P2 窗口化），EPISODE 计数逐窗口统计。
+- `logging.hotQuote*`：热路径 debug 日志闸门（默认 true + 1/10 采样）。
+- `[PERF] kpi` 行（每 5min）：`t2q_p99/fc_p99/n/crit_ep/warn_ep/max_p99/reallag/hotlog/halt_shadow`
+  —— 其中 `halt_shadow` 为 P1-6 阶段 1 的原因位图影子对比不一致计数（影子期需保持 0）。
 
 ---
 *文档生成：2026-08-24③，基于当时 HEAD 行号锚点；后续提交可能漂移，以方法名检索为准。*

@@ -191,6 +191,11 @@ strategies:
         # ========================================================
         # 下单控制
         # ========================================================
+
+        # F-core P0-B(2026-09-18): 热路径日志闸门 (QUOTE/STICKY/REQUOTE/TOXIC/SIGNAL_DECOMP)
+        logging:
+          hotQuoteEnabled: true      # false=热路径 debug 日志全不落盘
+          hotQuoteSampleEvery: 10    # 采样: 每 N 次落 1 条 (1=全落)
         orderErrorThreshold: 3        # 下单错误熔断阈值
         maxOrders: 32                # 最大同时挂单数
         maxPendingPerSide: 30        # 单侧最大挂单量 (pending超限->撤该侧旧单+跳过本轮; OrderFilter风控)
