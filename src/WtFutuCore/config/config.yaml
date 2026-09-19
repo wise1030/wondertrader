@@ -150,13 +150,11 @@ strategies:
             maxConsecutiveSameSide: 3    # 同侧连续成交触发阈值 (0=禁用)
             sameSideWindowMs: 3000       # 连续计数窗口 (ms)
             sameSidePauseMs: 5000        # 触发后暂停报价时长 (ms)
-          # v7.1: 日界自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产必须 false)
+            # V10-R8-a: ORDER_RATE 持续违规护栏 —— 超频持续超过此毫秒数 -> 单轨 ERROR 暂停报价
+            # + cancelAll + 指数退避自探恢复 (08-28 盘前 44,304 单/分风暴的兜底防线)
             orderRatePauseMs: 3000
+            # v7.1: 日界自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产必须 false)
             autoClearIrreversibleOnReset: false
-          autoClearIrreversibleOnReset: false
-          # V10-R8-a: ORDER_RATE 持续违规护栏 — 超频持续超过此毫秒数 -> 单轨 ERROR 暂停
-          # + cancelAll + 指数退避自探恢复 (08-28 盘前 44,304 单/分风暴的兜底防线)
-          orderRatePauseMs: 3000
 
         # ========================================================
         # 收盘平仓参数 (CloseoutOrchestrator + CloseoutExecutor)

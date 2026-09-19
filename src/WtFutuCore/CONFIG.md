@@ -216,7 +216,7 @@ P1-4(2026-09-19) 增补：
 
 ---
 
-### 2.5 生产配置示例（src/WtFutuCore/config/config.yaml，84 键）
+### 2.5 生产配置示例（src/WtFutuCore/config/config.yaml，82 叶键）
 
 **这是生产权威样例**（`src/WtFutuCore/config/` 为权威来源，线上 `dist/config.yaml` 由其派生并按需覆写）。
 下列值 = 仓库样例当前取值（2026-09-19 核对）；回测示例见 §2.1–§2.4。
@@ -248,6 +248,41 @@ P1-4(2026-09-19) 增补：
 （线上对应为 `ao1112` 组合、`maxTotalPosition 5`、`maxPairs 1`、`signalCooldownMs 30000`、`maxPosition 3` —— 样例与线上按品种而不同。）
 
 **生产 hotparams.yaml 样例**：26 键（24 注册 + 2 死键，见 §7）；与线上唯一差异为 `base_spread: 2.0`（线上 1.5）。
+
+### 2.6 生产样例自检（2026-09-19，与最新源码逐项比对）
+
+**自检方法（可复用，任何配置改动后建议重跑）**
+1. 复制 `src/WtFutuCore/config/config.yaml` 到临时文件，**仅把 `isBacktest` 改为 `true`**
+   （AGENTS §4 铁律：回测必须显式 true，否则 live-only 补挂在回调栈发单 → mocker 迭代器失效死循环）；
+2. 把 `coordinatorConfig` / `spreadArbitrageConfig` 指向 `src/WtFutuCore/config/` 的另两个文件，
+   并把 `src/WtFutuCore/config/hotparams.yaml` 放到运行目录（热参审计按文件名加载）；
+3. 用 `WtBtRunner` 跑一段极短回放（初始化即完成全部校验，无需真实行情）；
+4. 检查四行 `[CONFIG-AUDIT]` + `parameter validation passed` + `Config validation passed (N errors, M warnings)`。
+
+**本次结果（修正后）**
+
+| 源 | present | read | unknown | read_missing |
+|---|---|---|---|---|
+| config.yaml（策略样例） | 87 | 80 | **0** | **0** |
+| coordinator.yaml | 114 | 93 | **0** | **0** |
+| hotparams.yaml | 26 | 24 | **0** | **0** |
+| spread_arbitrage.yaml | 68 | 53 | **0** | **0** |
+
+`parameter validation passed` ✓、`Config validation passed (0 errors, 0 warnings)` ✓（E1–E14 / W1–W6 全通过）；
+`[HOTPARAM-DRIFT]` 无输出 ⇒ 样例的 `hotparams.base_spread(2.0)` 与 `quoting.baseSpread(2.0)` 一致（无静态-热参漂移）。
+
+**本次发现并修正的样例缺陷**
+- **2 个根级重复死键**：样例在 `risk` 根级重复写了 `autoClearIrreversibleOnReset` 与 `orderRatePauseMs`
+  （正确位置是 `risk.frequency.*`，loader 只读后者）⇒ 运行审计报 `unknown=2`。
+  已从样例删除（清理前 `unknown=2` → 清理后 `unknown=0`），并在 §7 留档。
+
+**自检注意事项（避免误判）**
+- 样例的 `contracts` 用**两段式** `SHFE.ag2608`，而 arb `pairs[].leg1/leg2` 用**三段式** `SHFE.ag.ag2608`
+  —— 与线上（`SHFE.ao2611` / `SHFE.ao.ao2611`）一致，属既定约定，不是拼写错误；
+- 回测夹具数据里没有 `ag` 合约的 session 信息与 tick，因此自检时会出现
+  `[BILATERAL_STATS] SHFE.ag2608 setSessionInfo: nullptr, statistics DISABLED` —— 属**夹具产物**，
+  与配置正确性无关（该分支由 `setSessionInfo` 在缺 session 时主动禁用统计）；
+- 本自检**只覆盖初始化/校验/审计路径**，不验证策略行为；行为面仍走 §4 的回测回归流程。
 
 ---
 
@@ -551,7 +586,7 @@ crossCheckIssues 五检查项 (:349-444):
 | `quoting.maxObligationSpread` / `obligationOnlyL0` / `qtyDecay`；`risk.frequency.flattenThreshold` / `pauseThreshold` | 历史 BT 配置（configbt_v5 旧版 / _ec_5d 系） | **归档死键**：代码已删（config.yaml:112 注释：旧 obligationOnlyL0/alwaysObligation 已从代码移除）；现行键为 `obligationMaxSpreadTicks` / `positionBreach*` / `sameSide*`（白名单） |
 | `spread_arbitrage.arb_close.*` | spread_arbitrage.yaml | **未启用特性的子键**：`arb_close.enabled:false` ⇒ 子键暂无消费（白名单；启用后其键会被正常读取，不受白名单影响） |
 | `spread_arbitrage.statistical.pairsTrading(.entryZThreshold)` | spread_arbitrage.yaml | **休眠子策略**：当前 primaryStrategy=mean_reversion ⇒ pairsTrading 子块不被读取（白名单，同上） |
-| `risk.autoClearIrreversibleOnReset` / `risk.orderRatePauseMs`（**根级**，非 `risk.frequency` 下） | **生产样例** src/WtFutuCore/config/config.yaml | **死键（2026-09-19 核对发现）**：loader 只读 `risk.frequency.*`（FutuConfigLoader.cpp:181-188 / RiskLimitsConfig.h:75 / FutuRiskMonitor.h:138），根级同名键无读取点。生产样例与之重复，建议删除以免误改后无效果（删除前请确认无外部工具依赖） |
+| ~~`risk.autoClearIrreversibleOnReset` / `risk.orderRatePauseMs`（**根级**）~~ | 生产样例 | **已于 2026-09-19 从样例删除**（历史记录）：loader 只读 `risk.frequency.*`（FutuConfigLoader.cpp:181-188 / RiskLimitsConfig.h:75 / FutuRiskMonitor.h:138），根级同名键无读取点；样例当时重复书写 ⇒ 运行审计 `unknown=2`，删除后归零。**改这两项请改 `risk.frequency` 下的键** |
 
 ## 8. 易错点与排障速查
 
