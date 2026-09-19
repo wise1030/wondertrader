@@ -30,6 +30,10 @@ struct TickContext;
 class RiskCoordinator
 {
 public:
+    /// F-core P1-6 阶段 1(2026-09-19): ORDER_RATE 持续违规窗口是否活跃 (影子对比用;
+    ///   Md 单写者, 读侧一次 load, 无锁)
+    bool isRateBreachActive() const { return _rate_breach_since_ms != 0; }
+
     struct Deps
     {
         FutuPortfolio* portfolio = nullptr;

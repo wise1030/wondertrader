@@ -4932,5 +4932,34 @@ BT 夹具已同步补齐（2026-09-19 同日）：`configbt_v5.yaml` +14 键、`
 **部署**：Release lib 落盘（周一 08:40 cron 生效）；三个配置文件已在线上就位（同一时刻生效）。
 **P1-4 阶段 2 至此完成**；阶段 3（契约测试扩展）已由 test_futu_config_audit.cpp / test_futu_config_map.cpp 承担主要部分。
 
+#### 19.14 P1-6 阶段 1 实施记录（2026-09-19，halt 原因位图影子双写，行为零变更）
+
+**新增**：`HaltReason.h`（header-only）—— `HaltReason` 10 项枚举 + `HaltReasons` 原子位图
+（`raise/clear` 单条 `fetch_or/fetch_and`，无锁、任意线程可调；`raw/blocked/has/describe`）+
+qphase→位映射（`TradingState::mirrorQPhase`）。
+
+**双写点（既有标志仍为唯一门禁来源，此处仅镜像）**
+
+| 组件 | 镜像点 |
+|---|---|
+| `FutuRiskMonitor` | `haltTrading`→HR_RISK_HALT；`resumeTrading`/`clearIrreversible`→清；`pauseQuoting`/`resumeQuoting`→HR_QUOTING_PAUSED；`blockLong/Short`、`unblockLong/Short`→HR_LONG/SHORT_BLOCKED；`setZombieHalt`/`clearZombieHalts`/`retainZombieHalts`（集合空）→HR_ZOMBIE_LATCH；`resetDaily` 与三个标志逐一同步 |
+| `TradingState` | `setQuotingPhase`/`tryResumeFrom`/`resumeFromRisk`→qphase 四位（RISK/ERROR/TOXICITY/MARKET）；`blockLong/Short`、`unblock*`、`reset()`→方向位 |
+| `RiskCoordinator` | `_rate_breach_since_ms` 置位/清零→HR_RATE_BREACH（新增 `isRateBreachActive()` 供影子读） |
+| `StrategyCoordinator` | **1min 影子对比**：legacy 集合（RiskMonitor 4 标志 + zombie 存活集合 + qphase + rate breach）vs 位图；不一致 ⇒ 计数 + 状态变化时 WARN `[P1-6-HALT-SHADOW]`；计数入 5min KPI 行 `halt_shadow=` |
+
+**未纳入原因集（按 19.8 映射表）**：`_halt_quoting_state`（纯限频日志）、zombie 闩锁计时（纯观测）、
+`MmPhase`/`SessionPhase`（相位/会话门，保留现 ownership）、**closeout 子态**（#9 → 留待阶段 3 与清算收敛一并处理）。
+
+**验证**
+- TestUnits **200 项 / 198 通过**（新增 `test_futu_halt_reasons.cpp` 3 用例：位图语义与 describe、
+  TradingState qphase 镜像（含 RISK_HALTED 不可抢占）、方向软禁与 reset；2 项为既有环境性失败）。
+- v5 冒烟：`EXIT=0`、trades 413（带内）、资金 5452.51 收敛、**`[P1-6-HALT-SHADOW]` 0 条**、
+  审计四源仍全零、HALT/ZOMBIE=0 ⇒ 影子镜像与既有标志完全一致（行为零变更）。
+
+**影子观察门控（进入阶段 2 的前置）**：≥**3 个交易日** `halt_shadow=` 保持 0（KPI 行每 5min 可见），
+期间若出现不一致，按 `describe(bits) vs describe(legacy)` 归因后再切换读点；读点切换按 19.3 阶段 2 逐点提交。
+
+**部署**：Release lib 落盘（周一 08:40 cron 生效；配置文件已在线上）。**P1-6 阶段 1 完成**。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。

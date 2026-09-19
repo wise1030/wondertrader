@@ -211,6 +211,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
         if (rate_breach) {
             if (_rate_breach_since_ms == 0) {
                 _rate_breach_since_ms = now_ms;
+                HaltReasons::raise(HR_RATE_BREACH); // F-core P1-6 阶段 1: 原因位图镜像
             } else if (
                 now_ms > _rate_breach_since_ms &&
                 now_ms - _rate_breach_since_ms >= _deps.risk_monitor->getRateLimits().order_rate_pause_ms) {
@@ -231,6 +232,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
             }
         } else {
             _rate_breach_since_ms = 0;
+            HaltReasons::clear(HR_RATE_BREACH); // F-core P1-6 阶段 1
         }
     }
 

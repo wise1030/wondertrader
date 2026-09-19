@@ -29,6 +29,7 @@
 #include "SideFillBreaker.h"
 #include "RiskLimitsConfig.h"
 #include "SpinLockGuard.h"
+#include "HaltReason.h" // F-core P1-6 阶段 1: 原因位图镜像 (影子模式)
 #include "../Share/LockFreeRingBuffer.hpp"
 
 NS_WTP_BEGIN
@@ -256,11 +257,13 @@ public:
     {
         SpinLockGuard _g(_zombie_halt_lock);
         _zombie_halt[code] = true;
+        HaltReasons::raise(HR_ZOMBIE_LATCH); // F-core P1-6 阶段 1: 原因位图镜像
     }
     void clearZombieHalts()
     {
         SpinLockGuard _g(_zombie_halt_lock);
         _zombie_halt.clear();
+        HaltReasons::clear(HR_ZOMBIE_LATCH); // F-core P1-6 阶段 1
     }
     /// 查询合约是否处于 zombie 闩锁 (2026-08-26: HALT_QUOTING 日志区分触发源 --
     /// zombie 闩锁与 maxPosition 硬闸门共用 halt_quoting 标志, 日志需可分辨)
@@ -284,6 +287,9 @@ public:
             else
                 ++it;
         }
+        // F-core P1-6 阶段 1: 闩锁集合清空 ⇒ 清原因位 (与 clearZombieHalts 同口径)
+        if (_zombie_halt.empty())
+            HaltReasons::clear(HR_ZOMBIE_LATCH);
     }
 
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
@@ -415,6 +421,7 @@ public:
     void blockLong()
     {
         _long_blocked.store(true, std::memory_order_relaxed);
+        HaltReasons::raise(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
         broadcastAlert("LONG_BLOCKED", "Opening long positions has been blocked");
     }
 
@@ -422,14 +429,23 @@ public:
     void blockShort()
     {
         _short_blocked.store(true, std::memory_order_relaxed);
+        HaltReasons::raise(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
         broadcastAlert("SHORT_BLOCKED", "Opening short positions has been blocked");
     }
 
     /// Unblock long positions
-    void unblockLong() { _long_blocked.store(false, std::memory_order_relaxed); }
+    void unblockLong()
+    {
+        _long_blocked.store(false, std::memory_order_relaxed);
+        HaltReasons::clear(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
+    }
 
     /// Unblock short positions
-    void unblockShort() { _short_blocked.store(false, std::memory_order_relaxed); }
+    void unblockShort()
+    {
+        _short_blocked.store(false, std::memory_order_relaxed);
+        HaltReasons::clear(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
+    }
 
     /// Pause quoting (reversible)
     void pauseQuoting();

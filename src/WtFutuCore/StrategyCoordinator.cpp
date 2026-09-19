@@ -684,13 +684,63 @@ ProcessingResult StrategyCoordinator::processTick(
         // F-core P2(2026-09-17): 5min 健康巡检行 —— 窗口 p99 + 超限 EPISODE 计数 + 影子簿 realized 滞后计数
         if (tc.timestamp - _last_kpi_ms >= 300000) {
             uint64_t reallag = _portfolio ? _portfolio->getRealizedLagEvents() : 0;
-            WTSLogger::info("[PERF] kpi {} reallag={} hotlog={}/{}",
+            WTSLogger::info("[PERF] kpi {} reallag={} hotlog={}/{} halt_shadow={}",
                             _perf_monitor->formatKpi(),
                             reallag >= _last_reallag ? (reallag - _last_reallag) : reallag,
                             HotLogGate::emitted(),
-                            HotLogGate::skipped());
+                            HotLogGate::skipped(),
+                            _halt_shadow_mismatch);
             _last_reallag = reallag;
             _last_kpi_ms = tc.timestamp;
+        }
+
+        //==========================================================================
+        // F-core P1-6 阶段 1(2026-09-19): halt 原因位图**影子对比** (行为零变更)
+        //   既有标志仍是唯一门禁来源; 此处按 1min 节拍比较"legacy 标志集合"与
+        //   "原因位图", 任何不一致计入 _halt_shadow_mismatch(入 KPI) 并 WARN 一次(状态变化时)。
+        //   影子期 ≥3 交易日零不一致 → 才进入阶段 2(把门禁读点切到位图)。
+        //==========================================================================
+        if (tc.timestamp - _last_halt_shadow_ms >= 60000) {
+            _last_halt_shadow_ms = tc.timestamp;
+
+            uint64_t legacy = 0;
+            if (_risk_monitor) {
+                if (_risk_monitor->isTradingHalted())
+                    legacy |= HaltReasons::bitOf(HR_RISK_HALT);
+                if (_risk_monitor->isQuotingPaused())
+                    legacy |= HaltReasons::bitOf(HR_QUOTING_PAUSED);
+                if (_risk_monitor->isLongBlocked())
+                    legacy |= HaltReasons::bitOf(HR_LONG_BLOCKED);
+                if (_risk_monitor->isShortBlocked())
+                    legacy |= HaltReasons::bitOf(HR_SHORT_BLOCKED);
+            }
+            if (!_order_tracker->getAliveZombieContracts().empty())
+                legacy |= HaltReasons::bitOf(HR_ZOMBIE_LATCH);
+            if (_trading_state) {
+                switch (_trading_state->qphase.load(std::memory_order_acquire)) {
+                case QuotingPhase::RISK_HALTED: legacy |= HaltReasons::bitOf(HR_QPHASE_RISK); break;
+                case QuotingPhase::ERROR: legacy |= HaltReasons::bitOf(HR_QPHASE_ERROR); break;
+                case QuotingPhase::TOXICITY: legacy |= HaltReasons::bitOf(HR_QPHASE_TOXICITY); break;
+                case QuotingPhase::MARKET: legacy |= HaltReasons::bitOf(HR_QPHASE_MARKET); break;
+                default: break;
+                }
+            }
+            if (_risk_coord.isRateBreachActive())
+                legacy |= HaltReasons::bitOf(HR_RATE_BREACH);
+
+            const uint64_t bits = HaltReasons::raw();
+            if (bits != legacy) {
+                ++_halt_shadow_mismatch;
+                if (bits != _last_halt_shadow_bits || legacy != _last_halt_shadow_legacy) {
+                    WTSLogger::warn("[P1-6-HALT-SHADOW] bits={} legacy={} (mismatch #{}) -- "
+                                    "原因位图与既有标志不一致, 影子期需归零后再切换读点",
+                                    HaltReasons::describe(bits),
+                                    HaltReasons::describe(legacy),
+                                    _halt_shadow_mismatch);
+                }
+            }
+            _last_halt_shadow_bits = bits;
+            _last_halt_shadow_legacy = legacy;
         }
     }
 

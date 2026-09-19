@@ -476,6 +476,11 @@ private:
     // F-core P2(2026-09-17): 5min 健康巡检行节流 + realized 滞后计数基线
     uint64_t _last_kpi_ms = 0;
     uint64_t _last_reallag = 0;
+    // F-core P1-6 阶段 1(2026-09-19): halt 原因位图影子对比 (1min 节拍; 行为零变更)
+    uint64_t _last_halt_shadow_ms = 0;
+    uint64_t _halt_shadow_mismatch = 0;      ///< 累计不一致次数 (入 KPI)
+    uint64_t _last_halt_shadow_bits = 0;     ///< 上次位图 (仅用于抑制重复 WARN)
+    uint64_t _last_halt_shadow_legacy = 0;   ///< 上次 legacy 集合 (同上)
     uint64_t _nan_tick_cnt = 0;                 // v7.7 C3: nan tick 计数 (原 static thread_local)
     uint64_t _limit_skip_cnt = 0;               // 锁板单边盘口 skip 计数 (日志节流)
     uint64_t _last_pause_diag_ms = 0;           // 上次shouldPause诊断日志时间戳(ms)

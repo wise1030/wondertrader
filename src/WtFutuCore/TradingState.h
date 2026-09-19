@@ -38,6 +38,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include "HaltReason.h" // F-core P1-6 阶段 1: 原因位图镜像 (影子模式)
 
 #ifndef NDEBUG
 #include <cassert>
@@ -171,7 +172,10 @@ struct TradingState
             if (cur == QuotingPhase::RISK_HALTED && !canTransitionQuoting(q))
                 return false; // RISK_HALTED 不可直接抢占
             if (qphase.compare_exchange_weak(cur, q, std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                mirrorQPhase(q); // F-core P1-6 阶段 1: 影子镜像
                 return true;
+            }
         }
     }
 
@@ -189,8 +193,11 @@ struct TradingState
     {
         _check_writer_thread();
         // v7.6: CAS 天然等价 "qphase == expected 才翻 NORMAL" 的原子判定
-        return qphase.compare_exchange_strong(
+        const bool ok = qphase.compare_exchange_strong(
             expected, QuotingPhase::NORMAL, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (ok)
+            mirrorQPhase(QuotingPhase::NORMAL); // F-core P1-6 阶段 1
+        return ok;
     }
 
     /// 风控恢复（RISK_HALTED → NORMAL 的唯一合法路径）
@@ -198,6 +205,7 @@ struct TradingState
     {
         _check_writer_thread();
         qphase.store(QuotingPhase::NORMAL, std::memory_order_release);
+        mirrorQPhase(QuotingPhase::NORMAL); // F-core P1-6 阶段 1
     }
 
     //==========================================================================
@@ -211,6 +219,27 @@ struct TradingState
         qphase.store(QuotingPhase::NORMAL, std::memory_order_release);
         long_blocked.store(false, std::memory_order_release);
         short_blocked.store(false, std::memory_order_release);
+        // F-core P1-6 阶段 1: 影子镜像复位 (qphase 位 + 方向软禁位)
+        mirrorQPhase(QuotingPhase::NORMAL);
+        HaltReasons::clear(HR_LONG_BLOCKED);
+        HaltReasons::clear(HR_SHORT_BLOCKED);
+    }
+
+    /// F-core P1-6 阶段 1(2026-09-19): qphase → 原因位镜像 (影子模式; 阶段 1 无门禁读取)
+    static void mirrorQPhase(QuotingPhase q)
+    {
+        HaltReasons::clear(HR_QPHASE_RISK);
+        HaltReasons::clear(HR_QPHASE_ERROR);
+        HaltReasons::clear(HR_QPHASE_TOXICITY);
+        HaltReasons::clear(HR_QPHASE_MARKET);
+        switch (q)
+        {
+        case QuotingPhase::RISK_HALTED: HaltReasons::raise(HR_QPHASE_RISK); break;
+        case QuotingPhase::ERROR: HaltReasons::raise(HR_QPHASE_ERROR); break;
+        case QuotingPhase::TOXICITY: HaltReasons::raise(HR_QPHASE_TOXICITY); break;
+        case QuotingPhase::MARKET: HaltReasons::raise(HR_QPHASE_MARKET); break;
+        default: break;
+        }
     }
 
     //==========================================================================
@@ -221,21 +250,25 @@ struct TradingState
     {
         _check_writer_thread();
         long_blocked.store(true, std::memory_order_release);
+        HaltReasons::raise(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
     }
     void unblockLong()
     {
         _check_writer_thread();
         long_blocked.store(false, std::memory_order_release);
+        HaltReasons::clear(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
     }
     void blockShort()
     {
         _check_writer_thread();
         short_blocked.store(true, std::memory_order_release);
+        HaltReasons::raise(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
     }
     void unblockShort()
     {
         _check_writer_thread();
         short_blocked.store(false, std::memory_order_release);
+        HaltReasons::clear(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
     }
 
     //==========================================================================

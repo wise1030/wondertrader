@@ -481,6 +481,7 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
 void FutuRiskMonitor::haltTrading(RiskCategory category, double pnl_snapshot)
 {
     _trading_halted.store(true, std::memory_order_relaxed);
+    HaltReasons::raise(HR_RISK_HALT); // F-core P1-6 阶段 1: 原因位图镜像 (影子)
     // V8-R6/WS-A: halt 域多字段复合写入收编 (写者含 arb 线程 handleRiskAlert)
     RecursiveSpinGuard _g(_halt_domain_lock);
     _halt_category.store(category, std::memory_order_release);
@@ -504,6 +505,7 @@ bool FutuRiskMonitor::resumeTrading()
     }
 
     _trading_halted.store(false, std::memory_order_relaxed);
+    HaltReasons::clear(HR_RISK_HALT); // F-core P1-6 阶段 1
     _halt_timestamp = 0;
     broadcastAlert("TRADING_RESUMED", "Trading resumed after risk normalized");
     return true;
@@ -520,6 +522,7 @@ void FutuRiskMonitor::pauseQuoting()
     }
     RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     _pause_timestamp = _current_time.load(std::memory_order_relaxed);
+    HaltReasons::raise(HR_QUOTING_PAUSED); // F-core P1-6 阶段 1
     broadcastAlert("QUOTING_PAUSED", "Quoting paused due to risk limits");
 }
 
@@ -536,6 +539,7 @@ void FutuRiskMonitor::resumeQuoting()
     }
     RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     _pause_timestamp = 0;
+    HaltReasons::clear(HR_QUOTING_PAUSED); // F-core P1-6 阶段 1
     broadcastAlert("QUOTING_RESUMED", "Quoting resumed after risk normalized");
 }
 
@@ -703,6 +707,16 @@ void FutuRiskMonitor::resetDaily()
     _long_blocked.store(false, std::memory_order_relaxed);
     _short_blocked.store(false, std::memory_order_relaxed);
     _quoting_paused.store(was_irreversible, std::memory_order_relaxed); // Stay paused if IRREVERSIBLE
+    // F-core P1-6 阶段 1: 原因位图镜像 (与上方三个标志逐一同步)
+    if (was_irreversible) {
+        HaltReasons::raise(HR_RISK_HALT);
+        HaltReasons::raise(HR_QUOTING_PAUSED);
+    } else {
+        HaltReasons::clear(HR_RISK_HALT);
+        HaltReasons::clear(HR_QUOTING_PAUSED);
+    }
+    HaltReasons::clear(HR_LONG_BLOCKED);
+    HaltReasons::clear(HR_SHORT_BLOCKED);
     // _halt_category is preserved (not reset to REVERSIBLE)
     _halt_timestamp = 0;
     _pause_timestamp = 0;
@@ -746,6 +760,8 @@ bool FutuRiskMonitor::clearIrreversible()
     _halt_category.store(RiskCategory::REVERSIBLE, std::memory_order_release);
     _trading_halted.store(false, std::memory_order_relaxed);
     _quoting_paused.store(false, std::memory_order_relaxed);
+    HaltReasons::clear(HR_RISK_HALT); // F-core P1-6 阶段 1
+    HaltReasons::clear(HR_QUOTING_PAUSED);
     _halt_timestamp = 0;
     _pause_timestamp = 0;
     _was_loss_triggered = false;
