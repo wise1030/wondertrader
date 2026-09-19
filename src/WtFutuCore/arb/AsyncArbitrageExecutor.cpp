@@ -45,6 +45,17 @@ AsyncArbitrageExecutor::~AsyncArbitrageExecutor()
 // Control
 //==============================================================================
 
+// F-core P1-4 阶段 2(2026-09-19): 利润门槛单一来源读取
+//   权威 = spread_arbitrage.yaml (`SpreadArbitrageManager::_config.min_profit_threshold_ticks`)。
+//   此前 assembly 期把值拷贝进本类原子成员, 形成第二份状态 (manager 侧变更不传导)。
+//   现在优先实时读 manager (getConfig 返回 const 引用, 无锁无拷贝);
+//   manager 未接线时回退到 assembly 注入值 (保持既有行为与单测可用性)。
+double AsyncArbitrageExecutor::minProfitThreshold() const
+{
+    return _arb_manager ? _arb_manager->getConfig().min_profit_threshold_ticks
+                        : _min_profit_threshold.load(std::memory_order_relaxed);
+}
+
 void AsyncArbitrageExecutor::start()
 {
     if (_running.load(std::memory_order_acquire))
@@ -497,7 +508,7 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     }
 
     // If price was adjusted, recalculate profit and check threshold
-    if (price_adjusted && _min_profit_threshold.load(std::memory_order_relaxed) > 0) {
+    if (price_adjusted && minProfitThreshold() > 0) {
         // Calculate spread impact from price adjustment
         // For LONG_SPREAD: buy leg1, sell leg2
         //   Profit change = (leg2_price - orig_leg2) - (leg1_price - orig_leg1)
@@ -524,10 +535,10 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
         double spread_impact_ticks = spread_impact / avg_tick_size;
 
         // If spread impact exceeds minimum profit threshold, reject signal
-        if (-spread_impact_ticks > _min_profit_threshold.load(std::memory_order_relaxed)) {
+        if (-spread_impact_ticks > minProfitThreshold()) {
             WTSLogger::warn("Arb signal REJECTED: price adjustment would cost {:.2f} ticks > threshold {:.2f}",
                             -spread_impact_ticks,
-                            _min_profit_threshold.load(std::memory_order_relaxed));
+                            minProfitThreshold());
             _arb_manager->onArbSignalDropped(signal.pair_id, is_close_signal(signal.type)); // 释放 B-3 in_flight (V8-A3: 按通道)
             return;
         }

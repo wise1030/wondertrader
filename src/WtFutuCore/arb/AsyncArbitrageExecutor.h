@@ -281,6 +281,14 @@ public:
     /// Set minimum profit threshold for arbitrage (reject if below)
     void setMinProfitThreshold(double threshold) { _min_profit_threshold.store(threshold, std::memory_order_relaxed); }
 
+    /// F-core P1-4 阶段 2(2026-09-19): 单一来源读取 —— 利润门槛的权威是
+    ///   spread_arbitrage.yaml (`SpreadArbitrageManager::_config.min_profit_threshold_ticks`)。
+    ///   此前 assembly 期把值拷贝进本类原子成员, 形成第二份状态 (manager 侧变更不会传导)。
+    ///   现在改为优先实时读 manager (getConfig 返回 const 引用, 无锁无拷贝);
+    ///   manager 未接线时回退到 assembly 注入值 (保持既有行为与单测可用性)。
+    /// 实现放 .cpp (此处 SpreadArbitrageManager 仅有前向声明)
+    double minProfitThreshold() const;
+
     //==========================================================================
     // Orphan Leg Auto-Hedge (Main Thread Interface)
     //==========================================================================

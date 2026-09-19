@@ -164,7 +164,8 @@ public:
     /// 回测同样调用 —— watcher 不跑、热参不生效, 差异键即回测/实盘行为分叉点。
     void logDriftSummary(const char* filepath, const char* strategy_id) const;
 
-    double hotVal(HotParamIndex idx) const
+    /// 原始取值 (不做覆盖记账)。applyAll 内部用同名局部 lambda 包装以做"注册即应用"自检。
+    double hotValRaw(HotParamIndex idx) const
     {
         return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val;
     }

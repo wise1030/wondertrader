@@ -73,6 +73,20 @@ void FutuHotParamManager::registerParams(wtp::IUftStraCtx* ctx,
 void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
 {
     //============================================================
+    // F-core P1-4 阶段 2(2026-09-19): 热参"注册即应用"覆盖自检
+    //   背景: 注册表 (paramNames) 是稳态权威, 但应用点散落在 applyAll 各处;
+    //   "注册了却没人应用"会让热更静默失效 (与 hotparams 死键同类缺陷, 只是方向相反)。
+    //   做法: 局部 hotVal 包装记账本, 末尾核对每个 HP_* 是否都被取用一次。
+    //   开销: 每次 applyAll 一次位掩码 OR (applyAll 仅由 watcher diff/参数更新触发, 极低频)。
+    //============================================================
+    uint32_t seen_mask = 0;
+    auto hotVal = [&](HotParamIndex idx) -> double {
+        if (static_cast<uint32_t>(idx) < 32u)
+            seen_mask |= (1u << static_cast<uint32_t>(idx));
+        return hotValRaw(idx);
+    };
+
+    //============================================================
     // 从共享内存读取更新后的参数值，同步到各模块
     //============================================================
 
@@ -195,6 +209,20 @@ void FutuHotParamManager::applyAll(const Targets& t, const char* strategy_id)
 
         for (const auto& msg : crossCheckIssues(cc))
             WTSLogger::warn("UftFutuMmStrategy[{}] [HOTPARAM-CHECK] {}", strategy_id, msg);
+    }
+
+    // F-core P1-4 阶段 2: 覆盖自检收尾 (未取用的已注册参数 = 热更静默失效, error 级暴露)
+    //   必须放在 applyAll 最末 —— 本函数后段(粘性/保护参数、交叉复查)仍会取用热参。
+    {
+        static const char* const* names = paramNames();
+        for (uint32_t i = 0; i < HP_COUNT; ++i) {
+            if (seen_mask & (1u << i))
+                continue;
+            WTSLogger::error("[HOTPARAM] param '{}' (idx={}) registered but NEVER applied in applyAll "
+                             "-- 热更对该参数静默失效, 请补应用点或从注册表移除",
+                             names[i],
+                             i);
+        }
     }
 }
 

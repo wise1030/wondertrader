@@ -4831,5 +4831,61 @@ TradingState 转换矩阵（C10 前置审计产物），本清单在其上补全
 **下一步**：P1-4 阶段 2（键所有权表 + 派生值单向化 + 热参注册表化）可开工；
 P1-6 阶段 0 清单已产出（19.8），阶段 1 需按裁决 A1/B 实现 reason 位图 + 事件通道（行为零变更的影子双写）。
 
+#### 19.12 P1-4 阶段 2 实施记录 + 键所有权表（2026-09-19）
+
+**键所有权表（权威来源 | 结构 | 消费组件 | 是否热更）**
+
+| 配置子树 | 权威文件 | 内存结构 | 消费组件 | 热更 |
+|---|---|---|---|---|
+| `contracts` / `anchorCode` / `isBacktest` | config.yaml（策略节点） | `FutuMmConfig` | FutuConfigLoader → 策略 | 否 |
+| `quoting.*` | config.yaml | `FutuMmConfig.quoting` | FutuQuoter / SpreadOptimizer（其中 base_spread/base_qty/level_* 由热参覆盖） | 5 键热更 |
+| `risk.*`（含 `risk.frequency.*`） | config.yaml | `FutuMmConfig.risk` | FutuRiskMonitor（RateLimits / RecoveryConfig） | 否 |
+| `portfolio.*` | config.yaml | `FutuMmConfig.portfolio` | FutuPortfolio（`maxDelta` 被热参覆盖） | `max_delta` 是 |
+| `closeout.*` | config.yaml | `FutuMmConfig.closeout` → 经 `FutuConfigMap` 覆盖 `CoordinatorConfig` | CloseoutTrigger / CloseoutExecutor | 否 |
+| `performance.*` | config.yaml | `FutuMmConfig.perf` → 经 `FutuConfigMap` | PerformanceMonitor | 否 |
+| `logging.hotQuote*` | config.yaml | `FutuMmConfig.logging` | HotLogGate | 否（可扩展） |
+| `monitor.*` | config.yaml | `FutuMmConfig.monitor` | MonitorBridge | 否 |
+| `modules.<name>.enabled` + 模块参数 | coordinator.yaml | `CoordinatorConfig.modules` | Factory 创建的各模块 | 否 |
+| `signals` / `toxicityDetector` / `autoCancel` / `zombieLatch` / `skewDriver` | coordinator.yaml | 同上 | Coordinator / SignalAggregator / ToxicFlowDetector / UnifiedOrderTracker | 否 |
+| `spread_arbitrage.*`（pairs / risk / 子策略） | spread_arbitrage.yaml | `SpreadArbitrageConfig` | SpreadArbitrageManager（executor 经 `minProfitThreshold()` 实时读） | 否 |
+| `hotparams`（24 个注册键） | **hotparams.yaml（稳态权威）** + 共享内存 | `HotParamEntry[24]` | `FutuHotParamManager::applyAll` → Portfolio / Quoter / SignalAggregator / Coordinator / SpreadOptimizer | **是（唯一热更通道）** |
+
+**显式化的重叠与裁决**
+
+| 重叠概念 | 现状 | 裁决 |
+|---|---|---|
+| `max_delta` | config.yaml `portfolio.maxDelta`（启动初值）+ hotparams `max_delta`（稳态权威）+ Coordinator 软响应分母 | 单一消费链：`applyAll` 用热参值同时写 `PortfolioParams.portfolio_max_delta` 与 `coordinator->setPortfolioMaxDelta()`；静态值仅作初值 |
+| `enabled` | coordinator.yaml `modules.<name>.enabled` 为唯一权威；主配置 `modules:` 整节为死键（CONFIG.md §7，已白名单） | 保留现状 |
+| `min_profit_threshold_ticks` | spread_arbitrage.yaml 权威；executor 曾持 assembly 期拷贝 | **本批已单向化**（见下） |
+| arb `signalInterval/maxWait`（`AsyncArbConfig`） | 无 yaml 入口，仅编译期默认 | 记录为"已知无入口键"；需要时按 P1-4 管道补 yaml 入口（不要在代码里再改默认值兜需求） |
+| `obligation_max_spread_ticks` | config.yaml quoting → 注入 BilateralStats | **样板**：单向派生（挂在哪=统到哪），保持 |
+
+**本批改动（策略层）**
+
+1. **派生值单向化（`AsyncArbitrageExecutor`）**：新增 `minProfitThreshold()`（实现放 .cpp，因头文件仅有
+   `SpreadArbitrageManager` 前向声明），2 处使用点改为**实时读 manager**（`getConfig()` 返回 const 引用，
+   无锁无拷贝）；原 `_min_profit_threshold` 原子保留为"manager 未接线"时回退（保持单测与既有行为）。
+   ⇒ `spread_arbitrage.yaml` 成为唯一权威，manager 侧变更可传导。
+2. **热参"注册即应用"覆盖自检（`FutuHotParamManager`）**：成员 `hotVal` 更名 `hotValRaw`；`applyAll`
+   顶部用同名局部 lambda 包装并记账位掩码，**函数最末**（后段仍取用热参，故必须放最后）核对
+   `HP_*` 全覆盖，未取用者打 `error` 级 `[HOTPARAM] param ... registered but NEVER applied`。
+   该自检永久防住"注册了却没人应用 → 热更静默失效"（与 hotparams 死键同类的反向缺陷）。
+
+**实测（本批事实）**：注册参数 **24 个（HP_COUNT=25 含哨兵）全部有应用点**，无缺口；
+hotparams.yaml 有 26 键 → 其中 2 个（`delta_skew_*`）为 19.10 已确认的死键 ⇒ 与审计结论一致。
+
+**计划偏差说明（需你确认是否接受）**：§19.2 阶段 2 第 6 条写的是"`applyAll` 手写分发改为
+`{key, target, setter}` 注册表驱动"。我实测该函数的目标结构异构（GLFTParams / quoting / SignalAggregatorConfig /
+Coordinator setter / PortfolioParams 五类，字段级映射），DSL 化需要为每类目标写描述符 + 运行期间接调用，
+**收益（防漏应用）已被上述覆盖自检完全覆盖**，而 DSL 化本身会引入新的间接层与性能/可读性代价。
+故本批**只做覆盖自检**。若你要求严格 DSL 化，我再单列一批实施。
+
+**验证**：TestUnits **197 项 / 195 通过**（热参相关 25 项全通过）；v5 冒烟 `EXIT=0`、trades 411（基线带内）、
+资金 5452.63 收敛、热参自检 0 error、HALT/ZOMBIE=0。
+**部署**：Release `ba5f04bc` 静默落盘（未做盘中重启），周一 08:40 cron 生效。
+
+**阶段 2 剩余（可继续或收尾）**：`arbAsyncConfig` 补 yaml 入口（消除"无入口键"）、
+`closeout.*` 与 `risk.frequency.*` 的静默默认值显式化（19.10 清单 22 项）。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。
