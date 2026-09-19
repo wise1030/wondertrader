@@ -5040,5 +5040,35 @@ v5 冒烟 `EXIT=0`、trades 405（带内）、资金 5452.59 收敛、四源审�
 用备份恢复 live，再按正确缩进重插，并以"解析后断言 `d['coordinator']['haltGate']['mode']`"验证 ✓。
 教训：改 YAML 必须用解析器自检，不能只看 diff 文本。
 
+#### 19.17 P1-6 阶段 3 现状核查 + 前置回归（2026-09-19）—— 结论：收敛面小于原估
+
+**核查结论（实测，修正 §19.8 的"清算态三处存放"表述）**
+
+| 组件 | 真实角色 | 证据 |
+|---|---|---|
+| `FutuRiskMonitor` | **唯一权威状态**（`_closeout_state` + `markCloseout*` + `transitionCloseoutSub`，受 `_halt_domain_lock` 保护） | `getCloseoutSub()/getCloseoutSubInfo()` 锁内读（后者按值返回 = R6-a 防撕裂契约）；状态机矩阵 `canTransitionTo` 在 `CloseoutSubInfo` 内 |
+| `CloseoutTrigger` | **无状态决策者**：只读 `risk_monitor->getCloseoutSub()` 决定何时触发/收尾 | CloseoutTrigger.cpp:24 只读；写操作全走 `markCloseout*`（:39/:41） |
+| `CloseoutExecutor` | **执行侧内部进度**（`_phase`，复用 `CloseoutSub` 枚举是 P1-1 有意合并），对 RiskMonitor **无依赖** | `grep risk_monitor CloseoutExecutor.*` 为空；Orchestrator 单向翻译 `isCompleted()/isFailed()/isIdle()` → `markCloseout*` |
+
+⇒ 实际是"**驱动方（Executor）→ 单点同步（Orchestrator）→ 唯一权威（RiskMonitor）→ 只读消费（Trigger/门禁）**"
+的单向链，并非三处各自维护；**§19.3 #17/#18 也已核实为"已满足"**：
+`FutuRuntimeOps::onSessionBegin` 已调用 `resetCloseout(true)`（强制清态，注释明确说明"上一日卡 FLATTENING 时非 force 会被状态机拒绝 → 永久死锁"），
+锁域沿用 `_halt_domain_lock`、无第二把锁。
+
+**本批交付：阶段 3 前置回归 `test_futu_closeout_state.cpp`（5 用例）**
+1. 触发链与时间戳落地（TRIGGERED→DRAINING→COMPLETED，含 `trigger_time/flatten_start/complete_time`）；
+2. 非法转移被拒（IDLE 只能→TRIGGERED；TRIGGERED 不可直跳 ASSESSING）且状态不变；
+3. 失败→限时重试有界（早于 `retry_interval_ms` 拒绝；到点进入 RETRYING；`retry_count ≥ max_retries` 后不再重试）；
+4. **卡死守卫**：非 force `resetCloseout(false)` 无法清掉 EXECUTING（矩阵不允许 → IDLE），
+   `resetCloseout(true)` 必须硬清到 IDLE；并验证 session-begin 实际序列（`resetDaily + resetCloseout(true)`）= IDLE；
+5. COMPLETED→IDLE 是唯一无需 force 的回 IDLE 路径。
+另含**跨阶段一致性断言**：`markCloseoutTriggered` 内部 `pauseQuoting()` ⇒ P1-6 原因位图必须出现 `QUOTING_PAUSED`。
+
+**阶段 3 剩余（低优先级、可选）**：① 是否把 Executor 的 `_phase` 独立为 `ExecPhase` 类型
+（纯类型隔离，消除"同名枚举两处使用"的阅读成本；P1-1 曾有意合并，收益有限）；
+② 13:30 小节边界"酸测"运行清单（人工/运维步骤，已在 §19.3 #19 记录，建议纳入交接文档而非代码）。
+
+**验证**：TestUnits **212 项 / 210 通过**（新增 5 项；2 项为既有环境性失败）；本批无 lib 变更、无需部署。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。
