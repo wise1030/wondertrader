@@ -13,6 +13,10 @@
 > 线上/回测配置的 `read_missing` 与 `unknown` 均已归零（四源：config / coordinator / hotparams / spread_arbitrage）；
 > 键所有权表见 `AGENTS.md §19.12`；本次补录 `logging.*`、`performance.alertThrottleMs`、
 > `zombieLatch.maxHoldMs`、`spread_arbitrage.asyncExecutor.*` 四组新键。
+>
+> **双示例口径（2026-09-19 核对）**：**§2.1–§2.4 的"示例"列 = 回测配置（`configbt_v5.yaml`）**；
+> **生产权威 = `src/WtFutuCore/config/config.yaml`**（84 键，示例见 **§2.5**）。
+> 两者在身份/合约、performance 阈值、closeout 时序等**多处取值不同**，请勿混用；本版已逐项核对并更正。
 
 ---
 
@@ -20,6 +24,7 @@
 
 - [§1 配置加载链路总览](#1-配置加载链路总览)
 - [§2 主配置（configbt_v5.yaml / _ec_5d.yaml）](#2-主配置)
+- [§2.5 生产配置示例（src/WtFutuCore/config/config.yaml）](#25-生产配置示例srcwtfutucorecfg)
 - [§3 模块配置 coordinator.yaml](#3-模块配置-coordinatoryaml)
 - [§4 热更新配置 hotparams.yaml（26 参数）](#4-热更新配置-hotparamsyaml)
 - [§5 日志配置 logcfgbt.yaml](#5-日志配置-logcfgbtyaml)
@@ -97,10 +102,10 @@ P1-4(2026-09-19) 增补：
 
 #### 身份与路径
 
-| 键 | 类型 | v5/_ec_5d | 缺省 | 校验 | 说明 |
+| 键 | 类型 | 回测(v5/_ec_5d) / 生产(src) | 缺省 | 校验 | 说明 |
 |---|---|---|---|---|---|
-| anchorCode | string | SHFE.ao.ao2609 | "" | E2/E3 error | 锚定合约（lead-lag 的 lead、closeout 时刻来源）；必须出现在 contracts |
-| isBacktest | bool | true | **false** | — | 回测开关。**缺失时 live-only 补挂在回调栈发单→mocker 迭代器失效死循环**（AGENTS §4） |
+| anchorCode | string | 回测 SHFE.ao.ao2609 / **生产 SHFE.ag2608** | "" | E2/E3 error | 锚定合约（lead-lag 的 lead、closeout 时刻来源）；必须出现在 contracts |
+| isBacktest | bool | 回测 true / **生产 false** | **false** | — | 回测开关。**缺失时 live-only 补挂在回调栈发单→mocker 迭代器失效死循环**（AGENTS §4） |
 | coordinatorConfig | string | ./coordinator.yaml | "coordinator.yaml" | — | 模块开关/参数唯一权威文件路径（:35） |
 | spreadArbitrageConfig | string | ./spread_arbitrage.yaml | 同名缺省 | — | 套利配置路径（:36） |
 
@@ -119,23 +124,23 @@ P1-4(2026-09-19) 增补：
 
 #### quoting 节
 
-| 键 | 类型 | v5 | 缺省 | 校验 | 说明 |
+| 键 | 类型 | 回测(v5) / **生产(src)** | 缺省 | 校验 | 说明 |
 |---|---|---|---|---|---|
-| numLevels | uint32 | 1 | 1 | E6 [1,10] | 报价层数 |
-| baseSpread | double | 2.5 | 2.0 | E10 (0,20] ticks | 基础价差(ticks)。**热参 base_spread 可覆盖**（v5 有漂移告警属预期） |
-| baseQty | double | 3.0 | 5.0 | E11 (0,100] 手 | 义务层报单量。热参可覆盖 |
+| numLevels | uint32 | 回测 1 / **生产 2** | 1 | E6 [1,10] | 报价层数 |
+| baseSpread | double | 回测 2.5 / **生产 2.0** | 2.0 | E10 (0,20] ticks | 基础价差(ticks)。**热参 base_spread 可覆盖**（v5 有漂移告警属预期） |
+| baseQty | double | 回测 3.0 / **生产 10.0** | 5.0 | E11 (0,100] 手 | 义务层报单量。热参可覆盖 |
 | qtyDecay(levelQtyMultiplier) | double | 0.5 | 0.7 | W4 [0.1,1.0] | 层量衰减系数。热参 level_qty_multiplier 可覆盖 |
 | levelStep | double | 1.0 | 1.0 | E7 (0,100] ticks | 层间价距 |
-| stickyThreshold | double | 1.5 | 1.0 | W5 (0,10] ticks | **顶单黏性专用**（B1 收窄语义）：价格改善 ≥ improve_retreat_ratio×sticky 才重挂。热参可覆盖 |
+| stickyThreshold | double | 回测 1.5 / **生产 2.0** | 1.0 | W5 (0,10] ticks | **顶单黏性专用**（B1 收窄语义）：价格改善 ≥ improve_retreat_ratio×sticky 才重挂。热参可覆盖 |
 | improveRetreatRatio | double | 2.0 | 2.0 | — | 改善侧容忍倍数（与 selfTradeCalibrator.retreatTicks 是**两个无关机制**） |
 | maxPriceDeviation | double | 20.0 | 20.0 | W6 [0,100] ticks | 最大价格偏离（超限撤旧不挂新）。热参可覆盖 |
 | useBilateralQuote | bool | false | false | E9 与 obligationLevel≠0 互斥 | 路径 A 双边报价接口（当前禁用，启用需专项验证——B+ 复核遗留） |
 | priceProtection | bool | true | true | — | 价格保护总开关（protect_ticks 关闭应走此开关而非配 0） |
 | protectTicks | double | 1.0 | 1.0 | — | 保护带宽度(ticks)：报价不得进入对手价×带内。热参可覆盖（下界 0.5） |
-| qtyDecayFactor | double | 3.0 | 2.0 | — | qty 衰减软风控因子 |
-| obligationMinQty | double | 3 | 10.0 | E12 >0; W2 <scoutQty | 义务总深度阈值(手)：同侧总挂量低于此值强制补义务层 |
+| qtyDecayFactor | double | 回测 3.0 / **生产 2.0** | 2.0 | — | qty 衰减软风控因子 |
+| obligationMinQty | double | 回测 3 / **生产 10.0** | 10.0 | E12 >0; W2 <scoutQty | 义务总深度阈值(手)：同侧总挂量低于此值强制补义务层 |
 | obligationMaxSpreadTicks | double | 10 | 10.0 | — | 义务层最大带宽(ticks)（须>skewCrossMaxTicks） |
-| obligationLevel | uint32 | (未配)/_ec_5d=1 | 0 | E8 <numLevels | scout 多层义务层序号：level<此值为自由探测层(scoutQty)，==为义务层(baseQty)，之后 flexible 衰减层 |
+| obligationLevel | uint32 | 回测 (未配) / **生产 1** | 0 | E8 <numLevels | scout 多层义务层序号：level<此值为自由探测层(scoutQty)，==为义务层(baseQty)，之后 flexible 衰减层 |
 | scoutQty | double | (未配)/_ec_5d=1.0 | 1.0 | W1 ≤baseQty | scout 层单量(手)；scout 成交=逆向信号→撤同侧义务层 |
 
 #### portfolio 节
@@ -161,7 +166,7 @@ P1-4(2026-09-19) 增补：
 | frequency.deltaCriticalMult / deltaWarningMult | double | 1.5/0.8 | 同左 | delta 分级告警倍数（CRITICAL/WARNING） |
 | frequency.widenThreshold / pauseThreshold / flattenThreshold | uint32 | 1/2/3 | 同左 | 库存分级响应档位（widen/pause/flatten 的 util 阈值分子） |
 | frequency.positionWarningL1/L2 | double | (未配) | 0.8/0.9 | 持仓预警档位 |
-| frequency.maxConsecutiveSameSide / sameSideWindowMs / sameSidePauseMs | uint32 | (未配) | 5/3000/5000 | SideFillBreaker 同侧连续成交熔断参数 |
+| frequency.maxConsecutiveSameSide / sameSideWindowMs / sameSidePauseMs | uint32 | 回测 (未配) / **生产 3**/3000/5000 | 5/3000/5000 | SideFillBreaker 同侧连续成交熔断参数（生产样例把连续同侧收紧到 3） |
 | frequency.cooldownMs | uint32 | 30000 | 30000 | halt 恢复冷却 ms |
 | frequency.checkIntervalMs | uint32 | 5000 | 5000 | 恢复尝试节流 ms |
 | frequency.recoveryThreshold | double | 0.8 | 0.8 | 恢复条件：util 降至阈值以下比例 |
@@ -173,10 +178,10 @@ P1-4(2026-09-19) 增补：
 
 | 键 | 示例 | 缺省 | 说明 |
 |---|---|---|---|
-| minutesBefore | uint32 | 10 | 5 | 白盘收盘前 N 分钟触发平仓（close_time 自动从 anchor session 推导，不可配 :154-155/Assembler:771-805） |
-| nightMinutesBefore | uint32 | 10 | =minutesBefore | 夜盘版（EC 无夜盘则删键） |
+| minutesBefore | uint32 | 回测 10 / **生产 2** | 5 | 白盘收盘前 N 分钟触发平仓（close_time 自动从 anchor session 推导，不可配 :154-155/Assembler:771-805） |
+| nightMinutesBefore | uint32 | 回测 10 / **生产 2** | =minutesBefore | 夜盘版（无夜盘品种删键） |
 | flattenPosition | bool | true | true | 是否实际平仓（false 仅停报） |
-| maxRetries / retryIntervalMs | uint32 | 10/3000 | 3/5000 | 平仓重试 |
+| maxRetries / retryIntervalMs | uint32 | 回测 10/3000 / **生产 10/2000** | 3/5000 | 平仓重试（生产把重试间隔收紧到 2s） |
 | drainTimeoutMs | uint32 | 3000 | 3000 | 排空超时 |
 | depthRatioPassive/Mid/Aggressive | double | 0.3/0.5/0.8 | 同左 | 渐进平仓三档深度比率（盘口占比） |
 | sweepThresholdMs / sweepTicks | uint32 | 5000/3 | 同左 | 扫单判定（时间窗内价格移动超 ticks 判扫单→升档） |
@@ -187,7 +192,7 @@ P1-4(2026-09-19) 增补：
 
 | 键 | 示例 | 缺省 | 说明 |
 |---|---|---|---|
-| orderErrorThreshold | uint32 | 3(v5)/1000(生产临时) | 10 | 连续下单错误计数阈值→qphase=ERROR+cancelAll（D1 后不再叠加 haltTrading）。生产 1000 是 31 拒单事故临时值待回收 |
+| orderErrorThreshold | uint32 | 回测 3 / **生产样例 3**（线上实跑 1000 为 31 拒单事故临时值，待回收） | 10 | 连续下单错误计数阈值→qphase=ERROR+cancelAll（D1 后不再叠加 haltTrading） |
 | maxOrders | uint32 | 32 | 32 | 最大在途订单数 |
 | maxPendingPerSide | double | (未配)/_ec_5d=30 | 30.0 | 单侧最大挂单量(手)，超限撤旧+跳过 |
 | ~~stpMinPriceGap~~ | — | — | — | **死键**；STP 权威在 coordinator.modules.selfTradePrevention |
@@ -196,10 +201,10 @@ P1-4(2026-09-19) 增补：
 
 | 键 | 示例 | 缺省 | 说明 |
 |---|---|---|---|
-| latencyThreshold | uint64(ns) | 1000000 | 100000 | 监控延迟阈值 |
+| latencyThreshold | uint64(ns) | 回测 1000000 / **生产 500000** | 100000 | 监控延迟阈值 |
 | enabled | bool | false | true | 开关（实际装配仍以 coordinator.usePerformanceMonitor 为准） |
-| logInterval | uint32 | 60000 | 1000(ms) | 输出间隔 |
-| warnThresholdNs / criticalThresholdNs | uint32 | 100000/500000 | 10000/50000 | 分级告警(ns) |
+| logInterval | uint32 | 回测 60000 / **生产 1000** | 1000(ms) | 输出间隔 |
+| warnThresholdNs / criticalThresholdNs | uint32 | 回测 100000/500000 / **生产 500000/1000000** | 10000/50000 | 分级告警(ns)；生产按 V10-R8-c(4) 标定（本机 p99 ~330-390µs） |
 | **alertThrottleMs** | uint32 | 300000 | 300000 | **P2(2026-09-17)**：同通道 CRITICAL 告警日志限频 ms（原每秒重复打印达 15448 行/日；0=不限频）。判定口径见 §9.3 窗口化说明 |
 
 #### logging 节（P0-B，2026-09-18）
@@ -211,10 +216,48 @@ P1-4(2026-09-19) 增补：
 
 ---
 
+### 2.5 生产配置示例（src/WtFutuCore/config/config.yaml，84 键）
+
+**这是生产权威样例**（`src/WtFutuCore/config/` 为权威来源，线上 `dist/config.yaml` 由其派生并按需覆写）。
+下列值 = 仓库样例当前取值（2026-09-19 核对）；回测示例见 §2.1–§2.4。
+
+| 分组 | 生产样例取值 |
+|---|---|
+| 身份/路径 | `anchorCode: SHFE.ag2608`；`isBacktest: false`；`coordinatorConfig: ./coordinator.yaml`；`spreadArbitrageConfig: ./spread_arbitrage.yaml` |
+| contracts | `[0] SHFE.ag2608`、`[1] SHFE.ag2612`（各 `maxPosition: 50`、`maxDelta: 30`、`targetPosition: 0`） |
+| quoting | `numLevels: 2`；`obligationLevel: 1`；`scoutQty: 1.0`；`baseSpread: 2.0`；`baseQty: 10.0`；`levelQtyMultiplier: 0.7`；`levelStep: 1.0`；`stickyThreshold: 2.0`；`improveRetreatRatio: 2.0`；`maxPriceDeviation: 20.0`；`useBilateralQuote: false`；`priceProtection: true`；`protectTicks: 1.0`；`qtyDecayFactor: 2.0`；`obligationMinQty: 10.0`；`obligationMaxSpreadTicks: 10` |
+| portfolio | `maxDelta: 30`；`hedgeRatio: 1.0` |
+| risk | `maxExposure: 20000000`；`maxDailyLoss: -200000` |
+| risk.frequency | `maxOrdersPerSec: 50` / `maxCancelsPerSec: 30` / `maxTradesPerSec: 20`；`cooldownMs: 30000` / `checkIntervalMs: 5000` / `recoveryThreshold: 0.8`；`maxDeltaChangePerSec: 50` / `deltaRateWindowSec: 10` / `deltaRateCooldownMs: 5000`；`maxRecoveryCount: 3` / `pnlRecoveryRatio: 0.5` / `maxLossForRecovery: 0`；`positionBreachPauseThreshold: 1.2` / `positionHardBlockRatio: 1.0` / `deltaCriticalMult: 1.5` / `deltaWarningMult: 0.8` / `positionWarningL1: 0.8` / `positionWarningL2: 0.9` / `widenThreshold: 1`；`maxConsecutiveSameSide: 3` / `sameSideWindowMs: 3000` / `sameSidePauseMs: 5000`；`orderRatePauseMs: 3000`；`autoClearIrreversibleOnReset: false` |
+| closeout | `minutesBefore: 2`；`nightMinutesBefore: 2`；`flattenPosition: true`；`maxRetries: 10`；`retryIntervalMs: 2000`；`drainTimeoutMs: 3000`；`depthRatioPassive/Mid/Aggressive: 0.3/0.5/0.8`；`sweepThresholdMs: 5000`；`sweepTicks: 3`；`useFak: true`；`closeOnly: false` |
+| performance | `latencyThreshold: 500000`；`enabled: false`；`logInterval: 1000`；`warnThresholdNs: 500000`；`criticalThresholdNs: 1000000`；`alertThrottleMs: 300000` |
+| logging | `hotQuoteEnabled: true`；`hotQuoteSampleEvery: 10` |
+| order_control | `orderErrorThreshold: 3`；`maxOrders: 32`；`maxPendingPerSide: 30` |
+| monitor | `enabled: true`；`flushIntervalMs: 1000` |
+
+**生产 coordinator.yaml 样例取值**（93 键，节选关键项）：`useMarketMaking/useSpreadArbitrage/use_signal_aggregator: true`；
+**`useAsyncArbThread: false`、`usePerformanceMonitor: false`（样例保守默认；线上实跑均为 true）**；`usePerformanceAnalyzer: false`；
+`haltGate.mode: legacy`；`bilateralStatsLogIntervalSec: 300` / `bilateralStatsLogDir: ./Logs`；
+`pipeline.paramUpdateInterval: 100` / `pipeline.alphaSensitivity: 2.0`；
+`modules.zombieLatch: {reprobeMs: 45000, telemetryMs: 60000, maxHoldMs: 120000}`；`modules.skewDriver.hrSlowWindowMs: 300000`；
+`modules.toxicityDetector.enabled: true`；`modules.spreadOptimizer.pauseSpreadMultRatio: 0.9`；`modules.selfTradePrevention.enabled: true`。
+
+**生产 spread_arbitrage.yaml 样例**：`pairs[0] = {id: ag0812, leg1: SHFE.ag.ag2608, leg2: SHFE.ag.ag2612, ratio/ratio2: 1.0, leg1/leg2Multiplier: 1.0, entryZ: 2.0, exitZ: 0.5, stopLossZ: 4.0, stopLossPct: 0.02, maxTrendBars: 50, addSafetyRatio: 0.75, maxPosition: 20, windowSize: 200}`；
+`maxTotalPosition: 20`、`maxPairs: 3`、`signalCooldownMs: 2000`、`minSignalConfidence: 0.5`、`minProfitThresholdTicks: 1.0`；
+`asyncExecutor: {signalIntervalUs: 5000, maxWaitUs: 10000, ticksPerSignal: 5, waitMode: event, tickQueueSize: 1024, orderQueueSize: 256}`。
+（线上对应为 `ao1112` 组合、`maxTotalPosition 5`、`maxPairs 1`、`signalCooldownMs 30000`、`maxPosition 3` —— 样例与线上按品种而不同。）
+
+**生产 hotparams.yaml 样例**：26 键（24 注册 + 2 死键，见 §7）；与线上唯一差异为 `base_spread: 2.0`（线上 1.5）。
+
+---
+
 ## 3. 模块配置 coordinator.yaml
 
 **模块开关与参数的唯一权威**（config 内同名节自 V8-R6 起零读取）。全部为启动期生效；
 与 hotparams 重叠的键会被热参覆盖（见 §4 优先级链）。
+> **生产样例 vs 线上（2026-09-19 核对）**：`src/WtFutuCore/config/coordinator.yaml` 是**保守样例**——
+> `useAsyncArbThread: false`、`usePerformanceMonitor: false`；**线上实跑两者均为 true**（低延迟套利线程 + 性能采集）。
+> `haltGate.mode` 两侧当前均为 `legacy`（P1-6 阶段 2 未激活）。其余差异见 §2.5。
 
 ### 3.1 根级开关与运行参数
 
@@ -350,6 +393,8 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 > - 文件里写了但未注册的键 = **死键**（当前 2 个：`delta_skew_threshold`/`delta_skew_factor`，见 §7）。
 > - `min_profit_threshold_ticks` 不在热参表内：其权威是 `spread_arbitrage.yaml`，executor 现在
 >   **实时读 manager**（P1-4 阶段 2 去掉了 assembly 期拷贝），改 yaml + 重启即生效。
+> - **生产样例 vs 线上（2026-09-19 核对）**：`src/WtFutuCore/config/hotparams.yaml` 与线上**仅 `base_spread` 不同**
+>   （样例 2.0 / 线上 1.5）；下表"dist 值"列 = **线上实际值**，样例值见 §2.5。
 
 ### 4.1 参数总表
 
@@ -449,6 +494,10 @@ crossCheckIssues 五检查项 (:349-444):
 
 ## 6. 套利配置 spread_arbitrage.yaml（SpreadArbitrageManagerInit.cpp:18-213）
 
+> **生产样例 vs 线上（2026-09-19 核对）**：样例为 `ag0812` 组合（`ag2608/ag2612`，`maxTotalPosition 20`、`maxPairs 3`、
+> `signalCooldownMs 2000`、单 pair `maxPosition 20`）；**线上为 `ao1112` 组合**（`ao2611/ao2612`，`maxTotalPosition 5`、
+> `maxPairs 1`、`signalCooldownMs 30000`、单 pair `maxPosition 3`）。`asyncExecutor` 与 `leg1/leg2Multiplier` 两侧一致。
+
 | 键路径 | 说明 |
 |---|---|
 | enabled | 总开关 |
@@ -502,6 +551,7 @@ crossCheckIssues 五检查项 (:349-444):
 | `quoting.maxObligationSpread` / `obligationOnlyL0` / `qtyDecay`；`risk.frequency.flattenThreshold` / `pauseThreshold` | 历史 BT 配置（configbt_v5 旧版 / _ec_5d 系） | **归档死键**：代码已删（config.yaml:112 注释：旧 obligationOnlyL0/alwaysObligation 已从代码移除）；现行键为 `obligationMaxSpreadTicks` / `positionBreach*` / `sameSide*`（白名单） |
 | `spread_arbitrage.arb_close.*` | spread_arbitrage.yaml | **未启用特性的子键**：`arb_close.enabled:false` ⇒ 子键暂无消费（白名单；启用后其键会被正常读取，不受白名单影响） |
 | `spread_arbitrage.statistical.pairsTrading(.entryZThreshold)` | spread_arbitrage.yaml | **休眠子策略**：当前 primaryStrategy=mean_reversion ⇒ pairsTrading 子块不被读取（白名单，同上） |
+| `risk.autoClearIrreversibleOnReset` / `risk.orderRatePauseMs`（**根级**，非 `risk.frequency` 下） | **生产样例** src/WtFutuCore/config/config.yaml | **死键（2026-09-19 核对发现）**：loader 只读 `risk.frequency.*`（FutuConfigLoader.cpp:181-188 / RiskLimitsConfig.h:75 / FutuRiskMonitor.h:138），根级同名键无读取点。生产样例与之重复，建议删除以免误改后无效果（删除前请确认无外部工具依赖） |
 
 ## 8. 易错点与排障速查
 
