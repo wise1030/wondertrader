@@ -194,6 +194,7 @@ coordinator:
     zombieLatch:
       reprobeMs: 45000             # 闩锁持有超此时长 -> cancelAll 重探一次 (0=禁用)
       telemetryMs: 60000           # 持有期遥测打点间隔 (0=禁用)
+      maxHoldMs: 120000            # B2(2026-09-16): 闩锁持有上限 —— 超此值停止 reprobe 风暴+高优告警, 保持停报 (0=不封顶)
 
     # --- F-core S1(2026-09-15): skew driver 纯化 ---
     #   hr 逐 tick 价格重算污染 driver (翻转-成交相关 0-9% 实测), 组合项 hr 慢化

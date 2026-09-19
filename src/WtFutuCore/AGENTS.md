@@ -4961,5 +4961,33 @@ qphase→位映射（`TradingState::mirrorQPhase`）。
 
 **部署**：Release lib 落盘（周一 08:40 cron 生效；配置文件已在线上）。**P1-6 阶段 1 完成**。
 
+#### 19.15 P1-4 阶段 3（契约测试）实施记录 —— P1-4 收尾（2026-09-19）
+
+**新增 `src/TestUnits/test_futu_config_contract.cpp`（3 用例）**
+1. **权威配置必须含全部显式键**（由 `__FILE__` 推导 `src/WtFutuCore/config/`）：主配置
+   `maxOrders/maxPendingPerSide/logging.*/performance.alertThrottleMs/quoting.*6/closeout.*7/risk.frequency.*11`；
+   coordinator `zombieLatch.{reprobeMs,telemetryMs,maxHoldMs}` + `signalAggregator.model.*` + `lead_lag.{window,maxAgeMs}`；
+   spread_arbitrage `asyncExecutor.*6` + `pairs[0].{leg1Multiplier,leg2Multiplier,ratio2}`。
+2. **hotparams 文件键 = 注册表 ∪ 已知死键**（不得出现"未注册的第三类键"），且注册表键必须都在文件里
+   （否则该热参恒取默认值）。已知死键白名单 = `delta_skew_threshold`/`delta_skew_factor`。
+3. **派生值单一来源**：`AsyncArbitrageExecutor::minProfitThreshold()` 实时跟随
+   `SpreadArbitrageManager::setConfig()` 的变更；未接线时回退注入值。
+
+**该测试当场抓出 2 处权威配置缺口（并已修正，行为中性）**
+- `src/WtFutuCore/config/config.yaml` 缺 `performance.alertThrottleMs: 300000`
+  （P2 当初只写进了 live 与 BT 夹具）；
+- `src/WtFutuCore/config/coordinator.yaml` 缺 `zombieLatch.maxHoldMs: 120000`（B2 当初只写进 live）。
+⇒ 说明"权威 src 配置"与"线上配置"此前存在双向漂移，契约测试是这两类漂移的长期守卫。
+
+**同步更新**：`README.md` §4.4 增加"配置审计（P1-4）"指引（[CONFIG-AUDIT] 行语义 + 契约测试清单 +
+CONFIG.md §9 / AGENTS §19.12 交叉引用）。
+
+**验证**：TestUnits **203 项 / 201 通过**（新增 3 项契约用例；2 项为既有环境性失败）；
+v5 冒烟 `EXIT=0`、trades 405（带内）、资金 5452.59 收敛、四源审计全零、HALT/ZOMBIE=0。
+**部署**：本批仅测试与文档（无 lib 变更，无需部署）；配置改动只在 src 权威（线上此前已含这两键）。
+
+**P1-4 至此整体收尾**（阶段 1 审计/单入口 → 阶段 2 键所有权+派生单向化+热参覆盖自检 → 阶段 3 契约测试）。
+后续进入 **P1-6 阶段 2** 需等影子期满 3 交易日（`halt_shadow=0`）。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。

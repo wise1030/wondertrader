@@ -302,6 +302,13 @@ raw 存档 :206｜根级开关 :237-239｜modules 开关 :242-270（MM=false 级
 
 > **死键警示**：config 内 `modules:` 节与根级 `stpMinPriceGap` 自 V8-R6 起**零读取**（权威=coordinator.yaml）；`portfolio.hedgeDeltaThreshold/hedgeCooldownMs`、`alwaysObligation` 无消费者。详见 CONFIG.md §7。
 
+> **配置审计（P1-4，2026-09-19）**：读取全部经 `FutuConfig::readX` 单一插桩点记账；启动打印
+> `[CONFIG-AUDIT] source=<文件> present/read/unknown/read_missing`——`unknown`=配了无读取点（死键/拼错），
+> `read_missing`=代码读了但文件没配（静默用默认值）。四源（config/coordinator/hotparams/spread_arbitrage）
+> 当前均为 0；策略层→协调器字段覆盖集中在 `FutuConfigMap::applyStrategyOverrides`（11 字段）。
+> 契约测试：`test_futu_config_audit.cpp` / `test_futu_config_map.cpp` / `test_futu_config_contract.cpp`。
+> 键所有权表与规则见 CONFIG.md §9 与 AGENTS.md §19.12。
+
 ---
 
 ### 4.5 SpreadOptimizer — GLFT 报价数学 ★核心（SpreadOptimizer.h/.cpp）

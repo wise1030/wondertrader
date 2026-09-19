@@ -187,6 +187,7 @@ strategies:
           logInterval: 1000          # 日志间隔 (tick)
           warnThresholdNs: 500000    # p99 延迟告警阈值 (ns); V10-R8-c(4) 标定 (原 10us 低于正常值 33 倍, 日刷 2.6 万条 error)
           criticalThresholdNs: 1000000 # p99 延迟严重告警阈值 (ns); V10-R8-c(4) 标定 (原 50us 恒触发)
+          alertThrottleMs: 300000      # P2(2026-09-17): 同通道 CRITICAL 告警日志限频 (原每秒重复打印达 15448 行/日)
 
         # ========================================================
         # 下单控制
