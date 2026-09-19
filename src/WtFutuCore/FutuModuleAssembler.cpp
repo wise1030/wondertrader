@@ -28,6 +28,7 @@
 #include "FutuComponentFactory.h"
 #include "HotLogGate.h" // F-core P0-B: 热路径日志闸门
 #include "FutuConfigAudit.h" // F-core P1-4: 配置读取审计 (coordBool 记账)
+#include "FutuConfigMap.h"   // F-core P1-4.1b: 策略→协调器 唯一映射点
 #include "SelfTradePrevention.h"
 #include "OrderRouter.h"
 #include "StrategyCoordinator.h"
@@ -99,21 +100,16 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     _coordinator->loadConfig(coord_cfg_path);
 
     // Apply strategy-level settings (final override)
+    // F-core P1-4.1b(2026-09-19): 原 11 行内联赋值收敛为 FutuConfigMap 唯一映射点
+    //   (新增跨结构字段只改该函数 + test_futu_config_map.cpp, 防"加了键忘了桥")
     {
-        const auto& mp = _coordinator->getConfig().modules;
         CoordinatorConfig coord_cfg = _coordinator->getConfig();
-        coord_cfg.closeout_minutes_before = _config.closeout.minutes_before;
-        coord_cfg.close_time = _config.closeout.close_time;
-        coord_cfg.closeout_flatten_position = _config.closeout.flatten_position;
-        coord_cfg.night_close_time = _config.closeout.night_close_time;
-        coord_cfg.night_minutes_before = _config.closeout.night_minutes_before;
-        coord_cfg.perf_monitor_latency_threshold = _config.perf.monitor_latency_threshold;
-        coord_cfg.perf_enabled = _config.perf.enabled;
-        coord_cfg.perf_log_interval = _config.perf.log_interval;
-        coord_cfg.perf_warn_threshold_ns = _config.perf.warn_threshold_ns;
-        coord_cfg.perf_critical_threshold_ns = _config.perf.critical_threshold_ns;
-        coord_cfg.perf_alert_throttle_ms = _config.perf.alert_throttle_ms;
+        const size_t mapped = FutuConfigMap::applyStrategyOverrides(coord_cfg, _config);
         _coordinator->setConfig(coord_cfg);
+        if (mapped != 11)
+            WTSLogger::warn("FutuConfigMap: {} strategy-override field(s) mapped (expected 11) -- "
+                            "映射表变更时请同步补 test_futu_config_map.cpp",
+                            mapped);
     }
 
     // F-core P0-B(2026-09-18): 热路径日志闸门配置注入 (默认 true + 1/10 采样)

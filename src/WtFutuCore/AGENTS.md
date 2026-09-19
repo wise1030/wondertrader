@@ -4797,5 +4797,39 @@ TradingState 转换矩阵（C10 前置审计产物），本清单在其上补全
 **教训**：夜盘跨日不等于休市；重启窗口必须按 `sessions.json` 的实际 section 判定，不能按"周末"推断。
 审计输出将于 **周一 08:40 cron 重启**时在线上打印（本次已用本地 dry-run 对线上配置等价验证，结论同上）。
 
+#### 19.11 P1-4.1b 实施记录（2026-09-19，映射点收敛；含一处事实修正与一处计划偏差说明）
+
+**交付**
+
+| 文件 | 改动 |
+|---|---|
+| `FutuConfigMap.h/.cpp`（新增） | `FutuConfigMap::applyStrategyOverrides(CoordinatorConfig&, const FutuMmConfig&)` —— **唯一映射点**，返回写入字段数 |
+| `FutuModuleAssembler.cpp` | 删除内联映射块，改调 `FutuConfigMap::applyStrategyOverrides`；返回值 ≠11 时 WARN（提醒同步补测试） |
+| `src/TestUnits/test_futu_config_map.cpp`（新增） | 2 用例：逐字段映射完整性（含 `mapped == 11` 断言）、非映射字段保持 coordinator 原值 |
+
+**事实修正**：§19.1/§19.10 中"19 行手写桥"是按 `grep -c "coord_cfg\."` 统计（含其它用途）；
+该映射块实测为 **11 个字段赋值**。已按 11 收敛并在测试中把 11 作为断言常量（新增字段必须同时改测试）。
+
+**计划偏差说明（有意为之，需你确认是否接受）**：§19.2 阶段 1 写的是"loader 拥有 coordinator.yaml 解析
++ 删除手写桥"。实测（19.10 已记）**coordinator.yaml 只有 1 处真正解析**（`StrategyCoordinator::loadConfig`），
+其余 6 处是注释/日志/路径字符串 ⇒ "单入口"目标**今天已满足**，不存在双解析分叉风险；
+强行把文件读取搬到 loader 需在 `FutuMmConfig` 里串 `WTSVariant` 生命周期（该结构会被多处引用，
+引入悬垂/双重 release 风险），**收益为负**。故本批只做映射点收敛，并记录一条硬规则：
+
+> **任何新增的 coordinator.yaml 读者必须走 `FutuConfigLoader`（含审计源登记），
+> `StrategyCoordinator::loadConfig` 保持唯一解析点；出现第二个解析点时本规则被触发。**
+
+若你要求严格执行原方案（loader 持有 variant 生命周期），我再单列一批实施。
+
+**验证**
+- TestUnits **197 项 / 195 通过**（新增 2 项映射用例；2 项为既有环境性失败）。
+- v5 BT 冒烟：`EXIT=0`、trades 417（基线带内）、资金 5452.57 收敛、`FutuConfigMap` 映射数=11 无告警、
+  三源审计 `unknown` 全 0、HALT/ZOMBIE=0。
+- 部署：Release `555519a3` **静默落盘**（`.bak_20260919_p14` 为 19-18 版），**未做盘中重启**；
+  周一 08:40 cron 重启时加载，届时线上应打印 P1-4.1a 的 `[CONFIG-AUDIT]` 与 P1-4.1b 的映射数。
+
+**下一步**：P1-4 阶段 2（键所有权表 + 派生值单向化 + 热参注册表化）可开工；
+P1-6 阶段 0 清单已产出（19.8），阶段 1 需按裁决 A1/B 实现 reason 位图 + 事件通道（行为零变更的影子双写）。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。
