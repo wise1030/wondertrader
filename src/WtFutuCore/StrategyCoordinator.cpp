@@ -8,6 +8,7 @@
 #include "StrategyCoordinator.h"
 #include "OrderApiGuard.h"
 #include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
+#include "HaltGate.h"       // F-core P1-6 阶段 2: 报价门禁统一求值
 #include "FutuPortfolio.h"
 #include "FutuQuoter.h"
 #include "FutuRiskMonitor.h"
@@ -261,6 +262,23 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
     _cfg.use_market_making = readBool(cfg, "useMarketMaking", _cfg.use_market_making);
     _cfg.use_spread_arbitrage = readBool(cfg, "useSpreadArbitrage", _cfg.use_spread_arbitrage);
     _cfg.use_signal_aggregator = readBool(cfg, "use_signal_aggregator", _cfg.use_signal_aggregator);
+
+    // F-core P1-6 阶段 2(2026-09-19): 报价门禁模式 (根级 haltGate.mode: legacy|union|bits)
+    //   缺省 legacy = 与切换前逐比特一致; union = 既有标志 ∪ 原因位图 (只可能多停);
+    //   bits = 仅原因位图 (阶段 4 删旧标志后的目标态)。激活前需影子期 halt_shadow 归零。
+    if (wtp::WTSVariant* hg = cfg->get("haltGate"))
+    {
+        ConfigAudit::instance().noteRead(hg, "mode"); // F-core P1-4: 读取记账 (防审计误报 unknown)
+        HaltGateMode m = HaltGate::mode();
+        const char* mode_str = hg->getCString("mode");
+        if (mode_str != nullptr && HaltGate::parseMode(mode_str, m))
+            HaltGate::setMode(m);
+        else if (mode_str != nullptr)
+            WTSLogger::warn("[HALT-GATE] unknown haltGate.mode '{}' (legacy|union|bits), keeping {}",
+                            mode_str,
+                            HaltGate::modeName(HaltGate::mode()));
+    }
+    WTSLogger::info("[HALT-GATE] quoting gate mode = {}", HaltGate::modeName(HaltGate::mode()));
 
     // Read modules section (modules.<name>.enabled 是模块级开关的唯一权威位置)
     wtp::WTSVariant* modules = cfg->get("modules");
@@ -690,6 +708,7 @@ ProcessingResult StrategyCoordinator::processTick(
                             HotLogGate::emitted(),
                             HotLogGate::skipped(),
                             _halt_shadow_mismatch);
+            WTSLogger::info("[PERF] halt-gate {}", HaltGate::statusLine()); // P1-6 阶段 2: 模式+原因位
             _last_reallag = reallag;
             _last_kpi_ms = tc.timestamp;
         }
@@ -811,7 +830,7 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
             // B2 fix: RISK_HALTED 时不复活 arb - 由 checkRisk 恢复路径
             // (resumeFromRisk + enabled=true) 在风险正常化后统一复活,
             // 避免 break 期间触发的风控 halt 被此处绕过
-            if (!isTradingHalted()) {
+            if (!HaltGate::blocked(isTradingHalted())) { // F-core P1-6 阶段 2: arb 复活门
                 AsyncArbConfig arbCfg = _arb_executor->getConfig();
                 arbCfg.enabled.store(true);
                 _arb_executor->setConfig(arbCfg);
@@ -1163,7 +1182,9 @@ void StrategyCoordinator::updateSignals(wtp::IUftStraCtx* ctx, const TickContext
 
 bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick)
 {
-    if (!_trading_state || !_trading_state->canQuote()) {
+    // F-core P1-6 阶段 2(2026-09-19): 门禁统一求值 —— legacy(默认) = 与切换前逐比特一致;
+    //   union/bits 模式下原因位图参与判定 (见 HaltGate.h 的模式表与已知差异说明)
+    if (HaltGate::blocked(!_trading_state || !_trading_state->canQuote())) {
         return false;
     }
 
@@ -1593,12 +1614,12 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
         return false;
     if (_cfg.requote_after_fill_min_interval_ms == 0)
         return false;
-    // 报价状态门: RISK_HALTED/MARKET/TOXICITY 等期间不补挂 (与 processQuoting 同门)
-    if (!_trading_state || !_trading_state->canQuote())
-        return false;
-    // 风控 HALT 显式拦截: haltTrading() 只置 _trading_halted, 不联动 qphase=RISK_HALTED,
-    // 故 canQuote() 仍 true -> 旧实现 HALT 期间仍重挂(13:50 后 943 笔成交绕过风控).
-    if (_risk_monitor && _risk_monitor->isTradingHalted())
+    // 报价状态门 + 风控 HALT 显式拦截: 合并为一个 legacy 条件后交 HaltGate 求值
+    //   (haltTrading() 只置 _trading_halted, 不联动 qphase=RISK_HALTED, 故 canQuote() 仍 true
+    //    -> 旧实现 HALT 期间仍重挂(13:50 后 943 笔成交绕过风控), 故显式拦截必须保留)
+    const bool legacy_blocked = (!_trading_state || !_trading_state->canQuote()) ||
+                                (_risk_monitor != nullptr && _risk_monitor->isTradingHalted());
+    if (HaltGate::blocked(legacy_blocked)) // F-core P1-6 阶段 2(2026-09-19)
         return false;
 
     // V10-R8-b: 时段/竞价撮合分钟禁止补挂 —— 事件驱动补挂绕过 preCheck; 与时段门

@@ -23,6 +23,10 @@ coordinator:
   usePerformanceMonitor: false
   usePerformanceAnalyzer: false
   use_signal_aggregator: true
+  # F-core P1-6 阶段 2(2026-09-19): 报价门禁求值模式
+  #   legacy(默认)=仅既有标志(与切换前一致) / union=标志∪原因位图(只可能多停) / bits=仅位图(阶段4目标态)
+  haltGate:
+    mode: legacy
 
   # --- v7.1 taker 紧急减仓 (大量成交突然穿仓时主动吃单; 报价永不停) ---
   # [风控口径] 合约 util=|净头寸|/maxPosition >= takerReduceThreshold 时,

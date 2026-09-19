@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "../WtFutuCore/HaltReason.h"
+#include "../WtFutuCore/HaltGate.h"
 #include "../WtFutuCore/TradingState.h"
 
 using namespace futu;
@@ -70,6 +71,83 @@ TEST(FutuHaltReasons, TradingStateMirrorsQPhase)
 	EXPECT_FALSE(HaltReasons::has(HR_QPHASE_MARKET));
 
 	HaltReasons::clearAll();
+}
+
+//==============================================================================
+// F-core P1-6 阶段 2(2026-09-19): HaltGate 三种模式的门禁求值
+//   legacy(默认)=仅既有标志, 与切换前逐比特一致; union=标志∪位图(只可能多停);
+//   bits=仅位图(阶段 4 目标态)。
+//==============================================================================
+
+TEST(FutuHaltGate, LegacyModeIgnoresBits)
+{
+	HaltReasons::clearAll();
+	HaltGate::setMode(HaltGateMode::LEGACY);
+
+	EXPECT_FALSE(HaltGate::blocked(false));
+	EXPECT_TRUE(HaltGate::blocked(true));
+
+	HaltReasons::raise(HR_RISK_HALT); // 位图置位不得影响 legacy 模式
+	EXPECT_FALSE(HaltGate::blocked(false));
+	EXPECT_TRUE(HaltGate::blocked(true));
+
+	HaltReasons::clearAll();
+}
+
+TEST(FutuHaltGate, UnionModeAddsBitsOnly)
+{
+	HaltReasons::clearAll();
+	HaltGate::setMode(HaltGateMode::UNION);
+
+	EXPECT_FALSE(HaltGate::blocked(false)); // 位图空 ⇒ 与 legacy 同
+	EXPECT_TRUE(HaltGate::blocked(true));
+
+	HaltReasons::raise(HR_QUOTING_PAUSED); // 仅位图有 ⇒ union 下拦截 (legacy 下本门禁不拦)
+	EXPECT_TRUE(HaltGate::blocked(false));
+	EXPECT_TRUE(HaltGate::blocked(true));
+
+	HaltReasons::clearAll();
+	HaltGate::setMode(HaltGateMode::LEGACY);
+}
+
+TEST(FutuHaltGate, BitsModeIgnoresLegacy)
+{
+	HaltReasons::clearAll();
+	HaltGate::setMode(HaltGateMode::BITS);
+
+	// 位图空时, 即便 legacy 判定为禁止也放行 (bits 为唯一权威 —— 阶段 4 目标态)
+	EXPECT_FALSE(HaltGate::blocked(true));
+
+	HaltReasons::raise(HR_RATE_BREACH);
+	EXPECT_TRUE(HaltGate::blocked(false));
+	EXPECT_TRUE(HaltGate::blocked(true));
+
+	HaltReasons::clearAll();
+	HaltGate::setMode(HaltGateMode::LEGACY);
+}
+
+TEST(FutuHaltGate, ParseModeAndStatusLine)
+{
+	HaltGateMode m = HaltGateMode::UNION;
+	EXPECT_TRUE(HaltGate::parseMode("legacy", m));
+	EXPECT_EQ(m, HaltGateMode::LEGACY);
+	EXPECT_TRUE(HaltGate::parseMode("union", m));
+	EXPECT_EQ(m, HaltGateMode::UNION);
+	EXPECT_TRUE(HaltGate::parseMode("bits", m));
+	EXPECT_EQ(m, HaltGateMode::BITS);
+	EXPECT_FALSE(HaltGate::parseMode("bogus", m)); // 非法值不改变 out
+	EXPECT_EQ(m, HaltGateMode::BITS);
+	EXPECT_FALSE(HaltGate::parseMode(nullptr, m));
+
+	HaltReasons::clearAll();
+	HaltReasons::raise(HR_ZOMBIE_LATCH);
+	HaltGate::setMode(HaltGateMode::UNION);
+	const std::string line = HaltGate::statusLine();
+	EXPECT_NE(line.find("mode=union"), std::string::npos) << line;
+	EXPECT_NE(line.find("ZOMBIE_LATCH"), std::string::npos) << line;
+
+	HaltReasons::clearAll();
+	HaltGate::setMode(HaltGateMode::LEGACY);
 }
 
 // 方向软禁与 reset 的镜像

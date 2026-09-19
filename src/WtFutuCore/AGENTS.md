@@ -4989,5 +4989,56 @@ v5 冒烟 `EXIT=0`、trades 405（带内）、资金 5452.59 收敛、四源审�
 **P1-4 至此整体收尾**（阶段 1 审计/单入口 → 阶段 2 键所有权+派生单向化+热参覆盖自检 → 阶段 3 契约测试）。
 后续进入 **P1-6 阶段 2** 需等影子期满 3 交易日（`halt_shadow=0`）。
 
+#### 19.16 P1-6 阶段 2 实施记录（2026-09-19，报价门禁统一求值 + 三模式，默认行为不变）
+
+**用户决策**：允许"阶段 2 一次做完、验证留待后期交易日"。
+据此把门禁切换做成**运行时可切的三模式**（`haltGate.mode`），默认 `legacy` ⇒ **部署即行为零变更**；
+激活（union/bits）是配置改动，无需再改代码 —— 既满足"一次做完"，又保留影子验证门。
+
+**新增 `HaltGate.h`（header-only）**
+
+| 模式 | 语义 | 用途 |
+|---|---|---|
+| `legacy`（默认） | 仅既有标志，与切换前逐比特一致 | 影子期 / 一键回退 |
+| `union` | 既有标志 ∪ 原因位图 | 影子期后首选激活态（**只可能"多停"，不会"少停"**） |
+| `bits` | 仅原因位图 | 阶段 4 删旧标志后的目标态 |
+
+**门禁点接线（3 处；其余 12 个 `isTradingHalted()` 调用点明确**不**改）**
+1. `StrategyCoordinator::processQuoting`（逐 tick 报价门）→ `HaltGate::blocked(!_trading_state || !canQuote())`
+2. `StrategyCoordinator::requoteAfterFill`（事件驱动补挂门）→ 合并"canQuote + isTradingHalted"为一个 legacy 条件后求值
+3. `StrategyCoordinator` arb 复活门（`:815`）
+
+**为什么不全局改 getter（本次审计的关键判断）**：其余调用点需要**精确 legacy 语义**，例如
+`RiskCoordinator:132`/`FutuRuntimeOps:375` 的"恢复确认"（union 会把 TOXICITY 等相位误判为"仍 halt"从而挡住恢复）、
+`FutuRuntimeOps:596` 的 `isTradingHalted()→qphase=RISK_HALTED` 同步（union 会把相位误升为不可抢占的 RISK_HALTED）、
+`CloseoutOrchestrator:242` 的 `self_canceled` 归类、`:74` 的 IRREVERSIBLE 判定。故本阶段只切**门禁点**，
+与 §19.8 的映射表一致。
+
+**顺带发现的既有事实**：`isQuotingPaused` 此前**没有任何报价门禁**（唯一读点在 RiskCoordinator 的恢复判定）
+⇒ `pauseQuoting()` 置位后报价路径并不读取它；`union`/`bits` 模式下该原因才会真正参与门禁。
+**这是从 legacy 切到 union 时唯一新增的行为变化**，已在 `HaltGate.h` 头注释与 CONFIG.md §3.1 标注，
+激活前需在影子期确认（若不想引入该变化，可先在白名单里屏蔽 HR_QUOTING_PAUSED 位 —— 留待裁决）。
+
+**验证**
+- TestUnits **207 项 / 205 通过**（新增 4 项 `FutuHaltGate.*`：legacy 忽略位图 / union 只做加法 /
+  bits 忽略 legacy / parseMode 与 statusLine）。
+- v5 冒烟（legacy 默认）：`EXIT=0`、trades **405**（与切换前逐次数一致）、资金 5452.59 一致、
+  `[HALT-GATE] quoting gate mode = legacy` ✓、四源审计全零、影子不一致 0、HALT/ZOMBIE=0
+  ⇒ **行为零漂移**。
+- 巡检可见性：5min KPI 行新增 `[PERF] halt-gate mode=… reasons=…`。
+
+**激活流程（后期交易日）**：① 观察 `[PERF] kpi` 的 `halt_shadow=` 连续 ≥3 交易日为 0；
+② 若希望只引入"原因位图参与门禁"而不引入 HR_QUOTING_PAUSED 这一新增门禁，先裁决是否屏蔽该位；
+③ 把线上 `coordinator.yaml` 的 `haltGate.mode` 改为 `union` 并重启；④ 观察覆盖率/报单面
+（union 只会更多停，异常表现为"少报"而非"乱报"）；⑤ 稳定后再评估 `bits`（阶段 4 删旧标志）。
+
+**部署**：Release `5593dbfd` 已落盘（周一 08:40 cron 生效）；`coordinator.yaml` 两侧已加
+`haltGate.mode: legacy`（备份 `.bak4_20260919_p16`），BT 夹具同步（dist 为 ignored 运行副本）。
+
+**一次操作事故（本人，已修复）**：插入 `haltGate` 时锚点缩进判断错误（coordinator 根级实为 **2 空格**，
+我按 4/6 插入并重复了锚点行），一度使两侧 coordinator.yaml YAML 非法 → 立即用 git 恢复 src、
+用备份恢复 live，再按正确缩进重插，并以"解析后断言 `d['coordinator']['haltGate']['mode']`"验证 ✓。
+教训：改 YAML 必须用解析器自检，不能只看 diff 文本。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。

@@ -220,6 +220,7 @@ P1-4(2026-09-19) 增补：
 
 | 键 | 类型 | 示例 | 缺省 | 生效 | 说明（加载点 StrategyCoordinator.cpp） |
 |---|---|---|---|---|---|
+| **haltGate.mode** | string | legacy | **legacy** | 启动 | **P1-6 阶段 2(2026-09-19)**：报价门禁求值模式 —— `legacy`=仅既有标志（与切换前逐比特一致）/ `union`=既有标志 ∪ 原因位图（只可能多停，不会少停）/ `bits`=仅原因位图（阶段 4 删旧标志后的目标态）。门禁点 3 处：`processQuoting` / `requoteAfterFill` / arb 复活门；恢复、相位同步、订单结果标注等位置**保持精确 legacy 语义**，不受本键影响。切换前置 = 影子期 `[PERF] kpi` 的 `halt_shadow=0`（≥3 交易日）|
 | useMarketMaking | bool | true | true | 启动 | MM 总开关；false 级联关 toxicity/spreadOptimizer(:237,260-263) |
 | useSpreadArbitrage | bool | true | false | 启动 | 套利开关；=true 时 STP 强制开启(Assembler:309-312) |
 | useAsyncArbThread | bool | false | **true** | 启动 | **回测必须 false**（主线程同步保可复现，Assembler:145） |
