@@ -4887,5 +4887,50 @@ Coordinator setter / PortfolioParams 五类，字段级映射），DSL 化需要
 **阶段 2 剩余（可继续或收尾）**：`arbAsyncConfig` 补 yaml 入口（消除"无入口键"）、
 `closeout.*` 与 `risk.frequency.*` 的静默默认值显式化（19.10 清单 22 项）。
 
+#### 19.13 P1-4 阶段 2 剩余三项完成记录（2026-09-19，live 配置审计四源归零）
+
+**① arbAsyncConfig 补 yaml 入口（消除"无入口键"）**
+- `spread_arbitrage.yaml` 新增 `asyncExecutor` 节：`signalIntervalUs / maxWaitUs / ticksPerSignal /
+  waitMode(event|spin) / tickQueueSize / orderQueueSize`（缺省 = `AsyncArbConfig` 编译期默认 ⇒ 行为不变）。
+- `SpreadArbitrageManager`：新增 `_async_exec_cfg` + `asyncExecutorConfig()`；`SpreadArbitrageManagerInit.cpp`
+  的 **局部 readX 助手全部改走 `FutuConfig` 助手**（复用同一插桩点 + NaN/空串守卫，与原实现等价），
+  并 `beginSource("spread_arbitrage.yaml", root)` ⇒ **该文件首次纳入审计**。
+- `FutuModuleAssembler`：创建 executor 后 `setConfig(manager.asyncExecutorConfig())`。
+- 实测（dry-run）：`SpreadArbitrageManager: asyncExecutor signalInterval=5000us maxWait=10000us
+  ticksPerSignal=5 waitMode=event tickQ=1024 orderQ=256` ✓
+
+**② 22 处"静默默认值"显式化（线上配置，逐字采用当前生效默认值 ⇒ 行为中性）**
+- 线上 `config.yaml` +16 键：`maxOrders:32`；`quoting.improveRetreatRatio:2.0 / maxPriceDeviation:20.0 /
+  useBilateralQuote:false`；`closeout.closeOnly:false / drainTimeoutMs:3000 / sweepThresholdMs:5000 /
+  sweepTicks:3 / depthRatioPassive:0.3 / Mid:0.5 / Aggressive:0.8`；`risk.frequency.checkIntervalMs:5000 /
+  cooldownMs:30000 / recoveryThreshold:0.8 / orderRatePauseMs:3000 / autoClearIrreversibleOnReset:false`。
+- 线上 `coordinator.yaml` +4 键：`signalAggregator.model.rollingWindow:500 / rollingInterval:20 /
+  icUpdateInterval:50`；`signals.lead_lag.maxAgeMs:0`。
+- 线上 `spread_arbitrage.yaml` +2 键：pairs 的 `leg1Multiplier:1.0 / leg2Multiplier:1.0`
+  （审计新覆盖该文件时发现"代码读、文件缺"，默认 1.0 = 日历价差价格差口径）。
+- 备份：`config.yaml.bak_20260919_p142`、`coordinator.yaml.bak_20260919_p142`、
+  `spread_arbitrage.yaml.bak2_20260919_p142`；YAML 合法性已校验。
+
+**③ 白名单扩充（新覆盖 arb 源后的休眠子配置）**：`spread_arbitrage.arb_close`（C0 分级平仓默认
+`enabled:false`）、`spread_arbitrage.statistical.pairsTrading`（子策略未启用，仅 mean_reversion 生效）。
+两者在特性启用后其键会被正常读取，白名单不影响记账。
+
+**验证（线上配置等价 dry-run，四源全零）**
+
+| 源 | present | read | unknown | read_missing |
+|---|---|---|---|---|
+| config.yaml | 85 | 78 | **0** | **0** |
+| coordinator.yaml | 115 | 88 | **0** | **0** |
+| hotparams.yaml | 26 | 24 | **0** | **0** |
+| spread_arbitrage.yaml | 68 | 53 | **0** | **0** |
+
+（对比 19.10 修复前：config.yaml unknown=1 / read_missing=18；coordinator read_missing=4。）
+TestUnits 全量 **197/195**；v5 冒烟 `EXIT=0`、trades 407（带内）、资金 5452.59 收敛、HALT/ZOMBIE=0。
+BT 自身配置（`configbt_v5.yaml`）仍有 14 项 read_missing —— 属测试夹具未同步，**不影响线上**，
+如需 BT 审计同样归零可另行补键。
+
+**部署**：Release lib 落盘（周一 08:40 cron 生效）；三个配置文件已在线上就位（同一时刻生效）。
+**P1-4 阶段 2 至此完成**；阶段 3（契约测试扩展）已由 test_futu_config_audit.cpp / test_futu_config_map.cpp 承担主要部分。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。

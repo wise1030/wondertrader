@@ -13,6 +13,7 @@
 #pragma once
 
 #include "SpreadArbitrageTypes.h"
+#include "AsyncArbitrageExecutor.h" // F-core P1-4 阶段 2: asyncExecutor yaml 入口 (AsyncArbConfig)
 #include "SpreadCalculator.h"
 #include "SpreadRiskManager.h"
 #include "MeanReversionStrategy.h"
@@ -122,6 +123,10 @@ public:
     /// 回测墙钟冷却随机器速度漂移 → 不可复现). atomic 因 arb 线程读.
     void setNowMs(uint64_t ms) { _now_ms.store(ms, std::memory_order_relaxed); }
     const SpreadArbitrageConfig& getConfig() const { return _config; }
+
+    /// F-core P1-4 阶段 2(2026-09-19): 异步套利执行器配置 (权威 = spread_arbitrage.yaml `asyncExecutor` 节;
+    ///   缺省时保持 AsyncArbConfig 编译期默认 ⇒ 行为不变)。此前该配置无 yaml 入口 (已知无入口键)。
+    const AsyncArbConfig& asyncExecutorConfig() const { return _async_exec_cfg; }
 
     /// Load configuration from YAML file
     /// @param config_file Path to spread_arbitrage.yaml
@@ -284,6 +289,7 @@ private:
     //==========================================================================
 
     SpreadArbitrageConfig _config;
+    AsyncArbConfig _async_exec_cfg; ///< P1-4 阶段 2: asyncExecutor 节 (默认 = 编译期默认)
     SpreadCalculatorConfig _calc_config;
     SpreadRiskConfig _risk_config;
     MmEnhancerConfig _mm_config;

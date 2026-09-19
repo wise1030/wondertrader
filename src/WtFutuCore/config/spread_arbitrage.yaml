@@ -22,6 +22,18 @@ spread_arbitrage:
                                     # 价格调整成本超此阈值则拒单 (此前未接线, 恒放行)
 
   # ============================================================
+  # F-core P1-4 阶段 2(2026-09-19): 异步套利执行器参数 (此前只有编译期默认, 属"无入口键")
+  # 缺省值 = AsyncArbConfig 编译期默认 ⇒ 配置本节的空节/缺键不改变行为
+  # ============================================================
+  asyncExecutor:
+    signalIntervalUs: 5000           # 时间轴信号检查间隔 (us)
+    maxWaitUs: 10000                 # 空闲等待上限 (us); 事件驱动模式下取 min(距下次时间轴, 本值)
+    ticksPerSignal: 5                # 每 N 个 tick 触发一次信号检查
+    waitMode: event                  # event(默认, 事件驱动, 空闲近零 CPU) / spin(旧自适应自旋, 仅供排障)
+    tickQueueSize: 1024              # tick 队列容量 (2 的幂)
+    orderQueueSize: 256              # 订单队列容量 (2 的幂)
+
+  # ============================================================
   # C0: 套利分级平仓配置 (ARB_SELF_CLOSE_DESIGN v2.1)
   # ------------------------------------------------------------
   # 设计哲学: CLOSE 保持 B-3 抑制 (MM maker 消耗, 赚 spread + 免 fee)
@@ -62,6 +74,8 @@ spread_arbitrage:
       leg2: "SHFE.ag.ag2612"        # 远月合约
       ratio: 1.0                    # 对冲比率 leg1 (leg1:leg2 = ratio:ratio2)
       ratio2: 1.0                   # A1: 对冲比率 leg2 (默认 1.0)
+      leg1Multiplier: 1.0          # 腿1 价格乘子 (1.0 = 日历价差价格差; 跨品种才需改)
+      leg2Multiplier: 1.0          # 腿2 价格乘子 (同上; 之前靠代码默认 1.0)
       entryZScore: 2.0             # 入场 Z-Score 阈值
       exitZScore: 0.5              # 出场 Z-Score 阈值
       stopLossZ: 4.0               # A9: 止损 Z-Score (此前无加载, 恒为默认 4.0)

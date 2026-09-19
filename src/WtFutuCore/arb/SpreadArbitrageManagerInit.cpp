@@ -8,6 +8,8 @@
  * 零 API 变化, 纯搬运。
  */
 #include "SpreadArbitrageManager.h"
+#include "../FutuConfig.h"      // F-core P1-4 阶段 2: 读取走统一插桩点
+#include "../FutuConfigAudit.h" // F-core P1-4 阶段 2: spread_arbitrage.yaml 纳入审计
 #include "../../Includes/WTSVariant.hpp"
 #include "../../WTSUtils/WTSCfgLoader.h"
 #include "../../WTSTools/WTSLogger.h"
@@ -33,36 +35,17 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
         return false;
     }
 
-    // Helper functions
+    // F-core P1-4 阶段 2(2026-09-19): 读取改走 FutuConfig 助手 —— 单一插桩点 (审计可覆盖
+    //   本源), 且复用其 NaN/空串守卫 (与原局部实现等价: 原 readDouble 的 V10-P2-18 守卫已并入)。
+    ConfigAudit::instance().beginSource("spread_arbitrage.yaml", cfg);
     auto readBool = [](WTSVariant* v, const char* key, bool defVal) -> bool {
-        if (!v)
-            return defVal;
-        WTSVariant* node = v->get(key);
-        return node ? node->asBoolean() : defVal;
+        return FutuConfig::readBool(v, key, defVal);
     };
     auto readDouble = [](WTSVariant* v, const char* key, double defVal) -> double {
-        if (!v)
-            return defVal;
-        WTSVariant* node = v->get(key);
-        // V10-P2-18: 字符串标量全串 strtod + finite 守卫 (".nan"→atof→0.0 静默穿透);
-        // 数值标量 finite 守卫 (NaN 穿透旧双向范围比较)
-        if (!node)
-            return defVal;
-        if (node->type() == WTSVariant::VT_String)
-        {
-            const char* s = node->asCString();
-            char* end = nullptr;
-            double sv = std::strtod(s, &end);
-            return (end != s && *end == '\0' && std::isfinite(sv)) ? sv : defVal;
-        }
-        double val = node->asDouble();
-        return std::isfinite(val) ? val : defVal;
+        return FutuConfig::readDouble(v, key, defVal);
     };
     auto readUInt32 = [](WTSVariant* v, const char* key, uint32_t defVal) -> uint32_t {
-        if (!v)
-            return defVal;
-        WTSVariant* node = v->get(key);
-        return node ? (uint32_t)node->asInt64() : defVal;
+        return FutuConfig::readUInt32(v, key, defVal);
     };
     auto readInt32 = [](WTSVariant* v, const char* key, int defVal) -> int {
         if (!v)
@@ -71,10 +54,7 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
         return node ? (int)node->asInt64() : defVal;
     };
     auto readString = [](WTSVariant* v, const char* key, const std::string& defVal) -> std::string {
-        if (!v)
-            return defVal;
-        WTSVariant* node = v->get(key);
-        return node ? node->asString() : defVal;
+        return FutuConfig::readString(v, key, defVal.c_str());
     };
 
     // Read basic settings
@@ -107,6 +87,34 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
 
     // A10: 开仓信号最低利润门槛 (ticks), 接线到 AsyncArbitrageExecutor
     _config.min_profit_threshold_ticks = readDouble(arb, "minProfitThresholdTicks", 1.0);
+
+    //----------------------------------------------------------------------
+    // F-core P1-4 阶段 2(2026-09-19): asyncExecutor 节 —— 异步套利执行器配置的 yaml 入口
+    //   (此前该组参数只有编译期默认, 属"已知无入口键"; 缺省 = AsyncArbConfig 默认值 ⇒ 行为不变)
+    //----------------------------------------------------------------------
+    if (WTSVariant* ae = arb->get("asyncExecutor")) {
+        // 以默认值为基线, 逐键覆盖 (未配的键保持编译期默认)
+        _async_exec_cfg.signal_interval_us = readUInt32(ae, "signalIntervalUs", _async_exec_cfg.signal_interval_us);
+        _async_exec_cfg.max_wait_us = readUInt32(ae, "maxWaitUs", _async_exec_cfg.max_wait_us);
+        _async_exec_cfg.ticks_per_signal = readUInt32(ae, "ticksPerSignal", _async_exec_cfg.ticks_per_signal);
+        _async_exec_cfg.tick_queue_size = readUInt32(ae, "tickQueueSize", _async_exec_cfg.tick_queue_size);
+        _async_exec_cfg.order_queue_size = readUInt32(ae, "orderQueueSize", _async_exec_cfg.order_queue_size);
+        // waitMode: event(默认, 事件驱动)/spin(旧自适应自旋, 仅供排障)
+        const std::string mode = readString(ae, "waitMode", "event");
+        if (mode != "event" && mode != "spin")
+            WTSLogger::warn("SpreadArbitrageManager: unknown asyncExecutor.waitMode '{}' (event|spin), using event",
+                            mode);
+        _async_exec_cfg.wait_mode =
+            (mode == "spin") ? AsyncArbConfig::WAIT_SPIN : AsyncArbConfig::WAIT_EVENT;
+        WTSLogger::info("SpreadArbitrageManager: asyncExecutor signalInterval={}us maxWait={}us ticksPerSignal={} "
+                        "waitMode={} tickQ={} orderQ={}",
+                        _async_exec_cfg.signal_interval_us,
+                        _async_exec_cfg.max_wait_us,
+                        _async_exec_cfg.ticks_per_signal,
+                        (mode == "spin") ? "spin" : "event",
+                        _async_exec_cfg.tick_queue_size,
+                        _async_exec_cfg.order_queue_size);
+    }
 
     // ----------------------------------------------------------------------
     // C0: arb_close 分级平仓配置 (默认 enabled=false = 纯 B-3, 行为不变)

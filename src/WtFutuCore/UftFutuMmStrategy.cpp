@@ -54,6 +54,11 @@ void registerConfigAuditWhitelist(futu::ConfigAudit& audit)
     audit.addWhitelistPrefix("contracts.multiplier"); // loader 注释: 可选, 缺省从基础数据取
     audit.addWhitelistPrefix("contracts.tickSize");   // 同上
 
+    // 未启用特性/休眠子策略的子键 (P1-4 阶段 2 审计首次覆盖 spread_arbitrage.yaml 时发现;
+    //   启用对应特性后这些键会被读取, 届时白名单不影响其正常记账)
+    audit.addWhitelistPrefix("spread_arbitrage.arb_close");            // C0 分级平仓默认 enabled:false
+    audit.addWhitelistPrefix("spread_arbitrage.statistical.pairsTrading"); // 子策略未启用 (仅 mean_reversion 生效)
+
     // 框架/外部模块拥有 (runer 侧消费, 策略不读)
     audit.addWhitelistPrefix("basefiles");
     audit.addWhitelistPrefix("parsers");

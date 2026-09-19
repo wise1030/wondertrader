@@ -655,6 +655,9 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     //------------------------------------------------------------
     if (_config.modules.use_spread_arbitrage) {
         _async_arb = FutuComponentFactory::createAsyncArbitrageExecutor(coord_cfg);
+        // F-core P1-4 阶段 2(2026-09-19): asyncExecutor 配置来自 spread_arbitrage.yaml
+        //   (此前只有编译期默认 = "已知无入口键"); 缺省时与 AsyncArbConfig 默认逐字一致。
+        _async_arb->setConfig(_spread_arb_manager->asyncExecutorConfig());
         _async_arb->setArbitrageManager(_spread_arb_manager.get());
         _async_arb->setSelfTradePrevention(_stp.get());
         // A10: 接线利润门槛 (此前 setMinProfitThreshold 无调用者, 价格调整成本检查恒放行)

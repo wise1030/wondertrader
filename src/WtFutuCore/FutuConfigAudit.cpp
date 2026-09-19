@@ -257,7 +257,11 @@ size_t ConfigAudit::report(const char* tag)
                         container_present = true;
                 }
                 if (!container_present)
-                    missing.push_back(path);
+                {
+                    // 白名单键 (文档化可选/归档) 不计入 actionable 计数与告警
+                    if (!isWhitelisted(path))
+                        missing.push_back(path);
+                }
             }
 
             WTSLogger::info("[CONFIG-AUDIT] tag={} source={} present={} read={} unknown={} read_missing={}",
@@ -284,8 +288,6 @@ size_t ConfigAudit::report(const char* tag)
 
             for (const auto& path : missing)
             {
-                if (isWhitelisted(path))
-                    continue; // 白名单键 (文档化可选键) 不再重复告警
                 WTSLogger::warn("[CONFIG-AUDIT] source={} READ-MISSING key '{}' -- 代码读了但文件里没有 (配置缺失 → 静默用默认值)",
                                 src.name,
                                 path);
