@@ -3,6 +3,7 @@
  * \brief 配置工具方法实现
  */
 #include "FutuConfig.h"
+#include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计 (单一插桩点)
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
@@ -37,6 +38,7 @@ double FutuConfig::readDouble(wtp::WTSVariant* cfg, const char* key, double defV
 {
     if (!cfg)
         return defVal;
+    ConfigAudit::instance().noteRead(cfg, key); // F-core P1-4: 审计
     wtp::WTSVariant* node = cfg->get(key);
     if (isInvalidScalar(node))
         return defVal;
@@ -63,6 +65,7 @@ uint32_t FutuConfig::readUInt32(wtp::WTSVariant* cfg, const char* key, uint32_t 
 {
     if (!cfg)
         return defVal;
+    ConfigAudit::instance().noteRead(cfg, key); // F-core P1-4: 审计
     wtp::WTSVariant* node = cfg->get(key);
     return isInvalidScalar(node) ? defVal : node->asUInt32();
 }
@@ -71,6 +74,7 @@ bool FutuConfig::readBool(wtp::WTSVariant* cfg, const char* key, bool defVal)
 {
     if (!cfg)
         return defVal;
+    ConfigAudit::instance().noteRead(cfg, key); // F-core P1-4: 审计
     wtp::WTSVariant* node = cfg->get(key);
     if (isInvalidScalar(node))
         return defVal;
@@ -98,6 +102,7 @@ std::string FutuConfig::readString(wtp::WTSVariant* cfg, const char* key, const 
 {
     if (!cfg)
         return defVal;
+    ConfigAudit::instance().noteRead(cfg, key); // F-core P1-4: 审计
     wtp::WTSVariant* node = cfg->get(key);
     // VT_Null/容器 → 默认值; 空字符串保留原语义 (调用方可能合法地配空串)
     if (!node || node->type() == wtp::WTSVariant::VT_Null || node->type() == wtp::WTSVariant::VT_Object ||

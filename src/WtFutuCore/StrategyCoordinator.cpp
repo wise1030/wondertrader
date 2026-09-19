@@ -7,6 +7,7 @@
 
 #include "StrategyCoordinator.h"
 #include "OrderApiGuard.h"
+#include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
 #include "FutuPortfolio.h"
 #include "FutuQuoter.h"
 #include "FutuRiskMonitor.h"
@@ -206,24 +207,31 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
     if (!cfg)
         return;
 
+    // F-core P1-4(2026-09-19): 登记 coordinator.yaml 源 (键路径展开 + 读取记账;
+    //   读取经下方局部 readX 助手自动记账), 供启动期 [CONFIG-AUDIT] 报告。
+    ConfigAudit::instance().beginSource("coordinator.yaml", cfg);
+
     _cfg._raw_variant = cfg;
 
     // Helper functions
     auto readBool = [](wtp::WTSVariant* v, const char* key, bool defVal) -> bool {
         if (!v)
             return defVal;
+        ConfigAudit::instance().noteRead(v, key); // F-core P1-4: 审计
         wtp::WTSVariant* node = v->get(key);
         return node ? node->asBoolean() : defVal;
     };
     auto readUInt32 = [](wtp::WTSVariant* v, const char* key, uint32_t defVal) -> uint32_t {
         if (!v)
             return defVal;
+        ConfigAudit::instance().noteRead(v, key); // F-core P1-4: 审计
         wtp::WTSVariant* node = v->get(key);
         return node ? (uint32_t)node->asInt64() : defVal;
     };
     auto readDouble = [](wtp::WTSVariant* v, const char* key, double defVal) -> double {
         if (!v)
             return defVal;
+        ConfigAudit::instance().noteRead(v, key); // F-core P1-4: 审计
         wtp::WTSVariant* node = v->get(key);
         // V10-P2-18: 字符串标量全串 strtod + finite 守卫 (".nan"→atof→0.0 静默穿透);
         // 数值标量 finite 守卫 (NaN 穿透旧双向范围比较)
@@ -242,6 +250,7 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
     auto readString = [](wtp::WTSVariant* v, const char* key, const char* defVal) -> std::string {
         if (!v)
             return defVal ? defVal : "";
+        ConfigAudit::instance().noteRead(v, key); // F-core P1-4: 审计
         wtp::WTSVariant* node = v->get(key);
         return node ? node->asCString() : (defVal ? defVal : "");
     };

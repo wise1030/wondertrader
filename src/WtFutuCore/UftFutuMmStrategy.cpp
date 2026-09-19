@@ -16,8 +16,57 @@
 #include "UftFutuMmStrategy.h"
 #include "FutuModuleAssembler.h"
 #include "FutuRuntimeOps.h"
+#include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
 #include "../WtUftCore/UftStraContext.h" // R1: dynamic_cast 获取 EventNotifier
 #include "../Includes/IUftStraCtx.h"
+
+namespace
+{
+/// F-core P1-4(2026-09-19): 配置审计白名单 —— 命中前缀不计入 unknown。
+///   来源: CONFIG.md §7 死键清单 + 框架/外部拥有键 + 运行态差异键 (评审约束 2)。
+void registerConfigAuditWhitelist(futu::ConfigAudit& audit)
+{
+    // CONFIG.md §7 死键 (配了也不生效, 历史遗留)
+    audit.addWhitelistPrefix("modules");                    // 主配置 modules 整节零读取
+    audit.addWhitelistPrefix("stpMinPriceGap");             // 根级, STP 权威在 coordinator.yaml
+    audit.addWhitelistPrefix("portfolio.hedgeDeltaThreshold");
+    audit.addWhitelistPrefix("portfolio.hedgeCooldownMs");
+    audit.addWhitelistPrefix("quoting.alwaysObligation");
+    audit.addWhitelistPrefix("useHedging");
+
+    // 归档死键 (代码已删, 仅残留在历史 BT 配置/hotparams):
+    //   - quoting.maxObligationSpread / obligationOnlyL0 / qtyDecay
+    //     (config.yaml:112 注释: 旧 obligationOnlyL0/alwaysObligation 已从代码移除)
+    //   - risk.frequency.flattenThreshold / pauseThreshold (现行阈值键为 positionBreach*/sameSide*)
+    //   - hotparams.delta_skew_threshold / delta_skew_factor
+    //     (coordinator.yaml:138 注释: R14 已删除 deltaSkewThreshold/deltaSkewFactor 键)
+    //   清理建议: 从 BT 配置与 hotparams.yaml 移除 (见 CONFIG.md §7); 在此之前按白名单豁免。
+    audit.addWhitelistPrefix("quoting.maxObligationSpread");
+    audit.addWhitelistPrefix("quoting.obligationOnlyL0");
+    audit.addWhitelistPrefix("quoting.qtyDecay");
+    audit.addWhitelistPrefix("risk.frequency.flattenThreshold");
+    audit.addWhitelistPrefix("risk.frequency.pauseThreshold");
+    audit.addWhitelistPrefix("delta_skew_threshold");
+    audit.addWhitelistPrefix("delta_skew_factor");
+
+    // 文档化可选/说明性键 (缺失属预期, 不重复告警)
+    audit.addWhitelistPrefix("contracts.alias");     // 人工可读别名, 无消费点
+    audit.addWhitelistPrefix("contracts.multiplier"); // loader 注释: 可选, 缺省从基础数据取
+    audit.addWhitelistPrefix("contracts.tickSize");   // 同上
+
+    // 框架/外部模块拥有 (runer 侧消费, 策略不读)
+    audit.addWhitelistPrefix("basefiles");
+    audit.addWhitelistPrefix("parsers");
+    audit.addWhitelistPrefix("traders");
+    audit.addWhitelistPrefix("bspolicy");
+    audit.addWhitelistPrefix("env");                        // env.slippage 仅 cta/sel mocker 用
+    audit.addWhitelistPrefix("data");
+    audit.addWhitelistPrefix("share_domain");
+    audit.addWhitelistPrefix("notifier");
+    audit.addWhitelistPrefix("writer");
+    audit.addWhitelistPrefix("replayer");                   // 回测专用
+}
+} // namespace
 #include "../Includes/WTSVariant.hpp"
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/WTSContractInfo.hpp"
@@ -435,6 +484,20 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
     // 加固(2026-08-24): 启动期热参漂移摘要 —— 对比 hotparams.yaml 与 config/coordinator 同名键。
     // 无条件调用(回测也打印): watcher 不跑、热参不生效, 差异键即回测/实盘行为分叉点。
     _hot_mgr.logDriftSummary("hotparams.yaml", id());
+
+    // F-core P1-4(2026-09-19): 配置读取审计报告 —— 全部配置源 (config.yaml / coordinator.yaml /
+    //   hotparams.yaml) 读取完毕后统一输出 present/read/unknown/read_missing, unknown 逐条 WARN。
+    //   白名单: CONFIG.md §7 死键 + 框架/外部拥有键 + 运行态差异键 (见下方 registerConfigAuditWhitelist)。
+    {
+        auto& audit = ConfigAudit::instance();
+        registerConfigAuditWhitelist(audit);
+        const size_t unknown = audit.report("startup");
+        if (unknown > 0)
+            WTSLogger::warn("UftFutuMmStrategy[{}] config audit: {} unknown key(s) -- 见上方 [CONFIG-AUDIT] 明细 "
+                            "(拼错/死键需加白名单, 或代码缺读取点)",
+                            id(),
+                            unknown);
+    }
 
     // 启动 hotparams.yaml 文件监视器 (修改后自动写入共享内存并触发热更新)
     // 仅在实盘模式启用 (回测无共享内存)

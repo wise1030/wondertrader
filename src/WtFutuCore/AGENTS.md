@@ -4746,5 +4746,56 @@ TradingState 转换矩阵（C10 前置审计产物），本清单在其上补全
 - ✅ **阶段 0 状态清单已产出**（19.8，纯文档，复用既有 C10 写点矩阵）。
 - ⏳ **待确认（唯一阻塞项）**：方案整体确认 → 即可开工 **P1-4 阶段 1**（配置单入口 + 审计，2 人日）。
 
+#### 19.10 P1-4.1a 实施记录（2026-09-19，配置读取审计已落地）
+
+**批次切分说明**：§19.2 阶段 1 拆为两批交付 ——
+**P1-4.1a（本批，审计基础设施 + 记账插桩，行为零变更）** 与
+**P1-4.1b（下一批，单一入口：loader 拥有 coordinator.yaml 解析 + 删除 19 行手写桥 → `toCoordinatorConfig`）**。
+
+**改动清单（全部策略层）**
+
+| 文件 | 改动 |
+|---|---|
+| `FutuConfigAudit.h/.cpp`（新增） | 键路径展开（对象+数组，容器前缀规则）、`noteRead(node,key)`、`noteReadPath`、白名单前缀、`unknownList/report`、报告后自动 `close()`（后续记账近零开销） |
+| `FutuConfig.cpp` | **单一插桩点**：4 个读助手（readDouble/readUInt32/readBool/readString）统一记账 |
+| `FutuConfigLoader.cpp` | `beginSource("config.yaml", cfg)`；`anchorCode`/`contracts[].code` 直读点手动记账 |
+| `StrategyCoordinator.cpp` | `loadConfigFromVariant()` 登记 `coordinator.yaml` 源；4 个局部读助手记账 |
+| `FutuHotParamManager.cpp` | hotparams 审计：`paramNames()` 为权威读取集合，文件里未注册的键 → unknown（复用既有 drift 检测，不重建） |
+| `FutuModuleAssembler.cpp` | `coordBool()` 记账（修掉 `useAsyncArbThread/usePerformanceMonitor/usePerformanceAnalyzer` 误报） |
+| `UftFutuMmStrategy.cpp` | 启动期白名单注册 + `report("startup")`；unknown>0 时汇总 WARN |
+| `src/TestUnits/test_futu_config_audit.cpp`（新增） | 5 用例：unknown 检出 / 部分读取的兄弟键暴露 / 白名单豁免 / 注册表键记账 / report 后关账 |
+
+**白名单三类**：① CONFIG.md §7 死键（`modules`、`portfolio.hedge*`、`quoting.alwaysObligation`、`useHedging`）；
+② 框架/外部拥有键（`basefiles/parsers/traders/bspolicy/env/data/share_domain/notifier/writer/replayer`）；
+③ 归档死键与文档化可选键（`quoting.maxObligationSpread|obligationOnlyL0|qtyDecay`、
+`risk.frequency.flatten|pauseThreshold`、`delta_skew_*`、`contracts.alias|multiplier|tickSize`）。
+**生产口径**：只统计 + WARN，不阻断启动；fixture 口径：`unknown == 0` 硬断言。
+
+**验证**
+- TestUnits **195 项 / 193 通过**（新增 5 项；2 项为既有环境性失败）。
+- v5 BT 冒烟：`EXIT=0`、trades 405（基线带内）、资金收敛、HALT/ZOMBIE=0；
+  审计收敛 `config.yaml unknown=0`、`coordinator.yaml unknown=0`、`hotparams unknown=0`。
+- **线上真实配置等价验证**（本地 dry-run：用线上 `strategies.uft[0].params` + 线上 coordinator/hotparams
+  跑一次回测初始化，BT 目录用后已还原）：`config.yaml present=69 read=78 unknown=1 read_missing=18`、
+  `coordinator.yaml unknown=0 read_missing=4`、`hotparams unknown=0 read_missing=0`。
+
+**审计首批真实发现（本批的直接价值）**
+1. **hotparams 死键**：`delta_skew_threshold` / `delta_skew_factor` 在文件里存在但**未注册**（`paramNames()` 无此名），
+   而 `coordinator.yaml:138` 注释确认 "R14 已删除 deltaSkewThreshold/deltaSkewFactor 键" ⇒ 确认为残留死键（已白名单，建议后续清理文件）。
+2. **线上 `contracts.alias`** 无任何消费点（人工可读别名）⇒ 已白名单（说明性键）。
+3. **22 处"静默用默认值"**（代码读、线上文件无）：`closeout.*` 7 项、`quoting.improveRetreatRatio|maxPriceDeviation|useBilateralQuote`、
+   `risk.frequency.*` 5 项、`maxOrders`、`contracts.multiplier|tickSize`（后三者文档化可选已白名单）、
+   coordinator 侧 `signalAggregator.model.rollingWindow|rollingInterval|icUpdateInterval`、`signals.lead_lag.maxAgeMs`。
+   ⇒ 这是一份"当前靠默认值运行"的显式清单，供你决定哪些需要显式配置。
+
+**事实修正（诚实记录）**：§19.1 称 coordinator.yaml 有 7 个文件"触及"，实测**只有 1 处真正解析**
+（`StrategyCoordinator::loadConfig`），其余 6 处是注释/日志/路径字符串 ⇒ **P1-4.1b 的工作量小于原估计**。
+
+**⚠️ 操作失误记录（本人）**：本批部署时以"周末零市场影响"为由在 **00:39 重启**，但**周五夜盘实际延续到周六 01:00**，
+且该重启后**策略未重新初始化**（未订阅行情、无 QUOTE/Smtting，`Logs/Strategy/*` 自 22:42 后无新行），
+⇒ 00:39-01:00 这 20 分钟无报价（低流动性尾段，仅 1 笔重启前在途单成交走 ORPHAN FILL，台账正常）。
+**教训**：夜盘跨日不等于休市；重启窗口必须按 `sessions.json` 的实际 section 判定，不能按"周末"推断。
+审计输出将于 **周一 08:40 cron 重启**时在线上打印（本次已用本地 dry-run 对线上配置等价验证，结论同上）。
+
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。

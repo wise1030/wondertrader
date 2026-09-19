@@ -9,6 +9,8 @@
 #include "SignalAggregator.h"
 #include "StrategyCoordinator.h"
 #include "FutuPortfolio.h"
+#include "FutuConfigAudit.h"          // F-core P1-4(2026-09-19): 配置读取审计
+#include "../WTSUtils/WTSCfgLoader.h" // F-core P1-4: hotparams.yaml 键集合审计
 #include "../Includes/IUftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
 #include "../WTSUtils/WTSCfgLoader.h"
@@ -464,6 +466,19 @@ void FutuHotParamManager::logDriftSummary(const char* filepath, const char* stra
     double defaults[HP_COUNT];
     for (uint32_t i = 0; i < HP_COUNT; i++)
         defaults[i] = _hot_params[i].default_val;
+
+    // F-core P1-4(2026-09-19): hotparams.yaml 读取审计 —— 复用既有 drift 检测之上,
+    //   额外识别"文件里写了但未注册"的键 (注册表 paramNames() 为权威读取集合)。
+    //   复用既有 [HOTPARAM-DRIFT] 机制, 不重建漂移检测。
+    if (wtp::WTSVariant* hp_root = WTSCfgLoader::load_from_file(filepath))
+    {
+        auto& audit = ConfigAudit::instance();
+        audit.beginSource("hotparams.yaml", hp_root);
+        const char* const* names = paramNames();
+        for (uint32_t i = 0; i < HP_COUNT; ++i)
+            audit.noteReadPath("hotparams.yaml", names[i]);
+        hp_root->release();
+    }
 
     std::vector<std::string> lines;
     const int32_t n = collectDriftLines(filepath, defaults, lines);

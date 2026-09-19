@@ -27,6 +27,7 @@
 #include "SpreadArbitrageManager.h"
 #include "FutuComponentFactory.h"
 #include "HotLogGate.h" // F-core P0-B: 热路径日志闸门
+#include "FutuConfigAudit.h" // F-core P1-4: 配置读取审计 (coordBool 记账)
 #include "SelfTradePrevention.h"
 #include "OrderRouter.h"
 #include "StrategyCoordinator.h"
@@ -149,6 +150,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         wtp::WTSVariant* raw = coord_cfg._raw_variant;
         auto coordBool = [&](const char* key, bool compile_time_default) -> bool {
             if (raw) {
+                // F-core P1-4(2026-09-19): 模块开关经此处读取 → 记账 (否则审计误报 unknown)
+                ConfigAudit::instance().noteRead(raw, key);
                 wtp::WTSVariant* node = raw->get(key);
                 if (node)
                     return node->asBoolean();

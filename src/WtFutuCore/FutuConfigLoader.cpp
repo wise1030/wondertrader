@@ -4,6 +4,7 @@
  */
 #include "FutuConfigLoader.h"
 #include "FutuConfig.h"
+#include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
 #include "../WTSTools/WTSLogger.h"
 
 namespace futu
@@ -25,7 +26,10 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     //------------------------------------------------------------
     // 读取合约配置
     //------------------------------------------------------------
+    // F-core P1-4: 登记本源并开始记账 (键路径由 ConfigAudit 展开; 读取经 FutuConfig 助手自动记账)
+    ConfigAudit::instance().beginSource("config.yaml", cfg);
     _config.anchor_code = cfg->getCString("anchorCode");
+    ConfigAudit::instance().noteRead(cfg, "anchorCode"); // getCString 直读, 手动记账
     _config.is_backtest = readBool(cfg, "isBacktest", false);
 
     //------------------------------------------------------------
@@ -45,6 +49,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
 
             ContractInfo ci;
             ci.code = cfgItem->getCString("code");
+            ConfigAudit::instance().noteRead(cfgItem, "code"); // getCString 直读, 手动记账
             // multiplier 和 tickSize 可选，-1 表示未配置，后续从基础数据模块获取
             ci.multiplier = readDouble(cfgItem, "multiplier", -1.0);
             ci.tick_size = readDouble(cfgItem, "tickSize", -1.0);
