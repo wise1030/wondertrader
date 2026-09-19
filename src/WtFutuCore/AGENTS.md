@@ -4926,8 +4926,8 @@ Coordinator setter / PortfolioParams 五类，字段级映射），DSL 化需要
 
 （对比 19.10 修复前：config.yaml unknown=1 / read_missing=18；coordinator read_missing=4。）
 TestUnits 全量 **197/195**；v5 冒烟 `EXIT=0`、trades 407（带内）、资金 5452.59 收敛、HALT/ZOMBIE=0。
-BT 自身配置（`configbt_v5.yaml`）仍有 14 项 read_missing —— 属测试夹具未同步，**不影响线上**，
-如需 BT 审计同样归零可另行补键。
+BT 夹具已同步补齐（2026-09-19 同日）：`configbt_v5.yaml` +14 键、`dist/WtBtFutu/spread_arbitrage.yaml`
++2 键（leg1/leg2Multiplier=1.0），BT 审计四源亦为 unknown=0 / read_missing=0（trades 405 带内、HALT/ZOMBIE=0）。
 
 **部署**：Release lib 落盘（周一 08:40 cron 生效）；三个配置文件已在线上就位（同一时刻生效）。
 **P1-4 阶段 2 至此完成**；阶段 3（契约测试扩展）已由 test_futu_config_audit.cpp / test_futu_config_map.cpp 承担主要部分。
