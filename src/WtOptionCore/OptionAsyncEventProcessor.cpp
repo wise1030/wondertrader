@@ -34,6 +34,9 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     // B28: capture exact expiry date from contract info when available
     auto* ci = t->getContractInfo();
     ev.tick.expireDate = (ci && ci->getExpireDate() > 0) ? ci->getExpireDate() : 0;
+    // R1: exchange price limits straight off the feed
+    ev.tick.upperLimit = t->upperlimit();
+    ev.tick.lowerLimit = t->lowerlimit();
     return ev;
 }
 

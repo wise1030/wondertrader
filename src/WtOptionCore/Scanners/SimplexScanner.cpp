@@ -16,4 +16,7 @@ double SimplexScanner::scanOption(OptionData* opt) {
     return edge;
 }
 
+// R6: factory registration — closes the "factory map empty" defect
+REGISTER_SCANNER("SimplexScanner", SimplexScanner);
+
 } // namespace wt_option

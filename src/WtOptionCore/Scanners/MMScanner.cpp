@@ -32,4 +32,7 @@ bool MMScanner::fireOption(OptionData* opt, int dir, double px, double score, Sc
     return true;
 }
 
+// R6: factory registration — closes the "factory map empty" defect
+REGISTER_SCANNER("MMScanner", MMScanner);
+
 } // namespace wt_option

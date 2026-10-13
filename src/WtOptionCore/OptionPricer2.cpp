@@ -22,6 +22,7 @@
 #include "OptionPricer2.h"
 #include "BlackCalc.h"
 #include "BlackImpliedCalculator.h"
+#include "PowerVolCurve.h"
 #include "OptionGrid.h"
 #include "../WTSTools/WTSLogger.h"
 #include "StrikeData.h"
@@ -215,7 +216,13 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
         ei->m_atmvol = m_defaultVolatility;
         // 创建波动率曲线 (与 quantbox 一致, 但不依赖 Lua config)
         ei->m_spVolCurve  = std::make_shared<GvvVolCurve>();
-        ei->m_spVolCurve2 = std::make_shared<GvvVolCurve>();
+        // R2: restore the original GVV×Power dual-curve design. With the
+        // migration-era default ("gvv") both curves are identical and
+        // volcurve_weight degenerates to a no-op.
+        if (m_config.curve2_type == "power")
+            ei->m_spVolCurve2 = std::make_shared<PowerVolCurve>(GvvVolCurve::RHO);
+        else
+            ei->m_spVolCurve2 = std::make_shared<GvvVolCurve>();
         // hardcode defaults (preserve original)
         ei->m_futsprd = 1.0;
         ei->m_atmvolsprd = 0.2;

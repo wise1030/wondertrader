@@ -1,5 +1,21 @@
 # WtOptionCore - WonderTrader 期权做市引擎
 
+> **2026-08 状态更新**（详细见 `analysis/diagnostic-report-2026-08-24.md` 与
+> `analysis/fix-plan-2026-08-24.md`、`.opencode/plans/wtoptioncore_quantbox_absorption_plan.md`）：
+> - 本 README 撰写于迁移期，部分描述已过期，以代码与上述文档为准。
+> - **已修复**: SPSC 多生产者 UB→双队列、tick 去重 string_view、forward 粘性+午夜回绕防护、
+>   total_risk 公式、fee/tickSize/multiplier 注入、OQM 计数器 session 复位、filter MODIFIED 采纳、
+>   panic 单一写者（TradingState 状态机）、combo 腿路由、Toxicity/Prediction 时钟注入等。
+> - **新增**: RiskFilterChain(5+B3 short限额)、RiskLimitsEx 预检/Greeks/保证金护栏接线、
+>   FillPriceChecker/PositionGuard/PositionOffsetMgr 通电、OrderAnomalyGuard、DeltaHedgeExecutor(默认关)、
+>   CommandBus 热指令、ConfigValidator 启动校验、PredictionEvaluator 闭环、PowerVolCurve 双曲线(R2)、
+>   StrikeFinders(R3)、涨跌停护栏(R1)、FIFO PnL+加权入场价。
+> - **性能**: -O3/-flto、timer 源头 100ms 合并、GVV α=1 闭式快路径（拟合后 α 数据驱动，通用翼部查表仍延后）。
+> - **Scanner 子系统**: 工厂注册已修复可加载，但各 scanner 信号逻辑仍为占位级实现，启用前需自行评估。
+> - **配置新增键**: `orderManager.*.quote_style/enable_offset_guard`、`margin{}`、`pnl.fifo_mode`、
+>   `delta_hedge{}`、`riskLimits.maxShortCall/PutPerSymbol`、`pricer.blackCalc.volCurve.curve2_type`；
+>   启动时未知键会 WARN（ConfigValidator）。
+
 ## 概述
 
 WtOptionCore 是 WonderTrader 量化交易平台下的**期权做市引擎**，从 quantbox/optiontrader 项目迁移而来。作为一个 C++17 共享库 (`libWtOptionCore.so`)，它被 WtRunner 以 HFT 策略工厂插件方式动态加载，实现了完整的期权做市管线：合约数据网格、Black-Scholes/Black76 定价、GVV 波动率曲面、组合风险/Greeks 聚合、订单管理、PnL 跟踪，以及一套套利/做市扫描器。

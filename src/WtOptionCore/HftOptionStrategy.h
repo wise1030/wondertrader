@@ -27,6 +27,11 @@
 #include "QuoteStatistics.h"
 #include "GammaScalpOptionPricer.h"
 #include "OrderAnomalyGuard.h"
+#include "TradingState.h"
+#include "CommandBus.h"
+#include "DeltaHedgeExecutor.h"
+#include "PredictionEvaluator.h"
+#include "ConfigValidator.h"
 
 #include <string>
 #include <memory>
@@ -218,6 +223,34 @@ private:
     // B2: exchange-report anomaly protection (IssuedOrderTracker absorption)
     wt_option::OrderAnomalyGuard _anomalyGuard;
 
+    // R1: latest exchange price limits per code (from tick feed)
+    struct PriceLimit { double upper = 0; double lower = 0; };
+    std::unordered_map<std::string, PriceLimit> _priceLimits;
+
+    // R5: timer-event dedup state (suppress the per-tick timer storm)
+    uint32_t _lastTimerDate = 0;
+    double   _lastTimerSecOfDay = -1e9;
+
+    // R8: unified trading state — single writer for enabled/panicked
+    wt_option::TradingState _tstate;
+    void setState(wt_option::TradingStateType t, const std::string& reason);
+    bool _tradingStateEnabled() const;
+    void applyTradingState();
+
+    // R9: structured hot-command bus (replaces raw manual_order parsing)
+    wt_option::CommandBus _cmdBus;
+    void registerCommands();
+
+    // R10: portfolio delta-hedge executor (default off)
+    bool   _deltaHedgeEnable = false;
+    double _deltaHedgeLastFire = -1e9;
+    std::string _primaryHedgeCode;
+    wt_option::DeltaHedgeExecutor::Config _hedgeCfg;
+    void checkDeltaHedge(double nowSec);
+
+    // R-P1: prediction accuracy loop closure
+    wt_option::PredictionEvaluator _predEvaluator;
+
     // B1: estimated-margin guard (config-driven; exchange does not publish
     // margins via commInfo, so rates are calibrated in config)
     struct MarginConfig {
@@ -271,6 +304,8 @@ private:
     void setupAsyncCallbacks();
     void setupSignals();
     void setupScanners();
+    void wireStrikeFinders();                        // R3
+    bool withinPriceLimits(const std::string& code, double price);  // R1
 
     // Order executors (bridge to IHftStraCtx)
     int32_t executeQuote(const std::string& code, double bidP, uint32_t bidQ,

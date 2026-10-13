@@ -111,6 +111,13 @@ public:
     bool    vol_fitting_to_all_expiries = false;
     int32_t trace_level              = 0;
     bool    use_parallel_for          = false;  // P1: enable via config "use_parallel"
+
+    /// R2: curve2 type for the GVV×curve2 blend. "gvv" reproduces the
+    /// migration-era behavior (both curves Gvv → vol≡vol2, weight no-op);
+    /// "power" restores the ORIGINAL quantbox dual-curve design
+    /// (GVV parametric smile × PowerVolCurve empirical wings), making
+    /// volcurve_weight meaningful. Recommended: "power".
+    std::string curve2_type          = "gvv";
     bool    use_sprd_vs_atmfwd       = true;
     double  slow_compute_interval    = 0.1;   // seconds
     int32_t expire_greeks_window_bdays = 0;

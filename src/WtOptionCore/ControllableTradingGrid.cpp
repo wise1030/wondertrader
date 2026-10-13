@@ -108,6 +108,8 @@ void ControllableTradingGrid::tradingStopMidDay() {
         // orders to the exchange. Without this, CANCEL quotes are staged in
         // m_pendingQuotes but never sent (all callers gate drain on enabled==true).
         drainPendingQuotes();
+        // R8: notify the unified state machine (strategy owns the writer now)
+        if (m_sessionStopCb) m_sessionStopCb(true);
     }
 }
 
@@ -117,6 +119,7 @@ void ControllableTradingGrid::resumeTrading() {
         m_ctx->enabled = true;
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "CTG::resumeTrading — trading enabled");
+        if (m_sessionStopCb) m_sessionStopCb(false);
     }
 }
 

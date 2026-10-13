@@ -148,6 +148,35 @@ double GvvVolCurve::eval(double x) const
     if (!m_bInitialized)
         return 1.0;
 
+    // R11: α=1 closed form. PriceError degenerates to
+    //   f(v) = v² − (atmvol² + skew·x + kurt·x²)
+    // whose root is exact — no Brent iteration needed on the hot path.
+    // Coverage note: fit() selects α via BrentMinimize over [dn,up], so
+    // post-fit α is usually ≠1 — this path then serves pre-fit evaluation,
+    // fits that landed near 1.0, and configs forcing ALPHA=1. General α
+    // keeps Brent; per-cycle memoization/wing tables stay deferred.
+    if (std::fabs(m_alpha - 1.0) < 1e-9) {
+        // Same param→smile derivation as the Brent path below
+        const double a_ = (1.0 + 0.25 * m_volvol * m_volvol);
+        const double b_ = -m_rho * m_spotvol * m_volvol;
+        const double c_ = -m_spotvol * m_spotvol;
+        double disc = b_ * b_ - 4.0 * a_ * c_;
+        if (disc < 0.0) disc = 0.0;
+        const double atmvol = (-b_ + std::sqrt(disc)) / 2.0 / a_;
+        const double kurt = m_volvol * m_volvol / m_maturity / std::pow(atmvol, 2.0 * m_alpha);
+        const double skew = 2.0 * m_rho * m_spotvol * std::sqrt(kurt);
+
+        double inner = atmvol * atmvol + skew * x + kurt * x * x;
+        if (!std::isfinite(inner))
+            return 1.0;
+        const double lo2 = GVV_MINATMVOL * GVV_MINATMVOL;
+        const double hi2 = GVV_MAXATMVOL * GVV_MAXATMVOL;
+        if (inner < lo2) inner = lo2;
+        else if (inner > hi2) inner = hi2;
+        const double vol = std::sqrt(inner);
+        return vol / m_atmvol;
+    }
+
     try {
         double a = (1.0 + 0.25 * m_volvol * m_volvol);
         double b = -m_rho * m_spotvol * m_volvol;

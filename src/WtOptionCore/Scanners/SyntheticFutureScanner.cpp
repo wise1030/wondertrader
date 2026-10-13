@@ -16,4 +16,7 @@ double SyntheticFutureScanner::scanOption(OptionData* opt) {
     return edge;
 }
 
+// R6: factory registration — closes the "factory map empty" defect
+REGISTER_SCANNER("SyntheticFutureScanner", SyntheticFutureScanner);
+
 } // namespace wt_option

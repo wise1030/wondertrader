@@ -76,6 +76,12 @@ public:
                                                  const OptionData* od)>;
     void setScannerExecuteFn(ScannerExecuteFn fn) { m_scannerExec = std::move(fn); }
 
+    /// R8: session stop/resume notifications route through the strategy's
+    /// unified state machine (single writer for enabled/panicked).
+    void setSessionStopCallback(std::function<void(bool stopped)> cb) {
+        m_sessionStopCb = std::move(cb);
+    }
+
     // TPS control
     int32_t getMaxTransactionsPerSec() const { return m_maxTransactionsPerSec; }
     void setMaxTransactionsPerSec(int32_t tps) { m_maxTransactionsPerSec = tps; }
@@ -123,6 +129,7 @@ public:
     CancelExecutor m_cancelExec;
     QuoteExecutor m_quoteExec;
     ScannerExecuteFn m_scannerExec;
+    std::function<void(bool stopped)> m_sessionStopCb;   // R8
 
     // TPS control
     int32_t m_maxTransactionsPerSec = 50;

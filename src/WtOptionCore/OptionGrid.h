@@ -17,6 +17,7 @@
 #include "StrikeData.h"
 #include "IOptionPricer.h"
 #include "optioncoretypes.h"
+#include "IStrikeFinder.h"
 
 #include <string>
 #include <vector>
@@ -162,6 +163,13 @@ public:
     // Forward stale timeout (microseconds). When validCount drops below minStrikes,
     // forwardReady stays true for this duration before being set to false.
     void setForwardStaleTimeoutUs(uint64_t us) { m_forwardStaleTimeoutUs = us; }
+
+    /// R3: per-expiry strike-grid finder (quantbox IStrikeFinder absorption).
+    /// When set, getAtmStrike snaps the reference price to the listed grid
+    /// before nearest-search — prevents selecting non-listed virtual strikes.
+    void setStrikeFinder(uint32_t expiry, IStrikeFinderPtr finder) {
+        m_strikeFinders[expiry] = std::move(finder);
+    }
     uint64_t getForwardStaleTimeoutUs() const { return m_forwardStaleTimeoutUs; }
 
 private:
@@ -229,6 +237,7 @@ private:
 
     // Forward stale timeout (microseconds, default 5s)
     uint64_t m_forwardStaleTimeoutUs = 5000000;
+    std::map<uint32_t, IStrikeFinderPtr> m_strikeFinders;   // R3
 };
 
 } // namespace wt_option

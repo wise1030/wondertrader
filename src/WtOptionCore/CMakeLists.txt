@@ -36,6 +36,10 @@ set(OPTION_CORE_SOURCES
     LinearVolCurve.cpp
     GvvVolCurve.cpp
     PeriodicCurveFitter.cpp
+    PowerVolCurve.cpp
+
+    # Strike grids (quantbox optioncore absorption, R3)
+    StrikeFinders.cpp
 
     # Risk + Trading data
     OptionRisk.cpp
@@ -123,6 +127,10 @@ set(OPTION_CORE_HEADERS
     LinearVolCurve.h
     GvvVolCurve.h
     PeriodicCurveFitter.h
+    PowerVolCurve.h
+    IStrikeFinder.h
+    CffexIOStrikeFinder.h
+    DceMOStrikeFinder.h
     OptionRisk.h
     OptionTradingData.h
     UnderlyingTradingData.h

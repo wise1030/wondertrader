@@ -21,8 +21,10 @@ public:
         int32_t clampLimit = 0;
         // C2: optimistic-reconciliation undo window (quantbox PositionTracker).
         // A broker-vs-internal adjustment made here is rolled back if a fill
-        // arrives within this window (the fill likely explains the diff).
-        double undoWindowSec = 2.0;
+        // arrives within this window. DEFAULT 0 = DISABLED: with 0, any
+        // |diff| > tolerance keeps the legacy fail-safe behavior (alert +
+        // disableOnBreach). Opt in explicitly once SimNow-validated.
+        double undoWindowSec = 0.0;
         Config() = default;
     };
 

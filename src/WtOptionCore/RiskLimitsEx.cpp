@@ -61,6 +61,27 @@ RiskLimitsEx::CheckReport RiskLimitsEx::checkPosition(int32_t position) const {
     return r;
 }
 
+RiskLimitsEx::CheckReport RiskLimitsEx::checkPriceLimit(double price,
+                                                          double upper,
+                                                          double lower) const {
+    CheckReport r;
+    if (price <= 0) return r;                       // nothing to judge
+    if (upper > 0 && price > upper + 1e-9) {
+        r.result = CheckResult::REJECT;
+        r.value = price;
+        r.limit = upper;
+        r.reason = "price_upper_limit";
+        return r;
+    }
+    if (lower > 0 && price < lower - 1e-9) {
+        r.result = CheckResult::REJECT;
+        r.value = price;
+        r.limit = lower;
+        r.reason = "price_lower_limit";
+    }
+    return r;
+}
+
 RiskLimitsEx::CheckReport RiskLimitsEx::checkPreTrade(
     const std::string& /*code*/, bool isBuy,
     double price, uint32_t qty,
@@ -99,38 +120,59 @@ RiskLimitsEx::CheckReport RiskLimitsEx::checkPostTrade(
     return r;
 }
 
+namespace {
+
+// A2 fix helper: breach -> REJECT (latches panic downstream);
+// >=90% of limit -> WARN (early warning without halting).
+RiskLimitsEx::CheckReport thresholdCheck(const char* name, double value,
+                                          double limit, double warnRatio = 0.9) {
+    RiskLimitsEx::CheckReport r;
+    if (limit <= 0) return r;                       // disabled
+    const double av = std::abs(value);
+    if (av > limit) {
+        r.result = RiskLimitsEx::CheckResult::REJECT;
+        r.value = value;
+        r.limit = limit;
+        r.reason = name;
+    } else if (av >= limit * warnRatio) {
+        r.result = RiskLimitsEx::CheckResult::WARN;
+        r.value = value;
+        r.limit = limit;
+        r.reason = name;
+    }
+    return r;
+}
+
+} // anonymous namespace
+
 RiskLimitsEx::CheckReport RiskLimitsEx::checkGreeks(
     double delta, double gamma, double vega, double pnl) const {
 
-    CheckReport r;
-    if (std::abs(delta) > maxDelta) {
-        r.result = CheckResult::WARN;
-        r.value = delta;
-        r.limit = maxDelta;
-        r.reason = "max_delta";
+    // Loss limit is one-sided (only losses breach)
+    if (maxLossPerDay > 0 && pnl < -maxLossPerDay) {
+        CheckReport r;
+        r.result = CheckResult::REJECT;
+        r.value = pnl;
+        r.limit = -maxLossPerDay;
+        r.reason = "max_loss_per_day";
         return r;
     }
-    if (std::abs(gamma) > maxGamma) {
-        r.result = CheckResult::WARN;
-        r.value = gamma;
-        r.limit = maxGamma;
-        r.reason = "max_gamma";
-        return r;
-    }
-    if (std::abs(vega) > maxVega) {
-        r.result = CheckResult::WARN;
-        r.value = vega;
-        r.limit = maxVega;
-        r.reason = "max_vega";
-        return r;
-    }
-    if (pnl < -maxLossPerDay) {
+    if (maxLossPerDay > 0 && pnl < -maxLossPerDay * 0.9) {
+        CheckReport r;
         r.result = CheckResult::WARN;
         r.value = pnl;
         r.limit = -maxLossPerDay;
         r.reason = "max_loss_per_day";
         return r;
     }
+
+    CheckReport r = thresholdCheck("max_delta", delta, maxDelta);
+    if (r.result != CheckResult::PASS) return r;
+
+    r = thresholdCheck("max_gamma", gamma, maxGamma);
+    if (r.result != CheckResult::PASS) return r;
+
+    r = thresholdCheck("max_vega", vega, maxVega);
     return r;
 }
 

@@ -40,6 +40,15 @@
 #include "Signals/SignalFactory.h"
 #include "Signals/AlphaSignals.h"
 #include "Signals/RiskSignals.h"
+#include "CffexIOStrikeFinder.h"
+#include "DceMOStrikeFinder.h"
+#include "TradingState.h"
+#include "CommandBus.h"
+#include "DeltaHedgeExecutor.h"
+#include "PredictionEvaluator.h"
+#include "ConfigValidator.h"
+
+#include <algorithm>
 
 namespace wt_option {
 // Forward-declared in header, full definition in ControllableTradingGrid.h
@@ -346,6 +355,20 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
         }
     }
 
+    // R10: portfolio delta-hedge executor config (default OFF)
+    if (cfg->has("delta_hedge")) {
+        WTSVariant* dh = cfg->get("delta_hedge");
+        if (dh) {
+            _deltaHedgeEnable = dh->has("enable") ? dh->getBoolean("enable") : false;
+            _hedgeCfg.thresholdDelta = dh->has("threshold_delta") ? dh->getDouble("threshold_delta") : 0.0;
+            _hedgeCfg.targetDelta    = dh->has("target_delta") ? dh->getInt32("target_delta") : 0;
+            _hedgeCfg.maxOrderSize   = dh->has("max_order_size") ? dh->getUInt32("max_order_size") : 5;
+            _hedgeCfg.cooldownSec    = dh->has("cooldown_sec") ? dh->getDouble("cooldown_sec") : 3.0;
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "DeltaHedger: enable={} threshold={}", _deltaHedgeEnable, _hedgeCfg.thresholdDelta);
+        }
+    }
+
     // B5: FIFO PnL matching mode
     if (cfg->has("pnl")) {
         WTSVariant* pnlCfg = cfg->get("pnl");
@@ -363,6 +386,9 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
 
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "Enhancement modules initialized: RiskLimitsEx FillPriceChecker");
+
+    // R-B33: startup config schema validation — unknown keys WARN loudly
+    wt_option::ConfigValidator::validate(cfg);
     return true;
 }
 
@@ -423,6 +449,10 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
         WTSLogger::log_by_cat("strategy", LL_ERROR, "OrderAnomaly: {}", msg);
     });
 
+    // R-P1: prediction accuracy loop closure + R9 command bus
+    _predEvaluator.setGetTimeFn([this]() { return _ctx ? wt_option::ctxTimeSeconds(_ctx) : 0.0; });
+    registerCommands();
+
     setupGrid();
     setupPricer();
     setupCTG();
@@ -471,6 +501,13 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
                 state.confidence = frontEd->isValuesReady() ? 1.0 : 0.0;
             }
             _predictor->update(state);
+            // R-P1: score predictions against realized forward
+            const double fwdNow = state.forward > 0 ? state.forward
+                                : (_grid ? _grid->getUnderlyingPrice() : 0.0);
+            if (fwdNow > 0) {
+                _predEvaluator.onPrediction(state.forward, 30.0 /*30s horizon*/);
+                _predEvaluator.onRealized(fwdNow);
+            }
         }
     });
     setupAsyncCallbacks();
@@ -603,6 +640,43 @@ void HftOptionStrategy::setupGrid()
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "HftOptionStrategy grid created: product={} underlying={} holidays={}",
         _optionProduct, _underlyingCode, _grid->numHolidays());
+
+    // R3: wire exchange strike-grid finders (quantbox absorption)
+    wireStrikeFinders();
+}
+
+// ============================================================================
+// wireStrikeFinders — R3: per-expiry strike-grid rules absorbed from
+// quantbox optioncore StrikeFinders. CFFEX IO/MO/HO: monthly 50 / quarterly
+// 100; DCE products: price-tiered 25/50/100. Rule of thumb for expiry type:
+// the nearest two expiries are MONTHLY, the rest QUARTERLY.
+// ============================================================================
+void HftOptionStrategy::wireStrikeFinders()
+{
+    if (!_grid || _expiryConfigs.empty()) return;
+
+    const bool useCffex = (_exchange == "CFFEX");
+    const bool useDceTiered = (_exchange == "DCE");
+    if (!useCffex && !useDceTiered) return;
+
+    std::vector<uint32_t> exps;
+    for (const auto& [exp, ec] : _expiryConfigs)
+        if (ec.enable) exps.push_back(exp);
+    std::sort(exps.begin(), exps.end());
+
+    for (size_t i = 0; i < exps.size(); ++i) {
+        auto type = (i < 2) ? wt_option::IStrikeFinder::MONTHLY
+                            : wt_option::IStrikeFinder::QUARTERLY;
+        if (useCffex)
+            _grid->setStrikeFinder(exps[i],
+                std::make_shared<wt_option::CffexIOStrikeFinder>(type));
+        else
+            _grid->setStrikeFinder(exps[i],
+                std::make_shared<wt_option::DceMOStrikeFinder>(type));
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "StrikeFinder wired: exp={} type={}", exps[i],
+            type == wt_option::IStrikeFinder::MONTHLY ? "MONTHLY" : "QUARTERLY");
+    }
 }
 
 // ============================================================================
@@ -704,6 +778,21 @@ void HftOptionStrategy::setupPricer()
         }
         p2cfg.trace_level = pCfg0->has("trace_level")
             ? pCfg0->getInt32("trace_level") : 0;
+
+        // R2: curve2 type — "power" restores the original GVV×Power dual-curve
+        // design and makes volcurve_weight effective; "gvv" keeps legacy behavior
+        {
+            WTSVariant* bc = pCfg0->get("blackCalc");
+            WTSVariant* vc = bc ? bc->get("volCurve") : nullptr;
+            if (vc && vc->has("curve2_type")) {
+                std::string t = vc->getCString("curve2_type");
+                if (t == "power" || t == "gvv")
+                    p2cfg.curve2_type = t;
+                else
+                    WTSLogger::log_by_cat("strategy", LL_WARN,
+                        "pricer.blackCalc.volCurve.curve2_type '{}' invalid (use gvv|power)", t);
+            }
+        }
     }
 
     auto pricer2 = std::make_shared<wt_option::OptionPricer2>(p2cfg, _grid.get(), _risk.get());
@@ -860,6 +949,14 @@ void HftOptionStrategy::setupPricer()
         }
     }
 
+    // R10: resolve the primary hedge code = first enabled expiry's hedge
+    for (const auto& [exp, ec] : _expiryConfigs) {
+        if (!ec.enable) continue;
+        std::string ul = ec.underlyingCode.empty() ? _underlyingCode : ec.underlyingCode;
+        _primaryHedgeCode = ec.hedgeCode.empty() ? ul : ec.hedgeCode;
+        break;
+    }
+
     _grid->setOptionPricer(_pricer);
     // Only CompositeOptionPricer needs grid events (onAddOption/onComputeValuesCompleted)
     if (_compositePricer) {
@@ -903,6 +1000,13 @@ void HftOptionStrategy::setupCTG()
 
     _ctg->setCancelExecutor([this](const std::string& code) -> int32_t {
         return executeCancel(code);
+    });
+
+    // R8: mid-day stop/resume flows through the unified state machine
+    _ctg->setSessionStopCallback([this](bool stopped) {
+        setState(stopped ? wt_option::TradingStateType::SessionStopped
+                         : wt_option::TradingStateType::Normal,
+                 stopped ? "session_stop" : "session_resume");
     });
 
     // Wire PositionGuard/PositionOffsetMgr/RiskFilterChain to each OQM.
@@ -1046,6 +1150,13 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _grid->onTick(code, ref);
             }
 
+            // R1: remember the latest exchange price limits for this code
+            if (tick.upperLimit > 0 || tick.lowerLimit > 0) {
+                auto& pl = _priceLimits[code];
+                if (tick.upperLimit > 0) pl.upper = tick.upperLimit;
+                if (tick.lowerLimit > 0) pl.lower = tick.lowerLimit;
+            }
+
             // Feed trade ticks to alpha signals (vega flow / delta flow)
             // Only for option ticks with non-zero trade volume
             if (!isUnderlying && !isPerExpiryUnderlying && tick.tradeVolume > 0) {
@@ -1062,9 +1173,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _underlyingChanged = true;
                 // Deferred enable: if channel is ready but trading was not enabled
                 // (because underlying price was 0 at channel_ready time), enable now.
-                if (_channelReady && _traderCtx && !_traderCtx->enabled) {
-                    _traderCtx->enabled = true;
+                _tstate.underlyingReady = true;
+                if (_channelReady && !_tradingStateEnabled()) {
                     if (_otg) _otg->enableAll();
+                    applyTradingState();
                     WTSLogger::log_by_cat("strategy", LL_INFO,
                         "Deferred enable: trading activated on first underlying tick");
                 }
@@ -1240,8 +1352,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     bool wasPanicked = _traderCtx->panicked;
                     bool pricerPanic = _pricer->isPanicked();
                     bool checkerPanic = _fillPriceChecker && _fillPriceChecker->isPanicked();
-                    _traderCtx->panicked = pricerPanic || checkerPanic
-                                           || _limitsBreached.load(std::memory_order_relaxed);
+                    const bool wantPanic = pricerPanic || checkerPanic
+                         || _limitsBreached.load(std::memory_order_relaxed);
+                    if (wantPanic && _tstate.type != wt_option::TradingStateType::Disabled)
+                        setState(wt_option::TradingStateType::Panic,
+                                 checkerPanic ? "fill_price_deviation" : "risk_signal");
+                    else if (!wantPanic && _tstate.type == wt_option::TradingStateType::Panic
+                             && !pricerPanic)
+                        setState(wt_option::TradingStateType::Normal, "blackout_expired");
                     if (_traderCtx->panicked && !wasPanicked) {
                         WTSLogger::log_by_cat("strategy", LL_ERROR,
                             "Auto-panic triggered by risk signal{}{}",
@@ -1268,6 +1386,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // B1: estimated-margin guard (runs on its own throttle, even
             // without compute, so a margin breach is caught in quiet markets)
             checkMarginLimits(now);
+
+            // R10: delta hedge executor (own cooldown inside decide())
+            checkDeltaHedge(now);
+            // R-P1: periodic accuracy report
+            _predEvaluator.maybeReport(60.0);
 
             // B10: Write option values to CSV if configured
             if (_valWriter && _grid) {
@@ -1552,7 +1675,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (isBegin) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy session begin: {}", tdate);
-            if (_traderCtx) _traderCtx->enabled = _channelReady.load();
+            setState(_channelReady.load() ? wt_option::TradingStateType::Normal
+                                          : wt_option::TradingStateType::Disabled,
+                     "session_begin");
             if (_grid) {
                 _grid->setCurrentDate(tdate);
                 // Refresh days-to-expiration for all expiries (fixes stale maturity)
@@ -1584,7 +1709,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
         } else {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy session end: {}", tdate);
-            if (_traderCtx) _traderCtx->enabled = false;
+            setState(wt_option::TradingStateType::Disabled, "session_end");
             // A6: Stop scanners
             for (auto& scanner : _scanners) {
                 if (scanner) scanner->onStop();
@@ -1634,18 +1759,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_channel = [this](bool isReady) {
         if (isReady) {
             WTSLogger::log_by_cat("strategy", LL_INFO, "channel_ready (worker)");
-            // Enable trading only if underlying price is available,
-            // otherwise computeValues will fail and produce spurious CANCELs.
-            bool canEnable = _grid && _grid->getUnderlyingPrice() > 0;
-            if (_traderCtx) _traderCtx->enabled = canEnable;
-            if (canEnable && _otg) _otg->enableAll();
-            if (!canEnable) {
-                WTSLogger::log_by_cat("strategy", LL_WARN,
-                    "channel_ready: underlying price not yet available, deferring enable");
-            }
+            // R8: route through the unified state machine. Underlying may not
+            // be priced yet — enabledFlag() gates on it for the deferred enable.
+            _tstate.channelReady = true;
+            setState(wt_option::TradingStateType::Normal, "channel_ready");
         } else {
             WTSLogger::log_by_cat("strategy", LL_WARN, "channel_lost (worker)");
-            if (_traderCtx) _traderCtx->enabled = false;
+            _tstate.channelReady = false;
+            setState(wt_option::TradingStateType::Disabled, "channel_lost");
             if (_otg) _otg->disableAll();
             // Cancel all existing quotes on channel loss
             if (_ctg) {
@@ -1849,11 +1970,20 @@ void HftOptionStrategy::on_tick(IHftStraCtx* ctx, const char* code, WTSTickData*
     _tickCount.fetch_add(1, std::memory_order_relaxed);
     _async->enqueue_tick(code, newTick);
 
-    // 路径1: 每次 tick enqueue timer 事件, worker 线程处理时触发定时 doFit
-    // (与 quantbox ClockMonitor 定时唤醒等价)
+    // 路径1: 定时 doFit 触发（与 quantbox ClockMonitor 等价）
+    // R5 fix: 原实现每 tick enqueue 一条 Timer——行情爆发时 worker 每 batch
+    // 要执行 N 次 sections 扫描 + drainPendingQuotes。改为源头合并到 100ms
+    // 节奏（跨日/时钟回拨立即放行），timer 流量下降两个数量级。
     uint32_t curDate = ctx->stra_get_date();
-    uint32_t curTime = ctx->stra_get_time();
-    _async->enqueue_timer(curDate, curTime);
+    double secOfDay = wt_option::ctxTimeSeconds(ctx);
+    if (curDate != _lastTimerDate ||
+        secOfDay < _lastTimerSecOfDay ||
+        (secOfDay - _lastTimerSecOfDay) >= 0.1)
+    {
+        _async->enqueue_timer(curDate, ctx->stra_get_time());
+        _lastTimerDate = curDate;
+        _lastTimerSecOfDay = secOfDay;
+    }
 }
 
 // ============================================================================
@@ -1940,10 +2070,32 @@ void HftOptionStrategy::on_session_end(IHftStraCtx* ctx, uint32_t uTDate)
 // ============================================================================
 // Executor bridges — IHftStraCtx order placement
 // ============================================================================
+
+// R1: exchange price-limit guard — the last line of defense before anything
+// leaves the process. Covers ALL order paths (OQM quotes/orders, scanner
+// takers, gamma hedges, manual orders) because they all funnel through here.
+bool HftOptionStrategy::withinPriceLimits(const std::string& code, double price)
+{
+    if (price <= 0) return true;
+    auto it = _priceLimits.find(code);
+    if (it == _priceLimits.end()) return true;   // no limits seen yet — pass
+
+    const auto& pl = it->second;
+    auto rep = _riskLimitsEx.checkPriceLimit(price, pl.upper, pl.lower);
+    if (rep.result == wt_option::RiskLimitsEx::CheckResult::REJECT) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "PriceLimit REJECT {}: {} ({})", code, price, rep.reason);
+        return false;
+    }
+    return true;
+}
+
 int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, uint32_t bidQ,
                                          double askP, uint32_t askQ)
 {
     if (!_ctx || !_channelReady) return 0;
+    // R1: reject out-of-limit quotes before hitting the wire
+    if (!withinPriceLimits(code, bidP) || !withinPriceLimits(code, askP)) return 0;
 
     auto ids = _ctx->stra_quote(code.c_str(), bidP, bidQ, askP, askQ, "OptionMM");
     WTSLogger::log_by_cat("strategy", LL_DEBUG,
@@ -1966,6 +2118,8 @@ int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
                                          double price, uint32_t qty)
 {
     if (!_ctx || !_channelReady) return 0;
+    // R1
+    if (!withinPriceLimits(code, price)) return 0;
 
     auto ids = isBuy
         ? _ctx->stra_buy(code.c_str(), price, qty, "OptionMM")
@@ -2075,6 +2229,111 @@ void HftOptionStrategy::checkMarginLimits(double nowSec)
 }
 
 // ============================================================================
+// R8: unified trading-state writers
+// ============================================================================
+void HftOptionStrategy::applyTradingState()
+{
+    if (!_traderCtx) return;
+    const bool en = _tstate.enabledFlag();
+    const bool pn = _tstate.panickedFlag();
+    if (en != _traderCtx->enabled.load() || pn != _traderCtx->panicked.load()) {
+        WTSLogger::log_by_cat("strategy", pn ? LL_WARN : LL_INFO,
+            "TradingState: {} -> {} ({})  enabled={} panicked={}",
+            wt_option::toString(_tstate.type), _tstate.reason,
+            en ? "ON" : "OFF", pn ? "Y" : "N");
+    }
+    _traderCtx->enabled = en;
+    _traderCtx->panicked = pn;
+}
+
+bool HftOptionStrategy::_tradingStateEnabled() const
+{
+    return _tstate.enabledFlag();
+}
+
+void HftOptionStrategy::setState(wt_option::TradingStateType t, const std::string& reason)
+{
+    _tstate.type = t;
+    _tstate.reason = reason;
+    applyTradingState();
+}
+
+// ============================================================================
+// R9: hot-command bus registration
+// ============================================================================
+void HftOptionStrategy::registerCommands()
+{
+    _cmdBus.registerCommand("STOP", [this](auto&, std::string&) {
+        setState(wt_option::TradingStateType::Disabled, "hotcmd_stop");
+        return true;
+    });
+    _cmdBus.registerCommand("RESUME", [this](auto&, std::string&) {
+        setState(_channelReady.load() ? wt_option::TradingStateType::Normal
+                                      : wt_option::TradingStateType::Disabled,
+                 "hotcmd_resume");
+        return true;
+    });
+    _cmdBus.registerCommand("PANIC", [this](auto&, std::string&) {
+        // Keep enabled so refresh() stages risk-reduction cancels with boosted TPS
+        setState(wt_option::TradingStateType::Panic, "hotcmd_panic");
+        return true;
+    });
+    _cmdBus.registerCommand("QMODE", [this](const auto& args, std::string& err) {
+        if (args.size() < 2) { err = "QMODE needs <on|off|close>"; return false; }
+        std::string m = args[1];
+        if (!_otg || !_ctg) { err = "not initialized"; return false; }
+        for (const auto& od : _grid->getAllOptions()) {
+            if (od && od->getTradingData())
+                _ctg->onSetQMode(od->getCode(), m);
+        }
+        return true;
+    });
+    _cmdBus.registerCommand("ORDER", [this](const auto& args, std::string& err) {
+        if (args.size() < 5) { err = "ORDER needs B|S,code,price,qty"; return false; }
+        bool isBuy = (args[1] == "B" || args[1] == "b");
+        double px = std::stod(args[3]);
+        uint32_t qty = static_cast<uint32_t>(std::stoul(args[4]));
+        int32_t ret = executeOrder(args[2], isBuy, px, qty);
+        if (ret == 0) { err = "order rejected (limits/channel)"; return false; }
+        return true;
+    });
+    _cmdBus.registerCommand("CANCEL", [this](const auto& args, std::string& err) {
+        if (args.size() < 2) { err = "CANCEL needs code"; return false; }
+        if (_ctx) _ctx->stra_cancel_all(args[1].c_str());
+        return true;
+    });
+}
+
+// ============================================================================
+// R10: portfolio delta-hedge executor tick
+// ============================================================================
+void HftOptionStrategy::checkDeltaHedge(double nowSec)
+{
+    if (!_deltaHedgeEnable || !_risk) return;
+
+    const double pd = _risk->getPortfolioDelta();
+    auto d = wt_option::DeltaHedgeExecutor::decide(_hedgeCfg, pd,
+                                                   nowSec, _deltaHedgeLastFire);
+    if (!d.fire) return;
+
+    // Resolve hedge price: prefer the hedge UTD book, fall back to underlying
+    double px = 0;
+    if (_otg && !_primaryHedgeCode.empty()) {
+        auto utd = _otg->getUnderlyingTradingData(_primaryHedgeCode);
+        if (utd) px = utd->getMid();
+    }
+    if (px <= 0 && _grid) px = _grid->getUnderlyingPrice();
+    if (px <= 0) return;
+
+    if (executeOrder(_primaryHedgeCode, d.isBuy, px, d.qty) > 0) {
+        _deltaHedgeLastFire = nowSec;
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "DeltaHedger fired: {} {} {}@{} ({})",
+            _primaryHedgeCode, d.isBuy ? "BUY" : "SELL", d.qty, px, d.reason);
+    }
+}
+
+// ============================================================================
 // on_params_updated — P10: hot-update callback (实盘模式, 回测不触发)
 // ============================================================================
 void HftOptionStrategy::on_params_updated()
@@ -2103,26 +2362,17 @@ void HftOptionStrategy::on_params_updated()
     if (cmd != 0) {
         switch (cmd) {
             case 1: // Stop trading
-                if (_traderCtx) _traderCtx->enabled = false;
-                WTSLogger::log_by_cat("strategy", LL_WARN, "  CMD: trading STOPPED");
+                setState(wt_option::TradingStateType::Disabled, "hotcmd_stop");
                 break;
-            case 2: // Panic
-                if (_traderCtx) {
-                    _traderCtx->panicked = true;
-                    // Keep enabled=true so refresh() can run and stage
-                    // risk-reduction cancels with enhanced TPS. Options
-                    // are force-cancelled; futures are kept for hedging.
-                }
-                WTSLogger::log_by_cat("strategy", LL_ERROR, "  CMD: PANIC");
+            case 2: // Panic — stays enabled so risk-reducing cancels flow
+                setState(wt_option::TradingStateType::Panic, "hotcmd_panic");
                 break;
             case 3: // Resume
-                if (_traderCtx) {
-                    _traderCtx->panicked = false;
-                    _traderCtx->enabled = _channelReady.load();
-                }
+                setState(_channelReady.load() ? wt_option::TradingStateType::Normal
+                                              : wt_option::TradingStateType::Disabled,
+                         "hotcmd_resume");
                 // B13: manual resume also clears the latched fill-price panic
                 if (_fillPriceChecker) _fillPriceChecker->clearPanic();
-                WTSLogger::log_by_cat("strategy", LL_INFO, "  CMD: RESUME");
                 break;
         }
         if (_hot.command) *_hot.command = 0;
@@ -2152,26 +2402,11 @@ void HftOptionStrategy::on_params_updated()
         }
         tokens.push_back(cmd.substr(start));
 
-        if (tokens.size() >= 2) {
-            std::string action = tokens[0];
-            std::string code = tokens[1];
-            if (action == "B" && tokens.size() >= 4) {
-                double price = std::stod(tokens[2]);
-                uint32_t qty = static_cast<uint32_t>(std::stoul(tokens[3]));
-                if (_ctx) _ctx->stra_buy(code.c_str(), price, qty, "ManualOrder");
-                WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "ManualOrder BUY {} {}@{}", code, qty, price);
-            } else if (action == "S" && tokens.size() >= 4) {
-                double price = std::stod(tokens[2]);
-                uint32_t qty = static_cast<uint32_t>(std::stoul(tokens[3]));
-                if (_ctx) _ctx->stra_sell(code.c_str(), price, qty, "ManualOrder");
-                WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "ManualOrder SELL {} {}@{}", code, qty, price);
-            } else if (action == "C") {
-                if (_ctx) _ctx->stra_cancel_all(code.c_str());
-                WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "ManualOrder CANCEL ALL {}", code);
-            }
+        // R9: structured dispatch via the command bus (ORDER/CANCEL/STOP/...)
+        std::string err;
+        if (!_cmdBus.dispatch(cmd, err)) {
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "CommandBus rejected '{}': {}", cmd, err);
         }
         // Clear the command (reset shared memory string)
         // sync_param returns const char* pointing to shared memory; we can't

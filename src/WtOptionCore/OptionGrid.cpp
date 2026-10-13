@@ -554,7 +554,17 @@ StrikeDataPtr OptionGrid::findStrikeFromGrid(uint32_t expiry, double price) cons
 }
 
 StrikeDataPtr OptionGrid::getAtmStrike(uint32_t expiry) {
-    return findStrikeFromGrid(expiry, getUnderlyingPrice());
+    // R3: snap the reference price onto the listed strike grid first so the
+    // nearest-search cannot land on a "virtual" midpoint between two listed
+    // intervals (CFFEX IO 50/100, DCE MO 25/50/100 tiers).
+    double refPrice = getUnderlyingPrice();
+    {
+        std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+        auto fit = m_strikeFinders.find(expiry);
+        if (fit != m_strikeFinders.end() && fit->second && refPrice > 0)
+            refPrice = fit->second->getStrike(refPrice);
+    }
+    return findStrikeFromGrid(expiry, refPrice);
 }
 
 StrikeDataPtr OptionGrid::findOrCreateStrike(uint32_t expiry, strike_t strike) {

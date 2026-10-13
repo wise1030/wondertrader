@@ -51,6 +51,11 @@ struct RiskLimitsEx {
     CheckReport checkClearlyErroneous(double price, double refPrice) const;
     CheckReport checkMinSellPrice(bool isBuy, double price) const;
     CheckReport checkPosition(int32_t position) const;
+
+    /// R1: exchange price-limit guard (quantbox ShfePriceLimits absorption —
+    /// limits come straight off the WT tick feed's upper_limit/lower_limit).
+    /// upper/lower <= 0 means "unknown", which passes.
+    CheckReport checkPriceLimit(double price, double upper, double lower) const;
 };
 
 } // namespace wt_option

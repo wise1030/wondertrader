@@ -16,4 +16,7 @@ double VolSpreadScanner::scanOption(OptionData* opt) {
     return edge;
 }
 
+// R6: factory registration — closes the "factory map empty" defect
+REGISTER_SCANNER("VolSpreadScanner", VolSpreadScanner);
+
 } // namespace wt_option
