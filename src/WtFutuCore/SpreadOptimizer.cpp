@@ -128,12 +128,18 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     //    S1(2026-09-15) 纯化: hr 逐 tick 价格重算使旧口径 (position×hr) 随行情抖动,
     //      翻转-成交相关仅 0-9% 实测; skew 驱动改用 纯手数合约项 + hr_slow(5min EMA)
     //      组合项, 消费方语义不变 (direction/sign 混合保留 R14 双驱动结构)
-    //    幅度映射(整档量化, 消灭 sub-tick 死偏移 —— 09-07 夜盘实证:
+    //      幅度映射(整档量化, 消灭 sub-tick 死偏移 —— 09-07 夜盘实证:
     //      util=1.0 撞限总 skew 仅 0.67t, 未穿越 mid, 7 分钟只减 1 手):
     //      k = clamp(round(k_max × driver), ±k_max), 滞环 h=skew_hysteresis
-    //    穿越授权: r_p≥1.0 或 |r_c|≥1.0 → |k| 上限 k_max (k_max=4/half=1 时
-    //      减仓侧=mid−3t 可成交, 恰好 = half+cross_max_ticks 的旧扩展上限);
-    //      未授权 → |k| ≤ floor(half_spread) (至多贴 mid, 义务合规)
+    //    穿越授权: r_p≥1.0 或 |r_c|≥1.0
+    //    19.23(2026-09-23, 用户批准) 档位 cap 重构 —— 死区修复 + 阶梯授权贴中化:
+    //      未授权: cap = max(1, floor(half_spread))
+    //        (旧 floor 在常态 spread 1.5t 时恒 0 → util 80-99% 死区, 库存钉 90-93%;
+    //         实证 09-22: 84% 时间 skew=0, 授权线全天 0 次触发)
+    //      授权:   cap = min(k_max, max(1, spread - 1))
+    //        (消除 0→4t 悬崖; 减仓侧几何 = 贴 mid: spread 2-4t 恰贴中,
+    //         宽价差渐近穿透, ≥9t 达 -3t 与 skew_cross_max_ticks 兜底衔接;
+    //         spread−1 用 base_spread ticks 口径, 与 half_spread 同源)
     //==========================================================================
     double half_spread = result.base_spread / 2.0;
 
@@ -153,17 +159,22 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     // 符号约定: driver>0 (多头库存) → skew<0 (整梯下移: bid 拉远防堆积, ask 压向/穿过 mid 减仓)
     int k = -quantizeSkewTicks(params.skew_tick_max * driver);
 
-    double k_cap = cross_authorized ? params.skew_tick_max : std::floor(half_spread);
+    double spread_ticks = result.base_spread;
+    double k_cap = cross_authorized
+                       ? std::min(params.skew_tick_max, std::max(1.0, spread_ticks - 1.0))
+                       : std::max(1.0, std::floor(half_spread));
     double delta_skew = std::max(-k_cap, std::min(k_cap, (double)k));
 
     //==========================================================================
     // 5. 综合偏移计算
-    //    skew 截断上限为 half_spread; v7.1: util≥1.0 时扩展到
-    //    half_spread + skew_cross_max_ticks, 授权减仓侧穿越 mid 主动减仓
+    //    第二重兜底: 授权 = half_spread + skew_cross_max_ticks (穿越上限);
+    //    未授权 = max(half_spread, k_cap) —— 19.23: max(1,·) 档不得被截回小数,
+    //    保整档量化语义 (half_spread<1 时 limit=1t)
     //==========================================================================
     double total_skew = delta_skew;
 
-    double clamp_limit = cross_authorized ? half_spread + params.skew_cross_max_ticks : half_spread;
+    double clamp_limit = cross_authorized ? half_spread + params.skew_cross_max_ticks
+                                          : std::max(half_spread, k_cap);
     total_skew = std::max(-clamp_limit, std::min(clamp_limit, total_skew));
     result.inventory_skew = total_skew;
 
@@ -176,11 +187,13 @@ GLFTResult SpreadOptimizer::computeOptimalQuote(double midPrice,
     // 两者协同才能在毒性环境下快速出清库存。
     double skew_price = total_skew * params.tick_size * spread_mult;
 
-    // 第二次截断上限 = (half_spread_price + 穿越授权扩展) * spread_mult
-    // 截断上限与 total_skew 的最大值一致 (含 v7.1 穿越权限扩展),
+    // 第二次截断上限: 授权 = half_spread_price + 穿越扩展; 未授权 = max(half, 整档)
+    // 截断上限与 total_skew 的最大值一致 (含 v7.1 穿越权限扩展 + 19.23 max(1,·) 档),
     // 否则 spread_mult>1 时 skew 被截回, 放大设计意图被抵消
-    double skew_limit =
-        (half_spread_price + (cross_authorized ? params.skew_cross_max_ticks * params.tick_size : 0.0)) * spread_mult;
+    double skew_base_price = cross_authorized
+                                 ? half_spread_price + params.skew_cross_max_ticks * params.tick_size
+                                 : std::max(half_spread_price, std::abs(total_skew) * params.tick_size);
+    double skew_limit = skew_base_price * spread_mult;
     if (std::abs(skew_price) > skew_limit) {
         skew_price = (skew_price > 0 ? 1.0 : -1.0) * skew_limit;
     }

@@ -222,3 +222,4 @@ strategies:
         # ========================================================
         coordinatorConfig: ./coordinator.yaml
         spreadArbitrageConfig: ./spread_arbitrage.yaml
+        hotparamsFile: hotparams.yaml   # 19.36: per-strategy 热参文件 (双策略部署)

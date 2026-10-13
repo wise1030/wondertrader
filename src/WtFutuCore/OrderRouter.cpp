@@ -73,6 +73,8 @@ OrderRouter::submitBuy(wtp::IUftStraCtx* ctx, const char* code, double price, do
     if (!result.localids.empty()) {
         for (uint32_t localid : result.localids) {
             recordActiveOrder(localid, code, true, price, qty, src, now_ms);
+            if (_perf)
+                _perf->recordOrderPlaced();
         }
     }
 
@@ -110,6 +112,8 @@ OrderRouter::submitSell(wtp::IUftStraCtx* ctx, const char* code, double price, d
     if (!result.localids.empty()) {
         for (uint32_t localid : result.localids) {
             recordActiveOrder(localid, code, false, price, qty, src, now_ms);
+            if (_perf)
+                _perf->recordOrderPlaced();
         }
     }
 
@@ -140,6 +144,8 @@ OrderSubmitResult OrderRouter::submitExitLong(
     if (localid != 0) {
         result.localids.push_back(localid);
         recordActiveOrder(localid, code, false, price, qty, src, now_ms);
+        if (_perf)
+            _perf->recordOrderPlaced();
     }
 
     return result;
@@ -169,6 +175,8 @@ OrderSubmitResult OrderRouter::submitExitShort(
     if (localid != 0) {
         result.localids.push_back(localid);
         recordActiveOrder(localid, code, true, price, qty, src, now_ms);
+        if (_perf)
+            _perf->recordOrderPlaced();
     }
 
     return result;
@@ -190,6 +198,8 @@ void OrderRouter::cancelOrder(wtp::IUftStraCtx* ctx, uint32_t localid)
         }
     }
     orderApiCall([&] { return ctx->stra_cancel(localid); });
+    if (_perf)
+        _perf->recordCancelSent();
 }
 
 uint32_t OrderRouter::getActiveCountBySource(Source src, uint64_t now_ms) const
@@ -231,6 +241,8 @@ void OrderRouter::cancelAllBySource(wtp::IUftStraCtx* ctx, Source src)
             info.pending_cancel = true;
             info.pending_cancel_ts = now_ms; // V10-P1-2b: 宽限期计数基准
             orderApiCall([&] { return ctx->stra_cancel(info.localid); });
+            if (_perf)
+                _perf->recordCancelSent();
         }
     }
 }
@@ -280,6 +292,8 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
                         info.pending_cancel = true;
                         info.pending_cancel_ts = now_ms; // V10-P1-2b: 宽限期计数基准
                         orderApiCall([&] { return ctx->stra_cancel(oid); });
+                        if (_perf)
+                            _perf->recordCancelSent();
                         ++n;
                     }
                     sent = true;
@@ -292,6 +306,8 @@ size_t OrderRouter::cancelByPair(wtp::IUftStraCtx* ctx, const std::string& pair_
         // 恒不成立 → 防御性补撤不可达. 改为仅判 !sent.
         if (!sent) {
             orderApiCall([&] { return ctx->stra_cancel(oid); });
+            if (_perf)
+                _perf->recordCancelSent();
             ++n;
         }
     }
@@ -323,6 +339,8 @@ size_t OrderRouter::escalateStaleCancels(wtp::IUftStraCtx* ctx, uint64_t now_ms,
                 continue;
             }
             orderApiCall([&] { return ctx->stra_cancel(info.localid); });
+            if (_perf)
+                _perf->recordCancelSent();
             info.pending_cancel_ts = now_ms; // 刷新宽限窗
             ++info.cancel_retries;
             ++resent;
@@ -395,13 +413,6 @@ std::vector<ActiveOrderInfo> OrderRouter::getActiveOrders(Source src) const
             result.push_back(info);
     }
     return result;
-}
-
-RateCounter& OrderRouter::getRateCounter(Source src)
-{
-    RecursiveSpinGuard _g(_lock);
-    auto key = static_cast<int>(src);
-    return _rate_counters[key];
 }
 
 size_t OrderRouter::totalActiveOrders() const

@@ -300,12 +300,12 @@ raw 存档 :206｜根级开关 :237-239｜modules 开关 :242-270（MM=false 级
 
 **warn（放行）**：W1 scoutQty>(0,baseQty]｜W2 obligationMinQty<scoutQty｜W3 全侧满挂总深度<obligationMinQty（三层公式累加 :283-297）｜W4 levelQtyMultiplier ∉ [0.1,1.0]｜W5 stickyThreshold ∉ (0,10]｜W6 maxPriceDeviation ∉ [0,100]。
 
-> **死键警示**：config 内 `modules:` 节与根级 `stpMinPriceGap` 自 V8-R6 起**零读取**（权威=coordinator.yaml）；`portfolio.hedgeDeltaThreshold/hedgeCooldownMs`、`alwaysObligation` 无消费者。详见 CONFIG.md §7。
+> **死键警示**：`stpMinPriceGap/allowSamePrice/priceAdjustTicks/spreadZThreshold` 已于 2026-09-19③ 批次E 从代码与 yaml 彻底删除（审计白名单仅兼容远程旧文件）；config 内 `modules:` 节无消费者键、`portfolio.hedgeDeltaThreshold/hedgeCooldownMs`、`alwaysObligation` 无消费者。详见 CONFIG.md §7。
 
 > **配置审计（P1-4，2026-09-19）**：读取全部经 `FutuConfig::readX` 单一插桩点记账；启动打印
 > `[CONFIG-AUDIT] source=<文件> present/read/unknown/read_missing`——`unknown`=配了无读取点（死键/拼错），
 > `read_missing`=代码读了但文件没配（静默用默认值）。四源（config/coordinator/hotparams/spread_arbitrage）
-> 当前均为 0；策略层→协调器字段覆盖集中在 `FutuConfigMap::applyStrategyOverrides`（11 字段）。
+> 当前均为 0；策略层→协调器字段覆盖集中在 `FutuConfigMap::applyStrategyOverrides`（13 字段）。
 > 契约测试：`test_futu_config_audit.cpp` / `test_futu_config_map.cpp` / `test_futu_config_contract.cpp`。
 > 键所有权表与规则见 CONFIG.md §9 与 AGENTS.md §19.12。
 
@@ -473,7 +473,7 @@ is_toxic = combined > adverseThreshold(0.75)
 V10-R10: toxic_side 方向语义已删除; is_toxic 由 StrategyCoordinator Step7 每 tick
   重算 resume-hold (cooloffMs=5000) 并翻转 TOXICITY 相位 (检测即双边暂停)
 V10-R11 观测行 (warn 级): [TOXIC-EPISODE] <code> enter / exit duration=<ms> peak=<score>
-  (session_reset 收尾), 配合 scripts/analyze_toxicity_markout.py 做离线覆盖率归因
+  (session_reset 收尾), 配合仓库根 scripts/analyze_toxicity_markout.py 做离线覆盖率归因
   与 markout 有效性分析
 ```
 
@@ -699,7 +699,7 @@ ready：channel_ready=true/price_stale=true→arb enable→**zombie 清扫锚点
 
 ### 4.17 热参数体系（FutuHotParamManager/Watcher）
 
-**26 参数稳态权威链**（实盘；V10-R10 起 27th toxicity_spread_factor 移除）：`hotparams.yaml > 共享内存残留 > config/coordinator`；
+**24 参数稳态权威链**（实盘；R10 移除 toxicity_spread_factor、R14 移除 delta_skew_threshold/factor 后由 27 收敛至 24）：`hotparams.yaml > 共享内存残留 > config/coordinator`；
 **回测不跑 watcher**——热参完全不生效，logDriftSummary 打印的差异键即"回测/实盘行为分叉点"。
 
 #### 完整链路（V8-P0-1 加固后 + 2026-08-24 加固）
@@ -730,11 +730,11 @@ crossCheckIssues (纯函数, warn 级 [HOTPARAM-CHECK], 不阻断):
   ⑤ confidence_weight_min > max(插值反向)
 
 logDriftSummary (on_init initial applyAll 后无条件调用, 回测也打印):
-  对比 27 键 hotparams 解析值 vs 注册默认(config/coordinator 值)
+  对比 24 键 hotparams 解析值 vs 注册默认(config/coordinator 值)
   → 逐条 warn [HOTPARAM-DRIFT] 'x' config_default=A hotparams=B + 汇总行
 ```
 
-**启动期语义**：initial applyAll 先把共享内存残留旧值盖到 config 初始化值上（"重启不丢上次热更结果"，UftFutuMmStrategy.cpp:383-395）；实盘 ~1s 内 watcher 首轮又以文件为准覆盖。27 键按名注册天然兼容旧共享内存布局。
+**启动期语义**：initial applyAll 先把共享内存残留旧值盖到 config 初始化值上（"重启不丢上次热更结果"，UftFutuMmStrategy.cpp:383-395）；实盘 ~1s 内 watcher 首轮又以文件为准覆盖。热参按名注册天然兼容旧共享内存布局。
 
 边界表收紧原则（2026-08-24）：loader error 级→热路径拒收同界（base_spread{0.5,20}/base_qty{1e-6,100}/level_step{1e-6,100}/max_delta{1e-6,1e8}/phi{0.01,2}；delta_skew_threshold 已随 R14 删除）；sticky_threshold{0.01,10}（0=churn 防呆拒收）、protect_ticks{0.5,1e4}（<半 tick 无意义，关闭走 price_protection 开关）；warn 口径保持宽松交给交叉复查。
 
@@ -886,7 +886,7 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner \
 ## 7. 测试体系
 
 - GoogleTest 于 `src/TestUnits`；构建目标 TestUnits 后运行二进制。
-- 当前基线 **180 过 / 2 个既有环境性失败**（test_session.test_allday、test_shm.test_sharehelper）。
+- 当前基线 **213 项 / 210 过 / 2 个既有环境性失败**（test_session.test_allday、test_shm.test_sharehelper）。
 - 关键测试文件与守护点：
 
 | 文件 | 守护点 |
@@ -903,6 +903,8 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner \
 | test_skew_dimensionality.cpp | skew 量化语义（R14 后改写，6 用例） |
 | test_error_single_track.cpp | D1 单轨契约（3 用例） |
 | test_v8_r1_p0 / r3_coverage / r5_fixes / v9_r6a / v10_r7* | 各轮修复回归 |
+| test_futu_config_audit/map/contract | P1-4 配置审计三档口径/13 字段映射契约/加载契约 |
+| test_futu_halt_reasons / test_futu_closeout_state / test_futu_perf_window / test_futu_hotlog_gate | P1-6 halt 位图/closeout 状态机/perf 窗口化/日志限流门 |
 
 - 回测判据（§8 勘误后）：统计带（笔数 ±1.5%）+健康度（0 HALT/zombie/error、session end Delta=0、资金收敛）。**不存在逐比特判据**。
 
@@ -936,7 +938,9 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner \
 
 ---
 
-*文档生成：2026-08-24③；**对齐更新：2026-09-16**（R12-R16/F-core v1-v3.2/Z1+Z3/S1+S3/C 批后
+*文档生成：2026-08-24③；**对齐更新：2026-09-20**（§19.22 批次甲：13 字段/24 热参/测试基线 213/210
+勘误；另含 09-17 P2 perf 窗口化、09-18 P0-B HotLogGate、09-19 P1-6 HaltReason/HaltGate 三模式报价门禁、
+shadow 位图——小节待补）。此前 2026-09-16 版（R12-R16/F-core v1-v3.2/Z1+Z3/S1+S3/C 批后
 全量对齐：R14 整档 skew、S1 纯化驱动、Z3 闩锁生命周期、CloseFreezeLedger 冻结台账、Bilateral
 el/cov/w0 双口径）。行号锚点基于 08-24 HEAD（d963a44e），后续提交已漂移，以方法名检索为准。
 配置字段逐键说明见 CONFIG.md 与 src/WtFutuCore/config/ 内注释（zombieLatch/skewDriver 两节

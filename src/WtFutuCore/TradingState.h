@@ -275,26 +275,6 @@ struct TradingState
     // 日志/调试
     //==========================================================================
 
-    /// 当前状态字符串
-    const char* getPhaseStr() const
-    {
-        if (phase.load(std::memory_order_acquire) == MmPhase::CLOSEOUT)
-            return "CLOSEOUT";
-        switch (qphase.load(std::memory_order_acquire)) {
-        case QuotingPhase::NORMAL:
-            return "NORMAL";
-        case QuotingPhase::TOXICITY:
-            return "TOXICITY";
-        case QuotingPhase::MARKET:
-            return "MARKET";
-        case QuotingPhase::ERROR:
-            return "ERROR";
-        case QuotingPhase::RISK_HALTED:
-            return "RISK_HALTED";
-        }
-        return "UNKNOWN";
-    }
-
 private:
     //==========================================================================
     // P1-7: DEBUG-only 线程契约校验

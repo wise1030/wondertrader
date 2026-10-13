@@ -8,6 +8,8 @@
  *          V10-R10 起 TOXICITY 相位翻转收编至 StrategyCoordinator)。
  */
 #pragma once
+#include "../WTSTools/WTSLogger.h"
+#include "ApplicationDeps.h"  // 19.33: 统一聚合 (成员 _deps 为按值切片)
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,13 +20,6 @@
 #include "FutuRiskMonitor.h"  // FutuRiskMonitor / RiskViolation / CloseoutSub / RiskAction
 namespace wtp { class IUftStraCtx; }
 namespace futu {
-class TradingState;
-class AsyncArbitrageExecutor;
-class QuotePolicyChain;
-class SelfTradeCalibrator;
-class FutuPortfolio;
-class IOrderSink;  // B6: was OrderRouter (narrowed to IOrderSink)
-struct CoordinatorConfig;
 struct TickContext;
 
 class RiskCoordinator
@@ -34,23 +29,18 @@ public:
     ///   Md 单写者, 读侧一次 load, 无锁)
     bool isRateBreachActive() const { return _rate_breach_since_ms != 0; }
 
-    struct Deps
+    // 19.33: 依赖统一走 ApplicationDeps 按值切片 (原嵌套 Deps 删除)
+    void setDeps(const ApplicationDeps& deps)
     {
-        FutuPortfolio* portfolio = nullptr;
-        IOrderSink* order_router = nullptr;  // B6: IOrderSink (was OrderRouter*)
-        FutuRiskMonitor* risk_monitor = nullptr;
-        TradingState* trading_state = nullptr;
-        AsyncArbitrageExecutor* arb_executor = nullptr;        // nullable (null-guard)
-        QuotePolicyChain* quote_chain = nullptr;               // shared w/ coordinator processQuoting
-        SelfTradeCalibrator* self_trade_calibrator = nullptr;
-        const CoordinatorConfig* cfg = nullptr;
-        std::function<void(wtp::IUftStraCtx*)> cancel_all_quotes; // HALT 撤所有做市单
-        // V10-R8-a: 策略层恢复状态挂钩 (复用 handleQuotingAutoResume 指数退避试探恢复;
-        // 均为策略成员原子的直通指针, Md 单写者线程)
-        std::atomic<uint64_t>* quoting_paused_since = nullptr;
-        std::atomic<uint32_t>* order_error_count = nullptr;
-    };
-    void setDeps(const Deps& deps) { _deps = deps; }
+        _deps = deps;
+        _deps.validate("RiskCoordinator");
+        // 19.33-cleanup: cfg 消费者契约固化 (checkRisk 配置读取)
+        if (!_deps.cfg)
+            WTSLogger::error("[DEPS] RiskCoordinator: required dep 'cfg' is null");
+        // 19.33: 内部 liquidator 随本 setDeps 一次性接线 (消费 order_router/portfolio 切片;
+        // 原 checkRisk HALT 分支的按次 setDeps 已收编删除)
+        _liquidator.setDeps(deps);
+    }
 
     /// taker 减仓 (Step 2a). exchange_time_ms = replay 时钟 (0=回退墙钟).
     bool checkTakerReduce(wtp::IUftStraCtx* ctx, uint64_t exchange_time_ms);
@@ -61,7 +51,7 @@ public:
     bool checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bool in_cooloff);
 
 private:
-    Deps _deps;
+    ApplicationDeps _deps;  // 19.33: 按值切片 (消费点 _deps.xxx 零改动)
     std::unordered_map<std::string, uint64_t> _last_taker_reduce;   // 2a: taker 限频
     RiskLiquidator _liquidator;                  // 2b: 统一强平原语 (从 coordinator 迁入)
     uint64_t _last_halt_log_ms = 0;              // 2b: halted 日志限频 (从 coordinator 迁入)

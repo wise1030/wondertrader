@@ -106,8 +106,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         CoordinatorConfig coord_cfg = _coordinator->getConfig();
         const size_t mapped = FutuConfigMap::applyStrategyOverrides(coord_cfg, _config);
         _coordinator->setConfig(coord_cfg);
-        if (mapped != 11)
-            WTSLogger::warn("FutuConfigMap: {} strategy-override field(s) mapped (expected 11) -- "
+        if (mapped != 13)
+            WTSLogger::warn("FutuConfigMap: {} strategy-override field(s) mapped (expected 13) -- "
                             "映射表变更时请同步补 test_futu_config_map.cpp",
                             mapped);
     }
@@ -167,7 +167,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
             if (stp_v)
                 stp_cfg = StpConfig::fromVariant(stp_v);
             _config.modules.use_self_trade_prevention = stp_cfg.enabled;
-            _config.modules.stp_min_price_gap = stp_cfg.min_price_gap;
+            // 批次E: stp_min_price_gap 死链删除 (checkSelfTrade 只读 stp_enabled)
         }
     }
 
@@ -325,7 +325,6 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
             WTSLogger::info("STP forced ON because use_spread_arbitrage=true (prevents arb→MM self-trade)");
         }
         tracker_cfg.stp_enabled = stp_effective;
-        tracker_cfg.stp_min_price_gap = _config.modules.stp_min_price_gap;
         _order_tracker->setConfig(tracker_cfg);
     }
 
@@ -385,6 +384,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     _order_router->setRateLimit(Source::CLOSEOUT, 0, 1000); // 0 = 不限速
 
     deps.order_router = _order_router.get();
+    deps.router = _order_router.get();        // 19.33: RiskLiquidator 窄接口别名
+    deps.trading_state = &_trading_state;  // 19.33: 提前填充, orchestrator 切片前置消费
     WTSLogger::info("OrderRouter: initialized (arb=30/s, hedge=30/s, closeout=unlimited)");
 
     //------------------------------------------------------------
@@ -395,6 +396,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     _closeout_executor->setOrderTracker(_order_tracker.get());
     _closeout_executor->setPortfolio(_portfolio.get());
     {
+        // 执行参数 = 装配期快照 (权威源 config.yaml closeout.*): closeout 触发后不应被
+        // 外部变更影响, 故保持值拷贝, 不走 CoordinatorConfig 链 (2026-09-19③ 批次B)
         CloseoutExecConfig exec_cfg;
         exec_cfg.drain_timeout_ms = _config.closeout.drain_timeout_ms;
         exec_cfg.depth_ratio_passive = _config.closeout.depth_ratio_passive;
@@ -431,31 +434,29 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     _risk_monitor->setRateLimits(rate_limits);
     _risk_monitor->setMaxPendingPerSide(_config.order_control.max_pending_per_side);
 
-    // 设置恢复配置
-    RecoveryConfig recovery_cfg;
-    recovery_cfg.cooldown_ms = _config.risk.cooldown_ms;
-    recovery_cfg.check_interval_ms = _config.risk.check_interval_ms;
-    recovery_cfg.recovery_threshold = _config.risk.recovery_threshold;
-    recovery_cfg.max_recovery_count = _config.risk.max_recovery_count;
-    recovery_cfg.pnl_recovery_ratio = _config.risk.pnl_recovery_ratio;
-    recovery_cfg.max_loss_for_recovery = _config.risk.max_loss_for_recovery;
-    recovery_cfg.auto_clear_irreversible_on_reset = _config.risk.auto_clear_irreversible_on_reset;
-    _risk_monitor->setRecoveryConfig(recovery_cfg);
+    // 设置恢复配置 — 批次D: RecoveryConfig 已嵌入 FutuMmConfig.risk, 整体拷贝 (仿 rate_limits 模式)
+    const CoordinatorConfig& cc = _coordinator->getConfig();
+    _risk_monitor->setRecoveryConfig(_config.risk.recovery);
 
+    // 2026-09-19③ 批次B: 单一填充链 — 5 键全部经 FutuConfigMap→CoordinatorConfig
+    // (契约测试 test_futu_config_map.cpp 覆盖), 不再直读 _config.closeout。
+    // 消除原"路径A(FutuConfigMap)/路径B(assembler直填)"双链: 双链下任一链单独变更会使
+    // CloseoutTrigger(读CoordinatorConfig)与RiskMonitor(读自有副本)的收盘窗口判定分叉,
+    // 且审计/契约测试均不可见。装配顺序保证: coordinator loadConfig+override 均先于本处。
     CloseoutConfig closeout_cfg;
-    closeout_cfg.minutes_before = _config.closeout.minutes_before;
-    closeout_cfg.max_retries = _config.closeout.max_retries;
-    closeout_cfg.retry_interval_ms = _config.closeout.retry_interval_ms;
-    closeout_cfg.night_close_time = _config.closeout.night_close_time;
-    closeout_cfg.night_minutes_before = _config.closeout.night_minutes_before;
+    closeout_cfg.minutes_before = cc.closeout_minutes_before;
+    closeout_cfg.max_retries = cc.closeout_max_retries;
+    closeout_cfg.retry_interval_ms = cc.closeout_retry_interval_ms;
+    closeout_cfg.night_close_time = cc.night_close_time;
+    closeout_cfg.night_minutes_before = cc.night_minutes_before;
     _risk_monitor->setCloseoutConfig(closeout_cfg);
 
     WTSLogger::info("FutuRiskMonitor: maxOrdersPerSec={}, maxCancelsPerSec={}, cooldownMs={}, recoveryThreshold={}, "
                     "maxDeltaChangePerSec={}",
                     _config.risk.rate_limits.max_orders_per_sec,
                     _config.risk.rate_limits.max_cancels_per_sec,
-                    _config.risk.cooldown_ms,
-                    _config.risk.recovery_threshold,
+                    _config.risk.recovery.cooldown_ms,
+                    _config.risk.recovery.recovery_threshold,
                     _config.risk.rate_limits.max_delta_change_per_sec);
 
     // Register with coordinator
@@ -463,21 +464,17 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         deps.risk_monitor = _risk_monitor.get();
     }
 
-    // CloseoutOrchestrator 依赖注入 (架构重构 C3) — 所有依赖模块至此均已创建
-    {
-        CloseoutOrchestrator::Deps orch_deps;
-        orch_deps.executor = _closeout_executor.get();
-        orch_deps.risk_monitor = _risk_monitor.get();
-        orch_deps.portfolio = _portfolio.get();
-        orch_deps.trading_state = &_trading_state;
-        orch_deps.order_router = _order_router.get();
-        orch_deps.quoters = &_quoters;
-        orch_deps.anchor_code = &_config.anchor_code;
-        orch_deps.close_time = _config.closeout.close_time;
-        orch_deps.flatten_position = _config.closeout.flatten_position;
-        orch_deps.strategy_id = s.id();
-        _closeout_orch.setDeps(orch_deps);
-    }
+    // 19.33: CloseoutOrchestrator 切片改由统一聚合下发 (消灭 orch_deps 第二填充源)。
+    // 与 RiskMonitor 同链 (FutuConfigMap→CoordinatorConfig), 消灭最后的直读双链。
+    deps.executor = _closeout_executor.get();
+    deps.anchor_code = &_config.anchor_code;
+    deps.close_time = cc.close_time;
+    deps.flatten_position = cc.closeout_flatten_position;
+    deps.strategy_id = s.id();
+    deps.closeout_orch = &_closeout_orch;
+    // 19.34: Orchestrator 的 Deps 延后到 wireDeps 之后经 wiredDeps() 接线
+    // (cancel_all_quotes/flush_bilateral_stats 回调由 coordinator 单点填充并存储;
+    //  此处提前接线会使回调为空 — 生命周期: assembler 栈对象不可捕获)
 
     //------------------------------------------------------------
     // 7. MarketDataContext（核心行情上下文）
@@ -606,6 +603,12 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         // 接线到 Coordinator — 旧代码漏接, 协调器内 recordTickToQuote 因空指针永不执行
         deps.perf_monitor = _performance_monitor.get();
         TscClock::calibrate(); // P0: rdtsc→ns 系数一次性校准 (10ms)
+        // 19.28: PERF 吞吐计数接线 — quotes/orders/cancels/fills 计数器自初版起
+        // 从未被喂养 (PERF 面板恒 0)。FutuQuoter 与 OrderRouter 均 optional 持有。
+        for (auto& kv : _quoters)
+            kv.second->setPerformanceMonitor(_performance_monitor.get());
+        if (_order_router)
+            _order_router->setPerformanceMonitor(_performance_monitor.get());
         WTSLogger::info("PerformanceMonitor: latencyThreshold={}ns", _config.perf.monitor_latency_threshold);
     } else {
         WTSLogger::info("PerformanceMonitor: disabled");
@@ -662,6 +665,7 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         _async_arb->setSelfTradePrevention(_stp.get());
         // A10: 接线利润门槛 (此前 setMinProfitThreshold 无调用者, 价格调整成本检查恒放行)
         _async_arb->setMinProfitThreshold(_spread_arb_manager->getConfig().min_profit_threshold_ticks);
+        deps.async_arb = _async_arb.get();   // 19.33: Bridge 成员别名同源填充 (不依赖 coordinator)
         if (_coordinator) {
             deps.arb_executor = _async_arb.get();
             deps.arb_manager = _spread_arb_manager.get(); // B2: 平仓 intent 查询通道
@@ -680,33 +684,26 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
 
         WTSLogger::info("AsyncArbitrageExecutor: enabled, signalInterval=5000us, ticksPerSignal=5");
 
-        // ArbExecutionBridge 依赖注入 (架构重构 C4)
-        {
-            ArbExecutionBridge::Deps bridge_deps;
-            bridge_deps.async_arb = _async_arb.get();
-            bridge_deps.arb_manager = _spread_arb_manager.get();
-            bridge_deps.order_router = _order_router.get();
-            bridge_deps.order_tracker = _order_tracker.get();
-            bridge_deps.stp = _stp.get();
-            bridge_deps.portfolio = _portfolio.get();
-            bridge_deps.risk_monitor = _risk_monitor.get();
-            bridge_deps.contract_infos = &_contract_infos;
-            bridge_deps.use_spread_arbitrage = _config.modules.use_spread_arbitrage;
-            bridge_deps.strategy_id = s.id();
-            _arb_bridge.setDeps(bridge_deps);
-        }
+        // 19.33: ArbExecutionBridge 切片改由统一聚合下发 (消灭 bridge_deps 第三填充源)
+        deps.stp = _stp.get();
+        deps.contract_infos = &_contract_infos;
+        deps.use_spread_arbitrage = _config.modules.use_spread_arbitrage;
+        _arb_bridge.setDeps(deps);
     } else {
         WTSLogger::info("AsyncArbitrageExecutor: disabled");
     }
 
-    // 共享TradingState（必须在arb if/else块之外，否则Arb=OFF时指针为nullptr导致segfault）
     // B7: trading_state must be set before wireDeps (was setTradingState call)
-    deps.trading_state = &_trading_state;
+    // 19.33: 已上移至 deps 核心填充区 (orchestrator 切片提前消费)
     if (_coordinator) {
         // V10-R8-a: 风暴护栏恢复挂钩 (须先于 wireDeps, RiskCoordinator::Deps 聚合初始化消费)
         _coordinator->setResumeStateHooks(&s._quoting_paused_since, &s._order_error_count);
         _coordinator->wireDeps(deps);      // B7: consolidated dep wiring (replaces 15 setters + setTradingState)
         _coordinator->validateDeps();      // B7: fail-fast validation
+        // 19.33: RiskLiquidator 单点接线 (原 RuntimeOps/RiskCoordinator 两处按次 setDeps 收编)
+        s._liquidator.setDeps(deps);
+        // 19.34: CloseoutOrchestrator 自 coordinator wiredDeps() 接线 (回调单填充源)
+        _closeout_orch.setDeps(_coordinator->wiredDeps());
     }
 
     // R1: 如果 WtUftRunner 在 init 之前已注入 _event_notifier,

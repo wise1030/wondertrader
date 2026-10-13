@@ -563,7 +563,7 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
                                 //   旧实现用 stra_get_last_tick 最新价被动挂单 (可能不成交) 且无 price>0
                                 //   校验 (m19), 语义与 coordinator FORCE FLAT 重复漂移。
                                 std::string breached_code = breached->code;
-                                _liquidator.setDeps({_order_router.get(), _portfolio.get()});
+                                // 19.33: liquidator 已在装配期单点接线, 此处不再按次 setDeps
                                 double qty = _liquidator.reduceContract(ctx,
                                                                         breached_code,
                                                                         std::abs(reduction),
@@ -602,6 +602,16 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     } else {
         // Use resumeFromRisk() instead of direct assignment
         _trading_state.resumeFromRisk();
+    }
+
+    // 19.30-A4: EMERGENCY 复活闸 — 通道就绪流程可能清除 halt (上方 resume 路径),
+    // 此处为 halt 状态的最终裁定: 恢复决策完成后 halt 仍存续 → arb 必须保持禁用
+    // (IRREVERSIBLE halt 语义拒一切新开仓; 上方 setEnabled(true) 属无条件复活漏洞)。
+    // 19.30-A3 已按用户裁决撤销: 重启残腿不做观测, 由做市库存语义 + skew 偏移
+    // 统一管理 (Portfolio 权威架构的本意, 与外部仓同路径)。
+    if (_async_arb && _risk_monitor && _risk_monitor->isTradingHalted() && _async_arb->isEnabled()) {
+        _async_arb->setEnabled(false);
+        WTSLogger::error("[ARB] keep disabled on channel ready: trading halt active (EMERGENCY revive blocked)");
     }
 
     WTSLogger::info("UftFutuMmStrategy[{}] channel ready", s.id());
@@ -1029,6 +1039,11 @@ void FutuRuntimeOps::onChannelLost(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     auto& _async_arb = s._async_arb;
 
     _channel_ready = false;
+    // 19.26 F1: 记录 dark 起点 — on_tick 早退分支据此输出节流告警。
+    // 2026-09-24 实证: settlement-confirm 卡死使 channel-ready 87 分钟未触发,
+    // 主链路(_channel_ready=false 即整体早退)零日志, 停摆完全不可见。
+    s._channel_lost_since_ms = TimeUtils::getLocalTimeNow();
+    s._last_channel_dark_warn_ms = 0;
 
     // 1. 立即暂停所有交易和报价
     // P1-1: enter RISK_HALTED on channel lost

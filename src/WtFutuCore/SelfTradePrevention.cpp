@@ -175,18 +175,4 @@ bool SelfTradePrevention::hasMMOrders(const std::string& code) const
 // Statistics
 //==========================================================================
 
-size_t SelfTradePrevention::totalOrders() const
-{
-    if (_tracker)
-        return _tracker->getOrderCount();
-    return 0;
-}
-
-size_t SelfTradePrevention::ordersForContract(const std::string& code) const
-{
-    if (_tracker)
-        return _tracker->getOrderIdsForContract(code).size();
-    return 0;
-}
-
 } // namespace futu

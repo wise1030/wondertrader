@@ -34,20 +34,16 @@ enum class SessionPhase
     CLOSEOUT_WINDOW ///< 日终/夜盘收盘前 closeout 触发窗口
 };
 
-struct SessionPhaseConfig
-{
-    uint32_t section_break_seconds_before = 10; ///< 每节收盘前 N 秒休息 (0=禁用, 默认10s)
-    uint32_t close_time = 150000;              ///< 全天收盘 HHMMSS
-    uint32_t closeout_minutes_before = 5;      ///< 白盘收盘前 N 分钟触发 closeout
-    uint32_t night_close_time = 0;             ///< 夜盘收盘 HHMM (0=无夜盘)
-    uint32_t night_minutes_before = 5;         ///< 夜盘收盘前 N 分钟触发 closeout
-};
+// 2026-09-19③ 批次B: 前向声明 + 指针持有, 避免与 StrategyCoordinator.h 循环包含
+// (coordinator 持有 _phase_mgr 成员); 读配置函数体移入 SessionPhaseManager.cpp
+struct CoordinatorConfig; // StrategyCoordinator.h
 
 class SessionPhaseManager
 {
 public:
-    void configure(const SessionPhaseConfig& cfg) { _cfg = cfg; }
-    const SessionPhaseConfig& config() const { return _cfg; }
+    /// 批次B: 改持 CoordinatorConfig 指针 (coordinator 内部助手惯例, 同 CloseoutTrigger::Deps.cfg),
+    /// 消除原 SessionPhaseConfig 值拷贝第三副本。指针寿命: _cfg 为 coordinator 成员, 与本对象同寿命。
+    void configure(const CoordinatorConfig& cfg);
 
     void setSessionInfo(const std::string& code, wtp::WTSSessionInfo* sess) { _sessions[code] = sess; }
 
@@ -82,40 +78,12 @@ public:
     /// 中间节休息窗口: 每节收盘前 N 秒 (最后一节归 closeout, 跳过)
     /// @param hhmmss 当前时间 HHMM/HHMMSS (stra_get_time)
     /// @param secs_in_min 分钟内秒数 0-59 (stra_get_secs/1000)
-    bool inSectionBreak(const std::string& code, uint32_t hhmmss, uint32_t secs_in_min) const
-    {
-        if (_cfg.section_break_seconds_before == 0)
-            return false;
+    /// 实现见 .cpp (读 _cfg->section_break_seconds_before)
+    bool inSectionBreak(const std::string& code, uint32_t hhmmss, uint32_t secs_in_min) const;
 
-        wtp::WTSSessionInfo* sess = getSession(code);
-        if (!sess)
-            return false;
-
-        const auto& sections = sess->getTradingSections();
-        if (sections.size() < 2)
-            return false; // 单节品种无中间休息段
-
-        uint32_t hour, min;
-        if (!parseHhmm(hhmmss, hour, min))
-            return false;
-        // v7.9: 秒级窗口 (默认小节结束前10s撤单停报, 原1分钟过早, 牺牲成交机会)
-        uint32_t cur_sec = hour * 3600 + min * 60 + secs_in_min;
-
-        for (size_t i = 0; i + 1 < sections.size(); i++) {
-            // v7.8 fix: 必须用 second_raw (墙钟原始节尾), 不能用 .second
-            // .second 是 offsetTime(eTime) 按 session offset 偏移后的时间
-            // (FN0100/FD0900 等 offset=300min), 与 stra_get_time 原始墙钟比较
-            // 会把休息窗口整体后移 5 小时, 全部落到非交易时段, SECTION_BREAK 永不触发.
-            // 框架 isInTradingTime 是输入时间先 offsetTime 再比 (两侧同基准);
-            // 本处直接用 raw 对 raw, 与 FutuModuleAssembler 推导 close_time 口径一致.
-            uint32_t end_hhmm = sections[i].second_raw;
-            uint32_t end_sec = (end_hhmm / 100) * 3600 + (end_hhmm % 100) * 60;
-            if (end_sec >= _cfg.section_break_seconds_before &&
-                cur_sec >= end_sec - _cfg.section_break_seconds_before && cur_sec < end_sec)
-                return true;
-        }
-        return false;
-    }
+    /// 19.26 F3②: 当前时间所属交易节序号 (sections[i] 内返 i; 非任何节内返 -1)。
+    /// 供统计沉默 watchdog 判定"同节断档 vs 跨节跳段"。
+    int sectionIndex(const std::string& code, uint32_t hhmmss) const;
 
     /// 夜盘 closeout 触发时间窗口 (仅时间判定, 不含状态机门)
     /// 窗口语义与原 checkCloseout 一致: 只有下界 (进入窗口后恒 true,
@@ -206,24 +174,11 @@ public:
     }
 
     /// 综合阶段判定: CLOSEOUT_WINDOW > SECTION_BREAK > CONTINUOUS > CLOSED
-    SessionPhase phase(const std::string& code, uint32_t hhmmss, uint32_t secs_in_min) const
-    {
-        if (!isTrading(code, hhmmss))
-            return SessionPhase::CLOSED;
-
-        bool night = inNightCloseoutWindow(hhmmss, _cfg.night_close_time, _cfg.night_minutes_before);
-        bool day = inDayCloseoutWindow(hhmmss, _cfg.close_time, _cfg.closeout_minutes_before);
-        if (night || day)
-            return SessionPhase::CLOSEOUT_WINDOW;
-
-        if (inSectionBreak(code, hhmmss, secs_in_min))
-            return SessionPhase::SECTION_BREAK;
-
-        return SessionPhase::CONTINUOUS;
-    }
+    /// 实现见 .cpp (读 _cfg-> 窗口字段)
+    SessionPhase phase(const std::string& code, uint32_t hhmmss, uint32_t secs_in_min) const;
 
 private:
-    SessionPhaseConfig _cfg;
+    const CoordinatorConfig* _cfg = nullptr; // 批次B: 指针持主配置 (configure 注入, 免值拷贝)
     wtp::wt_hashmap<std::string, wtp::WTSSessionInfo*> _sessions;
 };
 

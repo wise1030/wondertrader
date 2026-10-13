@@ -482,9 +482,4 @@ AccumulatedFlowStats TickTransactionInferer::getFlowStats() const
     return _accumulated;
 }
 
-double TickTransactionInferer::getImbalanceRatio() const
-{
-    return _accumulated.imbalance_ratio;
-}
-
 } // namespace futu

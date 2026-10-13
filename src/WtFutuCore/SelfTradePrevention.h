@@ -53,30 +53,19 @@ struct ActiveOrder
 struct StpConfig
 {
     bool enabled;
-    bool allow_same_price;
-    double min_price_gap;
 
-    enum class Strategy : uint8_t
-    {
-        REJECT_ARB,
-        CANCEL_MM,
-        ADJUST_ARB_PRICE
-    } strategy;
+    // 2026-09-19③ 批次E: 删除 allow_same_price/price_adjust_ticks/strategy/min_price_gap
+    // 四个死字段 —— 实际判定链 UnifiedOrderTracker::checkSelfTrade 只读 stp_enabled
+    // (价格比较 <=/>= 天然含同价), 价差/策略/同价容忍语义从未实现 (DIAGNOSTIC_REPORT_V10
+    // 已预警 "配了不生效, 最误导"); stpMinPriceGap 死链: coordinator.yaml→StpConfig→
+    // _config.modules→UnifiedTrackerConfig, 三层传递零消费。
 
-    double price_adjust_ticks;
-
-    StpConfig()
-        : enabled(true), allow_same_price(false), min_price_gap(1.0), strategy(Strategy::CANCEL_MM),
-          price_adjust_ticks(1.0)
-    {}
+    StpConfig() : enabled(true) {}
 
     static StpConfig fromVariant(wtp::WTSVariant* v)
     {
         StpConfig c;
         c.enabled = FutuConfig::readBool(v, "enabled", true);
-        c.min_price_gap = FutuConfig::readDouble(v, "stpMinPriceGap", 1.0); // H7: 键名与 config.yaml 统一
-        c.allow_same_price = FutuConfig::readBool(v, "allowSamePrice", false);
-        c.price_adjust_ticks = FutuConfig::readDouble(v, "priceAdjustTicks", 1.0);
         return c;
     }
 };
@@ -100,7 +89,6 @@ public:
 
     /// Set the unified order tracker (must be called before use)
     void setUnifiedTracker(UnifiedOrderTracker* tracker) { _tracker = tracker; }
-    UnifiedOrderTracker* getUnifiedTracker() const { return _tracker; }
 
     //==========================================================================
     // Order Tracking (delegated to UnifiedOrderTracker)
@@ -152,9 +140,6 @@ public:
     //==========================================================================
     // Statistics
     //==========================================================================
-
-    size_t totalOrders() const;
-    size_t ordersForContract(const std::string& code) const;
 
 private:
     StpConfig _config;

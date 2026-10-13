@@ -93,9 +93,9 @@ void AsyncArbitrageExecutor::stop()
 // Main Thread Interface
 //==============================================================================
 
-bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, uint64_t timestamp)
+bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, uint64_t timestamp, double bid, double ask)
 {
-    ArbTickData tick(code, price, timestamp);
+    ArbTickData tick(code, price, timestamp, bid, ask);
 
     // 回测模式: 同步执行 (不开 arb 线程, 避免 data race)
     // 实盘模式: push 到队列由 arb 线程异步处理
@@ -358,8 +358,8 @@ void AsyncArbitrageExecutor::processTick(const ArbTickData& tick)
     if (!_arb_manager)
         return;
 
-    // Update arbitrage manager with tick data
-    _arb_manager->onTick(tick.code, tick.price, tick.timestamp);
+    // Update arbitrage manager with tick data (含 bid/ask → 跨腿 mid)
+    _arb_manager->onTick(tick.code, tick.price, tick.timestamp, tick.bid, tick.ask);
 }
 
 void AsyncArbitrageExecutor::processSignals(uint64_t current_time)
@@ -444,10 +444,21 @@ void AsyncArbitrageExecutor::executeSignal(const SpreadSignal& signal)
     // 后面, FAK 立即杀单 → 止损零成交, z 仍极端则周期重复空转 (做市场景两腿同时被
     // 双边报价, 命中边界是常态)。FAK 改 pay-through: 越过我方 quote 一个 tick 仍保
     // 立即成交, 且利润门槛复核链(下放)继续把真实成本超阈的信号拒掉。
+    // 19.30-A2: TIMEOUT_EXIT 持续超时升级 — timeout_policy.timeout_ms 原系死配置
+    // (无运行时消费者, 实行为 5s 挂撤循环); 现由 Manager 按 pair 计时,
+    // 超时后升级 FAK 对手价 (复用 STOP_LOSS 链), 恢复升级追价的承诺语义.
     bool is_close = is_close_signal(signal.type);
     int order_flag = 0;
     if (is_close && _arb_manager) {
-        order_flag = _arb_manager->getArbCloseConfig().policy_for(signal.type).order_flag;
+        if (signal.type == SpreadSignalType::TIMEOUT_EXIT) {
+            order_flag = _arb_manager->timeoutExitOrderFlag(signal.pair_id, arbNowUs(_replay_now_us) / 1000);
+        } else {
+            order_flag = _arb_manager->getArbCloseConfig().policy_for(signal.type).order_flag;
+        }
+    } else if (!is_close && signal.source == ArbitrageStrategy::THETA_GRID) {
+        // 方案 B (立项 §20): θ 网格入场一律 FAK —— 腿价已在信号侧按
+        // entry_max_slippage 封顶（限价=最差可接受价，吃不到即弃格，不追价）
+        order_flag = 1;
     }
     const bool is_fak = (order_flag == 1);
 
@@ -688,7 +699,7 @@ size_t AsyncArbitrageExecutor::processOrphanLegs(OrphanHedgeCallback callback,
         leg.last_attempt = now;
         // 对冲量 = 计划 leg2 量 (含 ratio), 价格由回调方取 leg2 盘口快照
         double hedge_qty = leg.hedge_qty > 0 ? leg.hedge_qty : leg.leg1_qty;
-        if (callback(leg.leg2_code, !leg.leg1_is_buy, hedge_qty, urgent))
+        if (callback(leg.pair_id, leg.leg2_code, !leg.leg1_is_buy, hedge_qty, urgent))
             return true;
         leg.retry_count++;
         if (leg.retry_count > MAX_HEDGE_RETRY) {

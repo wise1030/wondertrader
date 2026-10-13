@@ -319,14 +319,6 @@ public:
         return result;
     }
 
-    bool isBilateral() const { return _is_bilateral; }
-    double getBilateralRatio() const { return getResult().bilateral_ratio; }
-    double getAvgSpreadTicks() const
-    {
-        return (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
-    }
-    uint32_t getSwitchCount() const { return _bilateral_switch_count; }
-
     /// 格式化输出
     std::string formatString() const
     {
@@ -483,43 +475,7 @@ public:
         _inv_spread_wide = inv[4];
     }
 
-    /// 通用快照序列化（type=live|section）
-    std::string serializeSnapshot(const char* type, uint32_t uTime_HHMM, uint32_t sec_in_min) const
-    {
-        if (strcmp(type, "live") == 0)
-            return formatLiveString(uTime_HHMM, sec_in_min);
 
-        if (!_session_info)
-            return std::string();
-
-        uint64_t now_units = computeMinuteUnits(uTime_HHMM, sec_in_min);
-        if (now_units == INVALID_UNITS)
-            return std::string();
-
-        uint64_t bil = _total_bilateral_units;
-        if (_is_bilateral && _bilateral_start_units != INVALID_UNITS && now_units >= _bilateral_start_units)
-            bil += (now_units - _bilateral_start_units);
-
-        double avg = (_spread_sample_count > 0) ? _total_spread_ticks / _spread_sample_count : 0.0;
-        double ratio = (_session_total_secs > 0) ? (double)bil / _session_total_secs : 0.0;
-        uint64_t el = (_section_start_units != INVALID_UNITS && now_units >= _section_start_units)
-                          ? (now_units - _section_start_units)
-                          : 0;
-        double cov = (el > 0) ? (double)bil / (double)el : 0.0;
-        double w0 = (_l0_sample_count > 0) ? _total_l0_spread_ticks / _l0_sample_count : 0.0;
-        return makeSnapshotString(type,
-                                  uTime_HHMM,
-                                  sec_in_min,
-                                  bil,
-                                  _session_total_secs,
-                                  ratio,
-                                  el,
-                                  cov,
-                                  avg,
-                                  w0,
-                                  _spread_sample_count,
-                                  _bilateral_switch_count);
-    }
 
 private:
     static constexpr uint64_t INVALID_UNITS = (uint64_t)-1;

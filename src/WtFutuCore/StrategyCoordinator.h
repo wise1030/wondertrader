@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "ApplicationDeps.h"  // 19.33: 统一聚合
 #include <string>
 #include <cstdint>
 #include <memory>
@@ -21,7 +22,6 @@
 #include "TradingState.h"
 #include "FutuRiskMonitor.h"
 #include "RiskLiquidator.h"
-#include "CloseoutTrigger.h"
 #include "RiskCoordinator.h"
 #include "SessionPhaseManager.h"
 #include "FutuPortfolio.h"
@@ -177,6 +177,10 @@ struct CoordinatorConfig
     bool closeout_flatten_position;
     uint32_t night_close_time;     // 夜盘收盘时间 (HHMM格式，0=无夜盘)
     uint32_t night_minutes_before; // 夜盘收盘前N分钟触发
+    // 2026-09-19③ 批次B: closeout 重试参数纳入 FutuConfigMap 唯一映射链 (原 assembler 直读
+    // FutuMmConfig.closeout 形成第二填充链, 与 CloseoutTrigger/SessionPhase 判定存在分叉风险)
+    uint32_t closeout_max_retries;       // closeout 最大重试次数
+    uint32_t closeout_retry_interval_ms; // closeout 重试间隔
 
     bool perf_enabled;
     uint32_t perf_log_interval;          // propagated from config.yaml via FutuMmConfig
@@ -211,7 +215,8 @@ struct CoordinatorConfig
         : use_market_making(true), use_spread_arbitrage(false), use_signal_aggregator(true),
           use_toxicity_detector(true), use_spread_optimizer(true), use_self_trade_prevention(true),
           param_update_interval(100), closeout_minutes_before(5), close_time(150000),
-          closeout_flatten_position(true), night_close_time(0), night_minutes_before(5), perf_enabled(true),
+          closeout_flatten_position(true), night_close_time(0), night_minutes_before(5),
+          closeout_max_retries(3), closeout_retry_interval_ms(5000), perf_enabled(true),
           perf_log_interval(1000), perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000),
           perf_alert_throttle_ms(300000), perf_monitor_latency_threshold(100000),
           bilateral_stats_log_interval_sec(300),
@@ -228,29 +233,8 @@ public:
     //==========================================================================
     // B7: CoordinatorDeps - consolidated dependency injection (replaces 15 setters)
     //==========================================================================
-    struct CoordinatorDeps
-    {
-        // Core deps (required, non-null after wireDeps)
-        FutuPortfolio* portfolio = nullptr;
-        UnifiedOrderTracker* order_tracker = nullptr;
-        FutuRiskMonitor* risk_monitor = nullptr;
-        OrderRouter* order_router = nullptr;
-        TradingState* trading_state = nullptr;  ///< Shared, owned by UftFutuMmStrategy
-
-        // Borrowed container pointers (lifetime: owned by UftFutuMmStrategy, must outlive coordinator)
-        wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters = nullptr;
-        wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* spread_opts = nullptr;
-        std::unordered_map<std::string, std::unique_ptr<MarketDataContext>>* market_data = nullptr;
-        std::unordered_map<std::string, std::unique_ptr<SignalAggregator>>* signal_aggregators = nullptr;
-
-        // Optional deps (nullable)
-        ToxicFlowDetector* toxicity = nullptr;
-        PerformanceMonitor* perf_monitor = nullptr;
-        SelfTradeCalibrator* self_trade_calibrator = nullptr;
-        CorrelationManager* correlation_manager = nullptr;
-        AsyncArbitrageExecutor* arb_executor = nullptr;  ///< nullable (arb disabled)
-        SpreadArbitrageManager* arb_manager = nullptr;   ///< nullable (arb disabled)
-    };
+    // 19.33: CoordinatorDeps 统一为 ApplicationDeps 别名 (单一聚合权威, 定义不再重复)
+    using CoordinatorDeps = ApplicationDeps;
 
     /// B7: Wire all dependencies in one call (replaces 15 individual setters).
     /// Must be called after all deps are created, before first tick.
@@ -261,6 +245,9 @@ public:
 
     /// B7: Fail-fast validation - logs errors and returns false if required deps missing.
     bool validateDeps() const;
+
+    /// 19.34: wireDeps 填充后的子组件聚合 (CloseoutOrchestrator 接线用, 含回调)
+    const ApplicationDeps& wiredDeps() const { return _wired_deps; }
 
         void setConfig(const CoordinatorConfig& cfg)
     {
@@ -291,27 +278,18 @@ public:
     void loadConfigFromVariant(wtp::WTSVariant* cfg);
     void initialize();
 
+public:
+    /// 19.34: 双边统计定点 flush — 公开供 assembler 填 deps.flush_bilateral_stats 回调
+    void flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs);
+
 private:
     /// 5A-1: _cfg → _phase_mgr 配置同步 (loadConfig/setConfig 后调用)
     void syncPhaseConfig();
-    void flushBilateralStats(wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs);
     /// F-core D2(2026-09-16): 排空周期行 I/O 积压 (段末 + 每 5min 周期采点各一次)
     void flushBilateralIoBacklog();
     void logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const TickContext& tc);
 
 public:
-    void setPortfolio(FutuPortfolio* portfolio) { _portfolio = portfolio; }
-    void setOrderTracker(UnifiedOrderTracker* tracker) { _order_tracker = tracker; }
-    void setRiskMonitor(FutuRiskMonitor* monitor) { _risk_monitor = monitor; }
-    void setToxicityDetector(ToxicFlowDetector* detector) { _toxicity = detector; }
-    void setArbExecutor(AsyncArbitrageExecutor* arb) { _arb_executor = arb; }
-    /// B2: 注入套利管理器 (查询平仓 intent / 聚合 z-score; 生命周期由 UftFutuMmStrategy 保证)
-    void setArbManager(SpreadArbitrageManager* mgr) { _arb_manager = mgr; }
-    void setPerformanceMonitor(PerformanceMonitor* monitor) { _perf_monitor = monitor; }
-    void setSelfTradeCalibrator(SelfTradeCalibrator* calibrator) { _self_trade_calibrator = calibrator; }
-    void setCorrelationManager(CorrelationManager* manager) { _correlation_manager = manager; }
-    void setOrderRouter(OrderRouter* router) { _order_router = router; }
-
     /// V10-R8-a: 策略层恢复状态挂钩注入 (须在 wireDeps 之前调用)
     void setResumeStateHooks(std::atomic<uint64_t>* quoting_paused_since, std::atomic<uint32_t>* order_error_count)
     {
@@ -319,31 +297,11 @@ public:
         _resume_order_error_count = order_error_count;
     }
 
-    /// Get trading state (read-only for external queries)
-    const TradingState& tradingState() const { return *_trading_state; }
-    /// Get trading state (mutable for direct manipulation by risk/toxicity modules)
-    TradingState& tradingStateMut() { return *_trading_state; }
-    /// Set shared trading state pointer (owned by UftFutuMmStrategy)
-    void setTradingState(TradingState* state); // P1.3: impl in .cpp (wires _closeout_trigger)
-
-    void setQuoters(wtp::wt_hashmap<std::string, std::unique_ptr<FutuQuoter>>* quoters) { _quoters = quoters; }
     void setSessionInfo(const std::string& code, wtp::WTSSessionInfo* sessInfo)
     {
         _phase_mgr.setSessionInfo(code, sessInfo);
     }
 
-    void setSpreadOptimizers(wtp::wt_hashmap<std::string, std::unique_ptr<SpreadOptimizer>>* opts)
-    {
-        _spread_opts = opts;
-    }
-    void setOrderBooks(std::unordered_map<std::string, std::unique_ptr<MarketDataContext>>* books)
-    {
-        _market_data = books;
-    }
-    void setSignalAggregators(std::unordered_map<std::string, std::unique_ptr<SignalAggregator>>* aggregators)
-    {
-        _signal_aggregators = aggregators;
-    }
 
     /// @param tsc_tick0 P0: on_tick 入口的 rdtsc 计数 (0=不测量), 用于
     ///   tick-to-quote 全链路延迟 (含策略层 preamble), 比 chrono 低 3 倍开销
@@ -401,14 +359,6 @@ public:
     {
         return _trading_state ? _trading_state->short_blocked.load(std::memory_order_acquire) : false;
     }
-    inline bool isMarketStatePaused() const
-    {
-        return _trading_state ? _trading_state->qphase == QuotingPhase::MARKET : false;
-    }
-    inline bool isToxicityPaused() const
-    {
-        return _trading_state ? _trading_state->qphase == QuotingPhase::TOXICITY : false;
-    }
     // setTradingHalted removed — use setQuotingPhase(RISK_HALTED) or enterCloseout()
     void resetSession();
     void resetDaily();
@@ -420,12 +370,14 @@ public:
 
 private:
     CoordinatorConfig _cfg;
+    std::string _loaded_from;  ///< 19.36: 配置文件路径 (审计源名, 双策略分源)
     FutuPortfolio* _portfolio = nullptr;
     UnifiedOrderTracker* _order_tracker = nullptr;
     FutuRiskMonitor* _risk_monitor = nullptr;
     ToxicFlowDetector* _toxicity = nullptr;
     PerformanceMonitor* _perf_monitor = nullptr;
-    CloseoutTrigger _closeout_trigger; // P1.3 Step1: 收盘触发/状态机 (从 processCloseout 拆出)
+    CloseoutOrchestrator* _closeout_orch = nullptr;
+    ApplicationDeps _wired_deps;  ///< 19.34: wireDeps 时存储 (子组件回调单填充源) // 19.34: 收盘触发决策+编排 (Trigger 已并入, wireDeps 注入)
     RiskCoordinator _risk_coord; // P1.3 Step2a: 风控协调器 (checkTakerReduce)
     SelfTradeCalibrator* _self_trade_calibrator = nullptr;
     CorrelationManager* _correlation_manager = nullptr;
@@ -442,7 +394,6 @@ private:
 
     /// Unified trading state (replaces _trading_halted, _quoting_paused, etc.)
     TradingState* _trading_state = nullptr; // Shared pointer — owned by UftFutuMmStrategy
-    bool _channel_ready = true;
 
     uint64_t _tick_count = 0;
 
@@ -521,6 +472,8 @@ private:
     std::unordered_map<std::string, CachedQuote> _last_quote_params;
     std::unordered_map<std::string, uint64_t> _last_requote_ms;
     std::unordered_map<std::string, uint64_t> _last_bilateral_log_ms;
+    std::unordered_map<std::string, int> _last_bilateral_section;  ///< 19.26 F3②: 上次统计flush所属交易节(-1=未知)
+    uint64_t _last_bilateral_silence_warn_ms{0}; ///< 19.26 F3②: 统计沉默告警节流(10min)
 
     // F-core Z3(2026-09-15): zombie 闩锁生命周期观测与限时重探
     //   _zombie_latch_ms: code -> 本进程首次置位时刻(ms); isZombieHalted==false 即清除

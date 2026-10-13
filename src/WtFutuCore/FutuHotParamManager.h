@@ -3,7 +3,7 @@
  * \brief 热更新参数管理器 (从 UftFutuMmStrategy 拆分的热参数职责)
  *
  * 设计目的:
- *   集中管理 26 个热更新参数的注册(共享内存同步)与应用分发。
+ *   集中管理 24 个热更新参数(R10/R14 两次删减后)的注册(共享内存同步)与应用分发。
  *   策略类只持有一个实例, on_params_updated 委托给 applyAll。
  */
 #pragma once
@@ -169,7 +169,6 @@ public:
     {
         return _hot_params[idx].ptr ? *_hot_params[idx].ptr : _hot_params[idx].default_val;
     }
-    bool isHotChanged(HotParamIndex idx) const { return _hot_params[idx].ptr != nullptr; }
 
     /// 获取已注册热参数名列表 (供 FutuHotParamWatcher 同步文件用)
     static const char* const* paramNames()

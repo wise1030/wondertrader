@@ -23,7 +23,7 @@ struct GLFTParams
     // Inventory skew parameters (unified with delta)
     // A4(2026-08-24②) 角色澄清: phi 名义源自经典 GLFT 的库存厌恶项, 在本实现中
     //   实际充当【波动率加价系数】(computeBaseSpread: spread += phi × percentile/scale × vol_scale);
-    //   库存厌恶的真实承担者是 delta_skew_factor / inventory_skew_gain。键名保留兼容。
+    //   库存厌恶自 R14 起由整档量化 skew(skew_tick_max 等, 见下方 Delta skew 注释)承担。键名保留兼容。
     double phi; ///< Volatility markup coefficient in base spread (legacy name from GLFT inventory penalty)
 
     // Delta skew parameters (R14-2026-09-07: tick 量化驱动)

@@ -58,7 +58,6 @@ public:
 
     // ---- 查询/测试接口 ----
     size_t unknownCount() const;
-    size_t presentCount(const std::string& source = "") const;
     size_t readCount(const std::string& source = "") const;
     std::vector<std::string> unknownList(const std::string& source = "") const;
     void reset();
@@ -79,7 +78,6 @@ private:
     void walkSource(Source& src, wtp::WTSVariant* node, const std::string& prefix, int depth);
     bool isWhitelisted(const std::string& path) const;
     bool isRead(const Source& src, const std::string& path) const;
-    static const char* pathOf(const void* node);
 
     mutable std::mutex _mtx;
     std::map<std::string, Source> _sources;

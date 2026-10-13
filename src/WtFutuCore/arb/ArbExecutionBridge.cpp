@@ -19,19 +19,14 @@
 namespace futu
 {
 
-void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick)
+void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick,
+                                                uint64_t now_ms)
 {
     RecursiveSpinGuard _g(_lock);
     // v7.1: replay 时钟注入 (stale 对冲清理/时间戳统一基准, 回测可复现)
     // V10-P2-11: relaxed store —— TdSpi 读者经 nowMs() 原子读
     {
-        uint32_t ad = tick->actiondate();
-        uint32_t at = tick->actiontime();
-        _now_ms.store(static_cast<uint64_t>(ad) * 86400000ULL +
-                          static_cast<uint64_t>(at / 10000000) * 3600000ULL +
-                          static_cast<uint64_t>((at / 100000) % 100) * 60000ULL +
-                          static_cast<uint64_t>((at / 1000) % 100) * 1000ULL + (at % 1000),
-                      std::memory_order_relaxed);
+        _now_ms.store(now_ms, std::memory_order_relaxed);  // 19.35: 经参数下发, 不再重复转换
     }
 
     if (!_deps.async_arb || !_deps.use_spread_arbitrage)
@@ -50,7 +45,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     // ============================================================
     // 主线程：快速推送 tick 数据到异步队列（~50ns，非阻塞）
     // ============================================================
-    _deps.async_arb->pushTick(stdCode, tick->price(), tick->actiontime());
+    _deps.async_arb->pushTick(stdCode, tick->price(), tick->actiontime(), tick->bidprice(0), tick->askprice(0));
 
     // 从 Portfolio(SSOT) 回填套利 pair 仓位 — 使策略退出/止损分支与
     // 风控仓位检查读到真实仓位.
@@ -63,16 +58,32 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     // original_qty=0 的条目 erase 要求 original_qty>0 永不满足, 会永久泄漏.
     // B1 根治: 新信号订单提交时 (processPendingOrders) 主动清除 original_qty==0 条目,
     // 消除 2s 窗口内新信号成交被错误对冲的风险.
+    // 19.30-A1: 完成判据改 filled_hedged(成交核验); 簿记与 _hedge_fill_index 同生命周期,
+    // onTick(Md) 与 onTradeFill(Td) 并发访问 → 收编 _lock (原实现无锁裸奔).
     {
+        RecursiveSpinGuard _g(_lock);
         uint64_t now_ms = nowMs() > 0 ? nowMs() : TimeUtils::getLocalTimeNow();
         for (auto it = _arb_hedge_on_fill.begin(); it != _arb_hedge_on_fill.end();) {
             const uint64_t timeout_ms = (it->second.original_qty > 0) ? 30000 : 2000;
             if (it->second.created_time_ms > 0 && now_ms - it->second.created_time_ms > timeout_ms) {
-                WTSLogger::warn("ArbBridge: stale hedge entry expired, pair={}, "
-                                "hedged={}/{}",
-                                it->first,
-                                it->second.hedged_qty,
-                                it->second.original_qty);
+                // 19.30-A1: 到期仍有未成交对冲余量 → 残腿不再有人追单,
+                // 由 Portfolio 权威 + MM 库存/skew 统一吸收 (与外部仓同语义), 此处仅留证.
+                if (it->second.original_qty > 0 &&
+                    it->second.filled_hedged + 1e-9 < it->second.original_qty) {
+                    WTSLogger::error("ArbBridge: stale hedge entry EXPIRED with unfilled remainder, pair={}, "
+                                     "filled={}/{} submitted={} — residual absorbed by MM inventory",
+                                     it->first,
+                                     it->second.filled_hedged,
+                                     it->second.original_qty,
+                                     it->second.hedged_qty);
+                } else {
+                    WTSLogger::warn("ArbBridge: stale hedge entry expired, pair={}, "
+                                    "hedged={}/{}",
+                                    it->first,
+                                    it->second.hedged_qty,
+                                    it->second.original_qty);
+                }
+                cleanupHedgeTrackingLocked(it->first);
                 it = _arb_hedge_on_fill.erase(it);
             } else {
                 ++it;
@@ -233,6 +244,7 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                                      "(new signal submitted, hedged={})",
                                      order.pair_id,
                                      hit->second.hedged_qty);
+                    cleanupHedgeTrackingLocked(order.pair_id); // 19.30-A1: 同步清成交核验索引
                     _arb_hedge_on_fill.erase(hit);
                 }
             }
@@ -291,7 +303,10 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     _deps.async_arb->processOrphanLegs(
         // V8-A2: 返回受理状态供 executor 有限重试; 定价只取 leg2 盘口快照
         // (旧 fallback 用 leg1 成交价下 leg2 单, 价格口径错误)
-        [this, ctx](const std::string& code, bool is_buy, double qty, bool urgent) -> bool {
+        // 19.30-A1: 受理成功后登记进成交核验簿记 — 受理≠成交,
+        // 完成判据 = 对冲单实际成交量累计 (onTradeFill 经 _hedge_fill_index 核验)
+        [this, ctx](const std::string& pair_id, const std::string& code, bool is_buy, double qty, bool urgent) -> bool {
+            RecursiveSpinGuard _g(_lock); // 簿记与 onTradeFill(TdSpi) 共享, 收编 _lock
             // 从Portfolio获取对手价（对冲方向用对手价确保成交）
             double hedge_price = 0;
             if (_deps.portfolio) {
@@ -355,6 +370,18 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
                 // V8-A2: 拒绝/限流/自成交拦截/未受理 → false 触发 executor 重试
                 if (result.rejected || result.rate_limited || result.self_trade_blocked || result.localids.empty())
                     return false;
+
+                // 19.30-A1: 受理成功 → 登记成交核验簿记 (完成判据=实际成交,
+                // 残余由 30s stale 兜底 + MM 库存吸收)
+                {
+                    auto& st = _arb_hedge_on_fill[pair_id];
+                    if (st.original_qty <= 0 || qty > st.original_qty)
+                        st.original_qty = qty;
+                    st.hedged_qty += qty;
+                    if (st.created_time_ms == 0)
+                        st.created_time_ms = nowMs() > 0 ? nowMs() : TimeUtils::getLocalTimeNow();
+                    noteHedgeOrderLocked(pair_id, result.localids);
+                }
             } else {
                 // V8-R6/P2-5: 删除 ctx 直调 fallback —— 该分支产生完全绕过
                 // Router/Tracker 的裸单(无来源标记/无在途统计/无自成交检查),
@@ -416,6 +443,11 @@ void ArbExecutionBridge::onTradeFill(
     if (!_deps.async_arb || !_deps.arb_manager)
         return;
 
+    // 19.30-A1: 对冲单成交核验 — 残腿对冲单无 pair tag(不经 consumePairTag),
+    // 先查成交核验索引; 命中即消费, 按实际成交量累计完成度.
+    if (onHedgeFillLocked(localid, vol))
+        return;
+
     // Scheme B-3: if this fill is from an arb order, decrement its in_flight tracking.
     std::string arb_pair_id;
     if (_deps.async_arb->consumePairTag(localid, arb_pair_id)) {
@@ -423,10 +455,13 @@ void ArbExecutionBridge::onTradeFill(
 
         // A3: 残腿对冲 — 分笔成交安全: 按 min(本次vol, 剩余未对冲量) 对冲,
         // 累计覆盖 original_qty 后才 erase (旧实现首笔即 erase, 后续分笔成裸腿).
+        // 19.30-A1: 剩余量与完成判据改用 filled_hedged (成交核验), 不再以
+        // "提交受理"计"已对冲" — FAK 零成交/部分成交曾致 hedged 虚高、
+        // 条目提前删除、残腿永久漂移 (与 09-24 closeout FAK 十连败同源).
         auto hedge_it = _arb_hedge_on_fill.find(arb_pair_id);
         if (hedge_it != _arb_hedge_on_fill.end() && _deps.order_router) {
             double remaining = hedge_it->second.original_qty > 0
-                                   ? hedge_it->second.original_qty - hedge_it->second.hedged_qty
+                                   ? hedge_it->second.original_qty - hedge_it->second.filled_hedged
                                    : vol; // 上限未知(拒单/撤单时无量): 全额对冲本次成交
             double hedge_qty = std::min(vol, remaining);
             if (hedge_qty > 0) {
@@ -436,6 +471,7 @@ void ArbExecutionBridge::onTradeFill(
                 double hedge_price =
                     isLong ? (cs && cs->bid1 > 0 ? cs->bid1 : price) : (cs && cs->ask1 > 0 ? cs->ask1 : price);
                 bool accepted = false;
+                wtp::OrderIDs hedge_ids;
                 if (isLong) {
                     // V8-A9: 残腿对冲单此前冒用 Source::CLOSEOUT -- 污染 closeout
                     // 订单统计且意外享受 Fix4 的 REVERSIBLE halt 豁免 (orphan 队列
@@ -446,17 +482,22 @@ void ArbExecutionBridge::onTradeFill(
                     // V10-P2-6: 受理判定与 V8-A2 异步孤儿腿路径对齐 ——
                     // rejected/rate_limited/self_trade_blocked/空 localids 不得记成"已对冲"
                     accepted = !rr.rejected && !rr.rate_limited && !rr.self_trade_blocked && !rr.localids.empty();
+                    hedge_ids = rr.localids;
                 } else {
                     auto rr = _deps.order_router->submitBuy(ctx, stdCode, hedge_price, hedge_qty, Source::HEDGING, 1);
                     if (rr.rejected)
                         WTSLogger::warn("ORPHAN LEG HEDGE BUY {} rejected - invalid price={}", stdCode, hedge_price);
                     accepted = !rr.rejected && !rr.rate_limited && !rr.self_trade_blocked && !rr.localids.empty();
+                    hedge_ids = rr.localids;
                 }
                 if (accepted) {
+                    // 19.30-A1: 仅登记 localids 待成交核验; 完成判据 = filled_hedged
                     hedge_it->second.hedged_qty += hedge_qty;
+                    noteHedgeOrderLocked(arb_pair_id, hedge_ids);
                     if (_deps.risk_monitor)
                         _deps.risk_monitor->recordOrder();
-                    WTSLogger::warn("UftFutuMmStrategy[{}] ORPHAN LEG HEDGE: pair={} {} {} x {} @ {} (cumulative {}/{})",
+                    WTSLogger::warn("UftFutuMmStrategy[{}] ORPHAN LEG HEDGE: pair={} {} {} x {} @ {} "
+                                    "(submitted {}/{}, filled {})",
                                     _deps.strategy_id,
                                     arb_pair_id,
                                     isLong ? "SELL" : "BUY",
@@ -464,11 +505,8 @@ void ArbExecutionBridge::onTradeFill(
                                     hedge_qty,
                                     hedge_price,
                                     hedge_it->second.hedged_qty,
-                                    hedge_it->second.original_qty);
-                    if (hedge_it->second.original_qty > 0 &&
-                        hedge_it->second.hedged_qty >= hedge_it->second.original_qty) {
-                        _arb_hedge_on_fill.erase(hedge_it);
-                    }
+                                    hedge_it->second.original_qty,
+                                    hedge_it->second.filled_hedged);
                 } else {
                     // V10-P2-6: 不累加 hedged_qty, 条目保留 —— 下一笔成交回报会以
                     // 含本次量的 remaining 重试对冲; 若再无成交回报, 30s stale
@@ -484,6 +522,50 @@ void ArbExecutionBridge::onTradeFill(
                 }
             }
         }
+    }
+}
+
+void ArbExecutionBridge::noteHedgeOrderLocked(const std::string& pair_id, const std::vector<uint32_t>& localids)
+{
+    for (uint32_t id : localids) {
+        if (id != 0)
+            _hedge_fill_index[id] = pair_id;
+    }
+}
+
+bool ArbExecutionBridge::onHedgeFillLocked(uint32_t localid, double vol)
+{
+    auto idx = _hedge_fill_index.find(localid);
+    if (idx == _hedge_fill_index.end())
+        return false;
+    const std::string pair = idx->second;
+    auto it = _arb_hedge_on_fill.find(pair);
+    if (it == _arb_hedge_on_fill.end()) {
+        // 条目已被 stale 清理/完成清除 — 孤儿索引一并清 (簿记权威在 Portfolio)
+        _hedge_fill_index.erase(idx);
+        return true;
+    }
+    it->second.filled_hedged += vol;
+    WTSLogger::warn("ORPHAN LEG HEDGE FILL: pair={} localid={} vol={:.1f} (filled {}/{})",
+                    pair,
+                    localid,
+                    vol,
+                    it->second.filled_hedged,
+                    it->second.original_qty);
+    if (it->second.original_qty > 0 && it->second.filled_hedged >= it->second.original_qty - 1e-9) {
+        cleanupHedgeTrackingLocked(pair);
+        _arb_hedge_on_fill.erase(it);
+    }
+    return true;
+}
+
+void ArbExecutionBridge::cleanupHedgeTrackingLocked(const std::string& pair_id)
+{
+    for (auto it = _hedge_fill_index.begin(); it != _hedge_fill_index.end();) {
+        if (it->second == pair_id)
+            it = _hedge_fill_index.erase(it);
+        else
+            ++it;
     }
 }
 
@@ -525,6 +607,7 @@ void ArbExecutionBridge::resetSession()
 {
     RecursiveSpinGuard _g(_lock);
     _arb_hedge_on_fill.clear();
+    _hedge_fill_index.clear(); // 19.30-A1: 与簿记同生命周期
     // _arb_last_order_price / _last_mm_generation 有意跨 session 保留:
     // 订单世代号单调递增, 价格去重随新挂单自然覆盖
 }

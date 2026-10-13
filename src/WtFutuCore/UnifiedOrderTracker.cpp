@@ -315,24 +315,6 @@ double UnifiedOrderTracker::getPendingBuyQty(const std::string& code) const
     return total_qty;
 }
 
-double UnifiedOrderTracker::getPendingSellQty(const std::string& code) const
-{
-    RecursiveSpinGuard _g(_lock);
-    double total_qty = 0;
-    auto it = _mm_sell_by_code.find(code);
-    if (it != _mm_sell_by_code.end()) {
-        for (uint32_t order_id : it->second) {
-            auto idx_it = _order_index.find(order_id);
-            if (idx_it != _order_index.end()) {
-                const UnifiedOrderInfo& order = _orders[idx_it->second];
-                if (order.isActive() && !order.isPendingCancel()) {
-                    total_qty += order.qty;
-                }
-            }
-        }
-    }
-    return total_qty;
-}
 
 // T4: 全源口径 (MM+arb 全量); F9: 增量维护 O(1) 查询
 double UnifiedOrderTracker::getPendingBuyQtyAllSources(const std::string& code) const
@@ -475,7 +457,6 @@ const std::vector<CancelAction>& UnifiedOrderTracker::checkAutoCancel(const std:
         }
     }
 
-    _total_cancels += static_cast<uint32_t>(_actions_buf.size());
     return _actions_buf;
 }
 

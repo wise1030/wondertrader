@@ -33,7 +33,6 @@ public:
 
     // Configuration
     void setWindowSize(uint32_t windowSize);
-    void setVpinWeight(double weight) { _vpin_weight = weight; }
 
     /// Set vol tier thresholds (direct realized_vol comparison, no percentile binning)
     void setVolThresholds(double elevated, double extreme)
@@ -60,8 +59,6 @@ private:
     double _running_sum = 0;
     double _running_sum_sq = 0;
     uint32_t _window_size = 100;
-
-    double _vpin_weight = 0.3;
     double _last_mid = 0;
     uint64_t _last_ts = 0; ///< V10-P2-4: 跨间隙守卫时间基准
 

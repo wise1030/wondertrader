@@ -97,24 +97,24 @@ void PerformanceMonitor::recordTickProcessed()
     ++_throughput.ticks_processed;
 }
 
-void PerformanceMonitor::recordQuotePlaced()
-{
-    ++_throughput.quotes_placed;
-}
-
 void PerformanceMonitor::recordOrderPlaced()
 {
     ++_throughput.orders_placed;
 }
 
-void PerformanceMonitor::recordCancelSent()
-{
-    ++_throughput.cancels_sent;
-}
-
 void PerformanceMonitor::recordFillReceived()
 {
     ++_throughput.fills_received;
+}
+
+void PerformanceMonitor::recordQuotePlaced()
+{
+    ++_throughput.quotes_placed;
+}
+
+void PerformanceMonitor::recordCancelSent()
+{
+    ++_throughput.cancels_sent;
 }
 
 LatencyStats PerformanceMonitor::calculateStats(const RingBuffer<uint64_t, LATENCY_HISTORY_SIZE>& history) const
@@ -341,30 +341,6 @@ void PerformanceMonitor::reset()
     _start_time = Clock::now();
 }
 
-void PerformanceMonitor::resetLatency(LatencyType type)
-{
-    switch (type) {
-    case LatencyType::TICK_TO_QUOTE:
-        _tick_to_quote_history.clear();
-        _win_tick_to_quote.clear(); // F-core P2
-        break;
-    case LatencyType::ORDER_TO_ACK:
-        _order_to_ack_history.clear();
-        break;
-    case LatencyType::QUOTE_TO_FILL:
-        _quote_to_fill_history.clear();
-        break;
-    case LatencyType::CANCEL_TO_ACK:
-        _cancel_to_ack_history.clear();
-        break;
-    case LatencyType::SIGNAL_TO_ORDER:
-        _signal_to_order_history.clear();
-        _win_signal_to_order.clear(); // F-core P2
-        break;
-    }
-
-    _current_latency_ns[static_cast<int>(type)].store(0, std::memory_order_relaxed);
-}
 
 bool PerformanceMonitor::checkThresholds(uint64_t now_ms)
 {

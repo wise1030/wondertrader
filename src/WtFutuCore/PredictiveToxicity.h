@@ -107,9 +107,6 @@ public:
     /// Quick toxicity score
     double getToxicityScore() const;
 
-    /// Get current VPIN
-    double getVPIN() const { return _vpin; }
-
     //==========================================================================
     // State
     //==========================================================================

@@ -15,6 +15,7 @@
 */
 #include "UftFutuMmStrategy.h"
 #include "FutuModuleAssembler.h"
+#include "FutuTime.h"  // 19.35: replayMsFromTick
 #include "FutuRuntimeOps.h"
 #include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
 #include "../WtUftCore/UftStraContext.h" // R1: dynamic_cast 获取 EventNotifier
@@ -48,6 +49,12 @@ void registerConfigAuditWhitelist(futu::ConfigAudit& audit)
     audit.addWhitelistPrefix("risk.frequency.pauseThreshold");
     audit.addWhitelistPrefix("delta_skew_threshold");
     audit.addWhitelistPrefix("delta_skew_factor");
+    // 批次E(2026-09-19③) 删除的死键 (解析存在但逻辑从不消费), 远程旧文件过渡期豁免
+    // (全路径匹配: 白名单为精确或"前缀+."匹配, 裸键名不匹配嵌套路径):
+    audit.addWhitelistPrefix("modules.selfTradePrevention.allowSamePrice");
+    audit.addWhitelistPrefix("modules.selfTradePrevention.priceAdjustTicks");
+    audit.addWhitelistPrefix("modules.selfTradePrevention.stpMinPriceGap");
+    audit.addWhitelistPrefix("modules.correlationManager.spreadZThreshold");
 
     // 文档化可选/说明性键 (缺失属预期, 不重复告警)
     audit.addWhitelistPrefix("contracts.alias");     // 人工可读别名, 无消费点
@@ -355,11 +362,8 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
         WTSLogger::info("UftFutuMmStrategy[{}] EventNotifier injected via ctx", id());
     }
 
-    // 默认收盘时间
-    _config.closeout.close_time = 150000;
-
-    // 从基础数据管理模块获取合约参数（如果配置文件未指定）
-    // 5A-3: 合约信息加载外移 (session 缓存/收盘时间推导/乘数tick回填)
+    // 默认收盘时间: loader (FutuConfigLoader.cpp:160) 已设 150000, 此处不再重复;
+    // loadContractInfos 会按 anchor 合约 session 推导覆盖
     FutuModuleAssembler::loadContractInfos(*this, ctx);
 
     // 初始化业务模块（需要合约参数 + ctx 用于 BilateralStats Per-Quoter sessInfo 注入）
@@ -488,7 +492,7 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
 
     // 加固(2026-08-24): 启动期热参漂移摘要 —— 对比 hotparams.yaml 与 config/coordinator 同名键。
     // 无条件调用(回测也打印): watcher 不跑、热参不生效, 差异键即回测/实盘行为分叉点。
-    _hot_mgr.logDriftSummary("hotparams.yaml", id());
+    _hot_mgr.logDriftSummary(_config.hotparams_file.c_str(), id());  // 19.36: per-strategy 路径
 
     // F-core P1-4(2026-09-19): 配置读取审计报告 —— 全部配置源 (config.yaml / coordinator.yaml /
     //   hotparams.yaml) 读取完毕后统一输出 present/read/unknown/read_missing, unknown 逐条 WARN。
@@ -509,7 +513,7 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
     // V8-P0-1: watcher 只写共享内存+置脏标志, 参数应用由 on_tick 在
     // _cb_mtx 内 drain -- 不再把 Targets 交给 watcher 线程直接 applyAll
     if (!_is_backtest) {
-        _hot_watcher.start(id(), "hotparams.yaml", &_hot_mgr, 1000);
+        _hot_watcher.start(_config.hotparams_file.c_str(), &_hot_mgr, 1000);  // 19.36: per-strategy 路径
     }
 
     // 输出初始化日志
@@ -711,7 +715,7 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
     }
 
     // === Closeout 驱动 (已拆分至 CloseoutOrchestrator, 架构重构 C3) ===
-    _closeout_orch.onTick(ctx, tick, result.closeout_executed);
+    _closeout_orch.onTick(ctx, tick, now_ms);  // 19.34/19.35: 触发态成员 + 时钟参数下发
 }
 
 //============================================================
@@ -733,8 +737,26 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     if (_hot_mgr.consumePendingApply())
         on_params_updated();
 
-    if (!_channel_ready || !tick)
+    if (!_channel_ready || !tick) {
+        // 19.26 F1: 通道 dark 看门狗 —— _channel_ready=false 时主链路整体早退
+        // (无报价/无风控/无恢复检查/无日志)。 settlement-confirm 卡死等框架层故障
+        // 会使该状态持续数小时且完全静默 (2026-09-24 实证 87 分钟), 此处按墙钟
+        // 节流输出告警: 30s 首报, 之后每 5min 复读。修复在框架层(settlement
+        // 重试), 策略层只保证"黑暗可观测"。
+        if (!_channel_ready && _channel_lost_since_ms > 0) {
+            uint64_t wall = TimeUtils::getLocalTimeNow();
+            uint64_t dark = wall - _channel_lost_since_ms;
+            uint64_t& last_warn = _last_channel_dark_warn_ms;
+            if (dark >= 30000 && (last_warn == 0 || wall - last_warn >= 300000)) {
+                last_warn = wall;
+                WTSLogger::warn(
+                    "[CHANNEL] trading channel not ready for {}s — pipeline dark (no quoting/risk/recovery). "
+                    "If >5min, check settlement-confirm stuck in TraderCTP (framework-level)",
+                    dark / 1000);
+            }
+        }
         return;
+    }
 
     // P0: tick 入口 rdtsc (perf monitor 启用时 ~6ns, 禁用时一次分支)
     _tsc_tick0 = _performance_monitor ? TscClock::now() : 0;
@@ -747,12 +769,7 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     //   导致订单序列不可复现 (同配置两次运行 PnL 差数倍)。
     //   实盘时 replay 时间=交易所时间, 语义一致。
     {
-        uint32_t ad = tick->actiondate();
-        uint32_t at = tick->actiontime();
-        _exchange_time_ms = static_cast<uint64_t>(ad) * 86400000ULL +
-                            static_cast<uint64_t>(at / 10000000) * 3600000ULL +
-                            static_cast<uint64_t>((at / 100000) % 100) * 60000ULL +
-                            static_cast<uint64_t>((at / 1000) % 100) * 1000ULL + (at % 1000);
+        _exchange_time_ms = futu::replayMsFromTick(tick);  // 19.35: 单一转换源
         if (_coordinator)
             _coordinator->setExchangeTime(_exchange_time_ms);
         if (_order_router)
@@ -795,7 +812,7 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
     // v7.1: session 休息段同样不喂 arb (与报价暂停一致).
     if (_spread_arb_manager && _config.modules.use_spread_arbitrage && _trading_state.phase != MmPhase::CLOSEOUT &&
         !(_coordinator && _coordinator->isSectionBreakActive())) {
-        _arb_bridge.onTick(ctx, stdCode, tick);
+        _arb_bridge.onTick(ctx, stdCode, tick, now_ms);  // 19.35: 时钟参数下发
     }
 
     _tick_count++;
@@ -853,11 +870,8 @@ void UftFutuMmStrategy::on_transaction(IUftStraCtx* ctx, const char* stdCode, WT
     auto md_it = _market_data.find(stdCode);
     if (md_it != _market_data.end())
         md_it->second->onTransaction(newTrans);
-
-    // 更新 PerformanceMonitor
-    if (_performance_monitor) {
-        _performance_monitor->recordFillReceived();
-    }
+    // 19.28: fills 计数已移至 on_trade (权威逐笔成交回调); on_transaction 是行情
+    // 视图且部分通道不推送, 不再重复计数。
 }
 
 void UftFutuMmStrategy::on_trade(
@@ -867,6 +881,10 @@ void UftFutuMmStrategy::on_trade(
     drainPendingCommands(ctx, false); // V8-R6/WS-E Td 检查点: Channel 域
     // 5A-3: 成交处理外移 (FutuRuntimeOps, friend+别名, 零逻辑改动)
     FutuRuntimeOps::processTradeFill(*this, ctx, localid, stdCode, isLong, offset, vol, price);
+    // 19.28: PERF fills 计数挂权威逐笔成交回调 (原挂 on_transaction, CTP 不推送该
+    // 通道 → PERF 面板 fills 恒 0)
+    if (_performance_monitor)
+        _performance_monitor->recordFillReceived();
 }
 
 void UftFutuMmStrategy::on_order(IUftStraCtx* ctx,

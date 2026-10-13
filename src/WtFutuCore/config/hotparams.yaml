@@ -34,8 +34,8 @@ strong_threshold: 0.7
 confidence_weight_min: 0.3
 confidence_weight_max: 1.0
 phi: 0.20
-delta_skew_threshold: 0.3
-delta_skew_factor: 1.5
+# 2026-09-19②: delta_skew_threshold/delta_skew_factor 两死键已删除 (R14 删除参数后残留,
+#   不在 paramNames() 注册表, 热更不生效; 见 AGENTS §19.10/§19.18, CONFIG.md §7)
 max_spread_mult: 3.0
 min_spread_mult: 1.0
 depth_sensitivity: 0.5

@@ -100,6 +100,7 @@ struct FutuMmConfig
     std::string anchor_code;
     std::string coordinator_config;
     std::string spread_arbitrage_config;
+    std::string hotparams_file = "hotparams.yaml";  ///< 19.36: per-strategy 热参文件 (双策略部署)
     bool is_backtest = false;
 
     struct Portfolio
@@ -143,23 +144,15 @@ struct FutuMmConfig
     {
         double max_exposure;
         double max_daily_loss;
-        uint32_t cooldown_ms;
-        uint32_t check_interval_ms;
-        double recovery_threshold;
-        uint32_t max_recovery_count;
-        double pnl_recovery_ratio;
-        double max_loss_for_recovery;
 
         /// 频率/速率/仓位/delta 阈值 — 单一来源 (与 FutuRiskMonitor::RateLimits 共用)
         RiskRateLimits rate_limits;
 
-        bool
-            auto_clear_irreversible_on_reset; ///< v7.1: resetDaily 自动清除 IRREVERSIBLE halt (回测用, 模拟隔夜人工复核; 生产默认 false)
-        Risk()
-            : max_exposure(35000000.0), max_daily_loss(-200000.0), cooldown_ms(30000), check_interval_ms(5000),
-              recovery_threshold(0.8), max_recovery_count(3), pnl_recovery_ratio(0.5), max_loss_for_recovery(0),
-              auto_clear_irreversible_on_reset(false)
-        {}
+        /// 恢复参数 — 2026-09-19③ 批次D: 复用 RecoveryConfig 类型 (仿 rate_limits 模式),
+        /// assembler 整体拷贝注入 RiskMonitor, 消除 7 字段手拷与双默认值表
+        RecoveryConfig recovery;
+
+        Risk() : max_exposure(35000000.0), max_daily_loss(-200000.0) {}
     } risk;
 
     struct Closeout
@@ -223,12 +216,10 @@ struct FutuMmConfig
         bool use_spread_arbitrage;
         bool use_async_arb_thread; // true=启动独立arb线程(实盘), false=主线程同步执行(回测)
         bool use_self_trade_prevention; ///< 自成交防护开关（唯一权威: coordinator.yaml modules.selfTradePrevention.enabled）
-        double stp_min_price_gap;       ///< 自成交防护最小价差（唯一权威: coordinator.yaml modules.selfTradePrevention.stpMinPriceGap）
         Modules()
             : use_spread_optimizer(true), use_toxicity_detector(true),
               use_performance_monitor(false), use_performance_analyzer(false), use_market_making(true),
-              use_spread_arbitrage(false), use_async_arb_thread(true), use_self_trade_prevention(true),
-              stp_min_price_gap(1.0)
+              use_spread_arbitrage(false), use_async_arb_thread(true), use_self_trade_prevention(true)
         {}
     } modules;
 
@@ -324,9 +315,6 @@ private:
 
     /// R1: 处理 SpreadArbitrageManager 的 RiskAlert 回调, 转发到 EventNotifier
     void handleRiskAlert(const RiskAlert& alert);
-
-    /// 检查毒性并决定是否熔断
-    bool checkToxicityAndCircuitBreak(IUftStraCtx* ctx);
 
     /// 处理跨期价差套利信号
 
@@ -531,11 +519,12 @@ private:
     wtp::wt_hashmap<std::string, SessionCache> _session_cache;
 
     // PortfolioContext 缓存（避免每tick分配）
-    mutable PortfolioContext _cached_portfolio_ctx;
     mutable std::atomic<bool> _portfolio_ctx_dirty{true}; // v7.6: MdSpi/TdSpi 双写
 
     // 运行状态 (v7.6: 全部原子化 — MdSpi/TdSpi 跨线程读写)
     std::atomic<bool> _channel_ready{false};
+    uint64_t _channel_lost_since_ms{0};     ///< 19.26 F1: 通道未就绪起点(墙钟ms), onChannelLost 写入
+    uint64_t _last_channel_dark_warn_ms{0}; ///< 19.26 F1: dark 告警节流时间戳
     std::atomic<bool> _price_stale{false}; ///< P1-4: 价格过期标志（channel恢复后到首tick之间）
     TradingState _trading_state;           // 统一交易状态（替代5个bool）
 
@@ -546,10 +535,6 @@ private:
     // V8-R6 收官: _blocked_contracts 已删除 —— 写-only 死字段 (全项目仅 3 处
     // clear()、零读者), ticker/Td/channel 三线程并发 clear 在拆大锁后是形式 UB,
     // 删除优于加锁。封锁语义由 TradingState long_blocked/short_blocked 承担。
-
-    // 当前 tick 数据缓存（避免重复计算）
-    uint64_t _current_tick_timestamp; // 当前 tick 时间戳
-    double _current_tick_mid;         // 当前 tick 中间价
 
     // 下单错误处理（统一处理所有下单错误）
     std::atomic<uint32_t> _order_error_count{0}; // 连续下单错误计数 (v7.6 原子)

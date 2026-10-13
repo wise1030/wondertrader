@@ -45,7 +45,8 @@ enum class ArbitrageStrategy : uint8_t
     PAIRS_TRADING,   ///< Strategy C: Pairs trading (cointegration)
     STATISTICAL_ARB, ///< Strategy D: Statistical arbitrage
     MARKET_MAKING,   ///< Strategy E: Market making enhancement
-    HYBRID           ///< Strategy F: Hybrid approach
+    HYBRID,          ///< Strategy F: Hybrid approach
+    THETA_GRID       ///< Strategy G: θ 因子反向网格（方案 B, 立项 §20）
 };
 
 /// 枚举 → 注册表名称映射 (与 yaml primaryStrategy 字符串一致)
@@ -56,6 +57,7 @@ enum class ArbitrageStrategy : uint8_t
 inline bool strategyFromString(const std::string& s, ArbitrageStrategy& out)
 {
     if (s == "mean_reversion") { out = ArbitrageStrategy::MEAN_REVERSION; return true; }
+    if (s == "theta_grid") { out = ArbitrageStrategy::THETA_GRID; return true; }
     if (s == "statistical" || s == "statistical_arb") { out = ArbitrageStrategy::STATISTICAL_ARB; return true; }
     if (s == "pairs_trading") { out = ArbitrageStrategy::PAIRS_TRADING; return true; }
     if (s == "trend_following") { out = ArbitrageStrategy::TREND_FOLLOWING; return true; }
@@ -69,9 +71,10 @@ inline const std::string& strategyTypeName(ArbitrageStrategy t)
         "pairs_trading",
         "statistical_arb",
         "market_making",
-        "mean_reversion" // HYBRID fallback
+        "mean_reversion", // HYBRID fallback
+        "theta_grid"      // 方案 B (立项 §20)
     };
-    return names[static_cast<uint8_t>(t) < 6 ? static_cast<uint8_t>(t) : 0];
+    return names[static_cast<uint8_t>(t) < 7 ? static_cast<uint8_t>(t) : 0];
 }
 
 //==============================================================================
@@ -96,6 +99,35 @@ enum class SpreadSignalType : uint8_t
 //==============================================================================
 // Spread Pair Configuration
 //==============================================================================
+
+/// θ 网格配置（方案 B 立项 §20; ThetaGridStrategy 消费）
+struct ThetaGridConfig
+{
+    bool shadow;          ///< P0: 只观测不下单
+    double ema_period;      ///< EMA 基线周期（500ms 网格下 ≈25s）
+    uint32_t lambda_quantile_pct; ///< λ = 前 N 日 |θ| 分位（默认 q80）
+    uint32_t lambda_lookback_days; ///< λ 回看交易日数
+    double band_exit_ratio;      ///< 出场带沿 = ratio × λ（|θ| ≤ 则平仓）
+    double stop_loss_ratio;      ///< 价差空间止损 = ratio × λ（对 entry_spread）
+    double death_ratio;          ///< 信号死亡线 = ratio × λ
+    uint32_t death_hold_ms;   ///< 信号死亡持续判定
+    double grid_lot;             ///< 每格手数
+    uint32_t max_grids;            ///< 最大格数
+    double entry_max_slippage;   ///< 入场 FAK 限价封顶：买腿=快照+slip，卖腿=快照−slip（价格单位）
+    double lag_ratio_max;        ///< lead-lag 确认阈值: cross_lag_ratio ≤ 此值 = F2 未跟确认
+                                 ///< （窗宽/平滑参数归 CrossLegContext 单一属主）
+    uint32_t no_new_after;    ///< 时段门：禁新开格 HHMMSS
+    uint32_t force_flat_at;   ///< 时段门：强退 HHMMSS
+    uint32_t shadow_log_interval_ms; ///< shadow 簇内状态行节流
+
+    ThetaGridConfig()
+        : shadow(true), ema_period(50), lambda_quantile_pct(80), lambda_lookback_days(5),
+          band_exit_ratio(0.2), stop_loss_ratio(1.2), death_ratio(0.3), death_hold_ms(120000),
+          grid_lot(1.0), max_grids(3), entry_max_slippage(1.0), lag_ratio_max(0.5),
+          no_new_after(145000), force_flat_at(145500),
+          shadow_log_interval_ms(5000)
+    {}
+};
 
 /// Configuration for a spread pair
 struct SpreadPairConfig
@@ -137,6 +169,9 @@ struct SpreadPairConfig
     // Strategy selection
     ArbitrageStrategy primary_strategy; ///< Primary strategy
     bool use_hybrid;                    ///< Use hybrid approach
+
+    // θ 网格参数（方案 B; ThetaGridStrategy 消费，其他策略忽略）
+    ThetaGridConfig grid;
 
     // Market making enhancement
     bool enhance_quoting;     ///< Enhance quoting with spread signal
@@ -206,6 +241,14 @@ struct SpreadState
     // Timing
     uint64_t last_update;        ///< Last update timestamp
     uint64_t position_open_time; ///< Position open timestamp
+    /// 19.30-A2: TIMEOUT_EXIT 首笔尝试时间 (ms, replay 域); 超时升级 FAK 的计时锚
+    uint64_t timeout_exit_first_ms = 0;
+
+    // 跨腿上下文输出（方案 B §20 迁移v2: CrossLegContext 在 arb onTick 链计算,
+    // 与策略同线程同前提; manager 填此副本; 默认 fail-safe = 不确认/未知）
+    double cross_lag_ratio = 1.0; ///< Σ|ΔF2|/Σ|ΔF1|; ≤阈值 = lead-lag 确认通过
+    int cross_co_move = -1;       ///< -1 未知 / 0 压力型 / 1 信息型(跳过)
+    double cross_lead_dir = 0.0;  ///< sign(ΣΔF1)
 
     // Flags
     bool is_active;     ///< Is actively trading
@@ -216,7 +259,7 @@ struct SpreadState
           total_volume(0), average_trade_size(0), buy_volume(0), sell_volume(0), spread_mean(0), spread_std(0),
           zscore(0), correlation(0), beta(1.0), half_life(0), leg1_position(0), leg2_position(0), spread_position(0),
           unrealized_pnl(0), realized_pnl(0), entry_spread(0), last_update(0), position_open_time(0), is_active(false),
-          is_converging(false)
+          is_converging(false), cross_lag_ratio(1.0), cross_co_move(-1), cross_lead_dir(0.0)
     {}
 
     /// Check if has open position
@@ -348,28 +391,6 @@ struct SpreadFeatureVector
 // Strategy Weights for Hybrid Mode
 //==============================================================================
 
-/// Weights for hybrid strategy signal combination
-struct StrategyWeights
-{
-    double mean_reversion;  ///< Weight for mean reversion
-    double trend_following; ///< Weight for trend following
-    double pairs_trading;   ///< Weight for pairs trading
-    double statistical_arb; ///< Weight for statistical arb
-
-    StrategyWeights() : mean_reversion(0.4), trend_following(0.2), pairs_trading(0.2), statistical_arb(0.2) {}
-
-    /// Normalize weights to sum to 1
-    void normalize()
-    {
-        double sum = mean_reversion + trend_following + pairs_trading + statistical_arb;
-        if (sum > 0) {
-            mean_reversion /= sum;
-            trend_following /= sum;
-            pairs_trading /= sum;
-            statistical_arb /= sum;
-        }
-    }
-};
 
 //==============================================================================
 // Scheme B-3: Portfolio-derived Arb State

@@ -90,26 +90,6 @@ enum class CancelReason : uint8_t
     COUNT                ///< Number of cancel reasons (for stats array)
 };
 
-inline const char* cancelReasonToString(CancelReason reason)
-{
-    static const char* names[] = {"NONE",
-                                  "PRICE_DEVIATION",
-                                  "STALE",
-                                  "TIMEOUT",
-                                  "STATE_CHANGE",
-                                  "INVENTORY_LIMIT",
-                                  "RISK_BREACH",
-                                  "MARKET_STATE_CHANGE",
-                                  "CLOSEOUT",
-                                  "SELF_TRADE",
-                                  "MANUAL",
-                                  "REJECTED"};
-    size_t idx = static_cast<size_t>(reason);
-    if (idx < sizeof(names) / sizeof(names[0]))
-        return names[idx];
-    return "UNKNOWN";
-}
-
 //==============================================================================
 // Order Information
 //==============================================================================
@@ -141,7 +121,6 @@ struct UnifiedOrderInfo
     inline bool isActive() const { return hasFlag(flags, OrderFlags::IS_ACTIVE); }
     inline bool isPendingCancel() const { return hasFlag(flags, OrderFlags::PENDING_CANCEL); }
     inline bool isMMOrder() const { return hasFlag(flags, OrderFlags::IS_MM_ORDER); }
-    inline bool isArbOrder() const { return hasFlag(flags, OrderFlags::IS_ARB_ORDER); }
     inline bool isZombie() const { return hasFlag(flags, OrderFlags::IS_ZOMBIE); }
 
     inline void setPendingCancel(CancelReason reason, uint64_t now = 0)
@@ -337,7 +316,7 @@ struct ArbitrageOrderRequest
 class UnifiedOrderTracker
 {
 public:
-    UnifiedOrderTracker() : _order_count(0), _total_cancels(0)
+    UnifiedOrderTracker() : _order_count(0)
     {
         // P1优化: 预分配内存，减少运行时动态分配
         _orders.reserve(64);
@@ -462,12 +441,6 @@ public:
     // Query Methods - O(1)
     //==========================================================================
 
-    inline bool isTracked(uint32_t orderId) const
-    {
-        RecursiveSpinGuard _g(_lock);
-        return _order_index.find(orderId) != _order_index.end();
-    }
-
     inline UnifiedOrderInfo* getOrderByOrderId(uint32_t orderId)
     {
         RecursiveSpinGuard _g(_lock);
@@ -496,14 +469,6 @@ public:
             return false;
         out = *p;
         return true;
-    }
-
-    inline UnifiedOrderInfo* getOrderByIndex(uint32_t index)
-    {
-        RecursiveSpinGuard _g(_lock);
-        if (index < _orders.size())
-            return &_orders[index];
-        return nullptr;
     }
 
     // V8-R6/P3: getOrders() 引用逃生口已删除 —— 返回内部 vector 引用却即刻释放锁,
@@ -547,9 +512,6 @@ public:
 
     /// Get total pending buy quantity for a contract (for position limit check)
     double getPendingBuyQty(const std::string& code) const;
-
-    /// Get total pending sell quantity for a contract (for position limit check)
-    double getPendingSellQty(const std::string& code) const;
 
     /// T4: 全源 pending (MM+arb 等所有 IS_ACTIVE 单; B+ 起含 PENDING_CANCEL --
     /// 撤单未确认前敞口未消的保守口径, 自成交/报价深度等实时性口径仍排除)。
@@ -610,22 +572,6 @@ public:
     // Statistics
     //==========================================================================
 
-    uint32_t getTotalTracked() const
-    {
-        RecursiveSpinGuard _g(_lock);
-        return _order_count;
-    }
-    uint32_t getTotalCancellations() const
-    {
-        RecursiveSpinGuard _g(_lock);
-        return _total_cancels;
-    }
-    const UnifiedTrackerStats& getStats() const
-    {
-        RecursiveSpinGuard _g(_lock);
-        return _stats;
-    }
-
     void recordFilled()
     {
         RecursiveSpinGuard _g(_lock);
@@ -648,20 +594,7 @@ public:
         // 导致 filled_qty >= remaining_qty 提前成立 → 多次部分成交的 MM 单被提前 untrack。
         return order.filled_qty >= order.original_qty - 1e-9;
     }
-    void recordDuplicateCancel()
-    {
-        RecursiveSpinGuard _g(_lock);
-        _stats.duplicate_cancels++;
-    }
-
     bool shouldCancelDueToRate(uint64_t currentTime);
-
-    void updateFillRateStats()
-    {
-        RecursiveSpinGuard _g(_lock);
-        if (_stats.orders_placed > 0)
-            _stats.fill_rate = static_cast<double>(_stats.orders_filled) / _stats.orders_placed;
-    }
 
     //==========================================================================
     // Reset
@@ -682,8 +615,6 @@ public:
         _pending_sell_all.clear(); // F9
         _best_buy_price.clear();
         _best_sell_price.clear();
-        _order_count = 0;
-        _total_cancels = 0;
         _stats = UnifiedTrackerStats();
     }
 
@@ -721,7 +652,6 @@ private:
     wtp::wt_hashmap<uint32_t, uint32_t> _order_index; // orderId -> vector index
     uint32_t _order_count;
     uint64_t _generation = 0; ///< 订单集世代号(track/untrack 递增)
-    uint32_t _total_cancels;
 
     // checkAutoCancel 复用缓冲 (每 tick 调用, 避免重复堆分配; 主线程单线程访问)
     std::vector<CancelAction> _actions_buf;

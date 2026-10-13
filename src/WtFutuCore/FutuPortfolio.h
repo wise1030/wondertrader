@@ -120,60 +120,10 @@ struct ContractState
         return std::abs(excess_position) * multiplier * last_price;
     }
 
-    /// Compute raw exposure without target adjustment (for reference)
-    /// 原始暴露 = |当前持仓| * 合约乘数 * 价格
-    inline double raw_exposure() const
-    {
-        if (last_price <= 0)
-            return 0;
-        return std::abs(position) * multiplier * last_price;
-    }
-
     /// Check if position limit breached
     /// 注意：position恰好等于max_position时不算breach（合法持仓上限）
     inline bool isPositionLimitBreached() const { return max_position > 0 && std::abs(position) > max_position; }
 
-    /// Check if contract delta is high (软指标，用于单合约 skew 计算)
-    /// 注意：这不是风控违规，只是用于判断是否需要增强 skew
-    inline bool isContractDeltaHigh() const
-    {
-        return contract_max_delta > 0 && std::abs(delta()) > contract_max_delta * 0.8;
-    }
-
-    /// Get contract delta utilization for skew calculation
-    inline double getContractDeltaUtilization() const
-    {
-        if (contract_max_delta <= 0)
-            return 0;
-        return std::abs(delta()) / contract_max_delta;
-    }
-
-    /// Check if position exceeds target (need to reduce)
-    /// @param threshold 超过目标持仓的比例阈值 (默认0.0表示超过即需平仓)
-    /// @return true 表示需要减仓
-    inline bool needsPositionReduction(double threshold = 0.0) const
-    {
-        if (target_position == 0) {
-            // 目标为0，任何持仓偏离都需要减仓
-            return std::abs(position) > threshold;
-        }
-        // 检查是否偏离目标持仓
-        double deviation = std::abs(position - target_position);
-        double allowed_deviation = std::abs(target_position) * threshold;
-        return deviation > allowed_deviation;
-    }
-
-    /// Get position reduction quantity (positive = need to sell, negative = need to buy)
-    /// @return 需要平仓的数量：正数表示需要卖出，负数表示需要买入
-    inline double getPositionReductionQty() const
-    {
-        if (target_position == 0) {
-            // 目标为0，返回当前持仓的相反数
-            return position; // position>0 返回正数(需卖出)，position<0 返回负数(需买入)
-        }
-        // 返回超出目标的部分
-        return position - target_position;
-    }
 };
 
 /// Hedge action recommendation
@@ -192,7 +142,6 @@ public:
     const PortfolioParams& getParams() const { return _params; }
 
     void setAnchorContract(const std::string& code) { _anchor_code = code; }
-    const std::string& getAnchorContract() const { return _anchor_code; }
 
     //==========================================================================
     // Contract Management
@@ -206,9 +155,6 @@ public:
                      double maxPosition = 0,
                      double maxDelta = 0,
                      double targetPosition = 0);
-
-    /// Remove a contract (O(1))
-    void removeContract(const std::string& code);
 
     /// Get contract state - O(1) lookup
     inline ContractState* getContract(const std::string& code)
@@ -323,7 +269,6 @@ public:
                              double engine_unrealized);
     void markShadowStale(const std::string& code);
     void clearShadowStale(const std::string& code);
-    bool isShadowStale(const std::string& code) const;
     /// F-core C(2026-09-17): 记录一次 realized 口径滞后事件 (仅计数, 不置 stale)
     void noteRealizedLag(const std::string& code);
     /// 累计 realized 滞后事件数 (巡检 KPI 用)
@@ -331,7 +276,6 @@ public:
     bool hasStaleCostBasis() const;
     double getShadowNet(const std::string& code) const;
     double getShadowRealizedPnl(const std::string& code) const;
-    double getShadowUnrealizedPnl(const std::string& code) const;
 
     //==========================================================================
     // B5: 过冲保险丝 (ARB_SELF_CLOSE_DESIGN v2.1)
@@ -405,14 +349,6 @@ public:
         return _agg_total_pnl;
     }
 
-    /// Net inventory deviation from target (扣除单合约目标持仓)
-    /// 用于 skew 计算：偏离目标的程度
-    inline double getInventoryDeviation() const
-    {
-        RecursiveSpinGuard _g(_lock);
-        return getNetDelta();
-    }
-
     /// Get position for specific contract - O(1)
     inline double getPosition(const std::string& code) const
     {
@@ -421,30 +357,9 @@ public:
         return cs ? cs->position : 0;
     }
 
-    /// Get net position for specific contract (扣除目标持仓) - O(1)
-    inline double getNetPosition(const std::string& code) const
-    {
-        RecursiveSpinGuard _g(_lock);
-        const ContractState* cs = getContract(code);
-        return cs ? (cs->position - cs->target_position) : 0;
-    }
-
     //==========================================================================
     // Risk Limits
     //==========================================================================
-
-    /// Check if portfolio delta is high (软指标，用于组合级 skew 计算)
-    /// 不作为硬风控条件，仅用于判断是否需要加强 skew
-    inline bool isPortfolioDeltaHigh() const
-    {
-        return _params.portfolio_max_delta > 0 && std::abs(getTotalDelta()) > _params.portfolio_max_delta * 0.8;
-    }
-
-    /// Check if portfolio delta is critical (软指标，用于日志警告)
-    inline bool isPortfolioDeltaCritical() const
-    {
-        return _params.portfolio_max_delta > 0 && std::abs(getTotalDelta()) > _params.portfolio_max_delta;
-    }
 
     /// Get the first contract that breached its POSITION limit (持仓手数限制，硬指标)
     inline const ContractState* getPositionBreachedContract() const
@@ -478,10 +393,9 @@ public:
         return 0;
     }
 
-    /// Get all contracts that need position reduction (exceed target position)
-    /// @param threshold 超过目标持仓的比例阈值
-    /// @return 需要减仓的合约列表
-    std::vector<const ContractState*> getContractsNeedingReduction(double threshold = 0.0) const;
+    //==========================================================================
+    // Tiered Risk Response (分级响应机制)
+    //==========================================================================
 
     /// Portfolio delta utilization (原始持仓 delta, 全链路单一口径)
     /// 2026-08-19 语义边界原则: portfolio delta 统一原始口径 (与组合 skew 的 getTotalDelta 对齐);
@@ -492,35 +406,6 @@ public:
         if (_params.portfolio_max_delta <= 0)
             return 0;
         return std::abs(getTotalDelta()) / _params.portfolio_max_delta;
-    }
-
-    //==========================================================================
-    // Tiered Risk Response (分级响应机制)
-    //==========================================================================
-
-    /// Risk level enumeration for tiered response
-    enum class RiskLevel : uint8_t
-    {
-        NORMAL = 0,   ///< Normal operations (< 50% utilization)
-        WARNING = 1,  ///< Warning level (50-70% utilization)
-        ELEVATED = 2, ///< Elevated risk (70-85% utilization)
-        HIGH = 3,     ///< High risk (85-95% utilization)
-        CRITICAL = 4  ///< Critical risk (>= 95% utilization)
-    };
-
-    /// Get current risk level based on delta utilization
-    inline RiskLevel getRiskLevel() const
-    {
-        double util = getRawPortfolioDeltaUtilization();
-        if (util < 0.5)
-            return RiskLevel::NORMAL;
-        if (util < 0.7)
-            return RiskLevel::WARNING;
-        if (util < 0.85)
-            return RiskLevel::ELEVATED;
-        if (util < 0.95)
-            return RiskLevel::HIGH;
-        return RiskLevel::CRITICAL;
     }
 
     // V8-R3: shouldPauseQuoting/shouldReduceQuoting 死接口已删 (零调用者)

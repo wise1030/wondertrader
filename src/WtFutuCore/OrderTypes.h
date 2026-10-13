@@ -16,12 +16,6 @@ enum class Source : uint8_t
                      ///< 污染 closeout 统计口径且隐式落入 Fix4 REVERSIBLE 豁免集合)
 };
 
-/// Get numeric priority for a source (higher = more important)
-inline int sourcePriority(Source src)
-{
-    return static_cast<int>(src);
-}
-
 /// Order submission result (shared by IOrderSink and OrderRouter)
 struct OrderSubmitResult
 {

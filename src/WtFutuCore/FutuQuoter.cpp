@@ -278,6 +278,8 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
     if (bidId != 0) {
         bid_level.order_ids.push_back(bidId);
         bid_level.price = qr.bidPrice;
+        if (_perf)
+            _perf->recordOrderPlaced();
         _order_id_to_level[bidId] = {static_cast<uint8_t>(level), true};
         if (_tracker && now > 0)
             _tracker->trackMMOrder(
@@ -291,6 +293,8 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
     if (askId != 0) {
         ask_level.order_ids.push_back(askId);
         ask_level.price = qr.askPrice;
+        if (_perf)
+            _perf->recordOrderPlaced();
         _order_id_to_level[askId] = {static_cast<uint8_t>(level), false};
         if (_tracker && now > 0)
             _tracker->trackMMOrder(
@@ -307,6 +311,8 @@ uint32_t FutuQuoter::handleBilateralQuote(uint32_t level, const QuoteResult& qr,
                         bidId,
                         askId);
     }
+    if (_perf && placed > 0)
+        _perf->recordQuotePlaced(); // 一次双边/单侧重挂 = 一次报价更新
     return placed;
 }
 
@@ -388,11 +394,15 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
                     if (_tracker && now > 0)
                         _tracker->trackMMOrder(
                             bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
-                    orders++;
-                }
-            }
-            if (!bid_level.order_ids.empty()) {
-                bid_level.price = qr.bidPrice;
+                            orders++;
+                            if (_perf)
+                                _perf->recordOrderPlaced();
+                        }
+                    }
+                    if (!bid_level.order_ids.empty()) {
+                        bid_level.price = qr.bidPrice;
+                        if (_perf)
+                            _perf->recordQuotePlaced();
                 if (_tracker && now > 0)
                     recomputeLevelQty(bid_level);
                 else
@@ -412,11 +422,15 @@ uint32_t FutuQuoter::handleObligationQuote(uint32_t level, const QuoteResult& qr
                     if (_tracker && now > 0)
                         _tracker->trackMMOrder(
                             askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
-                    orders++;
-                }
-            }
-            if (!ask_level.order_ids.empty()) {
-                ask_level.price = qr.askPrice;
+                            orders++;
+                            if (_perf)
+                                _perf->recordOrderPlaced();
+                        }
+                    }
+                    if (!ask_level.order_ids.empty()) {
+                        ask_level.price = qr.askPrice;
+                        if (_perf)
+                            _perf->recordQuotePlaced();
                 if (_tracker && now > 0)
                     recomputeLevelQty(ask_level);
                 else
@@ -464,10 +478,14 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
                             _tracker->trackMMOrder(
                                 bidId, static_cast<uint8_t>(level), _cfg.code, qr.bidPrice, qr.bidQty, mid, now, true);
                         orders++;
+                        if (_perf)
+                            _perf->recordOrderPlaced();
                     }
                 }
                 if (!bid_level.order_ids.empty()) {
                     bid_level.price = qr.bidPrice;
+                    if (_perf)
+                        _perf->recordQuotePlaced();
                     if (_tracker && now > 0)
                         recomputeLevelQty(bid_level);
                     else
@@ -503,10 +521,14 @@ uint32_t FutuQuoter::handleFlexibleQuote(uint32_t level, const QuoteResult& qr, 
                             _tracker->trackMMOrder(
                                 askId, static_cast<uint8_t>(level), _cfg.code, qr.askPrice, qr.askQty, mid, now, false);
                         orders++;
+                        if (_perf)
+                            _perf->recordOrderPlaced();
                     }
                 }
                 if (!ask_level.order_ids.empty()) {
                     ask_level.price = qr.askPrice;
+                    if (_perf)
+                        _perf->recordQuotePlaced();
                     if (_tracker && now > 0)
                         recomputeLevelQty(ask_level);
                     else
@@ -643,6 +665,8 @@ uint32_t FutuQuoter::cancelLevelOrders(wtp::IUftStraCtx* ctx, QuoteLevel& level,
     for (uint32_t id : level.order_ids) {
         if (!_tracker || _tracker->tryMarkPendingCancel(id, reason, now)) {
             orderApiCall([&] { return ctx->stra_cancel(id); });
+            if (_perf)
+                _perf->recordCancelSent();
             sent++;
         }
         // else: 已 pendingCancel — B+ 正常态, 静默 (tracker 超时重试/zombie 升级接管)
@@ -796,25 +820,7 @@ void FutuQuoter::onTrade(uint32_t localid, double vol, double price, uint32_t uT
     (void)sec_in_min;
 }
 
-double FutuQuoter::totalBidQty() const
-{
-    RecursiveSpinGuard _g(_lock);
-    double total = 0;
-    for (const auto& level : _bid_levels)
-        if (level.hasOrders())
-            total += level.qty;
-    return total;
-}
 
-double FutuQuoter::totalAskQty() const
-{
-    RecursiveSpinGuard _g(_lock);
-    double total = 0;
-    for (const auto& level : _ask_levels)
-        if (level.hasOrders())
-            total += level.qty;
-    return total;
-}
 
 void FutuQuoter::recomputeLevelQty(QuoteLevel& level) const
 {

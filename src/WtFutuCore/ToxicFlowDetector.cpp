@@ -177,10 +177,4 @@ double ToxicFlowDetector::getToxicityScore() const
     return _cached_metrics.toxic_score;
 }
 
-double ToxicFlowDetector::getAvgAdverseMove() const
-{
-    auto real_result = _realized.analyze();
-    return real_result.avg_adverse_move;
-}
-
 } // namespace futu

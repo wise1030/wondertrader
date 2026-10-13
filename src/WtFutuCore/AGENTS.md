@@ -5072,3 +5072,1020 @@ v5 冒烟 `EXIT=0`、trades 405（带内）、资金 5452.59 收敛、四源审�
 
 每批仍遵循：TestUnits 全量 + v5 BT 冒烟 + README/CONFIG 同步 + 逐批确认；
 代码改动前本方案须保持"已确认"状态。
+
+#### 19.18 P1-4/P1-6 复查与配置/文档勘误批（2026-09-19②，用户指令"复查+更新错误与冗余注册"授权）
+
+**复查结论（只读核验，全部对照源码）**：四源审计的键-读点映射抽查 ~25 键全部属实
+（含此前存疑的 arb 8 键，均在 SpreadArbitrageManagerInit 有真实读取）；haltGate.mode 接线
+（coordinator 根级 → StrategyCoordinator.cpp:269）与两侧 legacy 一致；契约测试断言与 src 权威
+文件一致（alertThrottleMs/maxHoldMs 已补）。**无代码错误、无"注册未应用"、无"读点缺失"**。
+
+**发现的问题（全部为文档陈旧值 + 已裁决未执行的冗余键清理）**：
+1. CONFIG.md 键数口径漂移：config.yaml 同文件出现 84（§0）/82（§2.5 标题）/87（§2.6 审计表）三个数；
+   coordinator 段"93 键"实为 READ 数（present=114）；
+2. CONFIG.md §2.4 `qtyDecayFactor` 标"生产 2.0"——R12(09-04) 远程已切 **0.7**（用户裁决 F1）；
+3. CONFIG.md §4.1 `base_spread` "dist 值"列写 2.0，与同节增补注/§2.5 的"线上 1.5"矛盾（列定义=线上实际值）；
+4. CONFIG.md §4.1 `level_qty_multiplier` 注册默认来源误写 `quoting.qtyDecay`（死键），应为 `quoting.levelQtyMultiplier`；
+5. 热参计数陈旧：CONFIG.md §4.2 三处（27 键/26 个注册名/27 键）与 README 两处（27 键），
+   当前注册表 = **24**（HP_COUNT=25 含哨兵，§19.12 实测）；
+6. **hotparams.yaml 仍含 2 个已裁决死键**（delta_skew_threshold/delta_skew_factor，§19.10 确认、
+   §7 两次"建议删除"未执行）——本轮清理。
+
+**修改清单**：
+1. CONFIG.md：上述 1-5 全部对齐（§2.6 为审计口径基准；§2.6 表下补一行 09-19② 复查注）；
+2. `src/WtFutuCore/config/hotparams.yaml` + `dist/WtBtFutu/hotparams.yaml`：删除 2 个死键
+   （不在 paramNames() 注册表、审计白名单豁免、零消费者 ⇒ 零行为变化；删除后文件 24 键=24 注册）；
+3. **代码不改**：FutuConfigAudit 白名单与 test_futu_config_contract 的 known_dead 列表**保留**——
+   远程 hotparams.yaml 尚未同步删除，白名单防新库+旧文件产生 unknown 误报（回退兼容）；
+4. **待办（远程批次）**：远程 hotparams.yaml 同步删除两键（base_spread=1.5 为线上权威值，
+   其余与 src 一致；随下次部署窗口 sed + 备份）；完成后可择机收紧白名单与 known_dead。
+
+**验证**：yaml 解析双文件通过；键计数 26→24；TestUnits 不受影响（无代码变更）。
+
+**19.18 实施记录（2026-09-19②，已完成）**：
+- CONFIG.md 9 处修正落地（§0/§2.5 标题键数=87 审计口径、coordinator 段 present=114/read=93、
+  §2.4 qtyDecayFactor 生产=0.7、§4.1 base_spread dist=1.5、level_qty_multiplier 来源改
+  quoting.levelQtyMultiplier、§4 标题/TOC/§4.2 三处热参计数=24、§2.6 表下补复查注、§7 死键行更新）；
+- README.md 2 处 27 键→24 键；
+- src/dist hotparams.yaml 删除 2 死键（各留一行删除注记于 src），解析验证 24 键 = 24 注册；
+- 代码零改动（审计白名单 + 契约测试 known_dead 保留，兼容远程旧文件）；
+- 遗留待办：远程 hotparams.yaml 同步删除两键（随下次部署窗口，sed+备份）。
+
+#### 19.19 配置结构体传递冗余复核与优化方案（2026-09-19③，**待用户确认后实施**）
+
+**复核结论（结论先行）**：存在冗余，3 处真冗余 + 1 处新发现，无正确性风险（P1-4 三道护栏覆盖），
+属"维护税"；唯一有"将来分叉"可能的是 closeout 子树的双拷贝路径。
+
+1. **死解析路径 ×2**（同文件成对，零调用者已全仓 grep 确认）：
+   - `FutuRiskMonitor.h:129-143` `RecoveryConfig::fromVariant`（7 键）；
+   - `FutuRiskMonitor.h:156-166` `CloseoutConfig::fromVariant`（5 键）。
+   实际链路均为 loader 单点解析 + assembler 逐字段填充。若被误接线会造成同节点双解析 +
+   双默认值表漂移（正是 RiskRateLimits 曾出过的问题形态）。
+2. **closeout 子树：5 个结构体各存一份、两条并行拷贝路径**（最需收敛项）：
+   - 路径 A：`config.yaml closeout.*` → `FutuMmConfig.closeout` →[FutuConfigMap 5 字段]→
+     `CoordinatorConfig` →{CloseoutTrigger 直读 deps.cfg 指针 ✓；`syncPhaseConfig()`
+     （StrategyCoordinator.cpp:412-420）打包 → `SessionPhaseConfig`（SessionPhaseManager.h:37）}；
+   - 路径 B：assembler 直拷（FutuModuleAssembler.cpp:444-451）→ `FutuRiskMonitor::CloseoutConfig`；
+   - 另：执行 7 键 → `CloseoutExecConfig`（Assembler:398-403，值拷贝快照）。
+   - **分叉风险实证**：FutuRiskMonitor.cpp:1084 用 `_closeout_config` 副本调
+     `SessionPhaseManager::inDayCloseoutWindow` 静态助手——同一收盘窗口数学，三个消费方
+     （SessionPhaseManager / CloseoutTrigger / RiskMonitor）各持一份配置副本。今天同源同值；
+     将来任何一条链的填充逻辑单独变更即产生判定分叉，且现有审计/契约测试**捕获不到**
+     （两份都"读到了键"）。
+3. **报价基础四元组（base_spread/base_qty/level_qty_multiplier/level_step）4 份副本**：
+   `FutuMmConfig.quoting`（master，热更回写 HotParamManager.cpp:110-113）→ `QuoterConfig`
+   装配快照（Assembler:243-248）→ quoter 活值 `FutuQuoter::_cfg`（updateQuotingParams 写入
+   并刷 `_level_qtys`，FutuQuoter.h:120-133）→ `GLFTParams.base_spread`（热更拷贝写回）。
+   其中 QuoterConfig 快照装配后即陈旧（活值只走 setter），三路热更广播是热更语义必需。
+   **判定：保留**（收益不抵改动），仅补注释防误读。
+
+**已排除（复核后判定非冗余/设计内）**：
+- `CoordinatorConfig.perf_*` 六字段 = FutuConfigMap 唯一映射点的纯接力（P1-4 裁决），
+  唯一消费者 FutuComponentFactory.cpp:135-139，无第二解析；
+- `RiskRateLimits` = 正确样板（loader 单点解析 → setRateLimits 整体拷贝，Assembler:429-431）；
+- arb 侧 62 个解析点 = 全局默认 + pairs 节 per-pair override 语义，有意设计；
+- `AsyncArbConfig` 已单入口（§19.13，Assembler:660 manager 直供）；
+- 热参 overlay 多目标广播 = 热更语义必需，有"注册即应用"自检。
+
+**优化方案（三批，按风险升序，可独立验收）**：
+
+**批次 A（死路径清扫，~0.5h，零风险）**：
+- A1 删 `RecoveryConfig::fromVariant`（FutuRiskMonitor.h:129-143）；
+- A2 删 `CloseoutConfig::fromVariant`（FutuRiskMonitor.h:156-166）；
+- 验证：TestUnits 全量 + 全仓 grep 无新调用。
+
+**批次 B（closeout 单链化，~0.5 人日，主菜）**——采"单拷贝路径"方案（最小侵入）：
+- B1 扩 FutuConfigMap 映射：补 `closeout_max_retries` / `closeout_retry_interval_ms`
+  两字段进 CoordinatorConfig（现 11→13 字段；这两键当前只在路径 B 由 assembler 直填）；
+- B2 assembler:444-451 改从 `_coordinator` 的 CoordinatorConfig 读 5 键填充
+  RiskMonitor::CloseoutConfig（max_retries/retry_interval_ms 同源改走映射），
+  **消除路径 B 独立直读 FutuMmConfig.closeout 的第二链**；
+- B3 `SessionPhaseManager::configure(SessionPhaseConfig)` 改持 `const CoordinatorConfig*`
+  （coordinator 成员，生命周期同源），删 SessionPhaseConfig 结构体与 syncPhaseConfig 打包；
+- B4 CloseoutExecConfig 保持值拷贝快照（执行参数快照语义合理），仅补权威源注释；
+- 契约测试同步：test_futu_config_map.cpp `mapped==11` → `==13` 并补 2 行字段断言；
+  test_v9_r6a.cpp:98 `setCloseoutConfig(CloseoutConfig{})` 不受影响（setter 签名不变）；
+  SessionPhaseManager 相关用例按需改造（configure 签名变化）。
+- 行为不变式：审计输出（read_missing/unknown/partial）批次前后 diff 为空；
+  夜盘 closeout 窗口判定日志（02:25 触发路径）回测不变。
+
+**批次 C（文档与防回归，~0.5h）**：
+- C1 CONFIG.md §9 链图更新（closeout 单链化后的新链路）；
+- C2 QuoterConfig 定义处（FutuQuoter.h:59）补"装配期快照，活值走 updateXxxParams"注释；
+- C3 AGENTS.md 本节追加实施记录。
+
+**验证矩阵**：TestUnits 全量（基线 195 项/193 pass）；`dist/WtBtFutu` 回测冒烟；
+审计 diff 为空；closeout 窗口判定回归。
+
+**边界**：不动框架文件（WtCore/UftCore）；不动热参语义；不动 dist 部署产物；
+批次 A 可独立先行，B 依赖 TestUnits 用例改造量评估后一次提交。
+
+**19.19 批次 A 实施记录（2026-09-19③，用户批准，已完成）**：
+- 删除 `FutuRiskMonitor.h` 两个零调用死解析路径：`RecoveryConfig::fromVariant`（7 键）与
+  `CloseoutConfig::fromVariant`（5 键），原位留注释说明加载路径（loader 单点解析 +
+  assembler 逐字段填充）与删除原因；随删空置的 `#include "FutuConfig.h"`（全文件 12 处
+  FutuConfig:: 调用均在被删函数内）。
+- **顺带发现预存构建缺口**：P1-4 批次新增的 FutuConfigAudit.cpp/FutuConfigMap.cpp 未被
+  cmake 采入（CMakeLists 用 `file(GLOB)`，需重跑 configure 才拾取新文件），导致
+  libWtFutuCore.so 缺符号、TestUnits 链接失败；已在 build_release 重跑 `cmake ..` 修复
+  （构建系统刷新，非代码变更）。
+- 验证：WtFutuCore + TestUnits 编译链接通过；TestUnits 全量 **210/212 pass**，
+  仅 test_session.test_allday / test_shm.test_sharehelper 两个既有环境性失败（AGENTS 已记录），
+  零回归。批次 A 为纯死代码删除，行为不变，免回测冒烟。
+
+**19.19 批次 B 方案评估（2026-09-19③，用户问"彻底引用化 vs 单链化，其他组件怎么做"）**：
+
+*仓内惯例调研（全量盘点）*：
+- **独立组件（9+ 实例，压倒性主流）= 值拷贝配置**：RiskMonitor（setRateLimits/setRecoveryConfig/
+  setCloseoutConfig 三 setter 全值拷贝）、FutuQuoter（QuoterConfig 成员 + 热更 setter）、
+  CloseoutExecutor（CloseoutExecConfig）、UnifiedOrderTracker（setConfig 值拷贝）、
+  SignalAggregator / ToxicFlowDetector / CorrelationManager / SelfTradeCalibrator（fromVariant 值）、
+  SpreadOptimizer（GLFTParams 值 + 热更）、AsyncArbitrageExecutor（setConfig 值）。
+  共同点：均可脱离策略独立构造、被 TestUnits 直接实例化（test_v9_r6a:98 即如此）。
+- **coordinator 内部助手 = const 指针**：唯一样例 CloseoutTrigger::Deps.cfg
+  （CloseoutTrigger.h:34，指向 coordinator 的 CoordinatorConfig）。
+- **热更参数 = 组件内值拷贝 + setter 广播**（quoter/optimizer/portfolio）：热覆盖必须触达
+  各消费方并刷新派生表（如 quoter 的 _level_qtys），引用化反而破坏此语义。
+
+*彻底引用化评估（对 RiskMonitor::CloseoutConfig）*：
+- ✗ 破坏独立组件惯例：三 setter 中只引用化一个 → 组件内范式混杂；
+- ✗ 类型耦合两难：持 const CoordinatorConfig* = 耦合协调器 schema；持 const
+  FutuMmConfig::Closeout* = 下层组件反向依赖策略层配置结构（分层倒置）；
+- ✗ 测试性退化：TestUnits 独立构造须伪造并保活 owner config；
+- ✗ 生命周期风险：夜盘窗口判定跑在定时器线程，指针须全程保活，值拷贝天然免疫；
+- ✗ "彻底"本不可达：rate_limits/recovery 仍须值拷贝，执行参数（CloseoutExecConfig）
+  是快照语义（closeout 触发后不应被外部变更影响）本就不该引用化。
+
+*裁决：采"单链化"（原方案 B1-B4），引用化仅施于 SessionPhaseManager*（B3）——
+它是 coordinator 内部成员，指针持 CoordinatorConfig 正合 CloseoutTrigger 先例。
+真正缺陷是**双填充链**（审计/契约测试均不可见的分叉源），而非值拷贝本身；
+单链化后全部 7 键经 FutuConfigMap 唯一映射（契约断言 11→13 覆盖），分叉风险归零，
+且接口零变更（test_v9_r6a 不受影响）。装配顺序已验证安全：coordinator 创建于
+Assembler:96、loadConfig:100、setConfig:108，均早于 risk monitor 创建:427 与填充:444；
+getConfig() 访问器现成（StrategyCoordinator.h:270）。
+
+**19.19 批次 B 实施记录（2026-09-19③，用户批准"单链化 + SessionPhaseManager 指针化"裁决，已完成）**：
+- **B1 映射扩链**：CoordinatorConfig +`closeout_max_retries`/`closeout_retry_interval_ms`
+  （StrategyCoordinator.h，默认 3/5000 对齐 FutuMmConfig 权威默认；注意 RiskMonitor::CloseoutConfig
+  旧默认 10/2000 曾是双默认值漂移实证）；FutuConfigMap +2 映射（11→13 字段）；
+  assembler 警告阈值同步 11→13。
+- **B2 单链化**：FutuModuleAssembler 填 RiskMonitor::CloseoutConfig 改从
+  `_coordinator->getConfig()` 读 5 键（原直读 `_config.closeout` 的第二填充链消除；
+  装配顺序已验证：coordinator loadConfig+override 均先于本处）。
+- **B3 指针化**：SessionPhaseManager 改持 `const CoordinatorConfig*`（前向声明避循环包含，
+  coordinator 持有 _phase_mgr 成员）；读配置的 3 函数体（configure/inSectionBreak/phase）
+  移入新建 `SessionPhaseManager.cpp`（含 `_cfg` 空指针防御：未 configure 时窗口判定全 false）；
+  删除 SessionPhaseConfig 结构体；syncPhaseConfig 收敛为单行 `_phase_mgr.configure(_cfg)`。
+  纯静态窗口判定（inNightCloseoutWindow/inDayCloseoutWindow）保留头文件内联，
+  FutuRiskMonitor.cpp:1084 等外部调用不受影响。
+- **B4**：CloseoutExecConfig 保持值拷贝快照（执行语义），补权威源注释。
+- **契约测试**：test_futu_config_map.cpp `mapped==13` + 2 字段断言，通过。
+- **文档同步**：CONFIG.md §9.1 "11 字段"→"13 字段"。
+- **验证**：cmake 重配（拾取新 .cpp，GLOB 限制）→ WtFutuCore + TestUnits 编译通过；
+  TestUnits 全量 210/212（2 个既有环境性失败，零回归）；
+  `dist/WtBtFutu` 冒烟（_prod_sample_check.yaml）：exit=0，四源审计
+  87/80/0/0、114/93/0/0、24/24/0/0、68/53/0/0 与基线逐字一致，无 FutuConfigMap 警告。
+  注：本机缺 20260602 tick 数据，冒烟只覆盖启动装配+审计链；closeout 窗口运行时行为
+  建议随下次含数据回测顺带观察（值链路单源后判定数学未变，风险低）。
+- 根 AGENTS.md 的冒烟命令 `-c config.yaml` 对本 dist 包已失效（该文件无 replayer 节，
+   runner 段配置在 `_*.yaml`），已在本次记录，择机更新根文档。
+- 远程部署待办：新 libWtFutuCore.so 随下次部署窗口推送（含批次 A/B + P1-4 遗留的
+  cmake 重配步骤——部署脚本若用增量 make 需先重跑 cmake 否则缺 FutuConfigAudit/Map 符号）。
+
+**19.19 批次 C 实施记录（2026-09-19③，用户指令"完成批次C剩余项"，已完成）**：
+- C1 CONFIG.md §1 链路图增补：映射 11→13 字段 + closeout 单链化说明（RiskMonitor::
+  CloseoutConfig 单点填充 / SessionPhaseManager 指针化 / CloseoutExecConfig 快照语义）；
+  §9.1 的"13 字段"已于批次 B 同步。
+- C2 FutuQuoter.h QuoterConfig 定义处补"装配期快照"注释：活值只走 4 个热更 setter
+  （updateQuotingParams/updateStickyParams/updateProtectionParams/updateMaxPriceDeviation，
+  已逐一核实存在），master 副本在 FutuMmConfig.quoting。
+- 验证：WtFutuCore 重编译通过（注释/文档级改动，无行为变化，免 TestUnits/冒烟重跑）。
+- **§19.19 全部三批（A 死路径清扫 / B closeout 单链化+指针化 / C 文档防回归）至此闭环**；
+  遗留：远程部署窗口（含 cmake 重配步骤）+ 根 AGENTS.md 冒烟命令更正（-c config.yaml 失效）。
+
+#### 19.20 批次 D+E 实施记录（2026-09-19④，用户批准）
+
+**批次 D（closeout 双链闭环 + RecoveryConfig 嵌入 + 默认值对齐 + 冗余赋值删除）**：
+- D1 orch_deps `close_time/flatten_position` 改走 CoordinatorConfig 链 —— closeout 双填充路径彻底归零；
+- D2 `FutuMmConfig::Risk` 7 散字段 → 内嵌 `RecoveryConfig recovery`（仿 rate_limits 整体拷贝模式），
+  assembler 8 行手拷收敛 1 行，最后一对双默认值表消除；
+- D3 `RiskMonitor::CloseoutConfig` 默认 10/2000→3/5000 对齐权威源；
+- D4 删 UftFutuMmStrategy.cpp 冗余 `close_time=150000`（loader:160 已设）。
+
+**批次 E（死参数清理）**——排查覆盖 loader 52 字段/coordinator 21 字段/RiskRateLimits 17 字段/
+ModuleParams 12 字段/9 个组件配置结构体，结论：
+- **`taker_reduce_threshold` 系活跃安全网，保留**：checkTakerReduce 被 StrategyCoordinator.cpp:638/647
+  实时调用，是 HALT 时强平减仓兜底（08-31 事故的退出路径）；target_util/cooldown_ms 配套键同活。
+- **删除 8 个死字段 + 4 个死键**：
+  - `StpConfig::allow_same_price/price_adjust_ticks/strategy/min_price_gap`（DIAGNOSTIC_REPORT_V10
+    已预警"配了不生效最误导"——stpMinPriceGap 三层传递链 coordinator.yaml→StpConfig→
+    _config.modules→UnifiedTrackerConfig 零消费，checkSelfTrade 只读 stp_enabled）；
+  - `CorrelationConfig::spread_z_threshold/auto_calculate_beta`；
+  - `UnifiedTrackerConfig::stp_allow_same_price/stp_min_price_gap`；
+  - 同步删除 `_config.modules.stp_min_price_gap` 中间字段与 assembler 两处赋值。
+- **yaml**：src+dist coordinator.yaml 删 4 键（allowSamePrice/priceAdjustTicks/spreadZThreshold/
+  stpMinPriceGap）；**白名单用全路径**（`modules.selfTradePrevention.*` 等——裸键名不匹配嵌套路径，
+  首版写错已修正）。
+- **白名单实战验证**：_prod_sample_check.yaml 指向 /tmp/prod_coord.yaml（旧格式含 4 死键），
+  unknown=0 → 远程旧文件过渡保护有效。
+- 验证：TestUnits 210/212（2 既有环境性失败，零回归）；双配置冒烟（_prod_sample_check 旧文件 /
+  configbt_v5 清理后文件）审计均归零；清理后 coordinator.yaml present 113→109、read 93→89。
+
+**processTick Stage 4 vs 5.5 核查（用户问"是否重复"）——结论：不重复，设计有意**：
+- Stage 4 的 checkTakerReduce 只在 **checkRisk 失败**（BLOCK_SIDE/HALT）分支执行（随后 return）；
+  Stage 5.5 只在 **checkRisk 通过**路径执行 —— 互斥分支，每 tick 恰好一次，全仓仅这两处调用。
+- **顺序有讲究**：pass 路径"先 auto-cancel 后 taker-reduce"——PENDING_CANCEL 单被 STP 排除
+  （UnifiedOrderTracker.cpp:511-514），若反过来减仓 FAK 单会被将撤旧报价误拦。
+- HALT 时跑减仓是恢复手段（:635 注释：旧逻辑 HALT 跳过减仓是反的）。
+- 可选微优化（未实施，收益仅可读性）：单点化 `risk_ok=checkRisk; if(risk_ok) autoCancel;
+  checkTakerReduce; if(!risk_ok) return; quoting` —— 保持两路径顺序语义不变，消除双调用点
+  失同步风险。判断：现状注释已清晰，不值得动热路径。
+
+**19.20 远程部署记录（2026-09-19 23:14，批次 A-E + P1-4/P1-6 全量上生产）**：
+- 部署物：`build_release` Release libWtFutuCore.so（md5 `40598889...` 双侧一致）；
+  备份 `.bak_20260919_231138_p1cfg` ×3（lib + coordinator.yaml + hotparams.yaml）。
+- 流程纠偏：deploy-futu.sh:306 是裸 scp 原地覆写（08-19 事故模式），未采用；
+  按事故教训走 `.so.new` + `mv -f` 原子替换（旧进程 879401 持旧 inode 无损）。
+- 配置清理（远程 sed + 备份）：coordinator.yaml 删 4 死键（allowSamePrice/priceAdjustTicks/
+  spreadZThreshold/stpMinPriceGap）、hotparams.yaml 删 2 死键（delta_skew_threshold/factor）
+  —— **§19.18 遗留待办就此闭环**。
+- 重启：官方 `monitor/wt_restart.sh`（kill→轮询→start.sh→单实例验证），新进程 1258466，
+  `ps` 确认单实例（pgrep -c 计数 2 为包装进程误匹配，ps 为准）。
+- 启动验证：四源审计全零；**hotparams 26→24 与注册表精确咬合**；coordinator.yaml
+  present 117→113、read 85；config validation 0 errors；无 FutuConfigMap 警告
+  （mapped==13 静默通过）；日志 error 行全部为既知噪声（TSC/周末 CTP 断连/旧进程退出）。
+- 周一 08:40 cron 常规重启即运行新代码，无需额外操作；夜盘实盘观察项：
+  夜盘 closeout 窗口（02:25 触发路径）与 session break 判定应与部署前完全一致（单链化
+  行为不变式，本地冒烟已验证审计计数逐字一致）。
+
+#### 19.21 两日生产日志复核（2026-09-19 部署后，基于 Runner_2026-09-17/18.log）
+
+**sectionBreakSecondsBefore=10 发挥作用确认**：两日三个窗口（00:59:50/10:14:50/11:29:50）
+全部精确 T-10s 触发，cancel-all+暂停+恢复完整。夜盘 01:00 作为中间节也触发（与 00:58
+night closeout 叠加无害——break 只撤 MM/ARB/HEDGING 源单）。小瑕疵：09-17 11:29
+进入记 ao2612、恢复记 ao2611（单标志由先后到达的不同合约 tick 驱动，行为正确仅日志
+不配对）；恢复点落在节间休市中由 preCheck isTrading 兜底，无越界报单。
+
+**现存问题（按严重度）**：
+1. **P0 两夜两崩（框架层，本批代码不涉及未修复）**：
+   - 09-17 22:09 `stra_sell+0x3d`：紧邻前行 "Action policy group default not exists"——
+     ActionPolicyMgr.cpp:106 assert 在 Release 空转 → `end()->second` 野指针返回。
+     待查：bspolicy 为何那一刻缺 default 组（文件/加载/竞态）。
+   - 09-18 22:41 `WTSBaseDataMgr::getContract` 在 TraderCTP OnRtnOrder 线程崩——
+     订单回报中合约代码基础数据查不到（疑似换月/未配置合约回报）null 解引用。
+   - 两次均 ~1s 看门狗重启，但夜盘中途重启 → 在途单变僵尸（与次日晨 latch 或相关）。
+2. **P1 每日开盘 zombie-cancel-latch**（两日 09:00:37 双合约，数秒 lifted）：开盘峰值
+   CTP 撤单应答 > 重试预算（08-26 已调 300→1000ms 仍复发），护栏有效根因未除。
+3. **P1 09-17 白盘性能劣化**：15,461 次 PERF CRITICAL（p99>1ms，14 时峰 6868 次，
+   TickToQuote p99 峰值 3.1ms）；09-18 仅 54 次正常。疑似宿主 CPU 争抢/行情速率异常。
+4. **P2 09-18 撤单竞态 336 次**（"报单已全成交或已撤销"）：B+ 合成终态保护兜住，量偏大。
+- 健康项：HALT_TRADING（不可逆）两日 0；TAKER_REDUCE 0 触发。
+
+**19.21 补充：两起 P0 崩溃根因分析（2026-09-19④，只读）**：
+- **崩溃②（09-18 22:41 getContract）= 人工操作触发的关停竞态，非自发故障**：WtMonSvr.log 实证
+  admin@117.135.127.173 于 22:41:50 前后连接监控台，22:41:43 SIGTERM（SignalHook 文本
+  "app terminated"=SIGTERM 专属）、22:41:45 停止、22:41:55 重新挂载 pid 849864。
+  segv 发生于 teardown 期间：交易回调线程迟到的 OnRtnOrder → getContract 撞上销毁中的
+  基础数据。框架健壮性项（确凿）：teardown 与回调线程未同步（TraderCTP/WtUftCore 域）。
+- **崩溃①（09-17 22:09 bspolicy/stra_sell）= 一次性内存状态异常，非配置问题**：
+  actpolicy.yaml 完好含 default 组、启动加载成功、09-09~18 日志该错误零发生、无
+  reload/clear 路径；getActionRules 报错的前提（_rules 缺 default）在正常状态下不可达。
+  确凿框架缺陷：ActionPolicyMgr.cpp getActionRules 末段 `assert(it != _rules.end())`
+  在 Release 空转 → `return it->second`(end()) = UB 野引用 → 调用方遍历崩溃
+  （Release+LTO 下栈帧符号化不可靠，stra_sell+0x3d 为最近符号归属）。
+  处置方向（待批准，涉框架层）：getActionRules 失败路径返回静态空规则组替代 UB；
+  若复发上 ASAN/Debug 抓内存踩踏源。
+- **安全观察**：监控台 runMonSvr 以 root 运行、绑定 0.0.0.0:8080、命令行无 --token
+  （若 WT_MON_TOKEN 环境变量也未设 = 无鉴权可远程停策略）；WtMonSvr.log 已有 296 次
+  admin 连接。建议确认鉴权设置 + 核对 117.135.127.173 是否本人。
+
+### 19.22 全景对齐审查：文档/注释/冗余/架构建议（2026-09-20，三路并行只读核查+独立抽验）
+
+三路只读核查（文档一致性 / 冗余成员方法 / 架构设计评审），独立抽验纠错后入档。
+**已纠错**：MarketMakingEnhancer 曾被判"死类"，抽验证实 arb/SpreadArbitrageManager.cpp:46/65/339/878
+活跃装配调用（观测模式，adj 参与 skew），仅其部分方法可能死，类不可删。
+
+#### A. 文档对齐（新鲜度：README 7/10、CONFIG 7.5/10、AGENTS 9/10、OPTIMIZATION_REPORT 3/10）
+硬错误（必修）：
+1. README:308 "11 字段" → 13 字段（FutuConfigMap.cpp:13-48，test 断言 mapped==13）。
+2. README:702/739 "26 参数" → 24（HP_COUNT=24，FutuHotParamManager.h:41-68）；
+   FutuHotParamManager.h:6 文件头注释与 .cpp:276 注释同步 26→24。
+3. README:889 测试基线"180 过" → 212 项/210 过，补 test_futu_* 新文件清单。
+4. CONFIG:18/223/225 "生产权威=src/config.yaml" 危险措辞 → "src 为样例/开发模板，
+   生产权威=远程（R15-a 规程）"。
+5. CONFIG:144 qtyDecayFactor "生产(src) 0.7" 自相矛盾（src 实为 2.0）→ 拆"回测3.0/src样例2.0/远程0.7"。
+6. CONFIG:171 risk.frequency 活键行混入 pause/flattenThreshold（代码仅读 widenThreshold，
+   RiskLimitsConfig.h:65-71）→ 移入 §7 死键区。
+7. CONFIG:136 quoting.qtyDecay 键名列 → levelQtyMultiplier（旧键已删）。
+8. CONFIG:249 entryZ/exitZ → entryZScore/exitZScore。
+9. CONFIG:314 takerReduceThreshold 示例 1.1→1.0（R8-c 3a 裁决）；:317 缺省 500→200（代码 200）。
+10. CONFIG:342 lead_lag.maxAgeMs 描述"B5 alpha 时效" → lead-lag 行情时效（F8 勘误）。
+11. CONFIG:202/582/411 + README:303 死键区 stpMinPriceGap 等 → 标注"已删除（批次E），
+    白名单仅兼容远程旧文件"。
+12. SpreadOptimizer.h:24-29 phi 注释引用已删的 delta_skew_factor/inventory_skew_gain → 改写。
+13. OPTIMIZATION_REPORT.md（2026-04-20 基线） → 移入 docs/archive/ 或头加"历史存档"声明。
+低风险：README:476 脚本路径标注仓库根；README 尾注补 09-17~19 三批新机制
+（HotLogGate/HaltGate/P2 窗口化）小节；CONFIG:60 "11 行"→"11 字段"。
+
+#### B. 冗余清理（抽验后高置信 ~90 处，分四批）
+- B1 死声明/死壳（低风险）：checkToxicityAndCircuitBreak（连定义都没有）、
+  FutuRiskMonitor::determineAction 转发壳、OrderRouter::cancelOrder/getRateCounter、
+  ContractInfo 三个零引用字段。
+- B2 死方法群（需逐条复核）：FutuPortfolio 旧风控 API 群 9 个、UnifiedOrderTracker 群 8 个
+  （getPendingSellQty 为复制遗留另一半；getPendingBuyQty arb 在用勿删）、
+  PerformanceMonitor 诊断 getter 群 9 个、PerformanceAnalyzer 遥测群 7 个
+  （recordToxicityEvent/recordAlphaSignal 及只写计数器）、SelfTradeCalibrator 5 个、
+  StrategyCoordinator 被 wireDeps 取代的 10 个 setter、CorrelationManager 3 个、
+  FutuConfigValidator 4 个（arb 校验残留）、BilateralQuoteStats 5 个等。
+- B3 半死位/死类型：UnifiedOrderInfo::isArbOrder + IS_ARB_ORDER 位（只写不读）；
+  BlockingQueue（LockFreeQueue.hpp:213）；StrategyWeights（arb 死类型）；
+  FutureTypes.h 整个文件（wt_futu 唯一第三 namespace + OrderFlag_* 全仓零引用）。
+- B4 死存储：FutuHotParamWatcher::_strategy_id、StrategyCoordinator::_channel_ready（恒真守卫，
+  勿与策略侧同名活变量混淆）、PerformanceMonitor quotes/orders/cancels 恒 0 计数。
+排除项（勿删，抽验确认）：TestUnits 引用清单（HaltReasons::maskAll、TscClock::calibrated、
+getOrdersPerSec、recordOrderPlaced、getFlowStats 等）、arb/signals 在用成员
+（trackArbOrder、getPendingBuyQty、setArbManager、TickTransactionInferer）、
+框架虚回调（on_order_detail/on_order_queue）、EventDispatcher 预留口、
+FutuPortfolio 热 getter 群、TdSpiOffload 类型别名。
+
+#### C. 架构/设计改进 Top5（收益/风险比）
+1. 头文件冗余清理：StrategyCoordinator.h:20/23 删多余 include（留 fwd decl）、
+   UftFutuMmStrategy.h:18 删 SpreadArbitrageTypes.h、:61/:66 删重复 fwd decl、
+   删 FutureTypes.h —— 编译器+grep 双可验证，零行为面。
+2. 拆 processTradeFill（FutuRuntimeOps.cpp:36-409，374 行单函数 → 8 个子函数，
+   纯机械拆分，该函数是历史事故最高频修改点）。
+3. FutuQuoter 三路径公共 helper（handleBilateral/Obligation/Flexible 同构 ~300 行，
+   有 B+③ P2-4 修复不同步前科；纯抽取+逐比特 A/B）。
+4. CMake GLOB 缺 CONFIGURE_DEPENDS（已实踩 19.19 缺符号坑；注意 cmake_minimum 3.0→3.12
+   或改显式列表，二选一）。
+5. 双边统计 I/O 拆 BilateralStatsService（StrategyCoordinator 尾部 150 行 I/O 外移，
+   coordinator 只留 onTick/onSectionBreak/onSessionEnd 三入口）。
+中期（不本次做）：RuntimeOps 90 处 friend 访问收敛为引用束（参照 CoordinatorDeps）、
+RecoveryConfig/CloseoutConfig 移入 RiskLimitsConfig.h 解耦策略壳、
+DeltaRateTracker 独立、TimeThrottle 助手统一限流语义。
+明确不做：拆 stage 流水线（TickContext 共享快照是性能核心）、拆 recovery 段
+（halt 锁域强耦合）、assembler 一次性改 DI 容器（与 R4b 裁决冲突）。
+
+#### D. 纪律项（无代码改动）
+新代码注释只写"当前为什么"不写"原来是什么"；老考古注下次触碰时收敛；
+AGENTS.md 按季度压缩 N 轮前已完成方案为单行索引（详细记录移 docs/）。
+
+**19.22 实施记录（2026-09-20，用户批准批次甲乙丙，丁戊未批）**：
+- **批次甲（文档）**：README 13 字段/24 热参/基线 213 项 210 过/死键标注/脚本路径/尾注更新；
+  CONFIG "生产权威=src"危险措辞改 R15-a 口径、qtyDecayFactor 三口径拆分、pause/flattenThreshold
+  移出活键行、levelQtyMultiplier/entryZScore/exitZScore 键名更正、takerReduceThreshold 1.0、
+  requote 缺省 200、maxAgeMs 描述勘误、stpMinPriceGap 死键改"已删除"标注；
+  FutuHotParamManager 注释 26→24×2、SpreadOptimizer phi 注释改写；
+  OPTIMIZATION_REPORT.md 头加历史存档声明（基线 2026-04-20，不可对照代码）。
+- **批次乙 B1**：删 checkToxicityAndCircuitBreak 死声明、determineAction 转发壳、
+  OrderRouter::getRateCounter（**cancelOrder 按用户裁决保留为预留接口**）、
+  ContractInfo 三死字段。B4：删 FutuHotParamWatcher::_strategy_id（start() 签名同步精简）、
+  StrategyCoordinator::_channel_ready 恒真守卫（preCheck 化简为 !tick）。
+- **批次丙 B2**（逐组复核后删，约 60 处）：FutuPortfolio 旧风控 API 14 个+needsPositionReduction
+  +RiskLevel 死枚举；UnifiedOrderTracker 9 方法+_total_cancels+isArbOrder 访问器
+  （**_order_count 经 getOrderCount 存活，_stats 经 cancel_rate 检查存活，均保留**）；
+  PerformanceMonitor 死 getter 群+recordQuotePlaced/recordCancelSent/resetLatency；
+  PerformanceAnalyzer 死方法 7 个+MarketCondition/ConditionPerformance/_condition_perf 全死链；
+  SelfTradePrevention totalOrders/ordersForContract/getUnifiedTracker；SelfTradeCalibrator 5 个；
+  StrategyCoordinator 被 wireDeps 取代的 13 个 setter+setTradingState+tradingState(Mut)；
+  CorrelationManager 3+FutuConfigValidator 4+BilateralQuoteStats 5+FutuRiskMonitor 死 getter 4
+  （**误删 setRecoveryConfig 已恢复，教训：连带删除前先验证 setter 调用面**）+FutuQuoter 5+
+  PredictiveToxicity getVPIN+ToxicFlowDetector getAvgAdverseMove+TickTransactionInferer
+  getImbalanceRatio+FutuHotParamManager isHotChanged+OrderTypes sourcePriority+
+  CloseoutExecutor 3 getter+TradingState getPhaseStr+ConfigAudit pathOf/presentCount。
+  **保留**：TscClock::maybeRecalibrate（注释明示"接口休眠"预留，原子化为未来接线预备）、
+  IS_ARB_ORDER 位（trackArbOrder 活路径写入）。
+- **批次丙 B3**：删 LockFreeQueue.hpp 内 BlockingQueue、arb/SpreadArbitrageTypes.h 内
+  StrategyWeights、整个 FutureTypes.h（wt_futu 第三 namespace+OrderFlag_* 全仓零引用）。
+- **验证**：make WtFutuCore/TestUnits 通过；TestUnits 210/212 与基线一致（2 个既有环境失败）；
+  冒烟 configbt_v5 closeout/双边统计/session end 全链正常，四源审计 unknown=0/read_missing=0。
+  注：冒烟 present/read 计数（103/76、109/89、24/24、61/47）反映当前 dist 配置内容
+  （批次E 后），与 §19.19 记录的 87/114 基线差异源于配置内容变化，非本批代码所致。
+- **过程教训**：启发式块删除（rfind/find 定位）两次误伤相邻活代码（影子簿声明区、
+  getRawPortfolioDeltaUtilization、_generation、recordTickProcessed 声明等），均以
+  git HEAD 恢复+edit 工具精确重删修复并编译验证。后续死代码删除一律用唯一上下文
+  edit 或"签名行+块尾花括号"成对定位，禁止跨块启发式切割。
+
+**19.22 回测验证（2026-09-20⑤）**：
+- _ec_5d 5 日全量回测 ×3 轮：post-19.22 首轮 25,161 笔、pre-19.22(远程部署版 md5
+  40598889…)A/B 25,041 笔、post-19.22 复跑 25,012 笔；三日逐日完全一致，差异日
+  0.5% 内（mocker srand 噪声带 ±1.5%）——**死代码清理行为中性确认**。
+- 健康度：5/5 日 session end Delta=0、0 HALT/zombie/error、四源审计 unknown=0；
+  read_missing=19 全部为 _ec_5d.yaml 缺省键（closeout.*/risk.frequency.* 等，
+  走代码缺省值，与清理前一致）；DRIFT=6 键为回测热参-配置差异（预期打印）。
+
+**19.22 远程部署（2026-09-20⑥）**：备份 .bak_20260920_pre1922(md5 40598889) →
+scp .new + mv -f 原子替换(md5 9cabf1c2,与本地构建产物一致) → wt_restart.sh 重启
+(pid 1535458,单实例)。启动验证：四源审计 unknown=0/read_missing=0、hotparams
+24/24、校验 0 errors/0 warnings；日志 2 条 error 均为已知良性(重启 SIGTERM 的
+"app terminated" + TscClock 虚拟化 TSC 兜底)。**本次仅 .so 替换，无配置变更**。
+
+**19.22 运行观察勘误（2026-09-22，用户裁决）**：
+1. zombie-cancel-latch 突发（撤单应答 >1s 尖峰）系 **SimNow 模拟环境特有抖动**，
+   生产 CTP 不会高频发生；闩锁机制本身按设计工作（保护性暂停+自愈，16/16、5/5 解除，
+   无仓位损失）——**不需要修复**，勿再作为 P1 候选提出。
+2. ao 夜盘实际交易时段就是 **21:00-01:00**（此前误判 23:00 收盘并推测"session 模板
+   幽灵边界"）——00:59:50 的 section break 是真实的夜盘收盘前撤单窗口（T-10s），
+   23:00 后的 TickToQuote CRITICAL 属夜盘尾段真实交易，模板无错——**无需任何修改**。
+同日生产配置确认：closeout minutesBefore=2（config.yaml:97，与回测样例 10 不同属
+有意配置），14:58 触发/2 秒完成属正常。
+
+**19.22 日常巡检（2026-09-23①，09-22 全天+09-23 至 10:47）**：
+- 09-22：0 HALT/0 崩溃；双 closeout 准点（00:58:04 夜收、14:58:04 日收，hedge delta=3.00）；
+  latch 25/25 自愈（时段散布：开盘/节段重开/盘中尖峰，SimNow 抖动定性不变）；
+  CTP 竞态 767 次 B+ 1:1 全闭环；CRITICAL 19 次（日盘 10、夜盘尾 9，孤立窗口）；
+  section break 00:59:50/10:14:50/11:29:50 精确 T-10s。
+- 09-23 至 10:47：审计四源全零；latch 3/3；CRITICAL 5 次全部在夜尾 00:05-00:50（日盘 0）；
+  夜收 closeout 00:58:07 COMPLETED（5.0/5.0 手 2 轮 6.5s）；台账 unmatched=0；成交 96 笔；
+  进程 17.7% CPU/35MB。
+- 三日趋势（周一→周三）：latch 16→25→3(至午前)、CTP 竞态 400→767→126、CRITICAL 6→19→5。
+  波动均落在 SimNow 环境噪声带内，无趋势性恶化；生产部署后零崩溃零 HALT 连续 3 个交易日。
+
+### 19.23 skew 死区修复 + 阶梯授权贴中化（2026-09-23②，用户批准）
+**根因**（19.22 分析）：未授权档 cap=floor(half_spread) 在常态 spread 1.5t 时恒 0 →
+skew 在 util 80-99% 死区为零（84% 时间 skew=0，库存钉 90-93%）；授权档 0→4t 悬崖过猛。
+**方案**（用户裁决：固定 2t/4t 不可用，授权档改 spread−1）：
+- 未授权：cap = max(1, floor(half_spread)) —— 方案a，至少 1t
+- 授权（|r_p|≥1 或 |r_c|≥1）：cap = min(k_max, max(1, spread−1)) —— 贴中减仓，
+  宽价差渐近穿透（≥9t 达 −3t 与 cross_max 兜底衔接）
+- 两处第二重 clamp 同步：未授权不得把整档截回小数（保留整档量化语义）
+- 落点：SpreadOptimizer.cpp:161 k_cap + :163 clamp_limit + skew_price 段 skew_limit
+**验证**：TestUnits（r14/skew_dimensionality 断言面需同步）+ v5 冒烟 + _ec_5d A/B
+（判据：util≥90% 时长分布、taker reduce 触发率应下降、成交笔数噪声带内）。
+
+**19.23 实施与验证（2026-09-23③）**：
+- 实现：SpreadOptimizer.cpp 三处（k_cap/clamp_limit/skew_limit）+ R14 注释块同步；
+  未授权 cap=max(1,floor(half))、授权 cap=min(k_max, max(1, spread−1))、
+  未授权双重 clamp 改 max(half, k_cap) 保整档语义。
+- 测试同步 3 文件：test_v10_r14_skew_ticks（授权 −4→−1 贴中+ask≥mid 断言）、
+  test_skew_dimensionality（两处授权 −4→−1）、test_inventory_delta_separation
+  CrossAuthorizationBeyondHalfSpread（授权 −4→−1）；TestUnits 210/212 基线恢复。
+- 回测 _ec_5d A/B：改前 25,013 vs 改后 25,365 笔（+1.4% 噪声带）；QUOTE skew 零档占比
+  97.1% vs 97.2%（数学自洽：回测 spread 2.5t 本无死区，本改动为 no-op，仅噪声差）；
+  两轮 0 HALT/0 zombie/0 error、5/5 session end Delta=0。
+- **生产验证口径（部署后观察）**：QUOTE skew 零档占比（基线 84%）应显著下降；
+  util 90-93% 钉住时长应缩短（库存回归）；taker reduce 触发率应下降。
+  部署未执行，待用户指示。
+
+**19.23 生产验证（2026-09-23④，12:46 部署后首日对比，同日分段）**：
+- skew 零档占比：改前段(00:00-12:46) 86.7% → 改后段(12:46-22:55, 时长可比) **70.0%**；
+  改后段 ±1t 非零 skew 2890 条（改前 1102 条）。
+- **库存钉住消除**：util≥80% 告警(1s 节流≈时长) 1447 → **17**（且 17 条全部是 13:30
+  开盘第一分钟的上午残留，之后日盘+夜盘全程为零）；util≥100% 授权事件 17 → **0**
+  （库存不再顶到 cap——正是死区修复的设计意图）。
+- 健康度：0 HALT、latch 7/7 自愈、CTP 竞态 263 全闭环、日收 closeout 14:58:03
+  COMPLETED(1 手对冲)、夜盘 199 笔成交、taker reduce 0。
+- 结论：**三项验证判据全部命中**（零档占比降、钉住消除、taker 未被需要）。
+  观察项：进程 RSS 2h18m 达 133MB（前日 43min 32MB），非同口径不可比，次日跟踪。
+
+**19.24 运行评审与风控复核（2026-09-24，只读分析）**：
+- 19.23 后全时段运行健康：09-23下午/夜盘/09-24凌晨/上午四段 |util|>80% ≈0%
+  （峰值 0.83 仅下午开盘残留），skew 零档 42-58%，mult max 2.71（≤cap5），
+  0 HALT_TRADING，latch 11/11 自愈，日收/夜收均准点触发。
+- 成交经济性：60s 往返 11 组净 −0.18t（最差 −1t）；同侧连击 0（breaker 未触发）；
+  深度穿越 9 笔全部归因旧库早盘 6 笔 + 开盘秒级缓存 mid 3 笔（13:30:08 Δ=−4、
+  09:00:24 Δ=−3.5 等），新库稳态 0 笔。skew×mult 几何自相似（spread 与 skew 同乘
+  mult）→ 最坏穿越 0.25×mult t ≤1.25t，"立即不利成交"被 (half−1t) 差值锁死。
+- **缺口①（实锤）**：09-24 00:58 夜收平仓失败——net_delta −8，FAK BUY 连续
+  10 次零成交（夜收最后 1 分钟对手簿被抽干，FAK 必败），retries exhausted 后
+  ①"manual intervention required"**每 tick 无节流刷屏**；②**无 halt/latch**，
+  次日 08:40 静默恢复报价，−8 空头隔夜带入日盘（死带内 skew=0，被动回补）。
+- 缺口②：orderErrorThreshold=1000 为 2026-08-17 共享账户保证金临时放宽值，
+  实际接近禁用该保护。
+- 风控复核结论：8 条 halt/暂停路径全部接线正确（zombie-latch/maxPosition 硬闸/
+  SideFillBreaker 5/3s→5s/orderError/通道断开 RISK_HALT/日亏与CRITICAL HALT_TRADING/
+  taker-reduce HALT期仍执行/requote四重门），唯一失效面=closeout exhausted 终态。
+- 优化建议（待裁决，未动代码）：QUOTE 加 cap/auth/driver 观测；开盘 3-5s 禁缓存
+  mid 挂 skew 单；closeout 终态加 latch+日志节流+末段 GFD 兜底；采集 1-2 周数据
+  后再评估 mult 上限与 util 目标带。
+
+**19.25 三数据链路缺陷深查——两项误诊修正 + 真缺陷链（2026-09-24，只读）**：
+- **误诊①（membin"截断"）**：trade/round.membin 完整无截断——全天 112 笔 Trade notified
+  = 112 笔 AllTrd，journal 末条与最后成交 11:25:15 精确对应。下午无记录因**下午无成交**。
+- **误诊②（双边统计 13:30 死亡）**：非独立缺陷，是 13:31:30 交易停摆的下游症状。
+- **排除③（Trade notified 采样丢失）**：112=112 精确吻合，假设撤销。遗留小疑点：
+  journal 量比 log 多 26%（622 vs 494 手）→ 双写嫌疑，P3 排查。
+- **真缺陷链（09-24 下午停摆 87 分钟）**：
+  11:30:05 小节边界竞态 resume → 往已闭市上午场报单 → CTP 批量拒"当前状态禁止交易"
+  → 13:30:07 下午开盘正常报单 → **13:31:30 TD 断连 8193** → 同秒 TraderCTP 重连成功
+  （新 Sessionid 3048983032，re-query 持续可用）→ 策略 RISK_HALTED →
+  **自动恢复四道闸 87 分钟未通过**（14:30:13 成交后仍 "Recovery gates not passed"，
+  拒绝原因仅 debug 级；嫌疑最大= PnL 恢复门死锁：halt 后无法交易→PnL 无法回补→
+  门永不放行）→ 14:58 closeout 风控层强平 1 手 COMPLETED → session 末仍 halted。
+- 修复方案（待裁决，未动代码）：F1(P0) 恢复闸可见性(INFO 节流+门原因)+channel-loss
+  halt 豁免 PnL 门+重连对账放行；F2(P1) 小节边界(resume 挂到 next_section_open/报单
+  提前 2s 停新单)；F3(P1) convert_trades 日终化+行数对账告警、双边统计 watchdog；
+  F4(P2) journal 双写排查。
+
+**19.26 修复批实施（2026-09-28，方案 19.25 获批后落地）**：
+- **根因修正（19.25 方案基于的中间假设被推翻）**：恢复闸 PnL 门实未参与
+  （`_was_loss_triggered` 仅 IRREVERSIBLE 置位）；真根因=**框架层 settlement-confirm
+  卡死**：13:31:30 断连同秒重登成功，但 "Querying confirming state" 之后再无
+  "Trading channel ready"（09-24 日志 61375 行后断链），`_channel_ready=false`
+  使 on_tick 主链路整体早退 87 分钟（无风控/无恢复检查/无日志）。框架文件禁改，
+  策略层做可观测+外部看门狗，settlement 重试列框架待批。
+- **F1** 恢复闸拒绝观测：canRecover 全拒绝点经 `rejectRecovery()` 计数+记因+30s
+  节流 INFO（WARN 级保留给 max-count/max-loss）；计数与原因入 PERF 5min KPI 行
+  （`recovery-gate rejects=N last=[...]`）。通道 dark 看门狗：onChannelLost 记录
+  起点，on_tick 早退分支 30s 首报+5min 复读 "[CHANNEL] pipeline dark"。
+- **F2** 小节边界：inSectionBreak 覆盖整段节间空隙（原仅 [end-N,end)）——resume
+  挂到下一节开盘，杜绝休市内报单被拒；新增 SessionPhaseManager::sectionIndex
+  供同节判定。冒烟实证 resume 从 1130 修正为 1330。
+- **F3** 观测三件套：①scripts/deployment/reconcile_journals.py（须传昨天+今天双
+  日志，夜盘跨日）；②双边统计沉默 watchdog（同节判定，跨节断档不告警）；③恢复闸
+  拒绝计数入 PERF（见 F1）。外部 scripts/deployment/channel_watchdog.sh：
+  settlement-stuck / pipeline-dark / md-down 三类签名，交易时段 */2min cron，
+  只告警不重启。
+- **F4 实锤框架 bug（待批，未改）**：WtUftCore/UftStraContext.cpp 卖分支开空簿记
+  `ts._volume = vol`（买分支正确=`unhandle`）——含平仓成分的卖单其平仓量在
+  journal 双计，纯平仓卖单额外产生 vol=全量的假开空记录。对账实证 td=20260924
+  journal 821 手 vs 日志 661 手（+24.2%，完全重复行仅 17 条排除重放）。污染
+  convert_trades→MonSvr 成交展示与任何基于 trade.membin 的分析；round.membin
+  PnL 不受影响（19.24 的 -2220/-1100 结论有效）。修复=该处改 `unhandle`，
+  属框架层，按 AGENTS.md §1 待用户批准后单独立项。
+- **验证**：make 0 err；TestUnits 210/212；configbt_v5 冒烟四源审计全零+无 watchdog
+  误报；_ec_5d 5日 A/B 24,983 笔（19.23 批 25,365，−1.5% 界内，差异=消除
+  跨休市挂单的开盘不利成交，属预期行为改善）；0 HALT/zombie/error，5/5 Delta=0。
+- **未部署**。待批：①本批 .so 部署（建议随明早 08:40 cron 重启生效）；②两个脚本
+  + 三条 cron 安装；③框架 sell-branch 修复立项。
+
+**19.27 sell-branch 框架修复 + 19.26 批全量部署（2026-09-28）**：
+- **框架修复（用户批准立项）**：WtUftCore/UftStraContext.cpp 卖分支开空簿记
+  `ts._volume = vol` → `unhandle`（与买分支对称）。含平仓卖单平仓量双计、纯平仓
+  卖单产生全量假开空记录的问题根治。round.membin 盈亏本就不受影响。
+- **部署**：远程双库原子替换——libWtFutuCore.so `c468aa16…`（19.26 批）、
+  libWtUftCore.so `4e29fc35…`（sell 修复）；备份 uft/.bak_20260928_pre1926、
+  .bak_20260928_sellfix。10:51 重启后单实例、四源审计全零、双合约正常报价、
+  0 HALT，CTP 撤单竞态走 B+ 闭环（已知良性）。
+- **脚本+cron 安装**：dist/monitor/channel_watchdog.sh + reconcile_journals.py；
+  cron 新增 3 条（reconcile 15:10/01:10 各传"昨天+今天"双日志；watchdog */2min），
+  crontab 备份 /tmp/cron.bak.20260928。修过程序内两处 shell 陷阱：case 不支持
+  数值区间（永不触发）+ 前导零八进制（0900 非法八进制报错）→ 统一 10# 归一化，
+  14 个边界时刻测试全对。
+- **遗留待批（框架层，策略禁改）**：TraderCTP settlement-confirm 卡死无超时重试
+  （09-24 停摆真根因）——19.26 已加策略层 dark 告警+外部看门狗兜底观测，根治需
+  框架层重试逻辑，单列待批。
+
+**19.28 PERF 计数器接线 + 日内盈亏风控审查（2026-09-28，用户批准）**：
+- 背景：PERF 面板 quotes/orders/fills 恒 0 查实为计数器从未接线（recordOrderPlaced
+  无调用点、recordFillReceived 挂在 CTP 不推送的 on_transaction）——非 19.26 回归。
+- 方案（观测微修，零交易行为影响）：①PerformanceMonitor 补 recordQuotePlaced/
+  recordCancelSent；②FutuQuoter（MM 报价主路径，stra_buy/sell 4 处+cancelLevelOrders）
+  挂 monitor 计数 quotes/orders/cancels；③OrderRouter（arb/hedge/closeout/risk 路径）
+  submitBuy/submitSell/cancelOrder 及批量撤补挂；④recordFillReceived 从
+  on_transaction 移到 on_trade（权威逐笔成交回调，防双计）。
+- 日内盈亏风控审查结论（见交付报告）：计算口径正确（已实现=引擎分向簿记按 detail
+  切片 (close-open)*qty*scale，交易日切换时 mmap 内 _closed_profit 清零→日内口径
+  且跨重启保留；未实现=逐 tick 盯市−日初锚）；不含手续费（对本策略日内盈亏量级为
+  一阶项，maxDailyLoss 评估偏宽松）；maxDailyLoss=-500000 相对实际日波幅
+  （09-24 最差 -2220/-1100）约 200 倍冗余，日亏熔断线实际不 binding，
+  binding 约束=持仓/频率/closeout/arb 回撤线(50000)。
+
+**19.28 实施与部署（2026-09-28）**：
+- PERF 计数接线：PerformanceMonitor 补 recordQuotePlaced/recordCancelSent；
+  FutuQuoter 双侧 stra_quote 路径 + obligation 4 处挂单侧重挂（orders=每个子单、
+  quotes=每次侧更新）、cancelLevelOrders 挂 cancels；OrderRouter submitBuy/Sell/
+  ExitLong/ExitShort 挂 orders、5 处撤单路径挂 cancels；recordFillReceived 从
+  on_transaction（CTP 不推送）移至 on_trade 权威回调。FutuModuleAssembler 在
+  monitor 创建后向全部 quoter+router 注入（optional 指针，禁用时 nullptr 安全）。
+- 顺带发现的配置坑（未修，记录）：coordBool 读 coordinator 节点**顶层**键，
+  configbt_v5.yaml 把 usePerformanceMonitor 放在 modules: 下 → 回测恒 disabled；
+  生产 coordinator.yaml 放在 coordinator: 节点内故正常。冒烟验证需顶层
+  `coordinator: usePerformanceMonitor: true`。
+- 部署：libWtFutuCore.so a9dcc602…，备份 uft/.bak_20260928_pre1928，15:00:10
+  盘后重启生效（规避交易中重启）。
+- 重启验证（14:45 立即重启，用户要求）：PERF 面板计数器上线——首窗口即
+  `quotes=4/s orders=4/s Cumulative: quotes=4, orders=4`（原恒 0）；四源审计全零、
+  双合约正常报价。（注：本次 pkill 清理计划任务时自匹配杀掉了会话，wt_restart
+  二次执行成功，无害。）
+
+**19.29 套利执行模块专项审查方案（2026-09-28，三代理并行精读 7400 行，待用户批准，未动代码）**：
+审查范围 arb/ 全模块，重点=多合约建仓/平仓执行、开仓顺序、缺腿、追单 vs 平仓。
+四问结论：①建仓两腿**并发双发**（SPSC 队列原子双槽预检，Executor:578-598），非顺序，
+腿间无价差重检；②缺腿四级处置=提交失败即撤对侧(Bridge:206-280)+hedge-on-fill
+对侧成交即反向 FAK 对冲(Bridge:424-486)+orphan 5s 对手价/30s 模拟市价分级
+(Async:738-769)+delta自适应收紧+500ms×3重试后GIVEUP；③**arb 挂单无主动追价**
+（刻意不撤换保队列优先级），"追价"仅存在于 orphan 对冲分级与 STOP_LOSS FAK
+pay-through；④平仓与建仓同管道，CLOSE_* 出厂禁用(靠 MM 自然消耗)，STOP_LOSS/
+TIMEOUT_EXIT 需灰度解禁。
+P0 缺陷（实盘暴露面）：(1) hedge-on-fill 以"受理"计"已对冲"，FAK 零成交→hedged
+虚高→条目删除→残腿永久漂移（Bridge:455-471，与 09-24 closeout FAK 十连败同源）；
+(2) TIMEOUT_EXIT 30s 升级死配置（Types:457/481 无运行时消费者，实行为 5s 挂撤循环）；
+(3) pair tag/hedge 纯内存，重启后旧腿成交回报不命中 tag→残腿保护失效，仅靠
+channel-ready 兜底撤单（非确定性，与 19.25/19.26 重启窗口问题同源）；
+(4) EMERGENCY disable 后进程重启即复活（Init:61 读 yaml enabled:true），与
+IRREVERSIBLE halt 跨重启保留语义不对称。
+P1 缺陷：onLegCancelled cancelByPair 默认 channel=0 全撤可能误撤新一轮在途单
+（Bridge:518，超时清理 V10-P2-10 已按通道）；建仓无价差时效重检+无资金预检；
+同价去重按合约不区分 pair/方向（Bridge:92,124）；首帧墙钟 bootstrap 1000× 时钟域
+使开盘 ~2s 残腿保护提前失效（Bridge:105-110,506）；B-3 目标仓位(默认10/20)与
+maxSinglePair=3 量纲打架致信号顶格空转。
+P2：tick 队列满静默丢（pushTick 返回值不检查，Bridge:53）；平仓与建仓同 FIFO
+无优先级；orphan 队列满(64)无降级；RiskManager 8 个死配置键；SpreadState.
+unrealized_pnl 恒 0 误导字段。
+方案分三批：批A 执行可靠性(P0 四项)、批B 边界正确性(P1)、批C 观测与配置卫生(P2)。
+详见当日交付报告，用户批准后按批立项。
+
+**19.30 批A 实施计划（2026-09-28，19.29 批A 获批，复核后四项定案）**：
+- **A1(P0-1) hedge-on-fill 成交核验**：CloseHedgeState 增 `filled_hedged`（实际成交累计）
+  + `_hedge_fill_index`（hedge localid→pair 反查）；onTradeFill 入口先查反查表，命中→
+  filled_hedged+=vol，original>0 且 filled≥original 才 erase；提交 accepted 只登记
+  localids 不再计完成；remaining 改用 filled_hedged；orphan 回调签名加 pair_id
+  （executor OrphanLeg 有上下文），accepted 后同机制登记；stale 清理 erase 同步清
+  反查表，到期未完→CRITICAL+重置计时留观（残余由 MM 库存吸收，Portfolio 权威 skew
+  处置），不在清理循环发单。
+- **A2(P0-2) TIMEOUT_EXIT 超时升级**：PairArbState 增 `timeout_exit_first_ms`；Manager
+  新增 `timeoutExitOrderFlag(pair_id, now_ms)`——首调记录，age≥timeout_policy.timeout_ms
+  返回 FAK（复用止损对手价链），持仓归零/reset 清计时；Executor 对 TIMEOUT_EXIT 改经
+  该 API。语义：GFD mid 5s 挂撤循环 → 超时后 FAK 对手价升级。
+- **A3(P0-3) 重启残腿观测**：复核修正——重启后裸腿≠失控（Portfolio 权威+MM 库存统一
+  处置+derived 每 tick 重建），真缺口=可观测性。Manager 新增
+  `logResidualLegsAfterRestart()`（双腿不对称≥1 手→WARN 标注 MM 吸收），onChannelReady
+  孤儿对账后调用一次。零行为变化。
+- **A4(P0-4) EMERGENCY 复活闸**：onChannelReady resume 路径——halt 存续且 arb
+  enabled→disable()+WARN。覆盖进程重启/重连一切通道就绪路径。
+- 验证：make 0 err / TestUnits 210/212 / v5 冒烟（arb 出厂 disabled 零触发）/ _ec_5d
+  A/B 噪声带内 / 19.23 判据不回退。
+
+**19.30 批A 实施记录（2026-09-28，已完成验证，未部署）**：
+- **A1 hedge-on-fill 成交核验**：CloseHedgeState 增 `filled_hedged` + `_hedge_fill_index`
+  （hedge localid→pair）；onTradeFill 入口先查反查表（命中即消费，按实际成交量累计，
+  filled≥original 才 erase）；提交 accepted 只记 submitted+登记 localids；remaining
+  改用 filled_hedged；orphan 回调签名加 pair_id（test_v8_r4b 两处 lambda 同步），
+  受理成功同机制登记；stale 清理收编 _lock（原无锁裸奔修复）+ erase 同步清索引 +
+  到期未完 CRITICAL 留证（残余由 Portfolio 权威+MM 库存吸收，不在清理循环发单）；
+  B1 清除路径与 resetSession 同步清索引。
+- **A2 TIMEOUT_EXIT 超时升级**：SpreadState 增 `timeout_exit_first_ms`（持仓归零自动
+  复位）；Manager::timeoutExitOrderFlag 首调计时、age≥timeout_policy.timeout_ms 升级
+  返回 FAK（死配置激活，复用 STOP_LOSS 对手价链）；Executor TIMEOUT_EXIT 改经该 API。
+- **A3 重启残腿观测**：复核修正——裸腿≠失控（Portfolio 权威+MM 库存/skew 统一处置
+  任何来源净仓，与外部仓同语义），真缺口=可观测性；Manager::
+  logResidualLegsAfterRestart（异号腿不对称≥1 手→WARN 标注 MM 吸收），onChannelReady
+  恢复决策后调用（纯日志零行为）。
+- **A4 EMERGENCY 复活闸**：onChannelReady 末尾（resume 决策完成后 halt 终态裁定）——
+  halt 存续且 arb enabled→setEnabled(false)+WARN；首版误置于函数顶部会在 resume
+  清 halt 后仍误禁，已修正为末尾裁定。覆盖重启/重连一切通道就绪路径。
+- **验证**：make 0 err；TestUnits 210/212（仅改 test_v8_r4b 回调签名，零回归）；
+  v5 冒烟四源审计全零、0 HALT、Delta=0；_ec_5d 5 日 25,014 笔（19.26 批 24,983，
+  +0.1% 噪声带内）、5/5 Delta=0、0 HALT/zombie/error。arb 出厂 disabled 批A行为面
+  在灰度路径，回测为零触发预期。
+- **未部署**，待用户指示（建议 20:40 cron 前窗口）。
+
+**19.31 退出前确定性撤单方案（2026-09-28，用户指令"确保重启退出前撤销所有未成交挂单"；
+先方案后实施，未动代码）**：
+- **框架 hook 方案（初稿，已被用户否决）**：WtUftRunner run() 退出循环后调
+  on_shutdown 透传策略（需动 Includes/UftStrategyDefs.h + IUftStraCtx.h +
+  WtUftCore + WtUftRunner 四处框架文件）。用户裁定"尤其不能随意修改框架代码"，
+  已还原全部框架改动（git checkout），此路仅在你**明示授权**后才可重提。
+- **现状根因（不变）**：SIGTERM→_to_exit→run() 返回→main 退出，全程无策略通知；
+  on_session_end 仅日界触发且 fire-and-forget（R15-c-2 隔夜幽灵单事故根因）；
+  wt_restart.sh 宽限仅 2s。
+- **新方案（纯策略层 + 运维脚本，零框架改动）——控制文件带外通道**：
+  复用既有 FutuHotParamWatcher 模式（策略进程每秒轮询文件，已验证的进程内
+  控制通道）：
+  1. 策略新增 ControlFileWatcher（WtFutuCore 内）：轮询 `control/shutdown_request`
+     出现 → 置 `_in_shutdown`（on_tick 立即早退，防撤单等待期重挂）→
+     `stra_cancel_all("")` 全撤 → 100ms 轮询各合约 `stra_get_undone` 至 0 或
+     预算超时（≤5s）→ 写 `control/shutdown_ready`（含剩余未终态单数）；
+  2. `monitor/wt_restart.sh` 改造：`touch control/shutdown_request` → 轮询
+     `shutdown_ready` 最多 8s → SIGTERM → 2s → SIGKILL 兜底。全部重启路径
+     （cron 08:40/20:40 + 手工）统一走该脚本，覆盖完整；
+  3. on_session_end 撤单调同助手（节末撤单+等待 ack，治理 R15-c-2 幽灵单来源，
+     日界路径本就有回调无需带外通道）；
+  4. 部署面：仅 libWtFutuCore.so + wt_restart.sh + control/ 目录，无 ABI 对子
+     问题；BT 不跑 watcher 行为不变。
+- **失效面（明示）**：进程崩溃/OOM/SIGKILL 直达等无通知场景无法覆盖（任何
+  进程内方案同限），此类残留仍靠 19.26 的 channel_watchdog 外部告警 +
+  channel-ready 兜底清扫。
+- **待用户确认后实施**。
+
+**19.30-A3 裁撤记录（2026-09-28，用户裁决）**：重启残腿不做观测——残腿属做市库存
+语义，由 skew 偏移统一管理（Portfolio 权威架构本意，与外部仓同路径）。
+logResidualLegsAfterRestart（Manager 声明+实现、onChannelReady 调用点）已全量删除，
+重建验证：make 0 err / TestUnits 210/212 / v5 冒烟四源审计全零、0 HALT、Delta=0、
+无残腿日志行。批 A 最终面 = A1（hedge 成交核验）+ A2（TIMEOUT 升级）+ A4（EMERGENCY
+复活闸）。退出前确定性撤单（19.31 控制文件方案）仍待批，与批 A 部署互不阻塞。
+
+**19.30 批A 部署记录（2026-09-28 18:14，用户批准）**：libWtFutuCore.so
+`10d35825…`（A1 hedge 成交核验 + A2 TIMEOUT 升级 + A4 EMERGENCY 复活闸，A3 已裁撤），
+备份 uft/.bak_20260928_pre1930A，原子替换+立即重启。验证：单实例、校验 0/0、
+hotparams 24/24、四源审计全零；PERF 计数器盘后运行正常（quotes/fills 累计，
+fills=12 = 重连重放当日成交回报，计数正确）；日志中 2 条 HALT 为日盘既有
+zombie-latch 良性记录（非本次）。19.31 控制文件退出撤单方案用户裁"先不立项"，
+记录在案。
+
+**19.32 日亏熔断生产验证 + 阈值调整（2026-09-28 夜盘）**：maxDailyLoss 由用户
+收紧至 -1000 后当日即验证生效——21:05:58 日亏 -1080（含浮亏、不含手续费）触发
+LOSS_CRITICAL → IRREVERSIBLE halt → 报单暂停；FORCE FLAT ao2612 x22 全成交、
+ao2611 买平 x5 FAK 被动价零成交（ao2611 空 5 残留，00:58 closeout Fix4 豁免兜底）。
+22:31 用户裁决阈值改 **-20000**（备份 config.yaml.bak_20260928_loss20k）+ 重启，
+重启后 halt 清除、持仓同步（ao2611 -5 带入，skew=+1 正常工作回补方向）、报价恢复，
+重启后窗口 0 halt/0 LOSS_CRITICAL。观测：-1000 标定下开盘 5 分钟 27 手库存的正常
+波动即可触发（高频熔断代价=当夜停报+强平），-20000 为防大亏口径。
+
+**19.33 Deps 依赖束设计评审（2026-09-29，用户提问，只读分析未动代码，方案待批）**：
+现状盘点：5 个嵌套 struct Deps（ArbExecutionBridge 10 字段/CloseoutOrchestrator 10/
+CloseoutTrigger 6/RiskCoordinator 12/RiskLiquidator 2）+ 聚合 CoordinatorDeps(23) +
+FutuRuntimeOps 直取策略壳成员（auto& 别名）；`_deps.` 访问 263 处；装配点分散
+（assembler/coordinator/runtimeops 三处，RiskLiquidator 有两个填充源）。
+分析结论：模式本身（零成本借用束）契合热路径与"默认构造+延迟装配"的测试性设计，
+不优雅感源于 ①同构字段重复 ②装配点多源 ③非空靠约定 ④Deps 混 std::function 类型擦除。
+候选裁决（对齐 P1-6"不拆类"与 19.19"单链化"既有取向）：不做 DI 容器/接口抽象/
+服务定位器/消息总线（均违背零成本或同步语义裁决）；推荐三步卫生化——
+①ApplicationDeps 单一聚合、组件持 const 引用（消灭重复字段）②装配唯一化收编
+RuntimeOps 两处 setDeps ③全量 validateDeps 启动 fail-fast（CloseoutOrchestrator
+已有先例）④std::function 字段逐步换具体成员。预估 ~3 人日，行为零变化，
+验证=编译+TestUnits+审计 diff+_ec_5d 统计带 A/B。
+
+**19.33 实施记录（2026-09-29，用户批准立项，已完成验证，未部署）**：
+- **ApplicationDeps 单一聚合**（新增 ApplicationDeps.h/.cpp，~30 字段超集 + validate()
+  启动 fail-fast）：5 个嵌套 struct Deps 全删，组件成员改 `ApplicationDeps _deps`
+  按值切片——消费点 `_deps.xxx` 263 处**零改动**（字段名全集合一致，含 router/
+  async_arb 视角别名）。StrategyCoordinator::CoordinatorDeps 改别名指向。设计落法
+  为值拷贝切片（对齐 19.19 组件值拷贝裁决；引用化与 coordinator 按值持有子组件+
+  延迟装配架构冲突，已记录偏离批准计划的理由）。
+- **装配唯一化**：FutuModuleAssembler 单一 `deps` 贯穿（orch/bridge 原独立填充块
+  删除，trading_state 填充上移适配切片时序）；**RiskLiquidator 三处按次/双源
+  setDeps 收编为装配期单点**（RuntimeOps:566 删除、RiskCoordinator 内部随 setDeps
+  一次接线）。
+- **顺带实修的潜伏缺陷**：原 wireDeps 对 RiskCoordinator 的 braced-init 只传 9/12
+  字段 → `quoting_paused_since/order_error_count` 生产恒 nullptr → V10-R8-a 风暴
+  护栏恢复挂钩从未武装（静默跳过）；重构后随 sub_deps 真实下发，该护栏激活
+  （行为变化点，唯一非中性项，方向=补原设计意图）。
+- **验证**：cmake 重配（新 .cpp 入库）→ make 0 err → TestUnits 210/212（零回归）→
+  v5 冒烟四源审计计数与重构前**逐字一致**（103/76、109/89、24/24、61/47）、0 HALT/
+  [DEPS]、Delta=0 → _ec_5d 24,952 笔（噪声带内）、5/5 Delta=0、0 异常。
+- std::function 字段（cancel_all_quotes/flush_bilateral_stats）已收编进聚合由
+  coordinator wireDeps 单点填充；具体成员化（消类型擦除）留待后续（需 quoters
+  访问器小接口，单独裁决）。
+
+**19.33 部署记录（2026-09-29 23:03，用户批准"现在部署"）**：libWtFutuCore.so
+`2eb87cc2…`，备份 uft/.bak_20260929_pre1933，原子替换+夜盘中重启。验证：单实例、
+交易日 20260930 登录、四源审计全零、重启后 0 [DEPS]/HALT/LOSS_CRITICAL、持仓同步
+ao2611 +9/delta=0、报价恢复（skew=1.00 工作）、PERF 计数正常。R8-a 风暴护栏自本
+版本起真实武装（19.33 重构顺带实修）。
+
+**19.33-cleanup 实施记录（2026-09-29，用户批准，已完成验证，未部署）**：
+- ① 死前向声明删除 27 个（Trigger 4 / Orchestrator 3 / RiskCoordinator 7 /
+  Bridge 8（含仅注释引用的 OrderRouter）），全部经"头文件自身零引用"核验。
+- ② 死 wiring 删除：AsyncArbitrageExecutor setOrderCallback/setPositionCallback
+  +两成员+PositionCallback typedef（OrderCallback typedef 保留——processPendingOrders
+  参数类型存活）；VolatilitySignalSource setVpinWeight+_vpin_weight（成员零读取，
+  与 ToxicFlowDetector 的 vpinWeight 键无关）；SpreadArbitrageManager
+  setMmEnhancerConfig/setRiskConfig 删除，setCalculatorConfig **恢复并标注测试接缝**
+  （test_v8_r4b 依赖此口，误删教训：删前必须查 TestUnits 引用）。
+- ③ cfg 契约固化：validate core 撤 cfg（非全组件必需，monolithic 校验误伤
+  orchestrator/bridge/liquidator——冒烟 6 条 [DEPS] 误报警实证），改由消费者
+  （CloseoutTrigger 无守卫解引用 :20 / RiskCoordinator）setDeps 各自固化。
+- R8-a 全量复核结论入档：Deps 全字段唯一填充源核实无新发；71 个注入方法扫描
+  的误报项（热参 setter/工厂接线/头文件内联调用者）逐一澄清存活。
+- 验证：make 0 err / TestUnits 210/212（零回归）/ v5 冒烟四源审计全零、
+  0 [DEPS]/HALT/error、Delta=0。
+
+**19.34 CloseoutTrigger 并入 CloseoutOrchestrator（2026-09-30，用户批准"直接执行"，已完成验证，未部署）**：
+- 动机：Trigger 唯一 process 方法+零成员状态（状态权威=FutuRiskMonitor::CloseoutSub），
+  P1.3 拆分的历史前提（逃离 god coordinator）已消失；合并消掉 closeout_triggered
+  桥接传参，Deps 收敛，与 R4b"不过度拆分"同向；P1-6 清算收敛的状态单属主约束
+  不变（Orchestrator(决策+驱动) → Executor(执行)，状态仍只在 RiskMonitor）。
+- 落地：processTrigger/processTriggerImpl 迁入 Orchestrator（Trigger.cpp 全文逐行
+  保持，_deps 字段名一致零改写）；触发态经 `_trigger_active` 成员传递（Md 线程
+  Stage0→onTick 同线程顺序，消桥接参数）；coordinator 改持 `CloseoutOrchestrator*`
+  （ApplicationDeps.closeout_orch 注入）；Stage0 调用点+strategy on_tick 调用点同步改。
+- 回调单填充源：cancel_all_quotes/flush_bilateral_stats 由 coordinator wireDeps
+  填充并存储于 `_wired_deps`（ assembler 栈对象不可捕获——生命周期约束），
+  Orchestrator 延后经 `wiredDeps()` 接线（提前接线会拿到空回调）；
+  flushBilateralStats 改 public。
+- 删 CloseoutTrigger.h/.cpp 两文件；cfg 消费契约固化进 Orchestrator::setDeps。
+- 验证：cmake 重配 → make 0 err → TestUnits 210/212（零回归）→ v5 冒烟 closeout
+  全链（DRAINING→halted+cancelAll→executor→COMPLETED）+ 四源审计全零 + Delta=0 →
+  _ec_5d 24,961 笔（带内）、5/5 Delta=0、**5/5 次日收 CLOSEOUT_COMPLETED 全走新链**、
+  0 [DEPS]/HALT/error。
+
+**19.34 部署记录（2026-09-30 01:02，用户批准，与 19.33-cleanup 合并一次上线）**：
+libWtFutuCore.so `ca628200…`（含 19.33-cleanup + 19.34 Trigger 并入），备份
+uft/.bak_20260930_pre1934，原子替换+夜收后重启（01:00 收市干净窗口）。验证：
+单实例、交易日 20260930、四源审计全零、0 [DEPS]/HALT/LOSS_CRITICAL、持仓同步
+±4/delta=0（夜收 closeout 已平净）。下一验证点：今日 14:58 日收 closeout 走新
+Orchestrator 触发链。
+
+**19.35 v7.1 时钟转换单一来源化（2026-09-30，用户批准执行，已完成验证，未部署）**：
+- 新增 `FutuTime.h::replayMsFromTick`（inline，~10ns 纯整数运算）：tick
+  actiondate/actiontime → replay 伪 epoch 的单一算法源。**明确不用
+  TimeUtils::makeTime**——mktime 产真实 Unix epoch（语义与 RiskMonitor/
+  coordinator 既有伪 epoch 域不符、慢两个量级、引入时区不确定性，违背 v7.1
+  回测可复现初衷）。
+- 批1：三处复制块收编（strategy 主时钟/bridge atomic store/orchestrator
+  _now_ms）。
+- 批2：bridge.onTick / orchestrator.onTick 签名加 `uint64_t now_ms`，由
+  on_tick 主入口单一转换后经参数下发（coordinator processTick 既有先例），
+  下游不再重复转换。
+- 验证：cmake 重配 → make 0 err → TestUnits 210/212 零回归 → v5 冒烟
+  closeout 全链+审计全零+Delta=0 → _ec_5d 24,943 笔（带内）、5/5 Delta=0、
+  5/5 CLOSEOUT_COMPLETED、0 异常。
+
+**19.35 部署记录（2026-09-30 08:47，用户批准）**：libWtFutuCore.so `f6b55f20…`，
+备份 uft/.bak_20260930_pre1935，原子替换+早市前重启。验证：单实例、交易日
+20260930、四源审计全零、0 [DEPS]/HALT/LOSS_CRITICAL、持仓同步 ±4/delta=0。
+今日观察点：14:58 日收 closeout 走 19.34 新链 + 19.35 参数化时钟。
+
+**19.35 勘误补记（2026-09-30 08:56）**：用户复核发现策略主时钟（UftFutuMmStrategy
+:772）仍残留手工转换块——根因：19.35 批 1 脚本对 strategy 文件只做了内存替换
+**漏写盘**（bridge/orchestrator 两处已正确写盘），冒烟/回测因算术等价未暴露。
+已补改收编 helper；重建产物 md5 与已部署版**逐位一致**（inline 展开等价机器码），
+故已部署二进制无需更新，重启仅为流程一致性。教训：多文件批量替换脚本必须逐文件
+确认写盘动作；验证脚本应加"源文件残留模式 grep"门控。另核查 Orchestraor:219
+executor snap.timestamp_ms 为**日内毫秒域**（executor 内部自洽的 drain/round 计时，
+刻意不含日期项）与 :663 analyzer 的 date*1e9 格式变体，均属独立语义域，不收编。
+
+**19.36 ec2611/ec2612 双策略部署 + 目录治理方案（2026-09-30，用户要求，待批，未执行）**：
+- **形态裁决：单进程双策略**（config.yaml strategies.uft 数组加第 2 项，框架原生支持）。
+  共享：WtUftRunner 进程、SimNow 账户（cta_turtle 先例已证跨品种共存可行）、
+  Trader/Parser 通道（CTP 单会话多交易所）、EventNotifier（notifier.url 单点 →
+  同页监控天然成立）、全部 19.x 治理设施（审计/validate/看门狗）。备选型=双进程
+  仅当账户/风控硬隔离需求出现时才评估。
+- **关键事实（远程调研）**：① 7 月曾部署 ec（config.yaml.bak_ec_final=
+  ec2608/2609、generated/outputs/futu_mm_ec*/ 遗留），有旧参考；② contracts.json
+  已有 INE/ec 产品定义，2611/12 具体条目待确认；③ sessions.json 8 模板全是
+  SHFE 风格、无 INE 模板——**ec（集运指数欧线）无夜盘**，需新增日盘-only 模板；
+  ④ convert_trades.py 已支持 argv[1] 传 membin 路径，监控改造小。
+- **配置清单**（参考 ao + 旧 ec）：strategies.uft[1] id=futu_mm_ec_live /
+  anchorCode=INE.ec2611 / 双合约 maxDelta 30（保守起）/ closeout 仅日收
+  minutesBefore=2（night_close_time=0）/ per-strategy coordinator_ec.yaml +
+  hotparams_ec.yaml + spread_arbitrage_ec.yaml（arb_close 维持禁用）/
+  actpolicy.yaml 增 INE 组 / sessions.json 增 INE 模板。
+- **监控同页改造**：convert_trades cron 增 ec 实例（trades_ec.csv 或合并单 csv，
+  取决于 MonSvr 多读支持核实）；channel_watchdog/reconcile 脚本参数化输出目录；
+  告警通道不变。
+- **目录治理（用户点名，53 个 .bak 混顶层）**：目标结构 config/ Logs/ generated/
+  monitor/ uft/ common/ scripts/ archive/（备份归档）；原则=先新增后迁移、软链
+  过渡、start.sh/cron 同步、重启验证门控；迁移与 ec 部署**分批**（ec 先上，目录
+  治理单独窗口），避免双变量同车。
+- **前置验证**：SimNow 账户 INE 权限（登录后合约查询）、contracts.json 2611/12
+  条目、ec 无夜盘/时段、乘数与 tick（ec 乘数 50? 需核）、19.33 四源审计对
+  新策略文件的覆盖确认。
+- **回滚**：config 备份制；ec 策略 active:false 即单策略还原；membin 目录独立
+  无耦合。
+
+**19.36 实施记录（2026-09-30，用户批准，ec2611/ec2612 双策略部署完成）**：
+- **代码小改**（随本批部署）：`hotparamsFile` per-strategy 配置键（FutuMmConfig
+  +loader+watcher/drift 三消费点）；审计源名参数化（hotparams=实际文件路径、
+  coordinator=_loaded_from 路径），双策略审计分源不互 merge；契约测试 +
+  src/bt 模板同步 hotparamsFile 键。
+- **远程配置**：coordinator_ec.yaml / hotparams_ec.yaml / spread_arbitrage_ec.yaml
+  （pair ec1112）克隆生成；actpolicy silver 组 filters 加 INE.ec（平昨优先）；
+  config.yaml strategies.uft[1] 克隆 ao 段（id/anchorCode/contracts/paths 定点
+  替换）。备份 .bak_20260930_ec ×2。**踩坑**：克隆块误含领头 `  uft:` 键行导致
+  YAML 嵌套错位两次（report 显示策略数=1），第三次去头后正确——教训：正则克隆
+  列表块必须确认块边界归属。
+- **membin 账本污染处置**：ec_live 目录有 7 月遗留 membin（含已过期合约
+  ec2608/2609 幽灵持仓 -102/+12），load_local_data 恢复进账本（不污染决策——
+  报价/风控/closeout 全遍历配置合约——但污染显示与续算）；整目录归档至
+  archive/membin_202607/ 后重启，账本清零（2611/12 net=0/delta=0）。
+- **实盘验证（13:30 午后盘）**：双策略同进程正常运行——ec 报价活跃（QUOTE
+  ec2611 mid=2819.5、skew=-1.00 工作、spread 1.8t）、3 分钟 290 报单/49 成交、
+  0 LOSS_CRITICAL/HALT/error；ao 策略不受影响。夜盘时间推导正确
+  （nightCloseTime=0，FD0900 日盘模板）。
+- **监控**：convert_trades cron 增 ec 实例（argv 双参 membin+csv 路径）；
+  notifier MQ 单点双策略共用 → 监控页同页预期成立（MQ 流含 strategy id）。
+- **遗留待查项**：①ec 侧 coordinator_ec/hotparams_ec 审计 read=0（配置实际
+  加载正确——multiplier/tick/validation 全对——纯审计时序问题：第二策略的
+  startup report 早于其读点记账链）；②runMonSvr --deploy-dir 指向
+  cta_turtle/deploy（19.21 记录的无鉴权 root 进程），futu 监控页数据源链路需
+  专项核查；③ec 开盘成交率偏高（3 分钟 49 笔 vs ao 平日全天 ~60）观察
+  base_spread 是否需按 ec tick=0.5 口径收紧；④目录治理（archive/ 已启用于
+  membin 归档）待 ec 观察窗后单独批次。
+
+**19.36 事故与遗留分析补录（2026-09-30 午后）**：
+- **ec 熔断事故**：13:30 开盘 4 分钟建多 29 手（乘数 50 → 名义 440 万 = ao 的
+  2.6×）被逆向打穿日亏 −20000 → IRREVERSIBLE halt + force flat。根因=克隆 ao
+  配置时 maxDelta/亏损线未按乘数折算。用户裁决**方案 A**：ec maxPosition 24 /
+  maxDelta 12（config + hotparams_ec 双改，热更已生效）。**runbook 教训：克隆
+  配置跨品种时必须按乘数折算 delta/亏损线，热参文件同步改**。
+- **监控页无 ec 根因实锤**：WtMonSvr 策略列表读 `generated/marker.json`
+  （60s 缓存），而 **WtUftEngine 从不写 marker.json**（本地源码+strings 双证），
+  现网 marker 是 8/6 单策略时代陈旧快照 → ec 永不出现。工具层修复：手工更新
+  marker.json 加 futu_mm_ec_live（备份 .bak_20260930）。长期建议=runbook 步骤
+  或框架层 WtUftEngine 补写（待批）。deploy-dir=cta_turtle/deploy 仅影响文件
+  浏览器根，与数据链路无关。
+- **settlement 卡死第二次实证**：14:09/14:13 两次重启均卡（Querying
+  confirming state 后无 ready），14:20 **自愈**（4-7 分钟，轻于 09-24 的 87
+  分钟）。午后时段性模式成立（13:31/14:09/14:13）。框架修复（超时重试）紧迫性
+  升级，仍待批。操作教训：**交易时段中重启引入 settlement 卡死暴露面**，非必要
+  不重启。
+- **watchdog MD-DOWN 误报**（新遗留）：Parser 日志只记连接/订阅事件，tick 到达
+  不写（12:21-14:04 行情正常但日志静默 6500s+ 持续误报）。心跳判定需改用报价
+  活性/最新 tick 时间戳。
+- **遗留分级**：P1=settlement 超时重试（框架，二次实证）；P2=watchdog 心跳源
+  修正、marker.json 长期方案、审计 read=0 时序（纯观测账务，ec 侧 42 条 unknown
+  噪音）、MonSvr 鉴权（19.21 旧项）；P3=目录治理批次。
+
+## 20. 立项：价差信号反转网格套利（方案 B v2.1，2026-10-13 批准）
+
+**形态**：arb 模块插件式改造，MM 零改动。arb 主动建仓（两腿 FAK 限价 ≤2tick），
+平仓走现役 B-3"MM maker 消耗"语义（零新增），arb→MM QuotingAdjustment 通道
+（QuotePolicyChain:183 现役接线，observe-only 门控）解决消耗流量不足。
+
+**核心新增**：`arb/ThetaGridStrategy`（ISpreadStrategy 插件，~300 行）——
+θ=spread−EMA₅₀(日重置)，λ=前5日|θ|q80 带沿进出，lead-lag 确认（F1 动/F2 未跟），
+信息/压力型过滤（两腿 4s 动量同号跳过），时段门（14:50 禁新开/14:55 强退），
+价差空间止损（type=6 挂 spread 价格域）。
+
+**复用清单**：插件 registry（Manager.cpp:31）、arb 线程信号循环（onTick→
+processSignals→generateSignals）、executeSignal 双腿链路、order_flag GFD/FAK/FOK、
+B-3 消耗平仓（Bridge:145 "consumed by MM"）、O(1) 自成交防护（Executor:460）、
+分向账务（is_close→offset）、SpreadRiskManager、closeout 19.34 链、分源审计。
+
+**改造文件**（全部 arb/ 内）：ThetaGridStrategy.h/.cpp（新增）、
+AsyncArbitrageExecutor.cpp（入场 FAK ≤2tick，~30 行）、SpreadArbitrageManager
++Init（注册+参数，~60 行）、SpreadRiskManager.cpp（格级止损，~40 行）、
+QuotingAdjustment 输出去门控（~30 行）、spread_arbitrage_ec.yaml（grid 段）。
+
+**批次**：P0 费率闸门（P3 前硬卡）+shadow 模式生产观测 1 周 → P1 账本生成点
+审计 → P2 主体 1 周（回测基线：四源审计 103/76、109/89、24/24、61/47 不破；
+_ec_5d Delta=0）→ P3 试点（ec 1 手/格、≤3 格、arb delta≤4、灰度 1 格起，
+熔断终止：单笔均亏>2tick×20 笔或日亏>-20000）→ P4 扩量+zscore/θ A/B。
+
+**不变式**：不顺势；FAK 限价封顶；禁止裸腿过夜；止损先于上层 kill switch；
+arb 库存计统一簿；`spread_grid.enabled` 独立回滚。
+**试点验收**：单笔净期望>0；post-fill 8min mark 递减；被动退出均时<8min；
+止损率<25%；kill switch 零误杀；自成交零发生。
+**已知约束**：MM 消耗流量依赖 spread（当前 ec 9.0 下 bil≈0）——arb 库存期间
+经 QuotingAdjustment 局部收窄；P3 以"被动退出均时"验证。
+**P0① 费率闸门结论（10-13）**：SimNow 环境无法自证费率（结算单无回显、框架无
+手续费归集字段）——闸门执行形式改为两段：SimNow 阶段用 shadow 数据直接测算
+"触带频率×≤2tick 滑点"的净空间替代；转真实做市账户前向券商/交易所书面确认
+ec2612 MM 费率豁免，为 P3 live 前置硬卡。
+
+**§20 P0② 进展（10-13）**：ThetaGridStrategy 开发部署完成——插件注册+
+strategyFromString/TypeName 映射（修复静默回退 mean_reversion 的真 bug）+
+Init grid 参数加载 + shadow CSV 通道（outputs/theta_grid_<pair>_shadow.csv，
+事件驱动：BAND_ENTER/LL_WAIT/FILTER_INFO/ENTRY_LONG/SHORT 等）。ec 配置
+spread_arbitrage_ec.yaml 切 primaryStrategy=theta_grid + grid.shadow=true
+（备份 .bak_20261013_grid）。TestUnits 基线 210/212 不破。shadow 数据产出
+待 channel ready + ec 行情（settlement 午后卡死三连 14:16/14:24/14:33，
+shadow 首验延至 10-14 09:00）。已知限制：插件面向无夜盘品种（actiontime
+时钟无跨零处理）。
+
+**§20 P1+P2 进展（10-13）**：
+- **P1 账本审计闭环**：幻影生成点实锤 = `WtUftCore/TraderAdapter.cpp onTradeRt`
+  的 ORPHAN FILL 路径——残留单（跨进程遗留挂单）成交时 `isKnownLocalId`
+  只告警**不拦截**，完整走 sink->on_trade 记账进本进程 _positions → membin
+  → 跨日继承 → 启动回灌幻影。生产实证：10-13 ORPHAN FILL ×5（00:19 重启后
+  残留夜盘单成交）。次因：该函数无成交去重（重复 TradeReport 会双计）。
+  合成终态单（cancel-error 骨架，volume=0 canceled）只走 onPushOrder 订单
+  管线，**排除嫌疑**。**修复需动框架（orphan fill 拦截/成交去重），列待批项**。
+- **P2 主体完成（策略层 3 处小改）**：① theta_grid 入场单转 FAK
+  （Executor: `!is_close && source==THETA_GRID → order_flag=1`）；② 腿价
+  封顶进信号（makeSignal：买腿=快照+entry_max_slippage、卖腿=快照−，
+  限价=最差可接受价，吃不到即弃格）；③ 配置 `entryMaxSlippage: 1.0`
+  （ec yaml）。**QuotingAdjustment 去门控主动收缩**：ArbCloseSyncPolicy 的
+  单腿抑制（arb 买腿→抑 MM ask）已现役生效，enhancer 的 spread 收窄全局
+  去门控无观测数据支持，降级为 P3 可选项。基线 210/212 不破，.so 已原子
+  部署，20:40 夜盘 cron 重启加载。
+
+**§20 回测验证（10-13，ks2wtpy→WtBtFutu 链路）**：KS 拉取 ec2611/2612
+tick 4 天（1008/1009/1012/1013，恰为三次熔断日）→ 500ms 网格对齐（10.6 万行）
+→ TestUnits/test_theta_grid.cpp 信号级回放（直接实例化 C++ 插件，update/
+generateSignal 全链 + FAK 限价成交模拟 + B-3 mid 出场近似）。结果：
+- **逻辑验证通过**：θ/EMA/触带/lead-lag/信息过滤/带沿出场/14:55 强退全链
+  可解释；修复止损方向真 bug（原条件把止盈方向当止损）。TestUnits 211/213
+  （新增 1 通过用例）。
+- **关键实测**：EC 的 λ(q80) 仅 2.4~3.5 点（非报告 IM 窗口的 10.4 点）；
+  ec2612 盘口半价差 2.1 点（全价差 8.4 tick，"F2 极薄"实证）。单笔毛利
+  ~0.8λ ≈ 2 点 ≈ 两腿 taker 冲击成本 → **taker 出场必死、必须 B-3 maker
+  消耗 + 费率豁免**（与研究报告"吃单必死"一致）。
+- **修正后净期望**：出场 mid 口径伪影 3.1 点/笔（maker 实际不承担），
+  λ 原始/x2 两版修正后均转正（+23 / +15~110 点/4天，0 费率假设）→
+  P0 shadow 继续累积真实 λ（5 日窗）；费率闸门维持 P3 硬卡。
+- **参数建议**：λ 取 2×q80 或 q90（触带频率降半、单笔毛利升至 4~6 点）。
+
+**§20 架构迁移（10-13 批准并施工）**：lead-lag/信息过滤上移至 signals 模块——
+新增 `signals/CrossLegSignalSource.h`（pair 级，主线程 mid 驱动，RingBuffer
+线性衰减加权 + V10-P2-4 跨间隙守卫 + 时效老化；输出原子快照 lag_ratio/
+co_move/lead_dir，arb 线程无锁读，仿 publishPnLSnapshot 先例）。接线：
+UftFutuMmStrategy::on_tick 双边 mid→manager::onMainThreadTick→
+generateSignal 填 SpreadState.cross_* 三分量→ThetaGridStrategy 消费。
+ThetaGridStrategy 删 _leg_history/leadLagConfirm/isInformational（−80 行），
+配置 ll 三键→`lagRatioMax`（0.5；窗宽/平滑归 signal 单一属主）。回测
+test_theta_grid 同步为生产同源架构（基线 211/213）。回放行为变化（止损率
+升）= lag_ratio 阈值初值未经标定，属 P0 观测周参数产出，非架构缺陷。
+
+**§20 架构迁移 v2（10-13 批准并施工）**：跨腿计算移入 arb 层通用基础模块
+`arb/CrossLegContext.h`（pair 级, manager.onTick 驱动 —— 与价差策略同一
+使能前提, 消除"主线程 wiring 缺失则策略静默失信号"的隐藏依赖；同线程
+普通成员无锁）。数据链补 bid/ask：ArbTickData 加字段+pushTick 默认参数
+(兼容既有调用者), ArbExecutionBridge 传入, processTick 带至 manager。
+主线程 onMainThreadTick wiring 整体删除。任意 ISpreadStrategy 插件经
+SpreadState.cross_* 通用消费（不消费无依赖）。回放行为 diff 溯源：v1
+CrossLegSignalSource 有 bug——lag_ratio 分母分子中 |ΔF2| 误传 dummy 变量
+致恒 0 全放行, v2 修正后 lag_ratio 恢复真实语义（entries 164→98 即此因,
+非架构缺陷）。基线 211/213。.so 763104fe 已原子部署, 20:40 cron 加载。
+
+**§20 P2 出口验收完成（10-13 夜）**：①四源审计 smoke 通过——coordinator
+109/89、config 104/77(+1 为已提交历史增量, unknown=0)、hotparams 24/24、
+spread_arbitrage 61/47, Delta=0;②_ec_5d 回归 5/5 CLOSEOUT_COMPLETED + 5/5
+Delta=0。夜盘 20:40 会话验证：settlement 秒过、双策略 0 halt、ao 夜盘正常
+(3177 QUOTE/20581 报单)、**shadow CSV 已产出**(BAND_ENTER+ ×9/- ×14,
+FORCE_FLAT/TIME_BLOCK 时段门生效)。修复 2 个 shadow 小 bug：hms 列单位错
+(µs/1000 再入 µs 函数); 时段门日志每日一次(CLOSE 信号照发, live 重试
+语义保留)。.so 893ed185 部署, 08:40 cron 加载。

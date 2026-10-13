@@ -194,14 +194,8 @@ public:
     /// Get calibration result for a contract
     CalibrationResult getCalibration(const std::string& code) const;
 
-    /// Get toxicity metrics for a contract
-    SelfTradeToxicityMetrics getToxicityMetrics(const std::string& code) const;
-
     /// Get quick toxicity score
     double getToxicityScore(const std::string& code) const;
-
-    /// Check if high toxicity
-    bool isHighToxicity(const std::string& code) const;
 
     //==========================================================================
     // Fill Retreat (成交后退机制)
@@ -218,10 +212,6 @@ public:
     // Statistics
     //==========================================================================
 
-    /// Get fill history for a contract (returns pointer to RingBuffer data)
-    /// Note: Returns nullptr if contract not found
-    const RingBuffer<SelfFillRecord, 128>* getFillHistory(const std::string& code) const;
-
     /// Get sample count for a contract
     uint32_t getSampleCount(const std::string& code) const;
 
@@ -230,10 +220,6 @@ public:
     //==========================================================================
 
     void reset();
-    void resetContract(const std::string& code);
-
-    /// Reset calibration for a contract (clear history, allow fresh start after toxicity cooloff)
-    void resetCalibration(const std::string& code);
 
     /// Apply time-based decay - reduce weight of old fills
     void decayCalibration(const std::string& code, uint64_t current_time, uint64_t decay_window_ms = 30000);

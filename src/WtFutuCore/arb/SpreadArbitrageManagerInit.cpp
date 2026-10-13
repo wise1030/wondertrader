@@ -205,6 +205,26 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
             pair.max_trend_bars = readUInt32(pair_cfg, "maxTrendBars", _default_tf_max_trend_bars);
             pair.add_safety_ratio = readDouble(pair_cfg, "addSafetyRatio", _default_mr_add_safety_ratio);
 
+            // θ 网格参数（方案 B 立项 §20; grid 节点缺省时全默认 + shadow=true）
+            WTSVariant* grid_node = pair_cfg->get("grid");
+            if (grid_node) {
+                pair.grid.shadow = readBool(grid_node, "shadow", true);
+                pair.grid.ema_period = readDouble(grid_node, "emaPeriod", 50.0);
+                pair.grid.lambda_quantile_pct = readUInt32(grid_node, "lambdaQuantilePct", 80);
+                pair.grid.lambda_lookback_days = readUInt32(grid_node, "lambdaLookbackDays", 5);
+                pair.grid.band_exit_ratio = readDouble(grid_node, "bandExitRatio", 0.2);
+                pair.grid.stop_loss_ratio = readDouble(grid_node, "stopLossRatio", 1.2);
+                pair.grid.death_ratio = readDouble(grid_node, "deathRatio", 0.3);
+                pair.grid.death_hold_ms = readUInt32(grid_node, "deathHoldMs", 120000);
+                pair.grid.grid_lot = readDouble(grid_node, "gridLot", 1.0);
+                pair.grid.max_grids = readUInt32(grid_node, "maxGrids", 3);
+                pair.grid.entry_max_slippage = readDouble(grid_node, "entryMaxSlippage", 1.0);
+                pair.grid.lag_ratio_max = readDouble(grid_node, "lagRatioMax", 0.5);
+                pair.grid.no_new_after = readUInt32(grid_node, "noNewAfter", 145000);
+                pair.grid.force_flat_at = readUInt32(grid_node, "forceFlatAt", 145500);
+                pair.grid.shadow_log_interval_ms = readUInt32(grid_node, "shadowLogIntervalMs", 5000);
+            }
+
             if (!pair.pair_id.empty() && !pair.leg1_code.empty() && !pair.leg2_code.empty()) {
                 addSpreadPair(pair);
             }
@@ -246,6 +266,9 @@ bool SpreadArbitrageManager::addSpreadPair(const SpreadPairConfig& pair_config)
 
     // Add to calculator manager
     _calculator_manager->addSpreadPair(pair_config);
+
+    // 跨腿上下文挂接（arb onTick 驱动, 与策略同前提; 多 pair 时改 map 属主）
+    _cross_leg_ctx.setLegs(pair_config.leg1_code, pair_config.leg2_code);
 
     // Initialize strategy
     StrategyInstance instance;

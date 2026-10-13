@@ -150,46 +150,12 @@ struct PerformanceMetrics
         return total_pnl / total_volume * 1e6;
     }
 
-    /// Calculate PnL per day
-    double pnlPerDay() const
-    {
-        if (trading_days == 0)
-            return 0;
-        return total_pnl / trading_days;
-    }
 };
 
 //==============================================================================
 // Market Condition Buckets
 //==============================================================================
 
-/// Market condition types
-enum class MarketCondition : uint8_t
-{
-    TRENDING_UP,     ///< Strong upward trend
-    TRENDING_DOWN,   ///< Strong downward trend
-    RANGING,         ///< Sideways/ranging market
-    HIGH_VOLATILITY, ///< High volatility period
-    LOW_VOLATILITY,  ///< Low volatility period
-    AUCTION,         ///< Auction period
-    NEWS_EVENT,      ///< News/event driven
-    NORMAL           ///< Normal conditions
-};
-
-/// Performance by market condition
-struct ConditionPerformance
-{
-    MarketCondition condition;
-    double pnl;
-    uint32_t trade_count;
-    double volume;
-    double win_rate;
-    double avg_spread_captured;
-
-    ConditionPerformance()
-        : condition(MarketCondition::NORMAL), pnl(0), trade_count(0), volume(0), win_rate(0), avg_spread_captured(0)
-    {}
-};
 
 //==============================================================================
 // Performance Analyzer
@@ -235,12 +201,6 @@ public:
     /// Update current position
     void updatePosition(const std::string& code, double position, double avgCost);
 
-    /// Record toxicity event
-    void recordToxicityEvent();
-
-    /// Record alpha signal outcome
-    void recordAlphaSignal(double alpha, bool wasCorrect);
-
     //==========================================================================
     // Analysis
     //==========================================================================
@@ -250,12 +210,6 @@ public:
 
     /// Get PnL attribution
     PnLAttribution getPnLAttribution() const;
-
-    /// Get performance by market condition
-    std::map<MarketCondition, ConditionPerformance> getPerformanceByCondition() const;
-
-    /// Get recent trades
-    const RingBuffer<TradeRecord, 16384>& getRecentTrades() const { return _trades; }
 
     /// pending adverse 队列大小 (V8-R5 测试/诊断钩子: 验证低流动性超时过期生效)
     size_t pendingAdverseCount() const { return _pending_adverse.size(); }
@@ -268,14 +222,10 @@ public:
     double calculateAdverseSelection(const TradeRecord& trade) const;
 
     /// Determine market condition at a timestamp
-    MarketCondition determineMarketCondition(uint64_t timestamp) const;
 
     //==========================================================================
     // Reporting
     //==========================================================================
-
-    /// Generate summary report
-    std::string generateSummaryReport() const;
 
     //==========================================================================
     // Reset
@@ -326,7 +276,6 @@ private:
     RingBuffer<double, 1024> _pnl_history;
 
     // Market condition performance
-    std::map<MarketCondition, ConditionPerformance> _condition_perf;
 
     // Time tracking
     uint64_t _start_time;
@@ -355,29 +304,5 @@ private:
 // Utility Functions
 //==============================================================================
 
-/// Convert market condition to string
-inline const char* marketConditionName(MarketCondition cond)
-{
-    switch (cond) {
-    case MarketCondition::TRENDING_UP:
-        return "TRENDING_UP";
-    case MarketCondition::TRENDING_DOWN:
-        return "TRENDING_DOWN";
-    case MarketCondition::RANGING:
-        return "RANGING";
-    case MarketCondition::HIGH_VOLATILITY:
-        return "HIGH_VOLATILITY";
-    case MarketCondition::LOW_VOLATILITY:
-        return "LOW_VOLATILITY";
-    case MarketCondition::AUCTION:
-        return "AUCTION";
-    case MarketCondition::NEWS_EVENT:
-        return "NEWS_EVENT";
-    case MarketCondition::NORMAL:
-        return "NORMAL";
-    default:
-        return "UNKNOWN";
-    }
-}
 
 } // namespace futu

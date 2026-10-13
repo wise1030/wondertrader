@@ -97,13 +97,6 @@ void ConfigAudit::walkSource(Source& src, wtp::WTSVariant* node, const std::stri
     }
 }
 
-const char* ConfigAudit::pathOf(const void* node)
-{
-    auto& self = instance();
-    auto it = self._node_path.find(node);
-    return it == self._node_path.end() ? nullptr : it->second.c_str();
-}
-
 void ConfigAudit::noteRead(wtp::WTSVariant* node, const char* key)
 {
     if (_closed.load(std::memory_order_relaxed) || key == nullptr)
@@ -197,19 +190,6 @@ std::vector<std::string> ConfigAudit::unknownList(const std::string& source) con
 size_t ConfigAudit::unknownCount() const
 {
     return unknownList().size();
-}
-
-size_t ConfigAudit::presentCount(const std::string& source) const
-{
-    std::lock_guard<std::mutex> _g(_mtx);
-    size_t n = 0;
-    for (const auto& kv : _sources)
-    {
-        if (!source.empty() && kv.first != source)
-            continue;
-        n += kv.second.present.size();
-    }
-    return n;
 }
 
 size_t ConfigAudit::readCount(const std::string& source) const

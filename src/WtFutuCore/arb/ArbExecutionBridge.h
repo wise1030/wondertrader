@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include "../ApplicationDeps.h"  // 19.33: 统一聚合 (成员 _deps 为按值切片)
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -31,37 +32,22 @@ class WTSTickData;
 namespace futu
 {
 
-class AsyncArbitrageExecutor;
-class SpreadArbitrageManager;
-class OrderRouter;
-class UnifiedOrderTracker;
-class SelfTradePrevention;
-class FutuPortfolio;
-class FutuRiskMonitor;
-struct ContractInfo;
 
 class ArbExecutionBridge
 {
 public:
     /// 依赖注入 (init 时设置一次)
-    struct Deps
-    {
-        AsyncArbitrageExecutor* async_arb = nullptr;
-        SpreadArbitrageManager* arb_manager = nullptr;
-        OrderRouter* order_router = nullptr;
-        UnifiedOrderTracker* order_tracker = nullptr;
-        SelfTradePrevention* stp = nullptr;
-        FutuPortfolio* portfolio = nullptr;
-        FutuRiskMonitor* risk_monitor = nullptr;
-        const std::vector<ContractInfo>* contract_infos = nullptr;
-        bool use_spread_arbitrage = false;
-        const char* strategy_id = "";
-    };
 
-    void setDeps(const Deps& deps) { _deps = deps; }
+    // 19.33: 依赖统一走 ApplicationDeps 按值切片 (原嵌套 Deps 删除)
+    void setDeps(const ApplicationDeps& deps)
+    {
+        _deps = deps;
+        _deps.validate("ArbExecutionBridge");
+    }
 
     /// 每 tick 主线程驱动 (原 processSpreadArbitrage 全部内容)
-    void onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick);
+    /// 19.35: now_ms 由 on_tick 主入口单一转换后经参数下发 (不再自转换)
+    void onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp::WTSTickData* tick, uint64_t now_ms);
 
     /// 成交回报中的套利单处理 (consumePairTag → in_flight 递减 + 残腿对冲)
     void
@@ -83,7 +69,7 @@ public:
     void resetSession();
 
 private:
-    Deps _deps;
+    ApplicationDeps _deps;  // 19.33: 按值切片 (消费点 _deps.xxx 零改动)
 
     // 同价去重: 上次套利挂单价 (防 WT 底层自动撤单重下, 保护排队优先级)
     // v7.6 阶段2: 递归自旋锁 — onTick(MdSpi) vs onTradeFill/onLegCancelled(TdSpi)
@@ -95,10 +81,20 @@ private:
     struct CloseHedgeState
     {
         double original_qty = 0;
-        double hedged_qty = 0;
+        double hedged_qty = 0;         ///< 已提交对冲量(受理口径, 仅日志)
+        double filled_hedged = 0;      ///< 19.30-A1: 已成交核验对冲量(完成判据)
         uint64_t created_time_ms = 0; ///< B5 fix: for stale entry cleanup
     };
     std::unordered_map<std::string, CloseHedgeState> _arb_hedge_on_fill;
+    /// 19.30-A1: 对冲单 localid → pair 反查表 (成交回报核验; 调用方须持 _lock)
+    std::unordered_map<uint32_t, std::string> _hedge_fill_index;
+
+    /// 19.30-A1: 登记对冲单 localids (调用方须持 _lock)
+    void noteHedgeOrderLocked(const std::string& pair_id, const std::vector<uint32_t>& localids);
+    /// 19.30-A1: 对冲单成交回报核验; true=该 fill 已被消费 (调用方须持 _lock)
+    bool onHedgeFillLocked(uint32_t localid, double vol);
+    /// 19.30-A1: 清理某 pair 的全部对冲单跟踪 (调用方须持 _lock)
+    void cleanupHedgeTrackingLocked(const std::string& pair_id);
     // MM 订单快照世代号 (增量同步到 arb 执行器)
     uint64_t _last_mm_generation = 0;
 

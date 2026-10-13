@@ -24,7 +24,6 @@
 #include <algorithm>
 #include <unordered_map>
 #include "../Includes/FasterDefs.h"
-#include "FutuConfig.h"
 #include "PreTradeDecision.h"
 #include "SideFillBreaker.h"
 #include "RiskLimitsConfig.h"
@@ -126,18 +125,9 @@ struct RecoveryConfig
           pnl_recovery_ratio(0.5), max_loss_for_recovery(0), auto_clear_irreversible_on_reset(false)
     {}
 
-    static RecoveryConfig fromVariant(wtp::WTSVariant* v)
-    {
-        RecoveryConfig c;
-        c.cooldown_ms = FutuConfig::readUInt32(v, "cooldownMs", 30000);
-        c.check_interval_ms = FutuConfig::readUInt32(v, "checkIntervalMs", 5000);
-        c.recovery_threshold = FutuConfig::readDouble(v, "recoveryThreshold", 0.8);
-        c.max_recovery_count = FutuConfig::readUInt32(v, "maxRecoveryCount", 3);
-        c.pnl_recovery_ratio = FutuConfig::readDouble(v, "pnlRecoveryRatio", 0.5);
-        c.max_loss_for_recovery = FutuConfig::readDouble(v, "maxLossForRecovery", 0);
-        c.auto_clear_irreversible_on_reset = FutuConfig::readBool(v, "autoClearIrreversibleOnReset", false);
-        return c;
-    }
+    // 配置加载: loader 单点解析 (FutuConfigLoader) + assembler 逐字段填充 (FutuModuleAssembler),
+    // 本结构体不提供 fromVariant (2026-09-19③ 批次A: 原 fromVariant 为零调用死路径, 已删,
+    // 防"同节点双解析 + 双默认值表漂移"——即 RiskRateLimits 曾出过的问题形态)
 };
 
 /// Closeout configuration for session end
@@ -150,19 +140,12 @@ struct CloseoutConfig
     uint32_t night_minutes_before; ///< Minutes before night close to stop quoting
 
     CloseoutConfig()
-        : minutes_before(5), max_retries(10), retry_interval_ms(2000), night_close_time(0), night_minutes_before(5)
+        // 批次D: 默认值对齐权威源 FutuMmConfig::Closeout (3/5000); 原 10/2000 仅独立构造可达
+        : minutes_before(5), max_retries(3), retry_interval_ms(5000), night_close_time(0), night_minutes_before(5)
     {}
 
-    static CloseoutConfig fromVariant(wtp::WTSVariant* v)
-    {
-        CloseoutConfig c;
-        c.minutes_before = FutuConfig::readUInt32(v, "minutesBefore", 5);
-        c.max_retries = FutuConfig::readUInt32(v, "maxRetries", 10);
-        c.retry_interval_ms = FutuConfig::readUInt32(v, "retryIntervalMs", 2000);
-        c.night_close_time = FutuConfig::readUInt32(v, "nightCloseTime", 0);
-        c.night_minutes_before = FutuConfig::readUInt32(v, "nightMinutesBefore", c.minutes_before);
-        return c;
-    }
+    // 配置加载: 同 RecoveryConfig —— loader 单点解析 + assembler 填充, 不提供 fromVariant
+    // (2026-09-19③ 批次A: 原 fromVariant 为零调用死路径, 已删)
 };
 
 /// Closeout sub-state machine (P1-1: merged old CloseoutState + CloseoutPhase)
@@ -292,8 +275,8 @@ public:
             HaltReasons::clear(HR_ZOMBIE_LATCH);
     }
 
+
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
-    const RecoveryConfig& getRecoveryConfig() const { return _recovery_config; }
 
     void setCloseoutConfig(const CloseoutConfig& config)
     {
@@ -301,7 +284,6 @@ public:
         _closeout_state.max_retries = config.max_retries;
         _closeout_state.retry_interval_ms = config.retry_interval_ms;
     }
-    const CloseoutConfig& getCloseoutConfig() const { return _closeout_config; }
 
     void setCurrentTime(uint64_t time) { _current_time.store(time, std::memory_order_relaxed); }
 
@@ -373,15 +355,10 @@ public:
 
     /// Get current rate counts (ring buffer size)
     inline uint32_t getOrdersPerSec() const { return static_cast<uint32_t>(_order_times.size()); }
-    inline uint32_t getCancelsPerSec() const { return static_cast<uint32_t>(_cancel_times.size()); }
-    inline uint32_t getTradesPerSec() const { return static_cast<uint32_t>(_trade_times.size()); }
 
     //==========================================================================
     // Actions
     //==========================================================================
-
-    /// Determine appropriate action based on violations
-    RiskAction determineAction(const std::vector<RiskViolation>& violations) const;
 
     /// Determine action with risk category (for recovery mechanism)
     /// @param violations List of violations
@@ -404,6 +381,10 @@ public:
     inline bool isQuotingPaused() const { return _quoting_paused.load(std::memory_order_relaxed); }
 
     inline RiskCategory getHaltCategory() const { return _halt_category.load(std::memory_order_acquire); }
+
+    // 19.26 F3③: 恢复闸拒绝观测读侧 (PERF 摘要调用, 无锁快照)
+    uint32_t getRecoveryRejectCount() const { return _recover_reject_count; }
+    const char* getLastRecoveryRejectReason() const { return _last_recover_reject_reason; }
 
     /// 成本簿 stale 事件上报（EventNotifier/GUI 可见；按时间节流）
     void broadcastCostBasisStale(const std::string& code);
@@ -564,6 +545,10 @@ public:
     /// Check if recovery conditions are met
     bool canRecover(const FutuPortfolio* portfolio) const;
 
+    /// 19.26 F1①: 恢复被拒统一出口 — 计数+记因+30s 节流日志(as_warn=true 时 WARN)。
+    /// 调用点须持有 _halt_domain_lock(canRecover 顶层 RecursiveSpinGuard 已保证)。
+    void rejectRecovery(const char* gate, const std::string& detail, bool as_warn = false) const;
+
     //==========================================================================
     // Reset
     //==========================================================================
@@ -635,6 +620,13 @@ private:
     uint32_t _recovery_count{0};     ///< Number of auto-recoveries this session
     double _halt_pnl_snapshot{0};    ///< PnL at halt time (for loss-based halt)
     bool _was_loss_triggered{false}; ///< Whether halt was triggered by daily loss
+
+    // 19.26 F1①/F3③: 恢复闸拒绝观测 (canRecover 内计数+记因, PERF 摘要输出;
+    // 读侧为日志快照, 无锁 char 缓冲, 容忍逐字节竞争)。2026-09-24 下午停摆 87min
+    // 实证: 恢复闸拒绝完全不可见, 只剩一句 debug 级 "gates not passed"。
+    mutable uint32_t _recover_reject_count{0};              ///< 恢复被拒累计次数
+    mutable char _last_recover_reject_reason[160]{0};       ///< 最近一次拒绝的门+数值
+    mutable uint64_t _last_recover_reject_log_ms{0};        ///< 拒绝日志节流时间戳
 
     // Closeout state (收盘前平仓) - State Machine (V8-R6/WS-A: 受 _halt_domain_lock 保护)
     CloseoutConfig _closeout_config;

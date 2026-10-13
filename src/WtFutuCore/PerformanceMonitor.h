@@ -173,16 +173,12 @@ public:
     bool isEnabled() const { return _enabled; }
 
     void setLatencyThresholdNs(uint64_t thresholdNs) { _latency_threshold_ns = thresholdNs; }
-    uint64_t getLatencyThresholdNs() const { return _latency_threshold_ns; }
 
     void setWarnThresholdNs(uint64_t ns) { _warn_threshold_ns = ns; }
     void setCriticalThresholdNs(uint64_t ns) { _critical_threshold_ns = ns; }
     void setLogInterval(uint32_t ms) { _log_interval_ms = ms; }
     /// F-core P2(2026-09-17): 同通道告警日志限频 (ms); 0=不限频
     void setAlertThrottleMs(uint32_t ms) { _alert_throttle_ms = ms; }
-    uint64_t getWarnThresholdNs() const { return _warn_threshold_ns; }
-    uint64_t getCriticalThresholdNs() const { return _critical_threshold_ns; }
-    uint32_t getLogInterval() const { return _log_interval_ms; }
 
     /// V8-R3: warn/critical 阈值接线 (此前 set 注入后无任何逻辑读取) --
     /// 全链路(TICK_TO_QUOTE/SIGNAL_TO_ORDER) p99 超阈输出告警,
@@ -230,10 +226,11 @@ public:
     //==========================================================================
 
     void recordTickProcessed();
-    void recordQuotePlaced();
     void recordOrderPlaced();
-    void recordCancelSent();
     void recordFillReceived();
+    // 19.28: 补接线 — quotes/cancels 计数器自初版起从未被喂养
+    void recordQuotePlaced();
+    void recordCancelSent();
 
     //==========================================================================
     // Statistics
@@ -252,17 +249,6 @@ public:
     // Latency Quick Checks (inline for hot path)
     //==========================================================================
 
-    inline bool isLatencyHigh(LatencyType type, uint64_t thresholdNs) const
-    {
-        uint64_t current = _current_latency_ns[static_cast<int>(type)].load(std::memory_order_relaxed);
-        return current > thresholdNs;
-    }
-
-    inline uint64_t getLastLatencyNs(LatencyType type) const
-    {
-        return _current_latency_ns[static_cast<int>(type)].load(std::memory_order_relaxed);
-    }
-
     //==========================================================================
     // Summary
     //==========================================================================
@@ -275,7 +261,6 @@ public:
     //==========================================================================
 
     void reset();
-    void resetLatency(LatencyType type);
 
 private:
     bool _enabled = true;

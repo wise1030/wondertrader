@@ -14,9 +14,10 @@
 > 键所有权表见 `AGENTS.md §19.12`；本次补录 `logging.*`、`performance.alertThrottleMs`、
 > `zombieLatch.maxHoldMs`、`spread_arbitrage.asyncExecutor.*` 四组新键。
 >
-> **双示例口径（2026-09-19 核对）**：**§2.1–§2.4 的"示例"列 = 回测配置（`configbt_v5.yaml`）**；
-> **生产权威 = `src/WtFutuCore/config/config.yaml`**（84 键，示例见 **§2.5**）。
-> 两者在身份/合约、performance 阈值、closeout 时序等**多处取值不同**，请勿混用；本版已逐项核对并更正。
+> **双示例口径（2026-09-20 核对）**：**§2.1–§2.4 的"示例"列 = 回测配置（`configbt_v5.yaml`）**；
+> **§2.5 展示的是 src 样例/开发模板**（`src/WtFutuCore/config/config.yaml`，87 键，审计 present 口径见 §2.6，
+> 身份为 ag2608 开发模板）；**生产权威 = 远程 dist 配置**（R15-a 规程：禁止整文件覆盖，单键热更/sed）。
+> 回测/src 样例/远程生产在身份/合约、performance 阈值、closeout 时序等**多处取值不同**，请勿混用。
 
 ---
 
@@ -26,7 +27,7 @@
 - [§2 主配置（configbt_v5.yaml / _ec_5d.yaml）](#2-主配置)
 - [§2.5 生产配置示例（src/WtFutuCore/config/config.yaml）](#25-生产配置示例srcwtfutucorecfg)
 - [§3 模块配置 coordinator.yaml](#3-模块配置-coordinatoryaml)
-- [§4 热更新配置 hotparams.yaml（26 参数）](#4-热更新配置-hotparamsyaml)
+- [§4 热更新配置 hotparams.yaml（24 参数）](#4-热更新配置-hotparamsyaml)
 - [§5 日志配置 logcfgbt.yaml](#5-日志配置-logcfgbtyaml)
 - [§6 套利配置 spread_arbitrage.yaml](#6-套利配置-spread_arbitrageyaml)
 - [§7 死键清单（配了也不生效）](#7-死键清单)
@@ -56,8 +57,12 @@ P1-4(2026-09-19) 增补：
  │    （spread_arbitrage 的局部助手已改走 FutuConfig，`SpreadArbitrageManagerInit.cpp`）
  ├ **读取审计**：`ConfigAudit`（FutuConfigAudit.cpp）按源展开键路径，启动打印
  │    `[CONFIG-AUDIT] tag=startup source=… present/read/unknown/read_missing`，见 §9
- └ **覆盖映射唯一化**：策略层 → 协调器配置的 11 个字段覆盖集中在
-      `FutuConfigMap::applyStrategyOverrides`（FutuConfigMap.cpp；原内联 11 行）
+ ├ **覆盖映射唯一化**：策略层 → 协调器配置的 13 个字段覆盖集中在
+ │    `FutuConfigMap::applyStrategyOverrides`（FutuConfigMap.cpp；原内联 11 字段）
+ └ **closeout 单链化**（2026-09-19③ 批次B）：`FutuRiskMonitor::CloseoutConfig` 5 键改由
+      CoordinatorConfig 单点填充（原 assembler 直读 `_config.closeout` 的第二填充链已消除，
+      防 Trigger/RiskMonitor 收盘窗口判定分叉）；`SessionPhaseManager` 持 CoordinatorConfig
+      指针（原 SessionPhaseConfig 值拷贝已删）；CloseoutExecConfig 保持装配期快照（执行语义）
 ```
 
 ---
@@ -129,7 +134,7 @@ P1-4(2026-09-19) 增补：
 | numLevels | uint32 | 回测 1 / **生产 2** | 1 | E6 [1,10] | 报价层数 |
 | baseSpread | double | 回测 2.5 / **生产 2.0** | 2.0 | E10 (0,20] ticks | 基础价差(ticks)。**热参 base_spread 可覆盖**（v5 有漂移告警属预期） |
 | baseQty | double | 回测 3.0 / **生产 10.0** | 5.0 | E11 (0,100] 手 | 义务层报单量。热参可覆盖 |
-| qtyDecay(levelQtyMultiplier) | double | 0.5 | 0.7 | W4 [0.1,1.0] | 层量衰减系数。热参 level_qty_multiplier 可覆盖 |
+| levelQtyMultiplier | double | 0.5 | 0.7 | W4 [0.1,1.0] | 层量衰减系数（旧键名 quoting.qtyDecay 已删）。热参 level_qty_multiplier 可覆盖 |
 | levelStep | double | 1.0 | 1.0 | E7 (0,100] ticks | 层间价距 |
 | stickyThreshold | double | 回测 1.5 / **生产 2.0** | 1.0 | W5 (0,10] ticks | **顶单黏性专用**（B1 收窄语义）：价格改善 ≥ improve_retreat_ratio×sticky 才重挂。热参可覆盖 |
 | improveRetreatRatio | double | 2.0 | 2.0 | — | 改善侧容忍倍数（与 selfTradeCalibrator.retreatTicks 是**两个无关机制**） |
@@ -137,7 +142,7 @@ P1-4(2026-09-19) 增补：
 | useBilateralQuote | bool | false | false | E9 与 obligationLevel≠0 互斥 | 路径 A 双边报价接口（当前禁用，启用需专项验证——B+ 复核遗留） |
 | priceProtection | bool | true | true | — | 价格保护总开关（protect_ticks 关闭应走此开关而非配 0） |
 | protectTicks | double | 1.0 | 1.0 | — | 保护带宽度(ticks)：报价不得进入对手价×带内。热参可覆盖（下界 0.5） |
-| qtyDecayFactor | double | 回测 3.0 / **生产 2.0** | 2.0 | — | qty 衰减软风控因子 |
+| qtyDecayFactor | double | 回测 3.0 / **src 样例 2.0** | 2.0 | — | qty 衰减软风控因子（R12 2026-09-04 远程生产已切 0.7，用户裁决 F1；非 src 取值） |
 | obligationMinQty | double | 回测 3 / **生产 10.0** | 10.0 | E12 >0; W2 <scoutQty | 义务总深度阈值(手)：同侧总挂量低于此值强制补义务层 |
 | obligationMaxSpreadTicks | double | 10 | 10.0 | — | 义务层最大带宽(ticks)（须>skewCrossMaxTicks） |
 | obligationLevel | uint32 | 回测 (未配) / **生产 1** | 0 | E8 <numLevels | scout 多层义务层序号：level<此值为自由探测层(scoutQty)，==为义务层(baseQty)，之后 flexible 衰减层 |
@@ -164,7 +169,7 @@ P1-4(2026-09-19) 增补：
 | frequency.deltaRateWindowSec / deltaRateCooldownMs | uint32 | 10/5000 | 2/15000 | delta 速率滑窗/冷却（恢复须过冷却） |
 | frequency.positionHardBlockRatio | double | (未配)/_ec_5d=1.0 | 1.0 | block_add 阈值：\|delta\| ≥ contract_max_delta×ratio 时 flexible 加仓侧跳过（键名历史遗留，实际 delta 口径） |
 | frequency.deltaCriticalMult / deltaWarningMult | double | 1.5/0.8 | 同左 | delta 分级告警倍数（CRITICAL/WARNING） |
-| frequency.widenThreshold / pauseThreshold / flattenThreshold | uint32 | 1/2/3 | 同左 | 库存分级响应档位（widen/pause/flatten 的 util 阈值分子） |
+| frequency.widenThreshold | uint32 | 1/2/3 | 同左 | 库存分级响应档位（**仅 widenThreshold 被读取**，RiskLimitsConfig.h；pause/flattenThreshold 无读取点，见 §7 死键区） |
 | frequency.positionWarningL1/L2 | double | (未配) | 0.8/0.9 | 持仓预警档位 |
 | frequency.maxConsecutiveSameSide / sameSideWindowMs / sameSidePauseMs | uint32 | 回测 (未配) / **生产 3**/3000/5000 | 5/3000/5000 | SideFillBreaker 同侧连续成交熔断参数（生产样例把连续同侧收紧到 3） |
 | frequency.cooldownMs | uint32 | 30000 | 30000 | halt 恢复冷却 ms |
@@ -195,7 +200,7 @@ P1-4(2026-09-19) 增补：
 | orderErrorThreshold | uint32 | 回测 3 / **生产样例 3**（线上实跑 1000 为 31 拒单事故临时值，待回收） | 10 | 连续下单错误计数阈值→qphase=ERROR+cancelAll（D1 后不再叠加 haltTrading） |
 | maxOrders | uint32 | 32 | 32 | 最大在途订单数 |
 | maxPendingPerSide | double | (未配)/_ec_5d=30 | 30.0 | 单侧最大挂单量(手)，超限撤旧+跳过 |
-| ~~stpMinPriceGap~~ | — | — | — | **死键**；STP 权威在 coordinator.modules.selfTradePrevention |
+| ~~stpMinPriceGap~~ | — | — | — | **已删除**（2026-09-19③ 批次E，代码+yaml 彻底移除；审计白名单仅兼容远程旧文件）；STP 权威在 coordinator.modules.selfTradePrevention |
 
 #### performance 节
 
@@ -216,10 +221,11 @@ P1-4(2026-09-19) 增补：
 
 ---
 
-### 2.5 生产配置示例（src/WtFutuCore/config/config.yaml，82 叶键）
+### 2.5 src 样例配置（`src/WtFutuCore/config/config.yaml`，87 键 = 审计 present 口径）
 
-**这是生产权威样例**（`src/WtFutuCore/config/` 为权威来源，线上 `dist/config.yaml` 由其派生并按需覆写）。
-下列值 = 仓库样例当前取值（2026-09-19 核对）；回测示例见 §2.1–§2.4。
+**这是 src 样例/开发模板**（ag2608 身份；线上 `dist/config.yaml` 由历史派生但**生产权威=远程配置**，
+R15-a 规程：禁止整文件覆盖，单键热更/sed。见 §1）。
+下列值 = 仓库样例当前取值（2026-09-20 核对）；回测示例见 §2.1–§2.4。
 
 | 分组 | 生产样例取值 |
 |---|---|
@@ -235,19 +241,19 @@ P1-4(2026-09-19) 增补：
 | order_control | `orderErrorThreshold: 3`；`maxOrders: 32`；`maxPendingPerSide: 30` |
 | monitor | `enabled: true`；`flushIntervalMs: 1000` |
 
-**生产 coordinator.yaml 样例取值**（93 键，节选关键项）：`useMarketMaking/useSpreadArbitrage/use_signal_aggregator: true`；
+**生产 coordinator.yaml 样例取值**（审计 present=114 / read=93，见 §2.6；节选关键项）：`useMarketMaking/useSpreadArbitrage/use_signal_aggregator: true`；
 **`useAsyncArbThread: false`、`usePerformanceMonitor: false`（样例保守默认；线上实跑均为 true）**；`usePerformanceAnalyzer: false`；
 `haltGate.mode: legacy`；`bilateralStatsLogIntervalSec: 300` / `bilateralStatsLogDir: ./Logs`；
 `pipeline.paramUpdateInterval: 100` / `pipeline.alphaSensitivity: 2.0`；
 `modules.zombieLatch: {reprobeMs: 45000, telemetryMs: 60000, maxHoldMs: 120000}`；`modules.skewDriver.hrSlowWindowMs: 300000`；
 `modules.toxicityDetector.enabled: true`；`modules.spreadOptimizer.pauseSpreadMultRatio: 0.9`；`modules.selfTradePrevention.enabled: true`。
 
-**生产 spread_arbitrage.yaml 样例**：`pairs[0] = {id: ag0812, leg1: SHFE.ag.ag2608, leg2: SHFE.ag.ag2612, ratio/ratio2: 1.0, leg1/leg2Multiplier: 1.0, entryZ: 2.0, exitZ: 0.5, stopLossZ: 4.0, stopLossPct: 0.02, maxTrendBars: 50, addSafetyRatio: 0.75, maxPosition: 20, windowSize: 200}`；
+**生产 spread_arbitrage.yaml 样例**：`pairs[0] = {id: ag0812, leg1: SHFE.ag.ag2608, leg2: SHFE.ag.ag2612, ratio/ratio2: 1.0, leg1/leg2Multiplier: 1.0, entryZScore: 2.0, exitZScore: 0.5, stopLossZ: 4.0, stopLossPct: 0.02, maxTrendBars: 50, addSafetyRatio: 0.75, maxPosition: 20, windowSize: 200}`；
 `maxTotalPosition: 20`、`maxPairs: 3`、`signalCooldownMs: 2000`、`minSignalConfidence: 0.5`、`minProfitThresholdTicks: 1.0`；
 `asyncExecutor: {signalIntervalUs: 5000, maxWaitUs: 10000, ticksPerSignal: 5, waitMode: event, tickQueueSize: 1024, orderQueueSize: 256}`。
 （线上对应为 `ao1112` 组合、`maxTotalPosition 5`、`maxPairs 1`、`signalCooldownMs 30000`、`maxPosition 3` —— 样例与线上按品种而不同。）
 
-**生产 hotparams.yaml 样例**：26 键（24 注册 + 2 死键，见 §7）；与线上唯一差异为 `base_spread: 2.0`（线上 1.5）。
+**生产 hotparams.yaml 样例**：24 键（= 24 注册，2026-09-19② 已删除 2 个死键 delta_skew_*，见 §7）；与线上唯一差异为 `base_spread: 2.0`（线上 1.5）。
 
 ### 2.6 生产样例自检（2026-09-19，与最新源码逐项比对）
 
@@ -267,6 +273,9 @@ P1-4(2026-09-19) 增补：
 | coordinator.yaml | 114 | 93 | **0** | **0** |
 | hotparams.yaml | 26 | 24 | **0** | **0** |
 | spread_arbitrage.yaml | 68 | 53 | **0** | **0** |
+
+> 2026-09-19② 复查：hotparams.yaml 已删除 2 个死键（delta_skew_threshold/delta_skew_factor）⇒
+> 该行现为 present=24 / read=24；上表数值为删除前自检记录，留档。
 
 `parameter validation passed` ✓、`Config validation passed (0 errors, 0 warnings)` ✓（E1–E14 / W1–W6 全通过）；
 `[HOTPARAM-DRIFT]` 无输出 ⇒ 样例的 `hotparams.base_spread(2.0)` 与 `quoting.baseSpread(2.0)` 一致（无静态-热参漂移）。
@@ -304,10 +313,10 @@ P1-4(2026-09-19) 增补：
 | useAsyncArbThread | bool | false | **true** | 启动 | **回测必须 false**（主线程同步保可复现，Assembler:145） |
 | usePerformanceMonitor / usePerformanceAnalyzer | bool | false/false | false | 启动 | 延迟监控/绩效分析开关 |
 | use_signal_aggregator | bool | true | true | 启动 | 新信号架构；false 走 legacy(:239) |
-| takerReduceThreshold | double | 1.1 | 1.3 | 启动 | util=\|净头寸\|/maxPosition 超此值→taker 减仓；0=禁用(:321) |
+| takerReduceThreshold | double | 1.0 | 1.3 | 启动 | util=\|净头寸\|/maxPosition 超此值→taker 减仓；0=禁用(:321)。R8-c(3a) 起示例/生产=1.0 |
 | takerReduceTargetUtil | double | 0.8 | 0.8 | 启动 | 减仓目标利用率(:322) |
 | takerReduceCooldownMs | uint32 | 30000 | 30000 | 启动 | 每合约限频 ms(:323) |
-| requoteAfterFillMinIntervalMs | uint32 | 500 | 500 | 启动 | 成交后重挂最小间隔 ms；0=禁用；2026-08-26 应急 500 |
+| requoteAfterFillMinIntervalMs | uint32 | 500 | 500 | 启动 | 成交后重挂最小间隔 ms；0=禁用；2026-08-26 应急 500（代码构造缺省 200） |
 | sectionBreakSecondsBefore | uint32 | 10 | 10 | 启动 | 每节收盘前 N 秒撤单停报（旧分钟键×60 兼容 :331-335） |
 | bilateralStatsLogIntervalSec | uint32 | 300 | 300 | 启动 | 双边统计周期输出间隔 s；0=禁用(:338) |
 | bilateralStatsLogDir | string | ./Logs | ./Logs | 启动 | 双边统计持久化目录（相对 CWD） |
@@ -332,7 +341,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | signals.momentum.window | 50 | 50 | 动量窗口——最近 min(window,128) 收益（S6 后真实生效，行为变化已归因） |
 | signals.momentum.emaAlpha | 0.1 | 0.1 | EMA 平滑系数 |
 | signals.lead_lag.window | 50 | 50 | 领先滞后窗口 |
-| signals.lead_lag.maxAgeMs | (未配) | 0 | B5 alpha 时效老化 ms；0=关闭。唯一持久化 last-value 通道的防护 |
+| signals.lead_lag.maxAgeMs | (未配) | 0 | lead-lag 行情报价时效老化 ms（R12 勘误 F8：alphaMaxAgeMs 从未实施）；0=关闭。唯一持久化 last-value 通道的防护 |
 | model.type | linear | linear | 组合模型；仅注册表内 "linear" 合法，否则 error+拒装配(Assembler:492-495) |
 | model.weights.ofi/trade_flow/book_imbalance/momentum/lead_lag | .35/.25/.20/.15/.05 | 同左 | Layer1 base 权重；和≈1 由热参交叉复查 warn。热参 ofi_weight 等 5 键可覆盖 |
 | model.strongThreshold | 0.7 | 0.7 | 强信号阈值。热参 strong_threshold 可覆盖 |
@@ -401,10 +410,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | selfTradeCalibrator.toxicityWindowMs/adverseThreshold/minSamples/moveThresholdTicks | 5000/0.6/5/1.0 | 同左 | SelfTradeCalibrator.h:131-134 |
 | selfTradeCalibrator.retreatTicks | 3 | **2.0** | 成交后退让 ticks（FillRetreatPolicy 消费；与 improveRetreatRatio 无关） |
 | selfTradeCalibrator.retreatCooldownMs | 5000 | **3000** | 退让冷却 ms |
-| selfTradePrevention.enabled | true | true | STP 开关唯一权威（arb=true 强制 ON） |
-| selfTradePrevention.stpMinPriceGap | 1.0 | 1.0 | 最小价差 gap(ticks)(H7 键名统一) |
-| selfTradePrevention.allowSamePrice | false | false | 是否允许同价对冲 |
-| selfTradePrevention.priceAdjustTicks | 1.0 | 1.0 | 价格调整 ticks |
+| selfTradePrevention.enabled | true | true | STP 开关唯一权威（arb=true 强制 ON）。批次E(2026-09-19③)：stpMinPriceGap/allowSamePrice/priceAdjustTicks 三键删除——死键（checkSelfTrade 只读 enabled，价差/同价容忍语义从未实现） |
 | autoCancel.maxAgeMs | 10000 | 10000 | 订单最大存活 ms→进入 auto-cancel 流程。热参无此键（结构参数不热更） |
 | autoCancel.staleExtensionTicks | 2.0 | 2.0 | **B1 新键**：STALE 延寿价格偏离阈值(ticks)——偏离≤此值的挂单不被 auto-cancel 判死（原 sticky×2 隐式值显式化；旧 priceDeviation 键删除=死接口清理） |
 | autoCancel.cancelRetryIntervalMs | 1000 | 1000 | B+ 撤单 ack 超时重发间隔 ms |
@@ -413,11 +419,11 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 | **zombieLatch.telemetryMs** | 60000 | 60000 | **Z3c**：闩锁持有期遥测打点间隔（0=禁用） |
 | **zombieLatch.maxHoldMs** | 120000 | 120000 | **B2(2026-09-16)**：闩锁持有上限 ms —— 超此值停止 reprobe 风暴 + 一次 `EXCEEDED maxHold` 高优告警，**保持停报**（0=不封顶）。缘起 09-16 14:13 双合约 136s 停报（重探被新 zombie 反复续期、停报时长无上界） |
 | **skewDriver.hrSlowWindowMs** | 300000 | 300000 | **S1**：hedge_ratio 慢化 EMA 窗口（skew driver 纯化，隔离逐 tick 价格噪声） |
-| correlationManager.windowSize/minCorrelation/spreadZThreshold | 100/0.5/2.0 | 同左 | CorrelationManager.h:57-59 |
+| correlationManager.windowSize/minCorrelation | 100/0.5 | 同左 | CorrelationManager.h；批次E：spreadZThreshold 死键已删 |
 
 ---
 
-## 4. 热更新配置 hotparams.yaml（24 个注册参数；文件 26 键）
+## 4. 热更新配置 hotparams.yaml（24 个注册参数；文件 24 键）
 
 **唯一的热更文件**（实盘 watcher 1Hz；回测完全不生效）。snake_case 键名。
 
@@ -435,9 +441,9 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 
 | 键 | dist 值 | 注册默认来源 | 热路径边界[lo,hi] | 应用目标 |
 |---|---|---|---|---|
-| base_spread | 2.0 | config.quoting.baseSpread | [0.5,20] | GLFTParams + FutuQuoter |
+| base_spread | 1.5 | config.quoting.baseSpread | [0.5,20] | GLFTParams + FutuQuoter |
 | base_qty | 10.0 | quoting.baseQty | [1e-6,100] | FutuQuoter |
-| level_qty_multiplier | 0.7 | quoting.qtyDecay | [0,1000](宽松,warn走复查) | FutuQuoter |
+| level_qty_multiplier | 0.7 | quoting.levelQtyMultiplier | [0,1000](宽松,warn走复查) | FutuQuoter |
 | level_step | 1.0 | quoting.levelStep | [1e-6,100] | FutuQuoter |
 | max_delta | 30 | portfolio.maxDelta | [1e-6,1e8] | Portfolio.portfolio_max_delta + Coordinator |
 | **contract_max_delta** | 30 | anchor 合约 ci.max_delta（B2） | [1e-6,1e8] | Portfolio.setContractMaxDelta **全部合约**（差异化需重启） |
@@ -467,7 +473,7 @@ presence 即启用：`signals.<name>` 存在才启用该信号源。
 生效时机轴（实盘）:
   T0 进程启动 ── initial applyAll: 共享内存残留旧值 → 盖到 config/coordinator 初始化值上
                  （"重启不丢上次热更结果"; UftFutuMmStrategy.cpp:383-395）
-  T0+ε        ── logDriftSummary 无条件打印 27 键 文件值 vs 注册默认 差异
+  T0+ε        ── logDriftSummary 无条件打印 24 键 文件值 vs 注册默认 差异
                  （回测也打印! 差异键=回测/实盘行为分叉点）
   T0~1s       ── watcher 首轮: hotparams.yaml 解析值写入共享内存 → 置 pending
   下一 tick   ── on_tick 内 drain(_cb_mtx 内): consumePendingApply→applyAll
@@ -482,7 +488,7 @@ parse 校验规则 (FutuHotParamManager.cpp:242-338):
   文件不可载 → 整体失败(本轮跳过)
   "abc"/"true"/空串 → strtod 全串校验拒收该键 warn(atof 会静默变0, 故显式校验)
   NaN/inf/越界(bounds 表) → 拒收该键保留旧值 warn
-  未知键 → 忽略(只遍历 26 个注册名; V10-R10 起 toxicity_spread_factor 已移除)
+  未知键 → 忽略(只遍历 24 个注册名; V10-R10 起 toxicity_spread_factor 已移除)
   合法变更 → 写共享内存 + old->new 审计日志 + 变更计数
 
 applyAll 应用顺序 (:74-203):
@@ -502,7 +508,7 @@ crossCheckIssues 五检查项 (:349-444):
 2. 单键拒收不影响其它键（逐键独立校验保留旧值）。
 3. `contract_max_delta` 应用到**全部合约**同一值；需要 per-contract 差异只能重启改 yaml。
 4. 结构性参数不在热参表（autoCancel/maxOrders/orderErrorThreshold 等）——改需重启。
-5. 共享内存按**名字**注册寻址，27 键增删天然兼容旧布局。
+5. 共享内存按**名字**注册寻址，键增删天然兼容旧布局。
 6. 回测想验证某组参数 → 直接改主配置的对应键（coordinator.yaml 或 config yaml），
    并保持 dist/hotparams.yaml 与之同步以免 drift 告警误导。
 
@@ -575,13 +581,13 @@ crossCheckIssues 五检查项 (:349-444):
 
 | 键 | 位置 | 状态 |
 |---|---|---|
-| `modules:` 整节 + 根级 `stpMinPriceGap` | 主配置 yaml | **零读取**——开关/毒性/STP 权威全在 coordinator.yaml（V8-R6 起） |
+| `modules:` 整节 + 根级 `stpMinPriceGap` | 主配置 yaml | **零读取**——开关/毒性/STP 权威全在 coordinator.yaml（V8-R6 起）；`stpMinPriceGap` 已删除（2026-09-19③ 批次E，白名单仅兼容远程旧文件） |
 | portfolio.hedgeDeltaThreshold / hedgeCooldownMs | 主配置 | loader 无读取点 |
 | quoting.alwaysObligation | 主配置 | 无消费者 |
 | useHedging（注释提及） | coordinator 根级 | 代码无读取点（Assembler coordBool 仅根级 Hedging 有） |
 | _ec_5d 内嵌 modules.toxicityDetector.adverseThreshold=0.14/vpinThreshold=0.07 | _ec_5d.yaml | **不生效**！实际 0.75/0.60 来自 coordinator.yaml——排查毒性阈值勿看错文件 |
 | env.slippage | 主配置(env) | 仅 cta/sel mocker 用，UFT 忽略 |
-| `delta_skew_threshold` / `delta_skew_factor` | hotparams.yaml | **死键（2026-09-19 审计确认）**：不在 `paramNames()` 注册表内 ⇒ 热更不生效；coordinator.yaml:138 注释已记 "R14 已删除 deltaSkewThreshold/deltaSkewFactor 键"。建议从 hotparams.yaml 删除（当前白名单豁免） |
+| ~~`delta_skew_threshold` / `delta_skew_factor`~~ | hotparams.yaml | **死键已删（2026-09-19②）**：R14 删除参数后残留、不在 `paramNames()` 注册表 ⇒ 热更不生效；已从 src/dist 样例删除（**远程 hotparams.yaml 待同步**，代码白名单暂保留防旧文件 unknown 误报）。历史：coordinator.yaml:142 注释记 "R14 已删除 deltaSkewThreshold/deltaSkewFactor 键" |
 | `contracts[].alias` | 主配置 | **说明性键**：人工可读别名（ao2611/ao2612），代码无消费点（白名单） |
 | `quoting.maxObligationSpread` / `obligationOnlyL0` / `qtyDecay`；`risk.frequency.flattenThreshold` / `pauseThreshold` | 历史 BT 配置（configbt_v5 旧版 / _ec_5d 系） | **归档死键**：代码已删（config.yaml:112 注释：旧 obligationOnlyL0/alwaysObligation 已从代码移除）；现行键为 `obligationMaxSpreadTicks` / `positionBreach*` / `sameSide*`（白名单） |
 | `spread_arbitrage.arb_close.*` | spread_arbitrage.yaml | **未启用特性的子键**：`arb_close.enabled:false` ⇒ 子键暂无消费（白名单；启用后其键会被正常读取，不受白名单影响） |
@@ -620,7 +626,7 @@ crossCheckIssues 五检查项 (:349-444):
 
 规则（**硬性**）：任何新增的 coordinator.yaml 读者必须走 `FutuConfigLoader`（含审计源登记）；
 `StrategyCoordinator::loadConfig` 保持唯一解析点。策略层 → 协调器的字段覆盖集中在
-`FutuConfigMap::applyStrategyOverrides`（11 字段，改动需同步 `test_futu_config_map.cpp`）。
+`FutuConfigMap::applyStrategyOverrides`（13 字段，改动需同步 `test_futu_config_map.cpp`）。
 
 ### 9.2 审计口径（三档）
 

@@ -13,6 +13,7 @@
 #include "../Share/TimeUtils.hpp"
 #include "../WtUftCore/EventNotifier.h"
 #include <algorithm>
+#include <cstdio>
 
 namespace futu
 {
@@ -375,12 +376,6 @@ bool FutuRiskMonitor::checkRateLimits()
 //   quote_chain->riskWiden().tickSoft(cur_util, l1, l2, halted) (每 tick 无状态重算,
 //   阈值同源 RateLimits.position_warning_l1/l2)。
 
-RiskAction FutuRiskMonitor::determineAction(const std::vector<RiskViolation>& violations) const
-{
-    RiskCategory category;
-    return determineActionWithCategory(violations, category);
-}
-
 RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskViolation>& violations,
                                                         RiskCategory& outCategory,
                                                         bool cost_basis_stale) const
@@ -545,19 +540,22 @@ void FutuRiskMonitor::resumeQuoting()
 
 bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
 {
-    if (!portfolio)
+    if (!portfolio) {
+        rejectRecovery("no-portfolio", "portfolio is null");
         return false;
+    }
 
     RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A (const: lock 为 mutable)
 
     // Irreversible risks cannot auto-recover
     if (_halt_category.load(std::memory_order_acquire) == RiskCategory::IRREVERSIBLE)
-        return false;
+        return false; // 终态: 不自动恢复, 不计数不日志(人工干预语义)
 
     // Check max recovery count
     if (_recovery_count >= _recovery_config.max_recovery_count) {
-        WTSLogger::warn("[RISK] Max recovery count ({}) reached, manual intervention required",
-                        _recovery_config.max_recovery_count);
+        rejectRecovery("max-recovery-count",
+                       fmt::format("{}/{}", _recovery_count, _recovery_config.max_recovery_count),
+                       true);
         return false;
     }
 
@@ -565,13 +563,19 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
 
     // Check cooldown period
     if (_trading_halted.load(std::memory_order_relaxed)) {
-        if (now - _halt_timestamp < _recovery_config.cooldown_ms)
+        if (now - _halt_timestamp < _recovery_config.cooldown_ms) {
+            rejectRecovery("halt-cooldown",
+                           fmt::format("{}ms left", _recovery_config.cooldown_ms - (now - _halt_timestamp)));
             return false;
+        }
     }
 
     if (_quoting_paused.load(std::memory_order_relaxed)) {
-        if (now - _pause_timestamp < _recovery_config.cooldown_ms)
+        if (now - _pause_timestamp < _recovery_config.cooldown_ms) {
+            rejectRecovery("pause-cooldown",
+                           fmt::format("{}ms left", _recovery_config.cooldown_ms - (now - _pause_timestamp)));
             return false;
+        }
     }
 
     // Check if risk utilization is below recovery threshold
@@ -586,8 +590,15 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     double exposure = portfolio->getTotalGrossExposure();
     if (params.max_exposure > 0) {
         double exposure_util = exposure / params.max_exposure;
-        if (exposure_util > _recovery_config.recovery_threshold)
+        if (exposure_util > _recovery_config.recovery_threshold) {
+            rejectRecovery("exposure-util",
+                           fmt::format("{:.2f}>{:.2f} (gross={:.1f}/max={:.1f})",
+                                       exposure_util,
+                                       _recovery_config.recovery_threshold,
+                                       exposure,
+                                       params.max_exposure));
             return false;
+        }
     }
 
     // Check if any contract position is still above pause threshold.
@@ -597,8 +608,15 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     // With the relaxed threshold, MM resumes at 60 but checkPreTradePosition's
     // v3 soft limit (obligation mode at util>=1.0) drives natural reduction.
     for (const auto& c : portfolio->getAllContractsSnapshot()) {
-        if (c.max_position > 0 && std::abs(c.position) > c.max_position * _rate_limits.position_breach_pause_threshold)
+        if (c.max_position > 0 && std::abs(c.position) > c.max_position * _rate_limits.position_breach_pause_threshold) {
+            rejectRecovery("position-breach",
+                           fmt::format("{} pos={:.0f} > max={:.0f}*thr={:.2f}",
+                                       c.code,
+                                       c.position,
+                                       c.max_position,
+                                       _rate_limits.position_breach_pause_threshold));
             return false;
+        }
     }
 
     // Enhanced: Check PnL recovery if halt was triggered by loss
@@ -609,9 +627,11 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
 
         // Must recover at least pnl_recovery_ratio of the loss
         if (current_loss > loss_at_halt * (1.0 - _recovery_config.pnl_recovery_ratio)) {
-            WTSLogger::debug("[RISK] PnL not recovered enough: loss_at_halt={:.2f}, current_loss={:.2f}",
-                             loss_at_halt,
-                             current_loss);
+            rejectRecovery("pnl-recovery",
+                           fmt::format("loss_at_halt={:.2f}, current_loss={:.2f}, ratio={:.2f}",
+                                       loss_at_halt,
+                                       current_loss,
+                                       _recovery_config.pnl_recovery_ratio));
             return false;
         }
     }
@@ -621,15 +641,43 @@ bool FutuRiskMonitor::canRecover(const FutuPortfolio* portfolio) const
     if (_recovery_config.max_loss_for_recovery != 0) {
         double halted_loss = std::abs(_halt_pnl_snapshot);
         if (halted_loss > std::abs(_recovery_config.max_loss_for_recovery)) {
-            WTSLogger::warn(
-                "[RISK] Loss at halt ({:.2f}) exceeds max for recovery ({:.2f}), manual intervention required",
-                halted_loss,
-                std::abs(_recovery_config.max_loss_for_recovery));
+            rejectRecovery("max-loss-for-recovery",
+                           fmt::format("halted_loss={:.2f} > max={:.2f}",
+                                       halted_loss,
+                                       std::abs(_recovery_config.max_loss_for_recovery)),
+                           true);
             return false;
         }
     }
 
     return true;
+}
+
+void FutuRiskMonitor::rejectRecovery(const char* gate, const std::string& detail, bool as_warn) const
+{
+    _recover_reject_count++;
+    snprintf(_last_recover_reject_reason,
+             sizeof(_last_recover_reject_reason),
+             "%s: %s",
+             gate,
+             detail.c_str());
+    _last_recover_reject_reason[sizeof(_last_recover_reject_reason) - 1] = '\0';
+
+    uint64_t now = TimeUtils::getLocalTimeNow();
+    if (now - _last_recover_reject_log_ms < 30000)
+        return; // 30s 节流: halt 期间每 5s 一次的检查不得刷屏
+    _last_recover_reject_log_ms = now;
+
+    if (as_warn)
+        WTSLogger::warn("[RISK] auto-recovery blocked by {} ({}) [rejects={}]",
+                        gate,
+                        detail,
+                        _recover_reject_count);
+    else
+        WTSLogger::info("[RISK] auto-recovery blocked by {} ({}) [rejects={}]",
+                        gate,
+                        detail,
+                        _recover_reject_count);
 }
 
 bool FutuRiskMonitor::checkAndRecover(const FutuPortfolio* portfolio)

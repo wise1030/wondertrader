@@ -38,25 +38,23 @@ struct CorrelationStats
     CorrelationStats()
         : correlation(0), beta(1), alpha(0), spread_mean(0), spread_std(0), zscore(0), sample_count(0), last_update(0)
     {}
-    inline bool isSpreadHigh(double threshold = 2.0) const { return zscore > threshold; }
-    inline bool isSpreadLow(double threshold = -2.0) const { return zscore < threshold; }
 };
 
 struct CorrelationConfig
 {
     uint32_t window_size;
     double min_correlation;
-    double spread_z_threshold;
-    bool auto_calculate_beta;
 
-    CorrelationConfig() : window_size(100), min_correlation(0.5), spread_z_threshold(2.0), auto_calculate_beta(true) {}
+    // 2026-09-19③ 批次E: spread_z_threshold/auto_calculate_beta 删除 —— 解析存在但
+    // 相关性管理逻辑从不消费 (死字段+死键)
+
+    CorrelationConfig() : window_size(100), min_correlation(0.5) {}
 
     static CorrelationConfig fromVariant(wtp::WTSVariant* v)
     {
         CorrelationConfig c;
         c.window_size = FutuConfig::readUInt32(v, "windowSize", 100);
         c.min_correlation = FutuConfig::readDouble(v, "minCorrelation", 0.5);
-        c.spread_z_threshold = FutuConfig::readDouble(v, "spreadZThreshold", 2.0);
         return c;
     }
 };
@@ -81,14 +79,11 @@ public:
 
     CorrelationStats getCorrelation(const std::string& code1, const std::string& code2) const;
 
-    double getSpreadZScore(const std::string& code1, const std::string& code2) const;
     double getHedgeRatio(const std::string& code1, const std::string& code2) const;
 
     // V8-R3: 套利假接口 (getSpreadSignals 返回 {}/hasSpreadOpportunity 硬编码
     // ratio=1.0/SpreadTradeSignal) 已删 -- 零调用者的半成品, 真实套利走 SpreadArbitrageManager
 
-    size_t getContractCount() const { return _contracts.size(); }
-    size_t getCorrelationCount() const { return _calculators.size(); }
     void reset();
 
 private:

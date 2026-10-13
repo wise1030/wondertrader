@@ -32,11 +32,10 @@ public:
     ~FutuHotParamWatcher();
 
     /// 启动监视线程
-    /// @param strategy_id 策略ID (日志)
     /// @param filepath    hotparams.yaml 完整路径
     /// @param hot_mgr     热参数管理器 (仅写共享内存+置脏, 不再 applyAll)
     /// @param interval_ms 轮询间隔, 默认 1000ms
-    bool start(const char* strategy_id, const char* filepath,
+    bool start(const char* filepath,
                FutuHotParamManager* hot_mgr,
                uint32_t interval_ms = 1000);
 
@@ -50,7 +49,6 @@ private:
     bool syncFileToSharedMemory();
 
 private:
-    std::string _strategy_id;
     std::string _filepath;
     uint32_t    _interval_ms;
 

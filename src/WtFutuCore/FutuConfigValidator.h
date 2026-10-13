@@ -54,48 +54,6 @@ public:
         return true;
     }
 
-    /// 验证止损必须大于入场阈值
-    static bool validateStopLoss(double entry_threshold, double stop_loss_z, ValidationResult& result)
-    {
-        if (stop_loss_z <= entry_threshold) {
-            result.addError("stop_loss_z (" + std::to_string(stop_loss_z) + ") must be > entry_z_threshold (" +
-                            std::to_string(entry_threshold) + ")");
-            return false;
-        }
-        return true;
-    }
-
-    /// 验证退出阈值必须小于入场阈值
-    static bool validateExitThreshold(double entry_threshold, double exit_threshold, ValidationResult& result)
-    {
-        if (exit_threshold >= entry_threshold) {
-            result.addError("exit_z_threshold (" + std::to_string(exit_threshold) + ") must be < entry_z_threshold (" +
-                            std::to_string(entry_threshold) + ")");
-            return false;
-        }
-        return true;
-    }
-
-    /// 验证加仓安全比率
-    static bool validateAddSafetyRatio(double add_safety_ratio, ValidationResult& result)
-    {
-        if (add_safety_ratio <= 0 || add_safety_ratio >= 1.0) {
-            result.addError("add_safety_ratio (" + std::to_string(add_safety_ratio) + ") must be in (0, 1)");
-            return false;
-        }
-        return true;
-    }
-
-    /// 验证队列大小是否为2的幂
-    static bool validateQueueSize(uint32_t size, const std::string& name, ValidationResult& result)
-    {
-        if (size == 0 || (size & (size - 1)) != 0) {
-            result.addError(name + " (" + std::to_string(size) + ") must be a power of 2");
-            return false;
-        }
-        return true;
-    }
-
     /// 验证参数范围
     template <typename T>
     static bool checkRange(const std::string& name, T value, T min_val, T max_val, ValidationResult& result)

@@ -171,9 +171,6 @@ public:
     /// Get accumulated flow statistics
     AccumulatedFlowStats getFlowStats() const;
 
-    /// Get current imbalance ratio
-    double getImbalanceRatio() const;
-
     //==========================================================================
     // Reset
     //==========================================================================

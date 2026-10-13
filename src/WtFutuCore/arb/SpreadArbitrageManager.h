@@ -21,6 +21,7 @@
 #include "PairsTradingStrategy.h"
 #include "StatisticalArbStrategy.h"
 #include "MarketMakingEnhancer.h"
+#include "CrossLegContext.h"
 #include "../../Includes/FasterDefs.h"
 #include <memory>
 #include <vector>
@@ -133,10 +134,6 @@ public:
     /// @return true if successful, false otherwise
     bool loadConfig(const std::string& config_file);
 
-    void setCalculatorConfig(const SpreadCalculatorConfig& config);
-    void setRiskConfig(const SpreadRiskConfig& config);
-    void setMmEnhancerConfig(const MmEnhancerConfig& config);
-
     /// Set expiry date callback for risk manager
     void setExpiryDateCallback(ExpiryDateCallback callback);
 
@@ -163,7 +160,7 @@ public:
     /// Process incoming tick
     /// V8-A1: 乘数死参数删除 — 乘数是合约静态属性, 由 pair 配置经
     /// setLegMultipliers 装配进 calculator, 不应逐 tick 传递。
-    void onTick(const std::string& code, double price, uint64_t timestamp);
+    void onTick(const std::string& code, double price, uint64_t timestamp, double bid = 0, double ask = 0);
 
     //==========================================================================
     // Signal Generation
@@ -211,6 +208,11 @@ public:
     /// Must be called once at init, before any generateSignal call.
     /// Portfolio must outlive SpreadArbitrageManager.
     void setPortfolio(const FutuPortfolio* portfolio) { _portfolio_ptr = portfolio; }
+
+
+    /// 测试接缝: calculator 配置直注 (生产路径走 loadConfig 内部直配;
+    /// 19.33-cleanup 曾判冗余删除, test_v8_r4b 依赖此口配置 min_samples, 恢复并标注)
+    void setCalculatorConfig(const SpreadCalculatorConfig& config);
 
     /// Callback when an arb order fills (called from UftFutuMmStrategy::on_trade
     /// after consumePairTag identifies the order as an arb order).
@@ -365,6 +367,10 @@ private:
     /// Nullable: if null, B-3 logic falls back to legacy generateSignal path.
     const FutuPortfolio* _portfolio_ptr{nullptr};
 
+    /// 跨腿上下文（arb 线程 onTick 驱动，与策略同线程同前提；§20 迁移v2 —
+    /// pair 级基础模块, 任意插件经 SpreadState.cross_* 通用消费）
+    CrossLegContext _cross_leg_ctx;
+
     /// Per-pair arb state (intent + in-flight tracking).
     wtp::wt_hashmap<std::string, PairArbState> _pair_arb_states;
     alignas(64) mutable std::atomic_flag _pair_arb_spin = ATOMIC_FLAG_INIT;
@@ -444,6 +450,11 @@ public:
     // C0 配置访问
     //==========================================================================
     const ArbCloseConfig& getArbCloseConfig() const { return _arb_close_cfg; }
+
+    /// 19.30-A2: TIMEOUT_EXIT 超时升级 — 返回本笔应使用的 order_flag。
+    /// 首笔记录计时, 持续超时 >= timeout_policy.timeout_ms 后升级为止损档
+    /// (FAK 对手价, 复用 STOP_LOSS 执行链); 持仓归零自动复位。
+    int timeoutExitOrderFlag(const std::string& pair_id, uint64_t now_ms);
 
     /// V10-P2-6: 失败腿下单量 → 对侧腿计划对冲手数换算 (pair ratio 折算)。
     /// 同步 hedge-on-fill 的封顶量此前直接用失败腿自身手数, ratio≠1 时对侧

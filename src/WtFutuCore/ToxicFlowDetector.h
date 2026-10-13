@@ -172,9 +172,6 @@ public:
     /// Quick toxicity score
     double getToxicityScore() const;
 
-    /// Average adverse move from realized toxicity (ticks)
-    double getAvgAdverseMove() const;
-
     void reset();
 
     //==========================================================================

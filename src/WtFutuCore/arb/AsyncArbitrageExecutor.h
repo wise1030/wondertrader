@@ -81,10 +81,14 @@ struct ArbTickData
     FixedString24 code;  ///< A5: trivially copyable (was std::string)
     double price;
     uint64_t timestamp;
+    double bid;  ///< 方案 B §20: 跨腿 mid 计算原料（0=调用方未提供, 消费方回退 last）
+    double ask;
 
     // V8-A1: multiplier 字段删除 (死参数 — bridge 恒传 1.0, 乘数由 pair 配置装配)
-    ArbTickData() : price(0), timestamp(0) {}
-    ArbTickData(const std::string& c, double p, uint64_t t) : code(c), price(p), timestamp(t) {}
+    ArbTickData() : price(0), timestamp(0), bid(0), ask(0) {}
+    ArbTickData(const std::string& c, double p, uint64_t t, double b = 0, double a = 0)
+        : code(c), price(p), timestamp(t), bid(b), ask(a)
+    {}
 };
 static_assert(std::is_trivially_copyable_v<ArbTickData>, "ArbTickData must be trivially copyable for SPSC queue");
 
@@ -184,7 +188,6 @@ class AsyncArbitrageExecutor
 {
 public:
     using OrderCallback = std::function<void(const ArbOrderRequest&)>;
-    using PositionCallback = std::function<void(const ArbPositionSync&)>;
 
     AsyncArbitrageExecutor();
     ~AsyncArbitrageExecutor();
@@ -242,8 +245,6 @@ public:
     // Callbacks
     //==========================================================================
 
-    void setOrderCallback(OrderCallback callback) { _order_callback = callback; }
-    void setPositionCallback(PositionCallback callback) { _position_callback = callback; }
 
     //==========================================================================
     // Control
@@ -263,7 +264,7 @@ public:
     //==========================================================================
 
     /// Push tick data (called from main thread, non-blocking)
-    bool pushTick(const std::string& code, double price, uint64_t timestamp);
+    bool pushTick(const std::string& code, double price, uint64_t timestamp, double bid = 0, double ask = 0);
 
     /// Get pending orders (called from main thread)
     /// @param callback Function to call for each order
@@ -325,7 +326,10 @@ public:
     /// @return V8-A2: true=对冲单已受理; false=拒绝/限流/无盘口价 → 调用方
     ///         保留 leg 有限重试。定价权全部在回调方 (leg2 盘口快照),
     ///         不再接受 executor 的 leg1 价兜底。
-    using OrphanHedgeCallback = std::function<bool(const std::string& code, bool is_buy, double qty, bool urgent)>;
+    // 19.30-A1: 回调增 pair_id — 桥侧登记对冲单进成交核验簿记
+    // (_arb_hedge_on_fill), 受理≠成交(FAK 零成交曾致残腿簿记漂移)
+    using OrphanHedgeCallback =
+        std::function<bool(const std::string& pair_id, const std::string& code, bool is_buy, double qty, bool urgent)>;
 
     /// Process orphan legs and generate hedge orders (called from main thread)
     /// @param callback  Called for each orphan leg that needs hedging
@@ -452,8 +456,6 @@ private:
     // Callbacks
     //==========================================================================
 
-    OrderCallback _order_callback;
-    PositionCallback _position_callback;
 
     //==========================================================================
     // Scheme B-3: Order → Pair Tagging Map

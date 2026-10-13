@@ -63,27 +63,6 @@ void FutuPortfolio::addContract(const std::string& code,
         _anchor_code = code;
 }
 
-void FutuPortfolio::removeContract(const std::string& code)
-{
-    RecursiveSpinGuard _g(_lock);
-    markAggregatesDirty(); // F4
-    auto it = _code_to_state.find(code);
-    if (it == _code_to_state.end())
-        return;
-
-    size_t idx = it->second;
-
-    // If not the last element, swap with last and update its index
-    if (idx != _contracts.size() - 1) {
-        // Move last element to the removed position
-        _contracts[idx] = std::move(_contracts.back());
-        // Update the moved element's index in the map
-        _code_to_state[_contracts[idx].code] = idx;
-    }
-    _contracts.pop_back();
-
-    _code_to_state.erase(it);
-}
 
 void FutuPortfolio::onTick(const char* stdCode, wtp::WTSTickData* tick)
 {
@@ -256,12 +235,6 @@ void FutuPortfolio::clearShadowStale(const std::string& code)
         cs->shadow_stale = false;
 }
 
-bool FutuPortfolio::isShadowStale(const std::string& code) const
-{
-    RecursiveSpinGuard _g(_lock);
-    const ContractState* cs = getContract(code);
-    return cs ? cs->shadow_stale : false;
-}
 
 // F-core C(2026-09-17): realized 滞后事件 —— 只计数。
 //   机制: setShadowFromEngine() 每次成交都把引擎 realized 镜像为权威值, 而 FutuRuntimeOps 的
@@ -302,12 +275,6 @@ double FutuPortfolio::getShadowRealizedPnl(const std::string& code) const
     return cs ? cs->shadow_realized_pnl : 0.0;
 }
 
-double FutuPortfolio::getShadowUnrealizedPnl(const std::string& code) const
-{
-    RecursiveSpinGuard _g(_lock);
-    const ContractState* cs = getContract(code);
-    return cs ? cs->shadow_unrealized_pnl : 0.0;
-}
 
 void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double now)
 {
@@ -325,17 +292,6 @@ void FutuPortfolio::checkOvershootSignFlip(const char* code, double prev, double
 //==========================================================================
 // Position Reduction
 
-std::vector<const ContractState*> FutuPortfolio::getContractsNeedingReduction(double threshold) const
-{
-    RecursiveSpinGuard _g(_lock);
-    std::vector<const ContractState*> result;
-    for (const auto& c : _contracts) {
-        if (c.needsPositionReduction(threshold)) {
-            result.push_back(&c);
-        }
-    }
-    return result;
-}
 
 void FutuPortfolio::smoothUpdateHedgeRatio(const std::string& code, double beta, long sample_count)
 {

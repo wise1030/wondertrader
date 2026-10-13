@@ -6,6 +6,7 @@
 */
 
 #include "StrategyCoordinator.h"
+#include "CloseoutOrchestrator.h"  // 19.34: Stage0 触发决策调用
 #include "OrderApiGuard.h"
 #include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
 #include "HaltGate.h"       // F-core P1-6 阶段 2: 报价门禁统一求值
@@ -165,7 +166,7 @@ BilateralSeed parseBilateralLine(const std::string& line)
 }
 } // namespace
 
-StrategyCoordinator::StrategyCoordinator() : _channel_ready(true), _tick_count(0), _portfolio_ctx_dirty(true) {}
+StrategyCoordinator::StrategyCoordinator() : _tick_count(0), _portfolio_ctx_dirty(true) {}
 
 StrategyCoordinator::~StrategyCoordinator()
 {
@@ -193,6 +194,7 @@ bool StrategyCoordinator::loadConfig(const std::string& config_file)
         coordinator = cfg;
     }
 
+    _loaded_from = config_file;  // 19.36: 审计源名=实际路径
     // 调用 loadConfigFromVariant 解析配置
     loadConfigFromVariant(coordinator);
 
@@ -210,7 +212,7 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
 
     // F-core P1-4(2026-09-19): 登记 coordinator.yaml 源 (键路径展开 + 读取记账;
     //   读取经下方局部 readX 助手自动记账), 供启动期 [CONFIG-AUDIT] 报告。
-    ConfigAudit::instance().beginSource("coordinator.yaml", cfg);
+    ConfigAudit::instance().beginSource(_loaded_from.empty() ? "coordinator.yaml" : _loaded_from, cfg);  // 19.36: 源名=实际路径, 双策略分源
 
     _cfg._raw_variant = cfg;
 
@@ -408,41 +410,11 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
 
 void StrategyCoordinator::syncPhaseConfig()
 {
-    // 5A-1: 同步会话阶段判定配置 (closeout 窗口参数与 _cfg 同源;
-    //       loadConfig / setConfig 后各调一次, 保持与 processCloseout 判定一致)
-    SessionPhaseConfig pcfg;
-    pcfg.section_break_seconds_before = _cfg.section_break_seconds_before;
-    pcfg.close_time = _cfg.close_time;
-    pcfg.closeout_minutes_before = _cfg.closeout_minutes_before;
-    pcfg.night_close_time = _cfg.night_close_time;
-    pcfg.night_minutes_before = _cfg.night_minutes_before;
-    _phase_mgr.configure(pcfg);
+    // 5A-1: 同步会话阶段判定配置 — 2026-09-19③ 批次B: SessionPhaseManager 改持 _cfg 指针
+    //       (原 SessionPhaseConfig 打包为同值第三副本, 已消除); loadConfig/setConfig 后各调一次
+    _phase_mgr.configure(_cfg);
 }
 
-void StrategyCoordinator::setTradingState(TradingState* state)
-{
-    _trading_state = state;
-    // P1.3 Step1: wire CloseoutTrigger. trading_state 是 coordinator 最后设置的依赖
-    // (FutuModuleAssembler 顺序: setConfig/setQuoters/setPortfolio/setRiskMonitor 均先于 setTradingState)
-    _closeout_trigger.setDeps({_risk_monitor, _trading_state, _portfolio, &_cfg,
-        [this](wtp::IUftStraCtx* ctx) {
-            if (_quoters) {
-                for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
-            }
-        },
-        [this](wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs) {
-            flushBilateralStats(ctx, hhmm, secs);
-        }});
-    _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, _trading_state, _arb_executor,
-        &_quote_chain, _self_trade_calibrator, &_cfg,
-        [this](wtp::IUftStraCtx* ctx) {
-            if (_quoters) {
-                for (auto& [code, q] : *_quoters) { q->cancelAll(ctx); }
-            }
-        },
-        // V10-R8-a: 风暴护栏恢复挂钩 (setResumeStateHooks 由装配器在 wireDeps 前注入)
-        _resume_quoting_paused_since, _resume_order_error_count});  // P1.3 Step2a+2b
-}
 
 void StrategyCoordinator::wireDeps(const CoordinatorDeps& deps)
 {
@@ -462,24 +434,27 @@ void StrategyCoordinator::wireDeps(const CoordinatorDeps& deps)
     _correlation_manager = deps.correlation_manager;
     _arb_executor = deps.arb_executor;
     _arb_manager = deps.arb_manager;
+    _closeout_orch = deps.closeout_orch;
 
-    // Wire sub-component deps (was in setTradingState - must be after all members set)
-    _closeout_trigger.setDeps({_risk_monitor, _trading_state, _portfolio, &_cfg,
-        [this](wtp::IUftStraCtx* ctx) {
-            if (_quoters) {
-                for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
-            }
-        },
-        [this](wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs) {
-            flushBilateralStats(ctx, hhmm, secs);
-        }});
-    _risk_coord.setDeps({_portfolio, _order_router, _risk_monitor, _trading_state, _arb_executor,
-        &_quote_chain, _self_trade_calibrator, &_cfg,
-        [this](wtp::IUftStraCtx* ctx) {
-            if (_quoters) {
-                for (auto& [code, q] : *_quoters) { q->cancelAll(ctx); }
-            }
-        }});
+    // 19.33: 子组件统一收 ApplicationDeps 切片。cancel_all_quotes 由 coordinator
+    // 填充 (捕获 this); flush_bilateral_stats 同源 —— 函数字段的自然属主在
+    // coordinator (私有方法), 故此处拷贝一份再填函数字段后下发, 指针字段仍
+    // 全部来自 assembler 单一填充源。
+    ApplicationDeps sub_deps = deps;
+    sub_deps.cfg = &_cfg;
+    sub_deps.quote_chain = &_quote_chain;
+    sub_deps.cancel_all_quotes = [this](wtp::IUftStraCtx* ctx) {
+        if (_quoters) {
+            for (auto& [code, q] : *_quoters) { if (q) q->cancelAll(ctx); }
+        }
+    };
+    sub_deps.flush_bilateral_stats = [this](wtp::IUftStraCtx* ctx, uint32_t hhmm, uint32_t secs) {
+        flushBilateralStats(ctx, hhmm, secs);
+    };
+    sub_deps.quoting_paused_since = _resume_quoting_paused_since;
+    sub_deps.order_error_count = _resume_order_error_count;
+    _risk_coord.setDeps(sub_deps);
+    _wired_deps = sub_deps;  // 19.34: 存储填充后聚合, CloseoutOrchestrator 经 wiredDeps() 接线
 
     // C12: pre-populate atomic _last_mid from _quoters
     initLastMid();
@@ -559,8 +534,8 @@ ProcessingResult StrategyCoordinator::processTick(
     if (_portfolio)
         tc.cs_valid = _portfolio->getContractSnapshot(tc.code, tc.cs);
 
-    // Stage 0: Closeout state machine (always needed)
-    if (_closeout_trigger.process(ctx, tc)) {
+    // Stage 0: Closeout 触发决策 (19.34: Trigger 并入 Orchestrator, 经注入指针调用)
+    if (_closeout_orch && _closeout_orch->processTrigger(ctx, tc)) {
         result.closeout_executed = true;
         result.processed = true;
         // T2: closeout 窗口不再是风控盲区 — 活跃平仓态下仍跑硬风控 (仅跳报价):
@@ -709,6 +684,12 @@ ProcessingResult StrategyCoordinator::processTick(
                             HotLogGate::skipped(),
                             _halt_shadow_mismatch);
             WTSLogger::info("[PERF] halt-gate {}", HaltGate::statusLine()); // P1-6 阶段 2: 模式+原因位
+            // 19.26 F3③: 恢复闸拒绝观测入 KPI (2026-09-24 停摆实证: 恢复被拒完全黑盒)
+            if (_risk_monitor) {
+                WTSLogger::info("[PERF] recovery-gate rejects={} last=[{}]",
+                                _risk_monitor->getRecoveryRejectCount(),
+                                _risk_monitor->getLastRecoveryRejectReason());
+            }
             _last_reallag = reallag;
             _last_kpi_ms = tc.timestamp;
         }
@@ -874,7 +855,7 @@ bool StrategyCoordinator::isOrderSubmissionAllowed(wtp::IUftStraCtx* ctx, const 
 
 bool StrategyCoordinator::preCheck(wtp::IUftStraCtx* ctx, TickContext& tc, wtp::WTSTickData* tick)
 {
-    if (!_channel_ready || !tick) {
+    if (!tick) {
         return false;
     }
 
@@ -1925,6 +1906,27 @@ void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const
     uint64_t now_ms = tc.timestamp > 0 ? tc.timestamp : TimeUtils::getLocalTimeNow();
     uint64_t& last = _last_bilateral_log_ms[tc.code];
     uint64_t interval_ms = static_cast<uint64_t>(_cfg.bilateral_stats_log_interval_sec) * 1000;
+
+    // 19.26 F3②: 统计沉默 watchdog —— 同一交易节内超过 3 个周期未刷新即告警。
+    // 覆盖"tick 在跑但统计路径卡死"的盲区(13:30 统计沉默曾掩盖停摆); 管道整体停摆
+    // (无 tick)由外部 channel_watchdog 覆盖。必须同节判定: 跨节(午休/隔夜/回测跳段)
+    // 的 gap 是正常断档, 非卡死; 否则每次小节恢复首 tick 误报。
+    int sec_idx = _phase_mgr.sectionIndex(tc.code, tc.time_hms);
+    if (last > 0 && now_ms > last && now_ms - last > interval_ms * 3 &&
+        sec_idx >= 0 && sec_idx == _last_bilateral_section[tc.code]) {
+        uint64_t wall = TimeUtils::getLocalTimeNow();
+        if (wall - _last_bilateral_silence_warn_ms > 600000) {
+            _last_bilateral_silence_warn_ms = wall;
+            WTSLogger::warn("[BILATERAL_STATS] {} silent for {}s in section {} (interval={}s) — stats path may be stuck",
+                            tc.code,
+                            (now_ms - last) / 1000,
+                            sec_idx,
+                            _cfg.bilateral_stats_log_interval_sec);
+        }
+    }
+    if (sec_idx >= 0)
+        _last_bilateral_section[tc.code] = sec_idx;
+
     if (last > 0 && now_ms > last && now_ms - last < interval_ms)
         return;
 

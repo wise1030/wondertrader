@@ -28,6 +28,7 @@
 #include "../Includes/ExecuteDefs.h"
 #include "OrderTypes.h"   // B6: Source, OrderSubmitResult (extracted)
 #include "IOrderSink.h"     // B6: OrderRouter implements IOrderSink
+#include "PerformanceMonitor.h" // 19.28: PERF 计数
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -105,6 +106,9 @@ public:
 
     /// Set the order tracker for MM order access (self-trade prevention)
     void setOrderTracker(UnifiedOrderTracker* tracker) { _mm_tracker = tracker; }
+
+    /// 19.28: PERF 计数接线 (optional, may be nullptr)
+    void setPerformanceMonitor(PerformanceMonitor* m) { _perf = m; }
 
     /// Set rate limit for a specific source
     void setRateLimit(Source src, uint32_t limit, uint32_t window_ms = 1000);
@@ -220,9 +224,6 @@ public:
     /// Get all active orders for a given source
     std::vector<ActiveOrderInfo> getActiveOrders(Source src) const;
 
-    /// Get rate counter for a source (mutable for direct manipulation)
-    RateCounter& getRateCounter(Source src);
-
     /// Get total active order count across all sources
     size_t totalActiveOrders() const;
 
@@ -267,6 +268,9 @@ private:
 
     /// v7.1: replay 时钟 (策略每 tick 注入; 0=回退墙钟)
     uint64_t _now_ms = 0;
+
+    /// 19.28: PERF 计数 (optional)
+    PerformanceMonitor* _perf = nullptr;
 };
 
 } // namespace futu

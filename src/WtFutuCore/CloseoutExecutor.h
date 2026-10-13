@@ -159,9 +159,6 @@ public:
     bool isFailed() const { return _phase == CloseoutSub::FAILED; }
     bool isActive() const { return _phase != CloseoutSub::IDLE && _phase != CloseoutSub::COMPLETED; }
 
-    double getRemaining() const { return _remaining; }
-    double getTotalFilled() const { return _total_filled; }
-    uint32_t getRoundCount() const { return static_cast<uint32_t>(_rounds.size()); }
 
 private:
     //==========================================================================

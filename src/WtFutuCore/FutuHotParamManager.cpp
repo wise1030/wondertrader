@@ -273,7 +273,7 @@ bool FutuHotParamManager::parseHotParamFile(const char* filepath, std::vector<st
         return false;
     }
 
-    // V8-P0-1: 26 参数边界表 -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
+    // V8-P0-1: 24 参数边界表(R10/R14 后) -- 越界/NaN 拒收 (此前 "abc"->0.0、负值照单全收)
     // V10-R10: toxicity_spread_factor 移除 (毒性加宽链路删除)
     // 加固(2026-08-24): 收紧至与 FutuConfigLoader error 级 / FutuConfigValidator 同口径 --
     //   此前 base_spread{0,1000}/base_qty{0,1e5}/level_step{0,1000}/max_delta{0,1e6} 均宽于
@@ -501,10 +501,11 @@ void FutuHotParamManager::logDriftSummary(const char* filepath, const char* stra
     if (wtp::WTSVariant* hp_root = WTSCfgLoader::load_from_file(filepath))
     {
         auto& audit = ConfigAudit::instance();
-        audit.beginSource("hotparams.yaml", hp_root);
+        // 19.36: 源名用实际文件路径 —— 双策略时 hotparams_ao/ec.yaml 审计分源不互 merge
+        audit.beginSource(filepath, hp_root);
         const char* const* names = paramNames();
         for (uint32_t i = 0; i < HP_COUNT; ++i)
-            audit.noteReadPath("hotparams.yaml", names[i]);
+            audit.noteReadPath(filepath, names[i]);
         hp_root->release();
     }
 

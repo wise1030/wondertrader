@@ -126,11 +126,6 @@ CorrelationStats CorrelationManager::getCorrelation(const std::string& code1, co
     return stats;
 }
 
-double CorrelationManager::getSpreadZScore(const std::string& code1, const std::string& code2) const
-{
-    auto calc = getCalculator(code1, code2);
-    return calc ? calc->getZScore() : 0.0;
-}
 
 
 double CorrelationManager::getHedgeRatio(const std::string& code1, const std::string& code2) const

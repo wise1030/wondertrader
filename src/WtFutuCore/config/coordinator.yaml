@@ -177,9 +177,8 @@ coordinator:
     # --- 自成交防护 ---
     selfTradePrevention:
       enabled: true                # 模块级开关（STP 唯一权威来源; useSpreadArbitrage=true 时强制 true）
-      stpMinPriceGap: 1.0          # 最小价差 (ticks, STP 唯一权威来源)
-      allowSamePrice: false        # 是否允许同价
-      priceAdjustTicks: 1.0        # 价格调整 ticks
+      # 批次E(2026-09-19③): stpMinPriceGap/allowSamePrice/priceAdjustTicks 删除 —— 死键
+      #   (checkSelfTrade 只读 enabled, 价差/同价容忍语义从未实现, DIAGNOSTIC_REPORT_V10 已预警)
 
     # --- 自动撤单策略 ---
     autoCancel:
@@ -209,4 +208,4 @@ coordinator:
     correlationManager:
       windowSize: 100              # 相关性计算窗口
       minCorrelation: 0.5          # 最小相关系数
-      spreadZThreshold: 2.0        # 价差 Z-Score 阈值
+      # 批次E(2026-09-19③): spreadZThreshold 删除 —— 死键 (解析存在但逻辑从不消费)

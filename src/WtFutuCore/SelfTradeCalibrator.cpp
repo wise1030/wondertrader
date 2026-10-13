@@ -25,23 +25,7 @@ void SelfTradeCalibrator::reset()
     _contract_states.clear();
 }
 
-void SelfTradeCalibrator::resetContract(const std::string& code)
-{
-    RecursiveSpinGuard _g(_lock); // V8-R6 收官
-    _contract_states.erase(code);
-}
 
-void SelfTradeCalibrator::resetCalibration(const std::string& code)
-{
-    RecursiveSpinGuard _g(_lock); // V8-R6 收官
-    auto it = _contract_states.find(code);
-    if (it != _contract_states.end()) {
-        // Clear fill history and reset cache
-        it->second.fill_history.clear();
-        it->second.cached_result = CalibrationResult();
-        it->second.cache_dirty = true;
-    }
-}
 
 void SelfTradeCalibrator::decayCalibration(const std::string& code, uint64_t current_time, uint64_t decay_window_ms)
 {
@@ -341,64 +325,17 @@ CalibrationResult SelfTradeCalibrator::getCalibration(const std::string& code) c
     return state.cached_result;
 }
 
-SelfTradeToxicityMetrics SelfTradeCalibrator::getToxicityMetrics(const std::string& code) const
-{
-    RecursiveSpinGuard _g(_lock); // V8-R6 收官 (递归: getCalibration 重入)
-    SelfTradeToxicityMetrics metrics;
-
-    auto calib = getCalibration(code);
-    metrics.realized_toxicity = calib.toxicity_level;
-    metrics.toxicity_score = calib.toxicity_level;
-    metrics.is_toxic = calib.high_toxicity;
-
-    auto it = _contract_states.find(code);
-    if (it != _contract_states.end()) {
-        auto& state = it->second;
-        metrics.total_fills = static_cast<uint32_t>(state.fill_history.size());
-
-        uint32_t adverse = 0;
-        double total_move = 0;
-
-        for (const auto& fill : state.fill_history) {
-            if (checkAdverse(fill, state.mid_price)) {
-                adverse++;
-                double move = state.mid_price - fill.mid_at_fill;
-                total_move += std::abs(move / _config.tick_size);
-            }
-        }
-
-        metrics.adverse_fills = adverse;
-        if (adverse > 0) {
-            metrics.avg_adverse_move = total_move / adverse;
-        }
-    }
-
-    return metrics;
-}
 
 double SelfTradeCalibrator::getToxicityScore(const std::string& code) const
 {
     return getCalibration(code).toxicity_level;
 }
 
-bool SelfTradeCalibrator::isHighToxicity(const std::string& code) const
-{
-    return getCalibration(code).high_toxicity;
-}
 
 //------------------------------------------------------------------------------
 // Statistics
 //------------------------------------------------------------------------------
 
-const RingBuffer<SelfFillRecord, 128>* SelfTradeCalibrator::getFillHistory(const std::string& code) const
-{
-    RecursiveSpinGuard _g(_lock); // V8-R6 收官
-    auto it = _contract_states.find(code);
-    if (it != _contract_states.end()) {
-        return &it->second.fill_history;
-    }
-    return nullptr;
-}
 
 uint32_t SelfTradeCalibrator::getSampleCount(const std::string& code) const
 {

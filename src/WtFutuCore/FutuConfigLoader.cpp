@@ -38,6 +38,7 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
     {
         _config.coordinator_config = readString(cfg, "coordinatorConfig", "");
         _config.spread_arbitrage_config = readString(cfg, "spreadArbitrageConfig", "");
+        _config.hotparams_file = readString(cfg, "hotparamsFile", "hotparams.yaml");
     }
 
     // 读取合约列表
@@ -178,13 +179,13 @@ bool FutuConfigLoader::load(wtp::WTSVariant* cfg,
         if (cfgFrequency) {
             // 频率/速率/仓位/delta 阈值: 单一来源 (RiskRateLimits, 见 RiskLimitsConfig.h)
             _config.risk.rate_limits = RiskRateLimits::fromVariant(cfgFrequency);
-            _config.risk.cooldown_ms = readUInt32(cfgFrequency, "cooldownMs", 30000);
-            _config.risk.check_interval_ms = readUInt32(cfgFrequency, "checkIntervalMs", 5000);
-            _config.risk.recovery_threshold = readDouble(cfgFrequency, "recoveryThreshold", 0.8);
-            _config.risk.max_recovery_count = readUInt32(cfgFrequency, "maxRecoveryCount", 3);
-            _config.risk.pnl_recovery_ratio = readDouble(cfgFrequency, "pnlRecoveryRatio", 0.5);
-            _config.risk.max_loss_for_recovery = readDouble(cfgFrequency, "maxLossForRecovery", 0);
-            _config.risk.auto_clear_irreversible_on_reset =
+            _config.risk.recovery.cooldown_ms = readUInt32(cfgFrequency, "cooldownMs", 30000);
+            _config.risk.recovery.check_interval_ms = readUInt32(cfgFrequency, "checkIntervalMs", 5000);
+            _config.risk.recovery.recovery_threshold = readDouble(cfgFrequency, "recoveryThreshold", 0.8);
+            _config.risk.recovery.max_recovery_count = readUInt32(cfgFrequency, "maxRecoveryCount", 3);
+            _config.risk.recovery.pnl_recovery_ratio = readDouble(cfgFrequency, "pnlRecoveryRatio", 0.5);
+            _config.risk.recovery.max_loss_for_recovery = readDouble(cfgFrequency, "maxLossForRecovery", 0);
+            _config.risk.recovery.auto_clear_irreversible_on_reset =
                 readBool(cfgFrequency, "autoClearIrreversibleOnReset", false);
         }
     }

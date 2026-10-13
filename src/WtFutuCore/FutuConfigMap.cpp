@@ -14,7 +14,7 @@ size_t FutuConfigMap::applyStrategyOverrides(CoordinatorConfig& coord, const Fut
 {
     size_t n = 0;
 
-    // ---- closeout 时序/开关 (策略层 config.yaml 为最终覆盖源) ----
+    // ---- closeout 时序/开关/重试 (策略层 config.yaml 为最终覆盖源) ----
     coord.closeout_minutes_before = cfg.closeout.minutes_before;
     ++n;
     coord.close_time = cfg.closeout.close_time;
@@ -24,6 +24,11 @@ size_t FutuConfigMap::applyStrategyOverrides(CoordinatorConfig& coord, const Fut
     coord.night_close_time = cfg.closeout.night_close_time;
     ++n;
     coord.night_minutes_before = cfg.closeout.night_minutes_before;
+    ++n;
+    // 2026-09-19③ 批次B: 重试参数入链 (RiskMonitor::CloseoutConfig 改由本链单点填充)
+    coord.closeout_max_retries = cfg.closeout.max_retries;
+    ++n;
+    coord.closeout_retry_interval_ms = cfg.closeout.retry_interval_ms;
     ++n;
 
     // ---- PerformanceMonitor (P2: alertThrottleMs 属本节, 新增字段务必在此登记) ----

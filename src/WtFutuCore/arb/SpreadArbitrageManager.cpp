@@ -10,6 +10,7 @@
 #include "../../WTSTools/WTSLogger.h"
 #include "SpinLockGuard.h"
 #include "../../Share/TimeUtils.hpp"
+#include "ThetaGridStrategy.h"
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -35,6 +36,8 @@ struct BuiltinStrategyRegistrar
             reg.registerStrategy("pairs_trading", [] { return std::make_unique<PairsTradingStrategy>(); });
         if (!reg.has("statistical_arb"))
             reg.registerStrategy("statistical_arb", [] { return std::make_unique<StatisticalArbStrategy>(); });
+        if (!reg.has("theta_grid"))
+            reg.registerStrategy("theta_grid", [] { return std::make_unique<ThetaGridStrategy>(); });
     }
 };
 // 进程级静态注册 (首次加载本 TU 时执行)
@@ -47,23 +50,8 @@ SpreadArbitrageManager::SpreadArbitrageManager()
 {}
 
 
-void SpreadArbitrageManager::setCalculatorConfig(const SpreadCalculatorConfig& config)
-{
-    _calc_config = config;
-    _calculator_manager->setConfig(config);
-}
 
-void SpreadArbitrageManager::setRiskConfig(const SpreadRiskConfig& config)
-{
-    _risk_config = config;
-    _risk_manager->setConfig(config);
-}
 
-void SpreadArbitrageManager::setMmEnhancerConfig(const MmEnhancerConfig& config)
-{
-    _mm_config = config;
-    _mm_enhancer->setConfig(config);
-}
 
 void SpreadArbitrageManager::setExpiryDateCallback(ExpiryDateCallback callback)
 {
@@ -88,10 +76,17 @@ std::vector<std::string> SpreadArbitrageManager::getSpreadPairs() const
 }
 
 
-void SpreadArbitrageManager::onTick(const std::string& code, double price, uint64_t timestamp)
+void SpreadArbitrageManager::onTick(const std::string& code, double price, uint64_t timestamp, double bid, double ask)
 {
     if (!_config.enabled)
         return;
+
+    // 跨腿上下文：与策略同生共死的 arb tick 流驱动（§20 迁移v2）。
+    // mid 口径与 markToMarket 一致：双边有效取中, 单边锁板回退 last。
+    {
+        double mid = (bid > 0 && ask > 0) ? (bid + ask) / 2.0 : price;
+        _cross_leg_ctx.onTick(code, mid, timestamp);
+    }
 
     // Update calculators
     _calculator_manager->onTick(code, price, timestamp);
@@ -214,6 +209,14 @@ SpreadSignal SpreadArbitrageManager::generateSignal(const std::string& pair_id, 
         return signal;
 
     const auto& instance = strat_it->second;
+
+    // 跨腿上下文输出 → SpreadState（同线程普通成员直读; §20 迁移v2）
+    {
+        const auto& xo = _cross_leg_ctx.output();
+        state.cross_lag_ratio = xo.lag_ratio;
+        state.cross_co_move = xo.co_move;
+        state.cross_lead_dir = xo.lead_dir;
+    }
 
     // 插件循环: 主策略在 front; hybrid 模式取置信度最高的信号
     for (const auto& strat : instance.strategies) {
@@ -447,6 +450,7 @@ void SpreadArbitrageManager::updatePosition(const std::string& pair_id,
     } else if (state.spread_position == 0) {
         state.position_open_time = 0;
         state.entry_spread = 0;
+        state.timeout_exit_first_ms = 0; // 19.30-A2: 持仓归零, 超时升级计时复位
     }
 
     // Update risk manager
@@ -871,9 +875,15 @@ void SpreadArbitrageManager::checkRiskAlerts()
     }
 }
 
-void SpreadArbitrageManager::reset()
+// 测试接缝: 见头文件注释 (生产路径 loadConfig 内部直配)
+void SpreadArbitrageManager::setCalculatorConfig(const SpreadCalculatorConfig& config)
 {
-    _calculator_manager->reset();
+    if (_calculator_manager)
+        _calculator_manager->setConfig(config);
+}
+
+void SpreadArbitrageManager::reset()
+{    _calculator_manager->reset();
     _risk_manager->reset();
     _mm_enhancer->reset();
 
@@ -907,6 +917,28 @@ void SpreadArbitrageManager::reset()
     // perf#1: z-score 缓存同步清零, 防跨 session 残留旧值
     for (auto& slot : _pair_zscore_cache)
         slot->store(0.0, std::memory_order_relaxed);
+}
+
+//==============================================================================
+// 19.30-A2: TIMEOUT_EXIT 超时升级
+//==============================================================================
+int SpreadArbitrageManager::timeoutExitOrderFlag(const std::string& pair_id, uint64_t now_ms)
+{
+    SpinLockGuard lock(_pair_states_spin);
+    auto it = _pair_states.find(pair_id);
+    if (it == _pair_states.end())
+        return _arb_close_cfg.timeout_policy.order_flag;
+
+    auto& state = it->second;
+    if (state.timeout_exit_first_ms == 0) {
+        state.timeout_exit_first_ms = now_ms;
+        return _arb_close_cfg.timeout_policy.order_flag;
+    }
+    // 持续超时未平掉 → 升级 FAK 对手价 (复用 STOP_LOSS 执行链:
+    // bridge 平仓单对手价替换 + executor FAK pay-through)
+    if (now_ms - state.timeout_exit_first_ms >= _arb_close_cfg.timeout_policy.timeout_ms)
+        return _arb_close_cfg.stop_loss_policy.order_flag;
+    return _arb_close_cfg.timeout_policy.order_flag;
 }
 
 //==============================================================================

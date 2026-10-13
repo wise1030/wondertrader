@@ -27,6 +27,7 @@
 #include "SpinLockGuard.h"
 #include "BilateralQuoteStats.h"
 #include "PreTradeDecision.h"
+#include "PerformanceMonitor.h"
 
 NS_WTP_BEGIN
 class IUftStraCtx;
@@ -56,6 +57,10 @@ struct QuoteLevel
 };
 
 /// Configuration for multi-level quoting on a single contract
+/// 2026-09-19③ 批次C: 本结构体是**装配期快照** (assembler 从 FutuMmConfig.quoting 拷贝注入)。
+/// 装配完成后活值只走热更 setter (updateQuotingParams/updateStickyParams/updateProtectionParams/
+/// updateMaxPriceDeviation, 直接改写 _cfg 并刷新派生表如 _level_qtys)——
+/// 勿把本结构体当作"运行时权威源"回读；master 副本在 FutuMmConfig.quoting (热参回写保持同步)。
 struct QuoterConfig
 {
     std::string code;    ///< Contract code
@@ -113,7 +118,9 @@ public:
 
     /// Set shared order tracker (must be called before refreshQuotes)
     void setOrderTracker(UnifiedOrderTracker* tracker) { _tracker = tracker; }
-    UnifiedOrderTracker* getOrderTracker() const { return _tracker; }
+
+    /// 19.28: PERF 计数接线 (optional, may be nullptr)
+    void setPerformanceMonitor(PerformanceMonitor* m) { _perf = m; }
 
     /// Get configuration
     const QuoterConfig& config() const { return _cfg; }
@@ -227,20 +234,8 @@ public:
     // Accessors
     //==========================================================================
 
-    /// Get all active bid levels
-    const std::vector<QuoteLevel>& getBidLevels() const { return _bid_levels; }
-
-    /// Get all active ask levels
-    const std::vector<QuoteLevel>& getAskLevels() const { return _ask_levels; }
-
     // V8-R6/P3: getBidLevelsMut/getAskLevelsMut/getLevelByOrder 已删除 ——
     // 内部可变引用逃生口全项目零调用(逐项 grep 复核), 保留即绕过 _lock 的竞态地雷。
-
-    /// Total bid quantity outstanding
-    double totalBidQty() const;
-
-    /// Total ask quantity outstanding
-    double totalAskQty() const;
 
     /// Check if a given order ID belongs to this quoter - O(1) via tracker
     bool isMyOrder(uint32_t localid) const;
@@ -354,6 +349,9 @@ private:
     std::vector<double> _level_qtys;
 
     UnifiedOrderTracker* _tracker;
+
+    /// 19.28: PERF 计数 (optional)
+    PerformanceMonitor* _perf = nullptr;
     wtp::IUftStraCtx* _ctx = nullptr;
     bool _allow_bid = true;
     bool _allow_ask = true;

@@ -23,6 +23,7 @@
 #include "../WTSTools/WTSLogger.h"
 #include "FutuPortfolio.h"
 #include "IOrderSink.h"  // B6: was OrderRouter.h (narrowed)
+#include "ApplicationDeps.h"  // 19.33: 统一聚合 (成员 _deps 为按值切片)
 
 namespace futu {
 
@@ -44,12 +45,13 @@ inline double clampReduceQty(double requested_qty, double actual_position)
 class RiskLiquidator
 {
 public:
-    struct Deps {
-        IOrderSink*    router    = nullptr;  // B6: IOrderSink (was OrderRouter*)
-        FutuPortfolio* portfolio = nullptr;
-    };
-
-    void setDeps(const Deps& deps) { _deps = deps; }
+    // 19.33: 依赖统一走 ApplicationDeps 按值切片 (原嵌套 Deps 删除;
+    // _deps.router 视图为 OrderRouter*, 满足 IOrderSink 接口消费)
+    void setDeps(const ApplicationDeps& deps)
+    {
+        _deps = deps;
+        _deps.validate("RiskLiquidator");
+    }
 
     /// 对手价 FAK 全组合强平 (HALT IRREVERSIBLE 场景, v7.7 业务#2 修复)
     /// 旧实现 forceFlatAnchor 只平 anchor 且 qty=|组合delta|: 多合约组合下
@@ -115,7 +117,7 @@ public:
     }
 
 private:
-    Deps _deps;
+    ApplicationDeps _deps;  // 19.33: 按值切片 (消费点 _deps.xxx 零改动)
 };
 
 } // namespace futu

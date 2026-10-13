@@ -269,7 +269,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
                 if (_deps.risk_monitor->isCloseoutFlattening() || _deps.risk_monitor->isCloseoutTriggered()) {
                     WTSLogger::warn("[RISK] HALT IRREVERSIBLE during closeout: forceFlatAll deferred to closeout (avoid cross-source dual-sell)");
                 } else {
-                    _liquidator.setDeps({_deps.order_router, _deps.portfolio});
+                    // 19.33: liquidator 随 RiskCoordinator::setDeps 一次性接线 (见 setDeps)
                     _liquidator.forceFlatAll(ctx, "HALT IRREVERSIBLE FORCE FLAT");
                 }
             }

@@ -19,12 +19,6 @@ PerformanceAnalyzer::PerformanceAnalyzer()
       _toxicity_events(0), _alpha_signals(0), _alpha_correct(0), _alpha_pnl(0), _start_time(0), _last_trade_time(0),
       _trading_days(0)
 {
-    // Initialize condition performance
-    for (int i = 0; i <= static_cast<int>(MarketCondition::NORMAL); ++i) {
-        ConditionPerformance cp;
-        cp.condition = static_cast<MarketCondition>(i);
-        _condition_perf[cp.condition] = cp;
-    }
 }
 
 void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
@@ -91,18 +85,6 @@ void PerformanceAnalyzer::recordTrade(const TradeRecord& trade)
     double drawdown = _peak_pnl - _total_pnl;
     if (drawdown > _max_drawdown)
         _max_drawdown = drawdown;
-
-    // Update condition performance
-    MarketCondition cond = determineMarketCondition(trade.timestamp);
-    ConditionPerformance& cp = _condition_perf[cond];
-    cp.pnl += immediate_pnl;
-    cp.trade_count++;
-    cp.volume += trade.qty;
-    if (immediate_pnl > 0)
-        cp.win_rate = (cp.win_rate * (cp.trade_count - 1) + 1.0) / cp.trade_count;
-    else
-        cp.win_rate = cp.win_rate * (cp.trade_count - 1) / cp.trade_count;
-    cp.avg_spread_captured = (cp.avg_spread_captured * (cp.trade_count - 1) + spread_cap) / cp.trade_count;
 }
 
 void PerformanceAnalyzer::onTickUpdate(const std::string& code, double mid, uint64_t timestamp)
@@ -171,17 +153,7 @@ void PerformanceAnalyzer::updatePosition(const std::string& code, double positio
     ps.avg_cost = avgCost;
 }
 
-void PerformanceAnalyzer::recordToxicityEvent()
-{
-    _toxicity_events++;
-}
 
-void PerformanceAnalyzer::recordAlphaSignal(double alpha, bool wasCorrect)
-{
-    _alpha_signals++;
-    if (wasCorrect)
-        _alpha_correct++;
-}
 
 PerformanceMetrics PerformanceAnalyzer::getMetrics() const
 {
@@ -289,10 +261,6 @@ PnLAttribution PerformanceAnalyzer::getPnLAttribution() const
     return attr;
 }
 
-std::map<MarketCondition, ConditionPerformance> PerformanceAnalyzer::getPerformanceByCondition() const
-{
-    return _condition_perf;
-}
 
 double PerformanceAnalyzer::calculateAdverseSelection(const TradeRecord& trade) const
 {
@@ -316,57 +284,7 @@ double PerformanceAnalyzer::calculateAdverseSelection(const TradeRecord& trade) 
     return adverse;
 }
 
-MarketCondition PerformanceAnalyzer::determineMarketCondition(uint64_t timestamp) const
-{
-    // V8-R3: 占位实现 -- 真实 regime 输入由 R4 的 RegimeTracker 提供
-    // (自 SignalAggregator 归还 ICWeightTracker 的滚动状态)。当前所有
-    // ConditionPerformance 统计都落在 NORMAL 单桶。
-    (void)timestamp;
-    return MarketCondition::NORMAL;
-}
 
-std::string PerformanceAnalyzer::generateSummaryReport() const
-{
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(2);
-
-    auto metrics = getMetrics();
-    auto attr = getPnLAttribution();
-
-    oss << "\n========== Market Making Performance Report ==========\n\n";
-
-    oss << "--- PnL Summary ---\n";
-    oss << "  Total PnL:         " << metrics.total_pnl << "\n";
-    oss << "  PnL per Million:   " << metrics.pnlPerMillion() << "\n";
-    oss << "  Max Drawdown:      " << metrics.max_drawdown << "\n";
-    oss << "  Sharpe Ratio:      " << metrics.sharpe_ratio << "\n";
-    oss << "  Win Rate:          " << (metrics.win_rate * 100) << "%\n\n";
-
-    oss << "--- PnL Attribution ---\n";
-    oss << "  Spread Capture:    " << attr.spread_pnl << "\n";
-    oss << "  Alpha PnL:         " << attr.alpha_pnl << "\n";
-    oss << "  Inventory PnL:     " << attr.inventory_pnl << "\n";
-    oss << "  Adverse Selection: " << attr.adverse_selection << "\n";
-    oss << "  Timing PnL:        " << attr.timing_pnl << "\n\n";
-
-    oss << "--- Trading Metrics ---\n";
-    oss << "  Total Trades:      " << metrics.total_trades << "\n";
-    oss << "  Total Volume:      " << metrics.total_volume << "\n";
-    oss << "  Fill Rate:         " << (metrics.fill_rate * 100) << "%\n";
-    oss << "  Avg Spread Cap:    " << metrics.avg_spread_captured << "\n\n";
-
-    oss << "--- Alpha Performance ---\n";
-    oss << "  Alpha Accuracy:    " << (metrics.alpha_accuracy * 100) << "%\n";
-    oss << "  Alpha PnL/Trade:   " << metrics.alpha_pnl_per_trade << "\n\n";
-
-    oss << "--- Risk Metrics ---\n";
-    oss << "  Adverse Ratio:     " << (metrics.adverse_ratio * 100) << "%\n";
-    oss << "  Toxicity Events:   " << metrics.toxicity_events << "\n";
-
-    oss << "\n======================================================\n";
-
-    return oss.str();
-}
 
 void PerformanceAnalyzer::reset()
 {
@@ -393,10 +311,6 @@ void PerformanceAnalyzer::reset()
     _last_trade_time = 0;
     _trading_days = 0;
 
-    for (auto& kv : _condition_perf) {
-        kv.second = ConditionPerformance();
-        kv.second.condition = kv.first;
-    }
 }
 
 void PerformanceAnalyzer::resetDaily()

@@ -25,14 +25,14 @@ FutuHotParamWatcher::~FutuHotParamWatcher()
     stop();
 }
 
-bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath,
+bool FutuHotParamWatcher::start(const char* filepath,
                                 FutuHotParamManager* hot_mgr,
                                 uint32_t interval_ms)
 {
     if (_running.load())
         return false;
 
-    if (!strategy_id || !filepath || !hot_mgr || strlen(strategy_id) == 0 || strlen(filepath) == 0)
+    if (!filepath || !hot_mgr || strlen(filepath) == 0)
     {
         WTSLogger::error("FutuHotParamWatcher: invalid arguments");
         return false;
@@ -44,7 +44,6 @@ bool FutuHotParamWatcher::start(const char* strategy_id, const char* filepath,
         return false;
     }
 
-    _strategy_id = strategy_id;
     _filepath = filepath;
     _interval_ms = interval_ms;
     _hot_mgr = hot_mgr;
