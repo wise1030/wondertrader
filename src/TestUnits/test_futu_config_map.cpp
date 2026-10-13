@@ -21,6 +21,8 @@ TEST(FutuConfigMap, AllStrategyOverridesAreMapped)
 	cfg.closeout.flatten_position = false;
 	cfg.closeout.night_close_time = 230;
 	cfg.closeout.night_minutes_before = 9;
+	cfg.closeout.max_retries = 11;
+	cfg.closeout.retry_interval_ms = 7654;
 	cfg.perf.monitor_latency_threshold = 123456;
 	cfg.perf.enabled = false;
 	cfg.perf.log_interval = 2222;
@@ -30,13 +32,15 @@ TEST(FutuConfigMap, AllStrategyOverridesAreMapped)
 
 	CoordinatorConfig coord;
 	const size_t mapped = FutuConfigMap::applyStrategyOverrides(coord, cfg);
-	EXPECT_EQ(mapped, 11u); // 映射表变更时必须同步本用例
+	EXPECT_EQ(mapped, 13u); // 映射表变更时必须同步本用例
 
 	EXPECT_EQ(coord.closeout_minutes_before, cfg.closeout.minutes_before);
 	EXPECT_EQ(coord.close_time, cfg.closeout.close_time);
 	EXPECT_EQ(coord.closeout_flatten_position, cfg.closeout.flatten_position);
 	EXPECT_EQ(coord.night_close_time, cfg.closeout.night_close_time);
 	EXPECT_EQ(coord.night_minutes_before, cfg.closeout.night_minutes_before);
+	EXPECT_EQ(coord.closeout_max_retries, cfg.closeout.max_retries);
+	EXPECT_EQ(coord.closeout_retry_interval_ms, cfg.closeout.retry_interval_ms);
 	EXPECT_EQ(coord.perf_monitor_latency_threshold, cfg.perf.monitor_latency_threshold);
 	EXPECT_EQ(coord.perf_enabled, cfg.perf.enabled);
 	EXPECT_EQ(coord.perf_log_interval, cfg.perf.log_interval);

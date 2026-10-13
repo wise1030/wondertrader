@@ -94,7 +94,7 @@ TEST(OrphanHedge, RejectionRetainsLegWithRetry)
     int calls = 0;
     double last_qty = 0;
     // 回调拒绝 (模拟 rate_limited) → leg 保留重试
-    auto reject = [&](const std::string&, bool, double qty, bool) {
+    auto reject = [&](const std::string&, const std::string&, bool, double qty, bool) { // 19.30-A1: +pair_id
         ++calls;
         last_qty = qty;
         return false;
@@ -128,7 +128,7 @@ TEST(OrphanHedge, AcceptedRemovesLeg)
     exe.setReplayNowUs(1000000);
     ASSERT_TRUE(exe.enqueueOrphanLeg(makeOrphan(0)));
 
-    auto accept = [](const std::string&, bool, double, bool) { return true; };
+    auto accept = [](const std::string&, const std::string&, bool, double, bool) { return true; }; // 19.30-A1: +pair_id
     exe.setReplayNowUs(1000000 + 6000000);
     size_t n = exe.processOrphanLegs(accept, 5000, 30000, 0.0);
     EXPECT_EQ(n, 1u);

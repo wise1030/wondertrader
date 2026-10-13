@@ -165,8 +165,8 @@ TEST(InventoryDeltaSeparation, ContractDeltaParamNoLongerDrivesSkew)
     EXPECT_NEAR(res.inventory_skew, 0.0, 1e-9);
 }
 
-// R14: util≥1.0 授权穿越 → k 上限 k_max=4 (减仓侧=mid−3t 可成交);
-// util<1.0 时截断在 floor(half_spread)=1 tick 内 (至多贴 mid)
+// 19.23: util≥1.0 授权档 → cap=min(k_max, max(1, spread-1)) (减仓侧贴 mid);
+// util<1.0 未授权 → cap=max(1, floor(half_spread))=1 tick (死区修复下限)
 TEST(InventoryDeltaSeparation, CrossAuthorizationBeyondHalfSpread)
 {
     SpreadOptimizer opt("SHFE.ag2610");
@@ -175,13 +175,12 @@ TEST(InventoryDeltaSeparation, CrossAuthorizationBeyondHalfSpread)
 
     auto below = makePCtx(0.9);
     auto res_below = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &below);
-    // R14: driver=0.9 → raw=3.6t → k=4, 未授权 → cap=1 → -1.0
+    // driver=0.9 → raw=3.6t → k=4, 未授权 → cap=max(1,1)=1 → -1.0
     EXPECT_NEAR(res_below.inventory_skew, -1.0, 1e-6);
     EXPECT_GT(res_below.inventory_skew, -1.0 - 1e-9);
 
     auto above = makePCtx(1.2);
     auto res_above = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &above);
-    // R14: 授权穿越 → k=4 (=half+cross_max=1+3, 与旧扩展上限一致)
-    EXPECT_NEAR(res_above.inventory_skew, -4.0, 1e-6);
-    EXPECT_LT(res_above.inventory_skew, -1.0);
+    // 19.23 授权档: cap=min(4, max(1, 2-1))=1 → 贴中 -1.0 (join-mid, 不再 -3t 穿越)
+    EXPECT_NEAR(res_above.inventory_skew, -1.0, 1e-6);
 }

@@ -59,6 +59,7 @@ TEST(FutuConfigContract, AuthorityConfigsContainAllExplicitKeys)
 	params = params->get("params");
 
 	expectKeys(params, {"maxOrders", "maxPendingPerSide"}, "config.yaml 根级");
+	expectKeys(params, {"hotparamsFile", "coordinatorConfig", "spreadArbitrageConfig"}, "config.yaml 路径键");
 	expectKeys(params->get("logging"), {"hotQuoteEnabled", "hotQuoteSampleEvery"}, "config.yaml logging");
 	expectKeys(params->get("performance"), {"alertThrottleMs", "criticalThresholdNs"}, "config.yaml performance");
 	expectKeys(params->get("quoting"),

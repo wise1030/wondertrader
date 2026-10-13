@@ -106,10 +106,12 @@ TEST(V10R14SkewTicks, EndToEndCrossVsCap)
     SignalContext sig;
 
     // 撞限: 组合 30/30 (r_p=1.0) + 合约 1.0 → driver=1.5 → raw=6t → k=4 (clamp)
-    //       授权穿越 → cap=k_max=4 → skew=-4t → ask=mid+1-4=mid-3t (可成交)
+    //       19.23 授权档 → cap=min(k_max, max(1, spread-1))=min(4, 2-1)=1 → skew=-1t
+    //       减仓侧几何 = 贴 mid: ask=mid+1-1=mid (join-mid 减仓, 不再 -3t 穿越)
     auto ctx_limit = makePCtx(30.0, 1.0);
     auto res_limit = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx_limit);
-    EXPECT_NEAR(res_limit.inventory_skew, -4.0, 1e-6);
+    EXPECT_NEAR(res_limit.inventory_skew, -1.0, 1e-6);
+    EXPECT_GE(res_limit.ask_price, 100.0 - 1e-9); // 贴 mid 不穿越
 
     // 对冲腿: 组合多 15 + 本合约空 -0.5 → driver=-0.25 → raw=-1.0t → k=+1 (抬报价, 鼓励建空头对冲)
     //         注意 quantize 滞环状态延续上一用例? 否 — 每 TEST 新实例

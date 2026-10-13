@@ -52,8 +52,9 @@ TEST(SkewDimensionality, PortfolioComponentQuantized)
     ctx.total_delta = 30.0; // r_p = 1.0
 
     auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    // driver = 1.0×1.0 = 1.0 → raw=4t → k=4 (clamp k_max) → 授权 → -4t
-    EXPECT_NEAR(r.inventory_skew, -4.0, 1e-9);
+    // driver = 1.0×1.0 = 1.0 → raw=4t → k=4 (clamp k_max);
+    // 19.23 授权档 cap=min(k_max, max(1, spread-1))=min(4,1)=1 → 贴中 -1t
+    EXPECT_NEAR(r.inventory_skew, -1.0, 1e-9);
 }
 
 // 权重语义稳定: driver = w_p·r_p + w_c·r_c (γ=1), 纯函数直接断言
@@ -134,9 +135,9 @@ TEST(SkewDimensionality, CrossAuthorizedByRealizedOnly)
     ctx.contract_realized_delta_util_valid = true;
 
     auto r = opt.computeOptimalQuote(100.0, 0.0, sig, 0.0, &ctx);
-    // R14: driver=1.3 → raw=5.2t → k=4 (clamp), 授权 → -4t (=half+cross_max 旧扩展上限)
-    EXPECT_NEAR(r.inventory_skew, -4.0, 1e-9);
-    EXPECT_LT(r.inventory_skew, -1.0);
+    // R14: driver=1.3 → raw=5.2t → k=4 (clamp); 19.23 授权档 cap=1 → 贴中 -1t
+    EXPECT_NEAR(r.inventory_skew, -1.0, 1e-9);
+    EXPECT_LE(r.inventory_skew, -1.0 + 1e-9);
 }
 
 // realized 未注入 (valid=false) → contract 分量 0 (与既有 ContractDeltaParamNoLongerDrivesSkew 呼应)

@@ -36,7 +36,8 @@ struct Rig
 
     Rig()
     {
-        RiskCoordinator::Deps deps;
+        // 19.33: RiskCoordinator::Deps 已收编为 ApplicationDeps 统一聚合
+        futu::ApplicationDeps deps;
         deps.portfolio = &portfolio;
         deps.risk_monitor = &monitor;
         deps.trading_state = &state;
