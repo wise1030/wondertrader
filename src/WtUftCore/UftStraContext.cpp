@@ -384,7 +384,10 @@ void UftStraContext::on_trade(uint32_t localid, const char* stdCode, bool isLong
 			ts._direct = 1;
 			ts._offset = 0;
 			ts._price = price;
-			ts._volume = vol;
+			// 19.27 sell-branch 修复: 必须写 unhandle(扣除平仓后的剩余量), 原实现写
+			// vol(全量) 使含平仓成分的卖单平仓量双计、纯平仓卖单产生全量假开空记录
+			// (journal 量虚高 24.2%, 2026-09-24 对账实证; 买分支本就写 unhandle)。
+			ts._volume = unhandle;
 			ts._trading_date = _tradingday;
 			ts._trading_time = now;
 		}
