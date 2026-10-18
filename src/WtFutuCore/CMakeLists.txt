@@ -102,7 +102,8 @@ IF(WT_FUTU_WARN AND NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 ENDIF()
 
 # Link dependencies
-TARGET_LINK_LIBRARIES(WtFutuCore
+# PRIVATE: 引擎/工具库只服务于插件内部实现, 不向加载方传播 (插件边界收敛)
+TARGET_LINK_LIBRARIES(WtFutuCore PRIVATE
     WtUftCore        # UFT framework core
     WTSTools         # WTS utilities
     Share            # Shared utilities (TimeUtils, SpinMutex, etc.)
@@ -115,7 +116,7 @@ IF (WIN32)
     # Windows specific settings
 ELSE()
     # Linux/Unix settings
-    TARGET_LINK_LIBRARIES(WtFutuCore
+    TARGET_LINK_LIBRARIES(WtFutuCore PRIVATE
         boost_filesystem
         dl
         pthread

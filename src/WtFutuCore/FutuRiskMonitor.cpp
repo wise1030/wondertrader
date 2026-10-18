@@ -11,7 +11,7 @@
 #include "SessionPhaseManager.h"
 #include "../WTSTools/WTSLogger.h"
 #include "../Share/TimeUtils.hpp"
-#include "../WtUftCore/EventNotifier.h"
+#include "FutuEnginePort.h"
 #include <algorithm>
 #include <cstdio>
 
@@ -138,7 +138,7 @@ void FutuRiskMonitor::broadcastAlert(const std::string& alertType, const std::st
 
     // Broadcast via EventNotifier if available
     if (_event_notifier) {
-        _event_notifier->notify(alertType.c_str(), message.c_str());
+        futu::notifyAlert(_event_notifier, alertType.c_str(), message.c_str());
     }
 }
 

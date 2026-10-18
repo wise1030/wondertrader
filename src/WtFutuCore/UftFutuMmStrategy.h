@@ -27,7 +27,6 @@
 #include "CloseoutOrchestrator.h"
 #include "ArbExecutionBridge.h"
 #include "MonitorBridge.h"
-#include "../WtUftCore/EventNotifier.h" // R1: 告警外发通道 (策略层作为组合根)
 #include <string>
 #include <vector>
 #include <memory>
@@ -40,6 +39,7 @@ NS_WTP_BEGIN
 class WTSVariant;
 class WTSCommodityInfo;
 class WTSSessionInfo;
+class EventNotifier; // 前向声明: 仅指针成员, 策略头不再暴露引擎实现头
 NS_WTP_END
 
 namespace futu

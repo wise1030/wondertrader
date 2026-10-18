@@ -18,7 +18,7 @@
 #include "FutuTime.h"  // 19.35: replayMsFromTick
 #include "FutuRuntimeOps.h"
 #include "FutuConfigAudit.h" // F-core P1-4(2026-09-19): 配置读取审计
-#include "../WtUftCore/UftStraContext.h" // R1: dynamic_cast 获取 EventNotifier
+#include "FutuEnginePort.h" // 唯一的引擎实现依赖入口 (UftStraContext/EventNotifier)
 #include "../Includes/IUftStraCtx.h"
 
 namespace
@@ -325,7 +325,7 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
                                       alert.value,
                                       alert.threshold,
                                       alert.message);
-        _event_notifier->notify("ARB_RISK", msg.c_str());
+        futu::notifyAlert(_event_notifier, "ARB_RISK", msg.c_str());
     }
 }
 
@@ -356,9 +356,9 @@ void UftFutuMmStrategy::on_init(IUftStraCtx* ctx)
         "UftFutuMmStrategy[{}] mode: {} (isBacktest={})", id(), _is_backtest ? "BACKTEST" : "LIVE", _is_backtest);
 
     // R1: 从 ctx 获取 EventNotifier (WtUftRunner 创建 UftStraContext 时已注入 &_notifier)
-    auto* uft_ctx = dynamic_cast<UftStraContext*>(ctx);
-    if (uft_ctx && uft_ctx->getEventNotifier()) {
-        setEventNotifier(uft_ctx->getEventNotifier());
+    // 引擎实现细节已收敛到 FutuEnginePort.cpp; 本文件只依赖 Port 的抽象入口.
+    if (auto* notifier = futu::resolveEventNotifier(ctx)) {
+        setEventNotifier(notifier);
         WTSLogger::info("UftFutuMmStrategy[{}] EventNotifier injected via ctx", id());
     }
 
