@@ -15,3 +15,11 @@ build_all/
 
 # WtOptionCore temporary
 src/WtOptionCore/tests/*.o
+
+# Test runtime artifacts (LMDB/perf caches at repo root)
+endiandb/
+testdb/
+scperform.dat
+scperform.ini
+simplecache.dat
+__pycache__/
