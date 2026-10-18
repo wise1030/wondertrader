@@ -83,11 +83,14 @@ struct ArbTickData
     uint64_t timestamp;
     double bid;  ///< 方案 B §20: 跨腿 mid 计算原料（0=调用方未提供, 消费方回退 last）
     double ask;
+    uint32_t wall_hms = 0;   ///< ctx 墙钟 HHMMSS（bridge 注入, 0=未提供）
+    uint32_t wall_date = 0;  ///< ctx 墙钟 yyyymmdd
 
     // V8-A1: multiplier 字段删除 (死参数 — bridge 恒传 1.0, 乘数由 pair 配置装配)
     ArbTickData() : price(0), timestamp(0), bid(0), ask(0) {}
-    ArbTickData(const std::string& c, double p, uint64_t t, double b = 0, double a = 0)
-        : code(c), price(p), timestamp(t), bid(b), ask(a)
+    ArbTickData(const std::string& c, double p, uint64_t t, double b = 0, double a = 0,
+                uint32_t hms = 0, uint32_t date = 0)
+        : code(c), price(p), timestamp(t), bid(b), ask(a), wall_hms(hms), wall_date(date)
     {}
 };
 static_assert(std::is_trivially_copyable_v<ArbTickData>, "ArbTickData must be trivially copyable for SPSC queue");
@@ -264,7 +267,8 @@ public:
     //==========================================================================
 
     /// Push tick data (called from main thread, non-blocking)
-    bool pushTick(const std::string& code, double price, uint64_t timestamp, double bid = 0, double ask = 0);
+    bool pushTick(const std::string& code, double price, uint64_t timestamp, double bid = 0, double ask = 0,
+                  uint32_t wall_hms = 0, uint32_t wall_date = 0);
 
     /// Get pending orders (called from main thread)
     /// @param callback Function to call for each order

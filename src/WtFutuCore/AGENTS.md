@@ -6089,3 +6089,173 @@ Delta=0。夜盘 20:40 会话验证：settlement 秒过、双策略 0 halt、ao 
 FORCE_FLAT/TIME_BLOCK 时段门生效)。修复 2 个 shadow 小 bug：hms 列单位错
 (µs/1000 再入 µs 函数); 时段门日志每日一次(CLOSE 信号照发, live 重试
 语义保留)。.so 893ed185 部署, 08:40 cron 加载。
+
+**§20 墙钟注入修复（10-14 早盘发现，P0 级）**：巡检发现 shadow CSV 时间列
+显示 17:12（实时 09:12）+ TIME_BLOCK/FORCE_FLAT 开盘即触发。根因：链路
+`tick->actiontime()` 实为 **HHMMSSmmm 打包整数**（wt action_time 语义,
+非 epoch）, ThetaGrid 的 current_time=actiontime×1000 被当 µs epoch 提
+绝对时刻 → 1970 时刻+8h 偏移 → 时段门恒触发（live 下会开盘强平+锁死）。
+差分比较（超时退出/lag 窗）同源自洽不受影响。修复：bridge 从
+`ctx->stra_get_time()/stra_get_date()` 注入墙钟（**实盘=真实、回测=回放,
+双场景正确**）, 经 ArbTickData→manager→SpreadState.wall_hms/wall_date,
+ThetaGrid 的时段门/日切/shadow 日志/λ date 列全部改用之; current_time
+保持 actiontime 语义不动（全链路差分自洽）。回放基线逐项不变（98/1725/
+41/57）, TestUnits 211/213, _ec_5d 5/5 Delta=0, 四源审计不破。λ 文件
+坏日期行已修复（20261013, q80=2.10146 有效采样保留）。.so 9cf450b6
+已部署, 20:40 cron 加载, 10-15 09:00 验证 shadow 时间列+时段门行为。
+今日（10-14）shadow 数据 hms 列与时段门相关事件不可信（BAND/θ 值有效）。
+
+**§20 重启加载修复版（10-14 11:32 手动）**：用户批准即时重启验证下午时段门。
+新会话 11:32:39 加载 9cf450b6（settlement 秒过/ao delta=0/ec delta=-7 轻量
+义务仓）。旧进程 SIGTERM 析构 flush 实证：λ 落出一行（date=错时钟
+574421010, q80=1.71408, n=15159——今天上午 θ 采样, 统计有效）, 已手动
+修正为 20261014。**λ 累积机制双实证**: 析构 flush 可靠（无 SIGKILL 丢样
+本风险——cron kill→2s→kill -9, 正常退出够快）。今日 q80 1.71 vs 昨日
+2.10（θ 分布日内波动, 5 日回看窗平滑之）。下午 13:00-15:00 为修复版
+首个验证窗：13:0x 时间列、14:50 TIME_BLOCK、14:55 FORCE_FLAT。
+
+**§20 墙钟注入第二轮修复（10-14 下午实盘验证发现）**：11:32 重启加载修复版
+后，shadow 时间列仍为 0。实盘排查链：①下午行情实际 13:10 才开始推送
+（SimNow 特性, 非故障——13 时首条日志在 13:1x, 时段休止 10:15-10:30 正常
+工作证明 tick actiontime 有效）; ②ctx->stra_get_time() 走引擎分钟级
+_cur_raw_time 且实测为 0 → 改从 tick->actiontime()/actiondate() 提取
+（ParserCTP 由 CTP UpdateTime/ActionDay 填充, 双场景正确）; ③**根因实锤:
+pushTick 收到 wall 参数但构造 ArbTickData 时漏传**（构造调用停留 5 参版本,
+wall 字段落默认 0）——一轮修复的签名/头文件/bridge/manager 全对, 独漏
+executor.cpp 构造行。修复 + 退出类事件日志 5s 节流（收盘后状态冻结每 5ms
+刷屏实证）。回放基线逐项不变, .so e2842cd4 部署, 20:40 cron 加载。
+**遗留设计项（观测周标定时注意）**: shadow 的 has_pos 读 state.spread_position
+（MM 双边对锁仓 8-10 手）→ 网格自身虚拟仓位被 MM 仓污染, 下午 EXIT/STOP
+事件实为"虚拟退出从未虚拟进入的仓", 语义不真; P3 前需改为网格自跟踪
+虚拟仓位（shadow）/ 自持仓标记（live）。今日 λ: 20261014 行已由 11:32 重启
+析构落盘（n=15159, 上午样本）; 下午样本因 wall_date=0 保护不落盘（损失
+可接受）。
+
+**§20 融合设计落地（10-14 用户批准）**：网格自跟踪仓位 `_grid_pos/_grid_entry_
+spread/_grid_entry_us`（shadow 虚拟, live 沿用 pair 持仓, P3 改 tag 级）——
+与 MM 对锁库存解耦。退出/止损前做库存有效性检查：pair 对锁仓同号且存在才
+发信号, 否则 EXTERNAL_CLOSE（视同 MM 提前止盈/止损, 清虚拟仓防反向开仓）。
+止损基准改用网格自身 entry_spread; 14:55 FORCE_FLAT 只作用网格仓（MM 库存
+不受影响）; shadow CSV pos/entry_spread 列记虚拟值; 移除退出类日志节流
+（虚拟仓时代事件天然一次性, 节流破坏状态机可观测性）。新增
+test_theta_grid.replay_ec_4d_shadow_lifecycle: 状态机严格校验（flat↔inpos
+交替/单层纪律/EOF 归零）, 回放实证 LONG 266 笔全部经带沿/止损闭环、SHORT
+446 笔全部 EXTERNAL_CLOSE（MM +8 多仓库存反号）。基线 212/214（新增 1 通过
++2 环境性失败）, 原回放 98/1725/41/57 不变, _ec_5d 5/5 Delta=0, 四源审计
+不破。.so 7b66fe84 已部署, 20:40 cron 加载; 明早 09:00 验证完整链路
+（时间列+时段门+虚拟仓位生命周期+λ 累积）。
+
+**§20 entryMaxSlippage 扫描实验（10-14 回测）**：_ec_5d(arb off) vs
+_ec_5d_arb(theta_grid shadow=false, 同步执行器), 5 日对照。
+结果: ①**回测固有噪声 ±1.4k**（arb-off 基线两次复跑 407798/406438, 19.35
+时钟统一后仍有残留非确定性源, 待查）; ②arb-on 各档净值 382k~404k 全部
+低于 arb-off（均值差约 -1~-2%）, 差异=执行摩擦（费+7.7k vs 毛利+3.6k）;
+③**零完整建仓**: 全部 5 档无一笔双腿同时成交（入场信号 704~953 个,
+残腿撤单 476~831, 退出信号恒 0）, 放宽 slip 1.0→3.0 只减少重试不提升
+成交。④**根因**: makeSignal 的 FAK 限价封顶锚定 state.leg*_price
+（last/mid 快照）而非盘口 touch——ec 远月半价差 2.1 点(8.4tick), 买腿
+cap=last+3.0 仍可能够不到 ask, 双腿同成概率≈0。**结论: 放宽滑点无解,
+应改锚定 touch（买=ask+余量, 卖=bid−余量）, 需 SpreadState 增加腿级
+bid/ask 字段（ArbTickData 已有原料）——列入待批**。附: 回测 arb 需
+useAsyncArbThread:false（异步模式回放/墙钟竞速, 结果不可复现）;
+trades.csv usertag 空, arb 成交不可归因（P3 前打 tag）。
+
+**§20 入场锚定 touch 修正（10-14 晚，用户批准）**：FAK 限价从锚定
+last/mid 改为锚定盘口 touch（买=ask+slip, 卖=bid−slip, touch 缺失回退
+leg_price）。两处静默失效踩坑：_pair_states.leg_code 依赖 Init 时序、
+calculator getState() 不填 leg_code——最终按 pair 配置（_pair_configs）
+比较 tick 归属腿。配套修正回放 harness 基准分离（策略止损参照=mid,
+经济成本=touch——混用曾致 965 次伪止损）。回测验证（slip=1.0, 5 日）:
+修复前 950 信号/840 残腿/零完整建仓 vs 修复后 628 信号/332 残腿/双腿
+成交打通（in-flight fully cleared）, 净值 409,131~414,201 两跑高于
+arb-off 基线（406,438~407,798, 噪声 ±1.4k）, 费仅 +1.7k。**但退出信号
+恒 0**——14:45 closeout 先于一 deals 平仓, 网格带沿/止损退出路径在全
+框架回测未获验证（回放 harness 已覆盖生命周期）。信号级回放新基线:
+entries=606 abandoned=103 exits=430 stops=176 pnl=-2422.5（taker 入场
+成本结构性为负 ≈-4/笔, maker 入场是唯一出路, 与 KS 结论互证）。
+TestUnits 212/214。.so 2b0480bb 已部署, 20:40 cron 加载（生产 shadow
+不受影响, 改善 would-be 入场价与 P3 就绪度）。**maker 入场变体（双腿
+挂单等流消耗, 与 B-3 出场对称）列为下一决策项**。
+
+
+## 策略插件边界专项（2026-10-18，已完成）
+
+**背景**：WtFutuCore / WtOptionCore 分别是 UFT / HFT 引擎上的策略插件，不是引擎。
+用户原则：**不改框架引擎（WtCore/WtUftCore/WtRunner/WtUftRunner/Includes/Share/WTSTools/WTSUtils），只改两个策略目录**。
+
+**目标**：把策略对宿主引擎的依赖收敛到策略目录内部，恢复“插件只依赖 Includes 接口”的方向；不改变任何交易行为、参数、默认值。
+
+**非目标（明确不做）**：
+- 不删除 `WtRunner` 对 `WtOptionCore` 的硬链接（属运行器，另案）；
+- 不新增框架级 `IEventSink`/`IAlertSink`（属 Includes，另案）；
+- 不改业务逻辑/参数/默认值；不改 TestUnits / dist 配置。
+
+**现状证据**：
+- `UftFutuMmStrategy.h:30` include `../WtUftCore/EventNotifier.h`；`UftFutuMmStrategy.cpp:21` include `UftStraContext.h`，`:359` `dynamic_cast<UftStraContext*>`；
+- `libWtFutuCore.so` 未定义符号含 `EventNotifier::notify`、`WtHelper::getOutputDir/getStraDataDir`、`typeinfo for UftStraContext`（`nm -D -u`）；
+- `libWtOptionCore.so` 未定义符号中无任何 `Wt/wtp` 符号，`ldd` 不依赖 `WtCore`；但 `CMakeLists.txt:196/204` 仍 include `../WtCore` + `PUBLIC WtCore`。
+
+**变更清单**：
+
+WtFutuCore：
+1. 新增 `FutuEnginePort.h/.cpp`：只在该 .cpp 内 include `../WtUftCore/UftStraContext.h`、`EventNotifier.h`；暴露 `wtp::EventNotifier* futu::resolveEventNotifier(wtp::IUftStraCtx*)`；内部 `dynamic_cast` + `getEventNotifier()`，空指针兜底。
+2. `UftFutuMmStrategy.h`：删除 `EventNotifier.h` include；改为 `class EventNotifier;` 前向声明；`setEventNotifier` 与成员签名不变。
+3. `UftFutuMmStrategy.cpp`：删除 `UftStraContext.h` include；`:359` 改为 `futu::resolveEventNotifier(ctx)`；行为不变。
+4. `CMakeLists.txt`：`TARGET_LINK_LIBRARIES(WtFutuCore PRIVATE WtUftCore WTSTools Share)`；不增删链接项。
+
+WtOptionCore：
+5. `CMakeLists.txt`：`target_link_libraries` 删除 `WtCore`；`target_include_directories` 删除 `../WtCore`；`WTSTools`/`Share` 保持不变。
+6. 不改任何 .cpp/.h（头文件已只依赖 `Includes/*`）。
+
+**验证**：
+- 构建：`cd src/build_release && cmake .. && make -j$(nproc) WtFutuCore WtOptionCore`（新增文件需 GLOB 重配）。
+- 符号：`nm -D -u libWtFutuCore.so` 无新增引擎符号；`nm -D -u libWtOptionCore.so` 无 `Wt*`；`ldd libWtOptionCore.so` 不出现 `WtCore`。
+- 插件契约：临时 `dlopen` harness 加载两个 .so，`dlsym("createStrategyFact")`，校验 `getName()` / `enumStrategy()` / `deleteStrategyFact()`；不启动引擎、不接行情。
+- 回归：TestUnits 全量；`_ec_5d` 回测（Delta=0、0 HALT、trades 在噪声带内）；WtOptionCore `test_enhancements`/`test_ctg_ranking`。
+- 热插拔：新 .so 拷到临时目录再 `dlopen`，证明不依赖源码树路径。
+
+**回滚**：每步保留 `.bak`；`git diff` 仅限两个策略目录；任一验证失败即回滚该步。
+
+**风险与兜底**：
+- WtOptionCore 去掉 `WtCore` 后若存在隐藏符号依赖，链接期会暴露；回退为 `PRIVATE WtCore`。
+- WtFutuCore 新增文件需 `cmake ..` 重配；若 GLOB 未生效，显式重配。
+- `EventNotifier` 仍由策略运行期使用（告警不能退化），本轮只收敛包含关系与调用入口，不改变调用路径。
+
+**后续（另案，不在本轮）**：
+- WtRunner 去硬链接 + `./hft/` 热插拔验收（需改运行器）；
+- `IAlertSink` 接口化，移除 `FutuRiskMonitor.cpp` 对 `EventNotifier.h` 的直接 include；
+- 策略业务 P0/P1（closeout/STP/tracker、ComboOrders/DeltaHedge/ConfigValidator）单独立项。
+
+
+### 插件边界专项实施记录（2026-10-18，已完成）
+
+**改动文件**（仅两个策略目录）：
+- `WtFutuCore/FutuEnginePort.h/.cpp`（新增）：唯一 include `UftStraContext.h`/`EventNotifier.h` 的编译单元；
+  暴露 `resolveEventNotifier()` + `notifyAlert()`。
+- `WtFutuCore/UftFutuMmStrategy.h`：移除 `EventNotifier.h` include，改前向声明。
+- `WtFutuCore/UftFutuMmStrategy.cpp`：移除 `UftStraContext.h`，改用 `futu::resolveEventNotifier/notifyAlert`。
+- `WtFutuCore/FutuRiskMonitor.cpp`：改用 `futu::notifyAlert`，移除 `EventNotifier.h`。
+- `WtFutuCore/CMakeLists.txt`：`target_link_libraries` 改 `PRIVATE`（两处，保持关键字签名一致）。
+- `WtOptionCore/CMakeLists.txt`：移除 `../WtCore` include 与 `WtCore` 链接；`WTSTools`/`Share` 保留。
+
+**验证结果**：
+- Release 构建：`WtFutuCore`、`WtOptionCore` 均成功；新增文件经 `cmake ..` GLOB 收编。
+- 工厂契约：`dlopen(RTLD_NOW)`（host 导出 `WTSCfgLoader`，与真实 Runner 一致）与
+  `RTLD_LAZY` 重定位均通过；`FutuStraFact/FutuMM`、`OptionStraFact/OptionMM` 名称/枚举/析构正确。
+- 符号：`libWtOptionCore.so` 的 `nm -D -u` 无任何 `Wt/wtp` 符号，`ldd` 无 `WtCore`；
+  `libWtFutuCore.so` 仅保留运行期必需的 `EventNotifier::notify`、`WtHelper::get*Dir`、
+  `typeinfo for UftStraContext`（Port 内 dynamic_cast）。
+- `_ec_5d` A/B（Release，dist 旧 .so `2b0480bb` vs 新 .so `8c470edf`）：
+  25,002 → 25,043 笔（+0.16%，mocker 噪声内）；期末 dynbalance 410,759.40 → 408,228.20
+  （-0.62%，噪声带内）；Delta=0；0 HALT / 0 zombie；CLOSEOUT 告警为既有正常路径。
+- TestUnits：24 个失败均为配置/YAML/回放数据类；抽样用改动前旧二进制+旧 .so 复现同样失败，
+  非本轮引入。本轮改动路径（on_init notifier 解析）在回测中 ctx 非 UftStraContext，
+  行为与改动前一致（不注入 notifier）。
+- WtOptionCore 自带测试：`test_ctg_ranking` ALL PASS；`test_enhancements` 仅
+  `test_pnl_tracker_fifo`（rows>=1）失败，属既有数据依赖，非本轮引入。
+
+**回滚**：`dist/WtBtFutu/uft/libWtFutuCore.so.bak_review_20261018`（旧版 `2b0480bb`）；
+源码回滚只需还原上述 6 个文件并删除 `FutuEnginePort.*`。
+
+**未做（另案）**：`WtRunner` 去 `WtOptionCore` 硬链接（运行器）、`IAlertSink` 框架接口、
+策略业务 P0/P1 修复；远程生产部署未执行。

@@ -93,9 +93,10 @@ void AsyncArbitrageExecutor::stop()
 // Main Thread Interface
 //==============================================================================
 
-bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, uint64_t timestamp, double bid, double ask)
+bool AsyncArbitrageExecutor::pushTick(const std::string& code, double price, uint64_t timestamp, double bid, double ask,
+                                      uint32_t wall_hms, uint32_t wall_date)
 {
-    ArbTickData tick(code, price, timestamp, bid, ask);
+    ArbTickData tick(code, price, timestamp, bid, ask, wall_hms, wall_date);
 
     // 回测模式: 同步执行 (不开 arb 线程, 避免 data race)
     // 实盘模式: push 到队列由 arb 线程异步处理
@@ -359,7 +360,7 @@ void AsyncArbitrageExecutor::processTick(const ArbTickData& tick)
         return;
 
     // Update arbitrage manager with tick data (含 bid/ask → 跨腿 mid)
-    _arb_manager->onTick(tick.code, tick.price, tick.timestamp, tick.bid, tick.ask);
+    _arb_manager->onTick(tick.code, tick.price, tick.timestamp, tick.bid, tick.ask, tick.wall_hms, tick.wall_date);
 }
 
 void AsyncArbitrageExecutor::processSignals(uint64_t current_time)

@@ -45,7 +45,11 @@ void ArbExecutionBridge::onTick(wtp::IUftStraCtx* ctx, const char* stdCode, wtp:
     // ============================================================
     // 主线程：快速推送 tick 数据到异步队列（~50ns，非阻塞）
     // ============================================================
-    _deps.async_arb->pushTick(stdCode, tick->price(), tick->actiontime(), tick->bidprice(0), tick->askprice(0));
+        // 墙钟注入: tick 自身携带 HHMMSSmmm/yyyymmdd（action_time/action_date）——
+    // 实盘=真实时刻, 回测=回放时刻, 双场景正确; 不依赖 ctx->stra_get_time()
+    // (生产实测返回 0, 10-14 下午 shadow 时间列全 0 实证)
+    _deps.async_arb->pushTick(stdCode, tick->price(), tick->actiontime(), tick->bidprice(0), tick->askprice(0),
+                              tick->actiontime() / 1000, tick->actiondate());
 
     // 从 Portfolio(SSOT) 回填套利 pair 仓位 — 使策略退出/止损分支与
     // 风控仓位检查读到真实仓位.

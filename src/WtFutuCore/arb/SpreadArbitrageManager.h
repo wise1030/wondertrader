@@ -160,7 +160,8 @@ public:
     /// Process incoming tick
     /// V8-A1: 乘数死参数删除 — 乘数是合约静态属性, 由 pair 配置经
     /// setLegMultipliers 装配进 calculator, 不应逐 tick 传递。
-    void onTick(const std::string& code, double price, uint64_t timestamp, double bid = 0, double ask = 0);
+    void onTick(const std::string& code, double price, uint64_t timestamp, double bid = 0, double ask = 0,
+                uint32_t wall_hms = 0, uint32_t wall_date = 0);
 
     //==========================================================================
     // Signal Generation

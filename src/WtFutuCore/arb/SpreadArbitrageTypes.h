@@ -203,9 +203,18 @@ struct SpreadState
     std::string leg1_code; ///< Leg1 contract code (e.g. "CFFEX.IF.2503")
     std::string leg2_code; ///< Leg2 contract code (e.g. "CFFEX.IF.2506")
 
+    // 墙钟（bridge 自 ctx->stra_get_time/date 注入；实盘=真实时刻，回测=回放时刻；
+    // 链路 timestamp 为 tick actiontime(HHMMSSmmm) 非 epoch，绝对时刻判定必须用它）
+    uint32_t wall_hms = 0;     ///< HHMMSS（时段门）
+    uint32_t wall_date = 0;    ///< yyyymmdd（日切/λ date 列）
+
     // Price data
     double leg1_price;     ///< Current leg1 price
     double leg2_price;     ///< Current leg2 price
+    // 腿级盘口 touch（§20 入场锚定修正: FAK 限价须锚 touch 而非 last/mid,
+    // 否则 ec 远月半价差 2.1pt 下双腿同成概率≈0; 0=未知, 消费方回退 leg_price）
+    double leg1_bid = 0, leg1_ask = 0;
+    double leg2_bid = 0, leg2_ask = 0;
     double current_spread; ///< Current spread value
     double current_price;  ///< Current spread price (for stop loss)
 

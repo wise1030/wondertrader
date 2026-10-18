@@ -79,6 +79,12 @@ private:
     uint64_t _last_shadow_log_ms = 0;
     int _force_flat_logged_day = -1; ///< 时段门日志每日一次（防信号循环刷屏）
     int _time_block_logged_day = -1;
+    uint32_t _last_wall_hms = 0;   ///< 最近 tick 墙钟 HHMMSS（shadow 日志时间列）
+    // 网格自身仓位（§20 融合设计）: shadow 虚拟自跟踪, 与 MM 对锁库存解耦
+    int _grid_pos = 0;           ///< 虚拟持仓（±lots, 0=空仓）
+    double _grid_entry_spread = 0; ///< 虚拟入场价差（止损/止盈基准）
+    uint64_t _grid_entry_us = 0; ///< 虚拟入场时刻
+    uint32_t _last_wall_date = 0;  ///< 最近 tick 墙钟 yyyymmdd（λ date 列, 0=未注入）
 
     // --- 格（live） ---
     std::vector<ThetaGridCell> _cells;

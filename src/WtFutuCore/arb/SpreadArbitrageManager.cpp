@@ -76,7 +76,8 @@ std::vector<std::string> SpreadArbitrageManager::getSpreadPairs() const
 }
 
 
-void SpreadArbitrageManager::onTick(const std::string& code, double price, uint64_t timestamp, double bid, double ask)
+void SpreadArbitrageManager::onTick(const std::string& code, double price, uint64_t timestamp, double bid, double ask,
+                                    uint32_t wall_hms, uint32_t wall_date)
 {
     if (!_config.enabled)
         return;
@@ -99,6 +100,8 @@ void SpreadArbitrageManager::onTick(const std::string& code, double price, uint6
 
     for (const auto& pair_id : pairs) {
         auto state = _calculator_manager->getSpreadState(pair_id);
+        state.wall_hms = wall_hms;
+        state.wall_date = wall_date;
 
         // Update strategy data — 插件循环, 替代原 else-if 链
         auto strat_it = _strategies.find(pair_id);
@@ -111,6 +114,21 @@ void SpreadArbitrageManager::onTick(const std::string& code, double price, uint6
 
         // Update state (protected by _pair_states_mutex)
         auto& stored_state = _pair_states[pair_id];
+        stored_state.wall_hms = wall_hms;
+        stored_state.wall_date = wall_date;
+        // 腿级 touch 累积更新（本 tick 属哪条腿刷哪条, 另一腿保留最近值）。
+        // 比较基准=pair 配置（_pair_states/calculator state 的 leg_code 均不可靠:
+        // 前者依赖 Init 写入时序, 后者 getState() 不填——10-14 两次零变化实证）
+        auto pcfg_it = _pair_configs.find(pair_id);
+        if (pcfg_it != _pair_configs.end()) {
+            if (code == pcfg_it->second.leg1_code) {
+                stored_state.leg1_bid = bid;
+                stored_state.leg1_ask = ask;
+            } else if (code == pcfg_it->second.leg2_code) {
+                stored_state.leg2_bid = bid;
+                stored_state.leg2_ask = ask;
+            }
+        }
         stored_state.current_spread = state.current_spread;
         stored_state.current_price = state.current_price; // V8-A2: 止损链路 (见 SpreadCalculator::getState)
         stored_state.spread_mean = state.spread_mean;

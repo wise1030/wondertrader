@@ -171,8 +171,10 @@ void ThetaGridStrategy::flushDailyLambda()
     if (f) {
         if (f.tellp() == 0)
             f << "date,q80,q90,n\n";
-        // 日期用当日最后样本不可得——用文件追加日的日切由调用方保证一天一次
-        f << _sample_day << "," << q80 << "," << q90 << "," << _abs_theta_samples.size() << "\n";
+        // date=wall_date（如 20261014, bridge 自 ctx 注入）; 未注入（0, 直调测试
+        // 无 manager/bridge 链路）则跳过落盘，绝不让错日期入文件
+        if (_last_wall_date > 0)
+            f << _last_wall_date << "," << q80 << "," << q90 << "," << _abs_theta_samples.size() << "\n";
     }
     // 并入缓存（截断到回看窗）
     if (q80 > 0)
@@ -219,9 +221,12 @@ void ThetaGridStrategy::shadowLog(uint64_t ts_us, const char* event, const Sprea
     }
     if (!_shadow_csv_open)
         return;
-    _shadow_csv << hmsOf(ts_us) << "," << event << "," << state.current_spread << "," << _ema << ","
+    // （曾有的退出类 5s 日志节流已移除: 融合设计后退出事件触发即清虚拟仓,
+    // 每生命周期天然只发一次, 节流反而破坏 CSV 状态机可观测性）
+    _shadow_csv << _last_wall_hms << "," << event << "," << state.current_spread << "," << _ema << ","
                 << theta << "," << _lambda << "," << f1_move << "," << f2_move << ","
-                << state.spread_position << "," << _cfg.grid_lot << "," << state.entry_spread << ","
+                << (_cfg.shadow ? _grid_pos : state.spread_position) << "," << _cfg.grid_lot << ","
+                << (_cfg.shadow ? _grid_entry_spread : state.entry_spread) << ","
                 << (note ? note : "") << "\n";
     _shadow_csv.flush();
 }
@@ -246,14 +251,22 @@ SpreadSignal ThetaGridStrategy::makeSignal(SpreadSignalType type, int direction,
     sig.leg2_qty = _cfg.grid_lot;
     sig.reason = reason;
 
-    // 入场 FAK 限价封顶（P2）: 信号快照价 ± entry_max_slippage 为最差可接受价，
-    // 执行器对 THETA_GRID 入场单转 FAK → 限价内立即成交、剩余撤销（=滑点硬顶+弃格语义）
-    if (type == SpreadSignalType::OPEN_LONG_SPREAD) {   // buy leg1, sell leg2
-        sig.leg1_price += _cfg.entry_max_slippage;
-        sig.leg2_price -= _cfg.entry_max_slippage;
-    } else if (type == SpreadSignalType::OPEN_SHORT_SPREAD) { // sell leg1, buy leg2
-        sig.leg1_price -= _cfg.entry_max_slippage;
-        sig.leg2_price += _cfg.entry_max_slippage;
+    // 入场 FAK 限价封顶（P2 → 10-14 锚定修正）: 锚定盘口 touch 而非 last/mid
+    // （last 锚定下 ec 远月半价差 2.1pt 使 cap 结构性够不到对手价, 回测实证
+    // slip 1.0~3.0 五档零完整建仓）; touch 缺失(0)回退 leg_price。
+    // 买腿=ask+slip, 卖腿=bid-slip: slip 语义="可接受的穿价深度上限"。
+    {
+        double l1_buy = state.leg1_ask > 0 ? state.leg1_ask : state.leg1_price;
+        double l1_sell = state.leg1_bid > 0 ? state.leg1_bid : state.leg1_price;
+        double l2_buy = state.leg2_ask > 0 ? state.leg2_ask : state.leg2_price;
+        double l2_sell = state.leg2_bid > 0 ? state.leg2_bid : state.leg2_price;
+        if (type == SpreadSignalType::OPEN_LONG_SPREAD) {   // buy leg1, sell leg2
+            sig.leg1_price = l1_buy + _cfg.entry_max_slippage;
+            sig.leg2_price = l2_sell - _cfg.entry_max_slippage;
+        } else if (type == SpreadSignalType::OPEN_SHORT_SPREAD) { // sell leg1, buy leg2
+            sig.leg1_price = l1_sell - _cfg.entry_max_slippage;
+            sig.leg2_price = l2_buy + _cfg.entry_max_slippage;
+        }
     }
     (void)direction;
     return sig;
@@ -268,8 +281,13 @@ SpreadSignal ThetaGridStrategy::generateSignal(const SpreadState& state, uint64_
     if (!state.is_active || !_ema_valid || state.leg1_price <= 0 || state.leg2_price <= 0)
         return none;
 
-    // --- 日切：EMA 重置 + λ 采样 flush（generateSignal 时钟 µs 可提日期） ---
-    int today = dayOf(current_time); // current_time 为 µs
+    // --- 日切：EMA 重置 + λ 采样 flush ---
+    // 绝对时刻一律用 state.wall_*（bridge 自 ctx 注入: 实盘=真实, 回测=回放;
+    // current_time 实为 tick actiontime(HHMMSSmmm)×1000 非 epoch, 仅差分
+    // （超时退出）自洽可用, 不可提绝对时刻）
+    int today = static_cast<int>(state.wall_date);
+    _last_wall_hms = state.wall_hms;
+    _last_wall_date = state.wall_date;
     if (_ema_day != today) {
         if (_ema_day != -1 && !_abs_theta_samples.empty())
             flushDailyLambda();
@@ -285,12 +303,19 @@ SpreadSignal ThetaGridStrategy::generateSignal(const SpreadState& state, uint64_
     if (_lambda <= 0)
         return none;
 
-    uint32_t hms = hmsOf(current_time);
+    uint32_t hms = state.wall_hms;
     double abs_theta = std::fabs(theta);
     int side = (theta >= _lambda) ? +1 : (theta <= -_lambda) ? -1 : 0;
     double exit_band = _cfg.band_exit_ratio * _lambda;
     double death_band = _cfg.death_ratio * _lambda;
-    bool has_pos = state.hasPosition();
+    // 网格自身仓位（§20 融合设计, 10-14 用户批准）: shadow=虚拟自跟踪
+    // (_grid_pos, 信号发出即记账), live=pair 持仓（P3 改 tag 级跟踪）。
+    // 不用 state.spread_position 直接当 has_pos —— 那是 pair 级对锁仓
+    // (MM 库存 8-10 手), 会锁死入场门/污染止损基准/14:55 误清 MM 库存。
+    bool has_pos = _cfg.shadow ? (_grid_pos != 0) : state.hasPosition();
+    int grid_dir = _cfg.shadow ? (_grid_pos > 0 ? 1 : -1)
+                               : (state.spread_position > 0 ? 1 : -1);
+    double entry_ref = _cfg.shadow ? _grid_entry_spread : state.entry_spread;
     double f1_move = 0, f2_move = 0;
 
     // --- 时段门 ---
@@ -299,25 +324,44 @@ SpreadSignal ThetaGridStrategy::generateSignal(const SpreadState& state, uint64_
 
     // --- 1. 持仓管理（exit 优先） ---
     if (has_pos) {
-        // 价差空间止损（对整体 entry_spread；格级细分 P2 细化）
-        // 不利方向: 多 spread(pos>0) 亏于 spread 下行; 空 spread 亏于上行
-        //   → (current - entry) × pos < 0 为亏损方向
-        double adverse = std::fabs(state.current_spread - state.entry_spread);
+        // 库存有效性: pair 对锁仓仍存在且同号才可退出消耗; 已被 MM 消耗/平掉
+        // → 视同提前止盈/止损 (EXTERNAL_CLOSE), 清虚拟仓, 不发信号（防反向开仓）
+        int inv = state.spread_position;
+        if (inv == 0 || ((inv > 0) != (grid_dir > 0))) {
+            if (_cfg.shadow) {
+                shadowLog(current_time, "EXTERNAL_CLOSE", state, theta, f1_move, f2_move,
+                          "MM consumed inventory");
+                _grid_pos = 0;
+                _grid_entry_spread = 0;
+            }
+            return none;
+        }
+        // 价差空间止损（基准=网格自身入场价 entry_ref）
+        // 不利方向: 多 spread 亏于 spread 下行; 空 spread 亏于上行
+        double adverse = std::fabs(state.current_spread - entry_ref);
         if (adverse >= _cfg.stop_loss_ratio * _lambda &&
-            (state.current_spread - state.entry_spread) * (state.spread_position > 0 ? 1.0 : -1.0) < 0) {
+            (state.current_spread - entry_ref) * grid_dir < 0) {
             shadowLog(current_time, "STOP_LOSS", state, theta, f1_move, f2_move,
                       "spread-space stop");
-            return _cfg.shadow ? none
-                               : makeSignal(SpreadSignalType::STOP_LOSS, 0, state,
-                                            "theta grid spread-space stop", current_time);
+            if (_cfg.shadow) {
+                _grid_pos = 0;
+                _grid_entry_spread = 0;
+                return none;
+            }
+            return makeSignal(SpreadSignalType::STOP_LOSS, 0, state,
+                              "theta grid spread-space stop", current_time);
         }
         // 带沿出场
         if (abs_theta <= exit_band) {
             shadowLog(current_time, "EXIT_BAND", state, theta, f1_move, f2_move, "|theta|<=exit");
-            return _cfg.shadow ? none
-                               : makeSignal(state.spread_position > 0 ? SpreadSignalType::CLOSE_LONG_SPREAD
-                                                                      : SpreadSignalType::CLOSE_SHORT_SPREAD,
-                                            0, state, "theta grid band exit", current_time);
+            if (_cfg.shadow) {
+                _grid_pos = 0;
+                _grid_entry_spread = 0;
+                return none;
+            }
+            return makeSignal(state.spread_position > 0 ? SpreadSignalType::CLOSE_LONG_SPREAD
+                                                        : SpreadSignalType::CLOSE_SHORT_SPREAD,
+                              0, state, "theta grid band exit", current_time);
         }
         // 信号死亡
         if (abs_theta <= death_band) {
@@ -326,11 +370,15 @@ SpreadSignal ThetaGridStrategy::generateSignal(const SpreadState& state, uint64_
             else if (current_time - _death_since_us >= _cfg.death_hold_ms * 1000ULL) {
                 shadowLog(current_time, "DEATH_EXIT", state, theta, f1_move, f2_move,
                           "signal death");
-                return _cfg.shadow ? none
-                                   : makeSignal(state.spread_position > 0
-                                                    ? SpreadSignalType::CLOSE_LONG_SPREAD
-                                                    : SpreadSignalType::CLOSE_SHORT_SPREAD,
-                                                0, state, "theta grid signal death", current_time);
+                if (_cfg.shadow) {
+                    _grid_pos = 0;
+                    _grid_entry_spread = 0;
+                    return none;
+                }
+                return makeSignal(state.spread_position > 0
+                                      ? SpreadSignalType::CLOSE_LONG_SPREAD
+                                      : SpreadSignalType::CLOSE_SHORT_SPREAD,
+                                  0, state, "theta grid signal death", current_time);
             }
         } else {
             _death_since_us = 0;
@@ -342,10 +390,14 @@ SpreadSignal ThetaGridStrategy::generateSignal(const SpreadState& state, uint64_
                 _force_flat_logged_day = today;
                 shadowLog(current_time, "FORCE_FLAT", state, theta, f1_move, f2_move, "14:55");
             }
-            return _cfg.shadow ? none
-                               : makeSignal(state.spread_position > 0 ? SpreadSignalType::CLOSE_LONG_SPREAD
-                                                                      : SpreadSignalType::CLOSE_SHORT_SPREAD,
-                                            0, state, "theta grid 14:55 force flat", current_time);
+            if (_cfg.shadow) {
+                _grid_pos = 0;
+                _grid_entry_spread = 0;
+                return none;
+            }
+            return makeSignal(state.spread_position > 0 ? SpreadSignalType::CLOSE_LONG_SPREAD
+                                                        : SpreadSignalType::CLOSE_SHORT_SPREAD,
+                              0, state, "theta grid 14:55 force flat", current_time);
         }
         return none; // 持仓中不加新格（单层网格纪律：回归期不摊平）
     }
@@ -405,8 +457,14 @@ SpreadSignal ThetaGridStrategy::generateSignal(const SpreadState& state, uint64_
     // 入场信号：θ≥+λ → 空 spread（卖 F1 买 F2）；θ≤−λ → 多 spread
     shadowLog(current_time, side > 0 ? "ENTRY_SHORT" : "ENTRY_LONG", state, theta, f1_move, f2_move,
               "confirmed");
-    if (_cfg.shadow)
+    if (_cfg.shadow) {
+        // 虚拟建仓（θ≥+λ→空 spread 卖F1买F2）: 乐观成交假设, 成交率/滑点由
+        // CSV 线下测算校准; 退出由配对库存消耗（EXTERNAL_CLOSE）或带沿/止损完成
+        _grid_pos = (side > 0 ? -1 : 1) * static_cast<int>(_cfg.grid_lot);
+        _grid_entry_spread = state.current_spread;
+        _grid_entry_us = current_time;
         return none;
+    }
     return makeSignal(side > 0 ? SpreadSignalType::OPEN_SHORT_SPREAD : SpreadSignalType::OPEN_LONG_SPREAD,
                       side, state, "theta grid entry", current_time);
 }

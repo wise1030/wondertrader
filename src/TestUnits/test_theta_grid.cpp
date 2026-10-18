@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -110,7 +111,7 @@ TEST(test_theta_grid, replay_ec_4d)
             close_pnl = -(leg1_exit - 0) + (leg2_exit - 0);
         // 用 spread 变动结算: entry spread = l1_entry - l2_entry
         double exit_spread = leg1_exit - leg2_exit;
-        close_pnl = (pos > 0 ? 1 : -1) * (exit_spread - entry_spread);
+        close_pnl = (pos > 0 ? 1 : -1) * (exit_spread - entry_cost_basis); // 盈亏按 touch 成本结算
         pnl_sum += close_pnl;
         pnl_peak = std::max(pnl_peak, pnl_sum);
         pnl_max_dd = std::max(pnl_max_dd, pnl_peak - pnl_sum);
@@ -135,8 +136,10 @@ TEST(test_theta_grid, replay_ec_4d)
         st.leg2_price = r.l2_px;
         st.current_spread = r.l1_px - r.l2_px;
         st.is_active = true;
+        st.leg1_bid = r.l1_bid; st.leg1_ask = r.l1_ask;
+        st.leg2_bid = r.l2_bid; st.leg2_ask = r.l2_ask;
         st.spread_position = pos;
-        st.entry_spread = entry_spread;
+        st.entry_spread = entry_spread; // mid 基准（策略止损参照系）
         st.last_update = toActionMs(r.ts_ms);
 
         strat.update(st, st.last_update);
@@ -152,6 +155,15 @@ TEST(test_theta_grid, replay_ec_4d)
             st.cross_lead_dir = xo.lead_dir;
         }
 
+        // 墙钟注入（等同生产 bridge ctx->stra_get_time/date：回放时刻）
+        {
+            time_t sec = (time_t)(r.ts_ms / 1000);
+            struct tm tmv;
+            localtime_r(&sec, &tmv);
+            st.wall_hms = (uint32_t)(tmv.tm_hour * 10000 + tmv.tm_min * 100 + tmv.tm_sec);
+            st.wall_date = (uint32_t)(tmv.tm_year + 1900) * 10000 + (uint32_t)(tmv.tm_mon + 1) * 100 +
+                           (uint32_t)tmv.tm_mday;
+        }
         auto sig = strat.generateSignal(st, r.ts_ms * 1000ULL); // µs
 
         if (!sig.isActionable())
@@ -169,7 +181,8 @@ TEST(test_theta_grid, replay_ec_4d)
                                  : (nx.l2_bid > 0 && nx.l2_bid >= sig.leg2_price);
             if (leg1_ok && leg2_ok) {
                 pos = buy1 ? 1 : -1;
-                entry_spread = (buy1 ? nx.l1_ask : nx.l1_bid) - (buy1 ? nx.l2_bid : nx.l2_ask);
+                entry_cost_basis = (buy1 ? nx.l1_ask : nx.l1_bid) - (buy1 ? nx.l2_bid : nx.l2_ask); // 经济成本(touch)
+                entry_spread = nx.l1_px - nx.l2_px; // 策略可见基准(mid, 与生产 manager entry_spread=current_spread 一致)
                 entries++;
                 printf("[GRID-REPLAY] %llu ENTRY %s sig_l1=%.2f sig_l2=%.2f entry_sp=%.2f\n",
                        (unsigned long long)r.ts_ms, buy1 ? "LONG" : "SHORT", sig.leg1_price,
@@ -196,4 +209,110 @@ TEST(test_theta_grid, replay_ec_4d)
     EXPECT_GT(entries + abandoned, 0) << "无任何入场尝试，信号链异常";
     EXPECT_EQ(pos, 0) << "回放结束仍有持仓（14:55 强退未生效）";
     SUCCEED();
+}
+
+// §20 融合设计（10-14 批准）: shadow 模式网格自跟踪虚拟仓位生命周期验证。
+// 模拟 MM 恒持 +8 手多价差对锁库存: 网格 LONG 入场(θ≤-λ) → 库存同号 →
+// 正常带沿/止损退出; 网格 SHORT 入场(θ≥+λ) → 库存反号 → EXTERNAL_CLOSE。
+TEST(test_theta_grid, replay_ec_4d_shadow_lifecycle)
+{
+    auto rows = loadCsv("/tmp/opencode/ec_grid_500ms.csv");
+    ASSERT_GT(rows.size(), 1000) << "grid csv missing";
+
+    std::filesystem::create_directories("./generated/outputs");
+    const char* csv = "./generated/outputs/theta_grid_ec1112s_shadow.csv";
+    std::remove(csv);
+    std::remove("./generated/outputs/theta_grid_ec1112s_lambda.csv"); // λ 跨日持久化, 保证 hermetic
+
+    ThetaGridStrategy strat;
+    SpreadPairConfig cfg;
+    cfg.pair_id = "ec1112s"; // 独立文件, 不污染基线用例
+    cfg.leg1_code = "INE.ec2611";
+    cfg.leg2_code = "INE.ec2612";
+    cfg.grid.shadow = true; // shadow: 虚拟仓位自跟踪
+    cfg.grid.ema_period = 50;
+    cfg.grid.grid_lot = 1.0;
+    cfg.grid.entry_max_slippage = 1.0;
+    cfg.grid.lag_ratio_max = 0.5;
+    strat.configure(cfg);
+
+    CrossLegContext ctx_xleg;
+    ctx_xleg.setLegs("INE.ec2611", "INE.ec2612");
+    auto midOf = [](double b, double a, double px) { return (b > 0 && a > 0) ? (b + a) / 2.0 : px; };
+
+    for (const auto& r : rows) {
+        SpreadState st;
+        st.pair_id = "ec1112s";
+        st.leg1_code = "INE.ec2611";
+        st.leg2_code = "INE.ec2612";
+        st.leg1_price = r.l1_px;
+        st.leg2_price = r.l2_px;
+        st.current_spread = r.l1_px - r.l2_px;
+        st.is_active = true;
+        st.leg1_bid = r.l1_bid; st.leg1_ask = r.l1_ask;
+        st.leg2_bid = r.l2_bid; st.leg2_ask = r.l2_ask;
+        st.spread_position = 8; // MM 恒持 +8 多价差对锁库存
+        st.entry_spread = st.current_spread;
+        st.last_update = toActionMs(r.ts_ms);
+        strat.update(st, st.last_update);
+        ctx_xleg.onTick("INE.ec2611", midOf(r.l1_bid, r.l1_ask, r.l1_px), st.last_update);
+        ctx_xleg.onTick("INE.ec2612", midOf(r.l2_bid, r.l2_ask, r.l2_px), st.last_update);
+        {
+            const auto& xo = ctx_xleg.output();
+            st.cross_lag_ratio = xo.lag_ratio;
+            st.cross_co_move = xo.co_move;
+            st.cross_lead_dir = xo.lead_dir;
+        }
+        {
+            time_t sec = (time_t)(r.ts_ms / 1000);
+            struct tm tmv;
+            localtime_r(&sec, &tmv);
+            st.wall_hms = (uint32_t)(tmv.tm_hour * 10000 + tmv.tm_min * 100 + tmv.tm_sec);
+            st.wall_date = (uint32_t)(tmv.tm_year + 1900) * 10000 + (uint32_t)(tmv.tm_mon + 1) * 100 +
+                           (uint32_t)tmv.tm_mday;
+        }
+        strat.generateSignal(st, r.ts_ms * 1000ULL);
+    }
+
+    // 解析 shadow CSV 验证生命周期
+    std::ifstream f(csv);
+    ASSERT_TRUE(f.good()) << "shadow csv not produced";
+    std::string line;
+    std::getline(f, line); // header
+    int entry_long = 0, entry_short = 0, exits = 0, stops = 0, ext_close = 0, force_flat = 0;
+    // 状态机平衡校验（无日志节流, 事件流即完整生命周期）:
+    // flat →ENTRY→ inpos →退出类(EXIT/STOP/DEATH/EXTERNAL/FORCE)→ flat
+    bool inpos = false;
+    while (std::getline(f, line)) {
+        if (line.empty())
+            continue;
+        auto field = [&](int idx) {
+            size_t p = 0;
+            for (int i = 0; i < idx; i++) { p = line.find(',', p); if (p == std::string::npos) return std::string(); p++; }
+            size_t e = line.find(',', p);
+            return line.substr(p, e == std::string::npos ? std::string::npos : e - p);
+        };
+        std::string ev = field(1);
+        if (ev == "ENTRY_LONG" || ev == "ENTRY_SHORT") {
+            ASSERT_FALSE(inpos) << "持仓中再次入场(单层纪律破坏): " << line;
+            inpos = true;
+            if (ev == "ENTRY_LONG") entry_long++; else entry_short++;
+        } else if (ev == "EXIT_BAND" || ev == "STOP_LOSS" || ev == "DEATH_EXIT" ||
+                   ev == "EXTERNAL_CLOSE" || ev == "FORCE_FLAT") {
+            ASSERT_TRUE(inpos) << "空仓状态下退出事件: " << line;
+            inpos = false;
+            if (ev == "EXIT_BAND" || ev == "DEATH_EXIT") exits++;
+            else if (ev == "STOP_LOSS") stops++;
+            else if (ev == "EXTERNAL_CLOSE") ext_close++;
+            else force_flat++;
+        }
+    }
+    printf("[SHADOW-LIFECYCLE] entry_long=%d entry_short=%d exits=%d stops=%d ext_close=%d "
+           "force_flat=%d final_inpos=%d\n",
+           entry_long, entry_short, exits, stops, ext_close, force_flat, inpos ? 1 : 0);
+
+    EXPECT_GT(entry_long + entry_short, 0) << "无虚拟入场";
+    EXPECT_GT(ext_close, 0) << "库存反号时应出现 EXTERNAL_CLOSE(SHORT 入场遇 MM 多仓)";
+    EXPECT_GT(exits + stops, 0) << "库存同号时应正常走带沿/止损退出(LONG 侧)";
+    EXPECT_FALSE(inpos) << "回放结束虚拟仓位未归零";
 }
