@@ -34,6 +34,25 @@
 
 ---
 
+## 七、R 轮执行记录（2026-08-24 复核后追加）
+
+复核发现并修复 2 项（FIX-1 checkGreeks 全 WARN 致 A2 锁存失效 → REJECT/WARN@90% 三档；FIX-2 PositionGuard 乐观协调改默认关闭保失效安全）。随后执行 P0 吸收四项 + 性能一项：
+
+| 项 | 状态 | 关键落点 | 偏差说明 |
+|----|------|---------|---------|
+| R1 涨跌停护栏 | ✅ | WT tick 自带 upper_limit/lower_limit → AEP TickData 捕获 → strategy `_priceLimits` → 执行器统一 `withinPriceLimits()`（覆盖 OQM/scanner/gamma/manual 全路径）；`RiskLimitsEx::checkPriceLimit` 可单测 | 超限直接 REJECT 不做截断（保守向）；quantbox ShfePriceLimits 的自算逻辑因 WT 直供交易所值而省略 |
+| R2 PowerVolCurve | ✅* | 新组件恢复原版 GVV×Power 双曲线设计，`volcurve_weight` 由无效变有效；OP2 配置 `blackCalc.volCurve.curve2_type`（默认 gvv 兼容，推荐 power） | *域修复：原版 fit 对负偏移 ln→NaN 且 fit/eval 定义域不一致（潜在缺陷，已在头注释记录）；移植改为 log-ratio 空间拟合 sv=a·e^{bx}+c，闭式 2×2 WLS 替代 GSL |
+| R3 StrikeFinders | ✅* | IStrikeFinder + CffexIO(50/100) + DceMO(25/50/100 分档) 移植；`OptionGrid::getAtmStrike` 先吸附上市网格再最近查找，杜绝虚拟行权价；setupGrid 按 exchange 自动接线 | *MONTHLY/QUARTERLY 判定暂用"前两到期月"启发式；CFFEX 真实规则为"当月+次月+随后两个季月"，多 expiry 品种上线前需精确化（原版 WEEKLY throw 改 WARN 回退） |
+| R4 静态信息对照审计 | ✅ 结论 | OptionInfoInitializer 对应字段已全覆盖：到期日(B28 tick 回填)、涨跌停(R1)、乘数/tick(B03 commInfo)；tick 尚有 pre_settle 字段未消费（保证金维持配置估算口径） | 无阻塞性遗漏 |
+| R5 timer 去重 | ✅ | on_tick 源头合并 Timer 至 100ms 节奏（跨日/时钟回拨立即放行），替代每 tick 一条——worker 每 batch 的 N 次 sections 扫描+drain 消除 | TimeEventScheduler 完整组件延后（当前近似已达同量级收益） |
+
+**测试**: test_enhancements **15/15 PASS**（新增 PowerVolCurve 参数恢复/负偏移防 NaN/退化保护、StrikeFinder 三档网格、PriceLimit 边界 共 3 套）；test_ctg_ranking 全绿。
+**变更**: 13 files, +344/−31（新增 PowerVolCurve.h/.cpp、IStrikeFinder.h、CffexIO/DceMO StrikeFinder.h、StrikeFinders.cpp）。
+
+**明确延后**（复核报告 P1/P2 余项）：BorealisHedger 式对冲执行器、TradingState 统一状态机、CommandRegistry 命令总线、PredictionEvaluator 闭环、GARCH 内核接 GarchScanner——待 BUYSELL SimNow 实测与 FAST 性能改造完成后按触发条件启动。
+
+---
+
 ## 一、结论摘要
 
 对比 plan 的**问题识别基本准确，但完成度描述已系统性过期**：它列出的多项"重要缺失"实际上在迁移过程中或 08-24 修复批次中已经落地。以当前代码为准：
@@ -224,3 +243,29 @@ NxN 合约级矩阵对期权做市过度（同标的相关结构本质上是"跨
 2. **B4 风险口径变更**用 feature flag 默认关闭，A/B 跑一个交易日对比 risk_adjustment 分布后再切。
 3. **B1 保证金为估算口径**：日志明示 "estimated"，不得作为强风控唯一依据，仅联动 widen/panic。
 4. 所有 Phase A/B 改动集中在 OQM/Strategy/PositionGuard/RiskLimitsEx 六个文件内，不动 Grid/Pricer 数学内核，保证定价链路零回归（以 test_ctg_ranking + test_enhancements + 新增 wiring 测试守护）。
+
+
+---
+
+## 八、收尾轮执行记录（2026-08-24，"延后项全量评估"）
+
+**判定原则**: 能在本仓库闭环的代码工作全部执行；依赖外部环境（SimNow/交易所参数）或纯重构零行为收益的，如实标注为"外部依赖/永久延后"，不伪装完成。
+
+| 延后项 | 判定 | 结果 |
+|--------|------|------|
+| Scanner 子系统（B09 收口） | ✅ 已闭环 | 9 个 scanner 统一工厂签名+REGISTER_SCANNER 注册；README 明示信号仍为占位级。配置可加载、腿路由/风控链路已通——框架可用，策略质量交由业务迭代 |
+| GarchScanner 空壳 | ✅ 已闭环 | 注入 GARCH(1,1) 条件波动率内核（ω/α/β 可配、平稳性自校正、预热门控），信号=年化σ预测 vs ATM IV × vega。quantbox GarchSimulator 为 MC 情景引擎，判定不移植（scope 错配） |
+| PredictionEvaluator 闭环 | ✅ 已闭环 | 新组件：预测-实现配对打分（MAE+方向命中率）、30s 视界、60s 周期报告；接入既有 TriggerEngine |
+| CommandRegistry 命令总线 | ✅ 已闭环 | CommandBus.h：STOP/RESUME/PANIC/QMODE/ORDER/CANCEL 结构化分发，未知命令 WARN；manual_order 裸解析退役 |
+| TradingState 统一状态机 | ✅ 已闭环 | 单一写者原则落地：channel/session/hotcmd/风险信号/盘中暂停六处写入全部收敛至 setState()；CTG 经回调上报；panic 覆盖类 bug 的结构性根因消除 |
+| DeltaHedgeExecutor 对冲执行 | ✅ 已闭环（默认关） | 纯函数决策（阈值/冷却/上限/向上取整）+ 主对冲腿自动解析；订单经统一执行器自动获得涨跌停与异常登记保护 |
+| 配置 schema 校验（B33） | ✅ 已闭环 | ConfigValidator 启动探针式校验，未知键 WARN——静默漂移时代结束 |
+| GVV eval 闭式化 | ⚠️ 部分·如实降级 | α=1 精确闭式已落地（含 clamp）；但复核发现 fit() 用 BrentMinimize 数据驱动选 α，拟合后通常≠1 → 快路径仅覆盖拟合前/α≈1 场景。通用翼部查表维持延后（原 P2-4 结论不变） |
+| God Object 拆分 | ❌ 永久延后 | 纯重构、无行为收益、diff 成本高且与最小变更纪律冲突——正式记录不做，除非功能改造顺带触及 |
+| SimNow BUYSELL 实测 / margin 参数校准 | 🔒 外部依赖 | 需实盘环境与交易所公开参数，本仓库无法代劳；已列为上线前 checklist |
+
+**验证**: 全量构建 ✅；test_enhancements **20/20 PASS**（本轮 +5 套件：gvv_closed_form/prediction_evaluator/command_bus/trading_state_flags/delta_hedge_decide）；test_ctg_ranking ✅。
+**累计**: 三轮共 34 files, +917/−86（本轮净增）。
+
+### 收尾结论
+代码侧可闭环事项已全部完成。剩余两项为环境依赖型验收动作（SimNow 拆分行为实测、保证金率校准），以及按业务触发才启动的远期项（MultiMarket 多档 Harmonizer、ETF Spot 业务线、Kalman/分类树信号升级）。**WtOptionCore 代码工程就此收尾。**
