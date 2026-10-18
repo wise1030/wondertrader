@@ -256,6 +256,11 @@ public:
 
     void resetLastComputeTime();
 
+    /// Hot-update the Composite MM alpha weights (worker thread only).
+    /// GammaScalp has its own independent pricer/config and is not touched.
+    void setAlphaWeights(double vegaflow, double frontfut_skew, double deltaflow,
+                         double atmsig, double rollema);
+
     // time (replaces ClockMonitor)
     double getTime() const { return m_time; }
     void setTime(double t) {
@@ -357,7 +362,7 @@ private:
     double __computeEffectiveDelta(uint32_t exp0);
 
 private:
-    const CompositeOptionPricerConfig m_config;
+    CompositeOptionPricerConfig m_config;
     OptionGrid*   m_grid = nullptr;
     OptionRisk*   m_spPositionRisk = nullptr;
     OptionGreeksCPtr m_spPositionGreeks;

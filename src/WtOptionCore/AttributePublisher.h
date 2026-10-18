@@ -42,6 +42,8 @@ public:
 
     // Refresh: mark all attributes dirty for a full republish
     void refresh();
+    // Drop per-instrument maps at session roll (expired contracts accumulate).
+    void clear() { m_optAttrs.clear(); m_undAttrs.clear(); m_dirty = true; }
 
     // Risk summary: portfolio Greeks from OptionRisk
     void setRisk(OptionRisk* risk) { m_risk = risk; }

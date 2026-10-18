@@ -515,6 +515,44 @@ void OptionGrid::reevaluateFrontMonth() {
     }
 }
 
+void OptionGrid::purgeExpired()
+{
+    if (m_expiries.empty()) return;
+
+    std::vector<uint32_t> dead;
+    for (const auto& [exp, ed] : m_expiries) {
+        if (ed && ed->daysToExpiry() < 0)
+            dead.push_back(exp);
+    }
+    if (dead.empty()) return;
+
+    for (uint32_t exp : dead) {
+        m_expiries.erase(exp);
+        m_strikesByExpiry.erase(exp);
+    }
+
+    m_allOptions.erase(std::remove_if(m_allOptions.begin(), m_allOptions.end(),
+        [&](const OptionDataPtr& od) {
+            return od && std::find(dead.begin(), dead.end(), od->getExpiry()) != dead.end();
+        }), m_allOptions.end());
+    m_allStrikes.erase(std::remove_if(m_allStrikes.begin(), m_allStrikes.end(),
+        [&](const StrikeDataPtr& sd) {
+            if (!sd) return false;
+            uint32_t exp = sd->call() ? sd->call()->getExpiry()
+                         : (sd->put() ? sd->put()->getExpiry() : 0);
+            return std::find(dead.begin(), dead.end(), exp) != dead.end();
+        }), m_allStrikes.end());
+
+    if (std::find(dead.begin(), dead.end(), m_frontMonth) != dead.end())
+        m_frontMonth = 0;
+    m_frontMonthExpiry.reset();
+    reevaluateFrontMonth();
+
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "OptionGrid: purged {} expired expiries, {} options remain",
+        dead.size(), m_allOptions.size());
+}
+
 void OptionGrid::refreshExpiryDays() {
     if (m_currentDate == 0) return;
     for (auto& [exp, ed] : m_expiries) {

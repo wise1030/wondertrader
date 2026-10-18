@@ -173,6 +173,9 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             optionOqmCfg.avoid_trade = optOm->has("avoid_trade") ? optOm->getBoolean("avoid_trade") : false;
             optionOqmCfg.check_potential_position = optOm->has("check_potential_position") ? optOm->getBoolean("check_potential_position") : false;
             optionOqmCfg.leave_outer_orders = optOm->has("leave_outer_orders") ? optOm->getBoolean("leave_outer_orders") : true;
+            optionOqmCfg.wait_for_cancels = optOm->has("wait_for_cancels") ? optOm->getBoolean("wait_for_cancels") : false;
+            optionOqmCfg.cancel_ack_timeout_ms = optOm->has("cancel_ack_timeout_ms") ? optOm->getDouble("cancel_ack_timeout_ms") : 2000;
+            optionOqmCfg.cancel_max_retries = optOm->has("cancel_max_retries") ? optOm->getUInt32("cancel_max_retries") : 3;
             optionOqmCfg.max_cancels_allowed = optOm->has("max_cancels_allowed") ? optOm->getInt32("max_cancels_allowed") : 0;
             optionOqmCfg.hard_flat_after_n_fills = optOm->has("hard_flat_after_n_fills") ? optOm->getInt32("hard_flat_after_n_fills") : 0;
             // A4: exchange quoting style
@@ -194,6 +197,9 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             futureOqmCfg.enable_quote_api = futOm->has("enable_quote_api") ? futOm->getBoolean("enable_quote_api") : true;
             futureOqmCfg.check_potential_position = futOm->has("check_potential_position") ? futOm->getBoolean("check_potential_position") : true;
             futureOqmCfg.avoid_trade = futOm->has("avoid_trade") ? futOm->getBoolean("avoid_trade") : false;
+            futureOqmCfg.wait_for_cancels = futOm->has("wait_for_cancels") ? futOm->getBoolean("wait_for_cancels") : false;
+            futureOqmCfg.cancel_ack_timeout_ms = futOm->has("cancel_ack_timeout_ms") ? futOm->getDouble("cancel_ack_timeout_ms") : 2000;
+            futureOqmCfg.cancel_max_retries = futOm->has("cancel_max_retries") ? futOm->getUInt32("cancel_max_retries") : 3;
             std::string qs = futOm->has("quote_style") ? futOm->getCString("quote_style") : "paired";
             futureOqmCfg.quote_style = (qs == "buy_sell")
                 ? wt_option::OptionQuoteManager::Config::QS_BUYSELL
@@ -241,6 +247,13 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     }
 
     _pricerType = cfg->has("pricerType") ? cfg->getCString("pricerType") : "composite_mm";
+    if (!wt_option::parseOptionPricerMode(_pricerType, _pricerMode)) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "Unknown pricerType '{}'; expected composite_mm|gammascalp (defaulting to composite_mm)",
+            _pricerType);
+        _pricerType = "composite_mm";
+        _pricerMode = wt_option::OptionPricerMode::CompositeMM;
+    }
 
     // Save config pointer for setupPricer
     cfgPtr_ = cfg;
@@ -364,10 +377,29 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             _hedgeCfg.targetDelta    = dh->has("target_delta") ? dh->getInt32("target_delta") : 0;
             _hedgeCfg.maxOrderSize   = dh->has("max_order_size") ? dh->getUInt32("max_order_size") : 5;
             _hedgeCfg.cooldownSec    = dh->has("cooldown_sec") ? dh->getDouble("cooldown_sec") : 3.0;
+            // delta_per_lot must be explicit (or derivable from the hedge contract
+            // multiplier); defaulting to 1.0 would over-hedge by the multiplier.
+            // Legacy migration: old configs used `minHedgeQty` with the same
+            // intended meaning; accept it once with a warning.
+            if (dh->has("delta_per_lot")) {
+                _hedgeCfg.deltaPerLot = dh->getDouble("delta_per_lot");
+            } else if (dh->has("minHedgeQty")) {
+                _hedgeCfg.deltaPerLot = dh->getDouble("minHedgeQty");
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "delta_hedge.minHedgeQty is deprecated; migrating to delta_per_lot={}",
+                    _hedgeCfg.deltaPerLot);
+            } else {
+                _hedgeCfg.deltaPerLot = 0.0;
+            }
             WTSLogger::log_by_cat("strategy", LL_INFO,
-                "DeltaHedger: enable={} threshold={}", _deltaHedgeEnable, _hedgeCfg.thresholdDelta);
+                "DeltaHedger: enable={} threshold={} delta_per_lot={}",
+                _deltaHedgeEnable, _hedgeCfg.thresholdDelta, _hedgeCfg.deltaPerLot);
         }
     }
+
+    // Phase 2: optional hard stress limit (0 = alert only)
+    if (cfg->has("riskLimits") && cfg->get("riskLimits")->has("maxStressLoss"))
+        _stressLimit = cfg->get("riskLimits")->getDouble("maxStressLoss");
 
     // B5: FIFO PnL matching mode
     if (cfg->has("pnl")) {
@@ -397,6 +429,23 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
 // ============================================================================
 void HftOptionStrategy::on_init(IHftStraCtx* ctx)
 {
+    if (_stress.scenarios().empty())
+        _stress.addDefaultScenarios();
+
+    _hedgeCoord.configure(_hedgeCfg, 0.0, "",
+        [this](const std::string& code, bool isBuy, double px, uint32_t qty) {
+            return executeOrder(code, isBuy, px, qty);
+        },
+        [this](const std::string& code) -> double {
+            if (_otg && !code.empty()) {
+                auto utd = _otg->getUnderlyingTradingData(code);
+                if (utd && utd->getMid() > 0) return utd->getMid();
+            }
+            return _grid ? _grid->getUnderlyingPrice() : 0.0;
+        },
+        [](const std::string& msg) {
+            WTSLogger::log_by_cat("strategy", LL_INFO, "{}", msg);
+        });
     _ctx = ctx;
     WTSLogger::log_by_cat("strategy", LL_INFO, "HftOptionStrategy[{}] on_init", id());
 
@@ -815,7 +864,7 @@ void HftOptionStrategy::setupPricer()
     }
 
     // === Pluggable pricer factory ===
-    if (_pricerType == "gammascalp") {
+    if (_pricerMode == wt_option::OptionPricerMode::GammaScalp) {
         // --- Gamma Scalping pricer ---
         _gammaPricer = std::make_shared<wt_option::GammaScalpOptionPricer>();
         _gammaPricer->setTheoreticalPricer(pricer2);
@@ -1217,20 +1266,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _tickTimestampUs = static_cast<uint64_t>(_ctx->stra_get_secs()) * 1000000ULL;
         }
         // A6: Notify scanners of underlying price update
-        if (_grid && !_scanners.empty()) {
-            double udlPrice = _grid->getUnderlyingPrice();
-            if (udlPrice > 0) {
-                for (auto& scanner : _scanners) {
-                    if (scanner && scanner->isEnabled())
-                        scanner->onUnderlyingUpdate(udlPrice);
-                }
-            }
-        }
+        if (_grid && !_scanCoord.empty())
+            _scanCoord.dispatchUnderlying(_grid->getUnderlyingPrice());
     };
 
     // Batch complete: computeValues + refresh + drainPendingQuotes (single pass per batch)
     cbs.on_batch_complete = [this]() {
         if (!_grid || !_pricer) return;
+        if (_hotUpdatePending.exchange(false, std::memory_order_acq_rel))
+            applyHotParams();
 
         static int batchCount = 0;
         batchCount++;
@@ -1281,12 +1325,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     }
                 }
                 // Scanner dispatch
-                if (!_scanners.empty() && od->isActive()) {
-                    for (auto& scanner : _scanners) {
-                        if (scanner && scanner->isEnabled())
-                            scanner->onOptionUpdate(od.get());
-                    }
-                }
+                if (od->isActive())
+                    _scanCoord.dispatchOption(od.get());
                 // Attribute collection
                 if (_attrPub) {
                     auto otd = od->getTradingData();
@@ -1295,12 +1335,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
 
             // Scanner grid-level dispatch
-            if (!_scanners.empty()) {
-                for (auto& scanner : _scanners) {
-                    if (scanner && scanner->isEnabled())
-                        scanner->onTick(_grid.get());
-                }
-            }
+            _scanCoord.dispatchTick(_grid.get());
 
             // Attribute collection for underlyings
             if (_attrPub && _otg) {
@@ -1342,6 +1377,49 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 // set by addFill/setHedgePosition. Without this, risk_adjustment
                 // uses previous-cycle greeks (1-cycle lag for fills).
                 if (_risk) _risk->update();
+
+                // Phase 2: periodic scenario stress on current portfolio Greeks.
+                if (_risk && now - _lastStressTime >= 60.0
+                    && !_stress.scenarios().empty()) {
+                    auto g = _risk->getPositionGreeks();
+                    const double spot = _grid->getUnderlyingPrice();
+                    if (g && spot > 0) {
+                        auto rep = _stress.evaluateAll(spot, g->delta(), g->gamma(),
+                                                       g->vega(), g->theta());
+                        auto w = _stress.worst(spot, g->delta(), g->gamma(),
+                                               g->vega(), g->theta());
+                        WTSLogger::log_by_cat("strategy", LL_INFO,
+                            "STRESS worst={:.2f} scenario={} (spot={:.2f} delta={:.2f} gamma={:.4f} vega={:.2f} theta={:.2f})",
+                            w.pnl, w.scenario.name, spot, g->delta(), g->gamma(),
+                            g->vega(), g->theta());
+                        for (const auto& r : rep) {
+                            WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                                "STRESS {} pnl={:.2f} spot_shock={:.2f} vol_shock={:.2f}",
+                                r.scenario.name, r.pnl, r.scenario.spot_shock_pct,
+                                r.scenario.vol_shock);
+                        }
+                        if (_stressLimit > 0 && w.pnl < -_stressLimit
+                            && _tstate.type != wt_option::TradingStateType::Panic) {
+                            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                                "STRESS limit breached: worst={:.2f} < -{:.2f}, PANIC",
+                                w.pnl, _stressLimit);
+                            setState(wt_option::TradingStateType::Panic, "stress_limit");
+                        }
+                        // Per-expiry view (IO expiries can have different hedge
+                        // forwards); aggregate risk can hide a single-expiry tail.
+                        for (const auto& [exp, ed] : _grid->expiries()) {
+                            (void)ed;
+                            auto eg = _risk->getExpiryGreeks(exp);
+                            if (!eg) continue;
+                            auto ew = _stress.worst(spot, eg->delta(), eg->gamma(),
+                                                    eg->vega(), eg->theta());
+                            WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                                "STRESS_EXP {} worst={:.2f} scenario={} delta={:.2f}",
+                                exp, ew.pnl, ew.scenario.name, eg->delta());
+                        }
+                        _lastStressTime = now;
+                    }
+                }
 
                 _grid->computeValues(_pricer.get());
 
@@ -1543,6 +1621,19 @@ void HftOptionStrategy::setupAsyncCallbacks()
     // Order callback
     cbs.on_order = [this](const std::string& code, uint32_t localid, bool isBuy,
                            double totalQty, double leftQty, double price, bool isCanceled) {
+        // Delta-hedge in-flight bookkeeping: release the slot on terminal state.
+        if (isCanceled || leftQty <= 0)
+            _hedgeCoord.onTerminal(localid);
+        // Combo terminal routing: a canceled leg must reach the combo state
+        // machine, otherwise a leg2 cancel silently leaves leg1 exposed.
+        if (isCanceled && !_activeCombos.empty()) {
+            for (auto& combo : _activeCombos) {
+                auto spread = std::dynamic_pointer_cast<wt_option::SpreadComboOrder>(combo);
+                if (spread) spread->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
+                if (syn) syn->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+            }
+        }
         if (isCanceled) {
             WTSLogger::log_by_cat("strategy", LL_DEBUG,
                 "HftOptionStrategy order canceled: {} id={}", code, localid);
@@ -1681,9 +1772,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_grid) {
                 _grid->setCurrentDate(tdate);
                 // Refresh days-to-expiration for all expiries (fixes stale maturity)
-                _grid->refreshExpiryDays();
-                // B6: Re-evaluate front month (roll expired contracts)
-                _grid->reevaluateFrontMonth();
+                // Phase 2: ExpiryLifecycle owns refresh/purge/roll.
+                wt_option::OptionExpiryLifecycle::onSessionBegin(*_grid);
             }
             // B07 fix: reset OQM lifetime counters — without this, MaxCancel /
             // MaxNewOrders / hard_flat thresholds permanently lock all quoting
@@ -1697,11 +1787,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     sig->reset();
             }
             // A6: Start scanners
-            for (auto& scanner : _scanners) {
-                if (scanner) scanner->onStart();
-            }
-            // B9: Clear expiration simulator for new session
+            _scanCoord.startAll();
+            // B9: Clear expiration simulator / attribute maps for new session
             if (_expSim) _expSim->clear();
+            if (_attrPub) _attrPub->clear();
             // B10: Initialize value writer for new session
             if (_valWriter) _valWriter->init(tdate);
             // QuoteStatistics: reset for new session
@@ -1710,10 +1799,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy session end: {}", tdate);
             setState(wt_option::TradingStateType::Disabled, "session_end");
+            // Phase 2: ExpiryLifecycle owns the session-end hard stop.
+            wt_option::OptionExpiryLifecycle::onSessionEnd(_ctx, _positions,
+                [](double gross, size_t codes) {
+                    WTSLogger::log_by_cat("strategy", LL_ERROR,
+                        "HftOptionStrategy session_end: non-zero gross position {:.0f} lots across {} codes (manual/next-session closeout required)",
+                        gross, codes);
+                });
             // A6: Stop scanners
-            for (auto& scanner : _scanners) {
-                if (scanner) scanner->onStop();
-            }
+            _scanCoord.stopAll();
             // B9: Print expiration simulator summary at session end
             if (_expSim) _expSim->printSummary();
             // B10: Close value writer at session end
@@ -1875,6 +1969,18 @@ void HftOptionStrategy::setupScanners()
         config.name = sCfg->has("name") ? sCfg->getCString("name") : type;
         config.enabled = sCfg->has("enable") ? sCfg->getBoolean("enable") : true;
         config.priority = sCfg->has("priority") ? sCfg->getInt32("priority") : 0;
+        // R6 follow-up: actually honor per-scanner numeric params instead of
+        // silently running code defaults.
+        config.min_edge = sCfg->has("min_edge") ? sCfg->getDouble("min_edge") : 0.5;
+        config.delta_min = sCfg->has("delta_min") ? sCfg->getDouble("delta_min") : 0.1;
+        config.delta_max = sCfg->has("delta_max") ? sCfg->getDouble("delta_max") : 0.9;
+        config.max_spread = sCfg->has("max_spread") ? sCfg->getDouble("max_spread") : 10.0;
+        config.min_size = sCfg->has("min_size") ? sCfg->getInt32("min_size") : 1;
+        config.garch_omega = sCfg->has("garch_omega") ? sCfg->getDouble("garch_omega") : 1e-10;
+        config.garch_alpha = sCfg->has("garch_alpha") ? sCfg->getDouble("garch_alpha") : 0.08;
+        config.garch_beta = sCfg->has("garch_beta") ? sCfg->getDouble("garch_beta") : 0.90;
+        config.warmup_returns = sCfg->has("warmup_returns") ? sCfg->getInt32("warmup_returns") : 50;
+        config.annualization_factor = sCfg->has("annualization_factor") ? sCfg->getDouble("annualization_factor") : 60480.0;
 
         // Parse per-expiry overrides
         if (sCfg->has("expiryOverrides")) {
@@ -1895,7 +2001,9 @@ void HftOptionStrategy::setupScanners()
         auto scanner = wt_option::ScannerFactory::instance().createScanner(type, config);
         if (scanner) {
             scanner->setEnabled(config.enabled);  // B09 fix: was unconditional setEnabled(true)
-            _scanners.push_back(scanner);
+            for (const auto& [exp, ov] : config.expiryOverrides)
+                scanner->setExpiryEnabled(exp, ov.enabled);
+            _scanCoord.add(scanner);
             _ctg->addScanner(scanner);
             // CTG implements IScannerListener, register it
             scanner->addListener(_ctg.get());
@@ -1908,12 +2016,12 @@ void HftOptionStrategy::setupScanners()
         }
     }
 
-    if (_scanners.empty()) {
+    if (_scanCoord.empty()) {
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "Total scanners loaded: 0 (configured entries were skipped — see errors above)");
     } else {
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "Total scanners loaded: {}", _scanners.size());
+            "Total scanners loaded: {}", _scanCoord.size());
     }
 
     // Wire scanner execution callback into CTG
@@ -2044,6 +2152,8 @@ void HftOptionStrategy::on_channel_lost(IHftStraCtx* ctx)
 void HftOptionStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* message, const char* userTag)
 {
     if (!bSuccess) {
+        // A rejected hedge order must not leave the in-flight latch stuck.
+        _hedgeCoord.onTerminal(localid);
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "HftOptionStrategy entrust failed: id={} msg={}", localid, message);
     }
@@ -2263,74 +2373,70 @@ void HftOptionStrategy::setState(wt_option::TradingStateType t, const std::strin
 // ============================================================================
 void HftOptionStrategy::registerCommands()
 {
-    _cmdBus.registerCommand("STOP", [this](auto&, std::string&) {
-        setState(wt_option::TradingStateType::Disabled, "hotcmd_stop");
-        return true;
-    });
-    _cmdBus.registerCommand("RESUME", [this](auto&, std::string&) {
-        setState(_channelReady.load() ? wt_option::TradingStateType::Normal
-                                      : wt_option::TradingStateType::Disabled,
-                 "hotcmd_resume");
-        return true;
-    });
-    _cmdBus.registerCommand("PANIC", [this](auto&, std::string&) {
-        // Keep enabled so refresh() stages risk-reduction cancels with boosted TPS
-        setState(wt_option::TradingStateType::Panic, "hotcmd_panic");
-        return true;
-    });
-    _cmdBus.registerCommand("QMODE", [this](const auto& args, std::string& err) {
-        if (args.size() < 2) { err = "QMODE needs <on|off|close>"; return false; }
-        std::string m = args[1];
-        if (!_otg || !_ctg) { err = "not initialized"; return false; }
+    wt_option::OptionCommandHandlers::Hooks hooks;
+    hooks.setState = [this](wt_option::TradingStateType t, const std::string& reason) {
+        setState(t, reason);
+    };
+    hooks.channelReady = [this]() { return _channelReady.load(); };
+    hooks.setQModeAll = [this](const std::string& mode, std::string& err) -> bool {
+        if (!_otg || !_ctg || !_grid) { err = "not initialized"; return false; }
+        if (mode != "on" && mode != "off" && mode != "close") {
+            err = "QMODE needs <on|off|close>";
+            return false;
+        }
         for (const auto& od : _grid->getAllOptions()) {
             if (od && od->getTradingData())
-                _ctg->onSetQMode(od->getCode(), m);
+                _ctg->onSetQMode(od->getCode(), mode);
         }
         return true;
-    });
-    _cmdBus.registerCommand("ORDER", [this](const auto& args, std::string& err) {
-        if (args.size() < 5) { err = "ORDER needs B|S,code,price,qty"; return false; }
-        bool isBuy = (args[1] == "B" || args[1] == "b");
-        double px = std::stod(args[3]);
-        uint32_t qty = static_cast<uint32_t>(std::stoul(args[4]));
-        int32_t ret = executeOrder(args[2], isBuy, px, qty);
-        if (ret == 0) { err = "order rejected (limits/channel)"; return false; }
-        return true;
-    });
-    _cmdBus.registerCommand("CANCEL", [this](const auto& args, std::string& err) {
-        if (args.size() < 2) { err = "CANCEL needs code"; return false; }
-        if (_ctx) _ctx->stra_cancel_all(args[1].c_str());
-        return true;
-    });
+    };
+    hooks.executeOrder = [this](const std::string& code, bool isBuy,
+                                double px, uint32_t qty) {
+        return executeOrder(code, isBuy, px, qty);
+    };
+    hooks.cancelAll = [this](const std::string& code) {
+        if (_ctx) _ctx->stra_cancel_all(code.c_str());
+    };
+    _cmdHandlers.registerAll(_cmdBus, std::move(hooks));
 }
 
 // ============================================================================
 // R10: portfolio delta-hedge executor tick
 // ============================================================================
+double HftOptionStrategy::resolveDeltaPerLot()
+{
+    if (_otg && !_primaryHedgeCode.empty()) {
+        auto utd = _otg->getUnderlyingTradingData(_primaryHedgeCode);
+        if (utd && utd->getContractSize() > 0)
+            return utd->getContractSize();
+    }
+    if (_ctx && !_primaryHedgeCode.empty()) {
+        auto ci = CodeHelper::extractStdCode(_primaryHedgeCode.c_str(), nullptr);
+        std::string prodKey = fmt::format("{}.{}", ci._exchg, ci._product);
+        WTSCommodityInfo* cinfo = _ctx->stra_get_comminfo(prodKey.c_str());
+        if (cinfo && cinfo->getVolScale() > 0)
+            return cinfo->getVolScale();
+    }
+    if (!_deltaHedgeLotWarned) {
+        _deltaHedgeLotWarned = true;
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "DeltaHedger: cannot resolve delta_per_lot for hedge code '{}'; hedge disabled until configured",
+            _primaryHedgeCode);
+    }
+    return 0.0;
+}
+
 void HftOptionStrategy::checkDeltaHedge(double nowSec)
 {
     if (!_deltaHedgeEnable || !_risk) return;
 
-    const double pd = _risk->getPortfolioDelta();
-    auto d = wt_option::DeltaHedgeExecutor::decide(_hedgeCfg, pd,
-                                                   nowSec, _deltaHedgeLastFire);
-    if (!d.fire) return;
-
-    // Resolve hedge price: prefer the hedge UTD book, fall back to underlying
-    double px = 0;
-    if (_otg && !_primaryHedgeCode.empty()) {
-        auto utd = _otg->getUnderlyingTradingData(_primaryHedgeCode);
-        if (utd) px = utd->getMid();
+    if (_hedgeCfg.deltaPerLot <= 0) {
+        _hedgeCfg.deltaPerLot = resolveDeltaPerLot();
+        if (_hedgeCfg.deltaPerLot <= 0) return;
     }
-    if (px <= 0 && _grid) px = _grid->getUnderlyingPrice();
-    if (px <= 0) return;
-
-    if (executeOrder(_primaryHedgeCode, d.isBuy, px, d.qty) > 0) {
-        _deltaHedgeLastFire = nowSec;
-        WTSLogger::log_by_cat("strategy", LL_INFO,
-            "DeltaHedger fired: {} {} {}@{} ({})",
-            _primaryHedgeCode, d.isBuy ? "BUY" : "SELL", d.qty, px, d.reason);
-    }
+    _hedgeCoord.setHedgeCode(_primaryHedgeCode);
+    _hedgeCoord.setDeltaPerLot(_hedgeCfg.deltaPerLot);
+    _hedgeCoord.check(nowSec, _risk->getPortfolioDelta());
 }
 
 // ============================================================================
@@ -2338,14 +2444,34 @@ void HftOptionStrategy::checkDeltaHedge(double nowSec)
 // ============================================================================
 void HftOptionStrategy::on_params_updated()
 {
+    // Framework callback thread: only signal; the worker owns grid/CTG/OQM.
+    _hotUpdatePending.store(true, std::memory_order_release);
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "HftOptionStrategy[{}] PARAMS HOT UPDATE queued", id());
+}
+
+void HftOptionStrategy::applyHotParams()
+{
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "HftOptionStrategy[{}] === PARAMS HOT UPDATE ===", id());
 
-    // 1. Read hot values into pricer config
-    if (_pricer) {
+    // 1. Read hot values into the Composite MM pricer config. GammaScalp is a
+    // separate strategy pricer (dynamic hedging), not this alpha-weight path.
+    if (_compositePricer) {
+        const double vega = hotVal(_hot.wgt_vegaflow, _wgt_vegaflow);
+        const double front = hotVal(_hot.wgt_frontfut_skew, _wgt_frontfut_skew);
+        const double delta = hotVal(_hot.wgt_deltaflow, _wgt_deltaflow);
+        const double atm = hotVal(_hot.wgt_atmsig, _wgt_atmsig);
+        const double roll = hotVal(_hot.wgt_rollema, _wgt_rollema);
+        _compositePricer->setAlphaWeights(vega, front, delta, atm, roll);
+        _wgt_vegaflow = vega;
+        _wgt_frontfut_skew = front;
+        _wgt_deltaflow = delta;
+        _wgt_atmsig = atm;
+        _wgt_rollema = roll;
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "  wgt_vegaflow: {} → {}", _wgt_vegaflow,
-            hotVal(_hot.wgt_vegaflow, _wgt_vegaflow));
+            "  alpha weights: vega={} frontfut={} delta={} atmsig={} rollema={}",
+            vega, front, delta, atm, roll);
     }
 
     // 2. Update TPS

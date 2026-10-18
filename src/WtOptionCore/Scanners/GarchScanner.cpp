@@ -3,6 +3,15 @@
 
 namespace wt_option {
 
+void GarchScanner::onStart()
+{
+    // A new session must not inherit yesterday's last price / variance.
+    m_lastPrice = 0.0;
+    m_sigma = 0.0;
+    m_samples = 0;
+    m_active = true;
+}
+
 // ---------------------------------------------------------------------------
 // R7: GARCH(1,1) conditional-volatility kernel (replaces the placeholder).
 // quantbox's GarchSimulator is a Monte-Carlo scenario engine (N-path matrix
@@ -68,6 +77,13 @@ double GarchScanner::scanOption(OptionData* opt) {
     const double edge = std::fabs(sigmaAnn - iv) * vega;
     if (edge < m_config.min_edge) return 0.0;
     return edge;
+}
+
+void GarchScanner::onOptionUpdate(OptionData* od) {
+    if (!od || !m_active || !isEnabled()) return;
+    const double score = scanOption(od);
+    if (score > 0)
+        publishHit(od, score, "garch_vol_edge");
 }
 
 // R6: factory registration — closes the "factory map empty" defect

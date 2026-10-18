@@ -39,8 +39,11 @@ public:
     /*! d2P/dFdV */
     double vanna(double maturity) const;
 
-    /*! Sensitivity to time to maturity. */
-    virtual double thetaPerDay(double spot, double maturity) const;
+    /*! Sensitivity to time to maturity.
+     *  Implementation takes (rate, vol): -rate*value/365 - 0.5*vol^2*F^2*gamma/252.
+     *  (The old header named the parameters (spot, maturity), which silently
+     *   disagreed with the definition — same types, so the compiler could not catch it.) */
+    virtual double thetaPerDay(double rate, double vol) const;
 
     /*! dP/dV */
     double vega(double maturity) const;

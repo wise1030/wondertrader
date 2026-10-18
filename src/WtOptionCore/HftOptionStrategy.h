@@ -14,6 +14,11 @@
 #include "OptionAsyncEventProcessor.h"
 #include "OptionQuoteManager.h"
 #include "Scanners/IScanModule.h"
+#include "OptionScanCoordinator.h"
+#include "OptionHedgeCoordinator.h"
+#include "OptionExpiryLifecycle.h"
+#include "OptionCommandHandlers.h"
+#include "OptionPricerMode.h"
 #include "AttributePublisher.h"
 #include "ExpirationSimulator.h"
 #include "OptionValueWriter.h"
@@ -32,11 +37,14 @@
 #include "DeltaHedgeExecutor.h"
 #include "PredictionEvaluator.h"
 #include "ConfigValidator.h"
+#include "StressAnalyzer.h"
 
 #include <string>
 #include <memory>
 #include <atomic>
 #include <set>
+#include <unordered_set>
+#include <mutex>
 #include <unordered_map>
 #include <map>
 
@@ -115,6 +123,7 @@ private:
 
     // Pricer strategy type
     std::string _pricerType = "composite_mm";
+    wt_option::OptionPricerMode _pricerMode = wt_option::OptionPricerMode::CompositeMM;
 
     // Config pointer saved for setupPricer
     wtp::WTSVariant* cfgPtr_ = nullptr;
@@ -188,7 +197,7 @@ private:
     std::vector<std::pair<double, double>> _rateCurve; // (days, rate) sorted
 
     // A6: Scanners
-    std::vector<wt_option::IScanModulePtr> _scanners;
+    wt_option::OptionScanCoordinator _scanCoord;
 
     // Scanner execution context (bridges to IHftStraCtx)
     wt_option::ComboExecContext _comboCtx;
@@ -239,17 +248,30 @@ private:
 
     // R9: structured hot-command bus (replaces raw manual_order parsing)
     wt_option::CommandBus _cmdBus;
+    wt_option::OptionCommandHandlers _cmdHandlers;
     void registerCommands();
+    // Hot params are applied on the async worker, never on the framework
+    // callback thread that invokes on_params_updated().
+    std::atomic<bool> _hotUpdatePending{false};
+    void applyHotParams();
 
     // R10: portfolio delta-hedge executor (default off)
     bool   _deltaHedgeEnable = false;
-    double _deltaHedgeLastFire = -1e9;
     std::string _primaryHedgeCode;
     wt_option::DeltaHedgeExecutor::Config _hedgeCfg;
+    wt_option::OptionHedgeCoordinator _hedgeCoord;   // owns in-flight + cooldown
+    bool _deltaHedgeLotWarned = false;
     void checkDeltaHedge(double nowSec);
+    /// Resolve delta-per-lot from the hedge contract multiplier; <=0 means unknown.
+    double resolveDeltaPerLot();
 
     // R-P1: prediction accuracy loop closure
     wt_option::PredictionEvaluator _predEvaluator;
+
+    // Phase 2: scenario stress (delta-gamma-vega-theta) on the portfolio book
+    wt_option::StressAnalyzer _stress;
+    double _lastStressTime = -1e9;
+    double _stressLimit = 0.0;   // 0 = alert-only; >0 = Panic if worst < -limit
 
     // B1: estimated-margin guard (config-driven; exchange does not publish
     // margins via commInfo, so rates are calibrated in config)

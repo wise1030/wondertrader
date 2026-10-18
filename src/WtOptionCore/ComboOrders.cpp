@@ -82,19 +82,17 @@ void SpreadComboOrder::hedge(uint32_t qty)
     if (id > 0) {
         m_leg2Sent = true;
         m_leg2LocalId = id;
+        m_leg2Ids.push_back(id);
+        m_leg2Open.insert(id);
         m_leg2Committed += qty;  // B27: track cumulative hedge commitment
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "SpreadComboOrder {} leg2 sent: {} {} {}@{} (improved from {})",
+            "SpreadComboOrder {} leg2 sent: {} {} {}@{} (improved from {}, committed={}/{})",
             m_name, m_leg2Code, m_leg2IsBuy ? "BUY" : "SELL",
-            qty, improvedPrice, m_leg2Price);
+            qty, improvedPrice, m_leg2Price, m_leg2Committed, m_totalSize);
     } else {
         WTSLogger::log_by_cat("strategy", LL_ERROR,
             "SpreadComboOrder {} leg2 send FAILED: {}", m_name, m_leg2Code);
-        // Leg2 failed - cancel leg1 if it has fills remaining
-        if (m_leg1LocalId > 0 && m_execCtx->cancelOrder)
-            m_execCtx->cancelOrder(m_leg1LocalId);
-        m_done = true;
-        m_active = false;
+        markFailed("leg2 send failed");
     }
 }
 
@@ -104,27 +102,76 @@ bool SpreadComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
     if (m_leg1Sent && localid == m_leg1LocalId) {
         matched = true;
         m_leg1Filled += fillQty;  // B27: accumulate partial fills
-        uint32_t need = (m_leg1Filled > m_leg2Committed)
-            ? (m_leg1Filled - m_leg2Committed) : 0;
-        if (need > 0 && !m_done) {
-            if (!m_leg2Sent) {
+        if (!m_failed) {
+            uint32_t need = (m_leg1Filled > m_leg2Committed)
+                ? (m_leg1Filled - m_leg2Committed) : 0;
+            if (need > 0) {
                 WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "SpreadComboOrder {}: leg1 fill {}/{}, sending hedge",
-                    m_name, m_leg1Filled, m_totalSize);
-                hedge(need);   // B27 fix: size hedge to ACTUAL filled qty
-            } else {
-                hedge(need);   // B27 fix: top-up for late leg1 fills
+                    "SpreadComboOrder {}: leg1 fill {}/{}, sending hedge {}",
+                    m_name, m_leg1Filled, m_totalSize, need);
+                hedge(need);
             }
         }
-    } else if (m_leg2Sent && localid == m_leg2LocalId) {
+    } else if (std::find(m_leg2Ids.begin(), m_leg2Ids.end(), localid) != m_leg2Ids.end()) {
         matched = true;
+        m_leg2Filled += fillQty;
     }
 
-    if (matched && checkDone(false)) {
+    if (matched && !m_failed && checkDone(false)) {
         m_done = true;
         m_active = false;
     }
     return matched;
+}
+
+bool SpreadComboOrder::onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty)
+{
+    (void)leftQty;   // retained for API symmetry / future partial-fill policy
+    if (!canceled) return false;
+
+    bool is_leg1 = (m_leg1Sent && localid == m_leg1LocalId);
+    bool is_leg2 = (std::find(m_leg2Ids.begin(), m_leg2Ids.end(), localid) != m_leg2Ids.end());
+    if (!is_leg1 && !is_leg2) return false;
+
+    if (is_leg1) m_leg1Terminal = true;
+    if (is_leg2) {
+        m_leg2Open.erase(localid);
+        m_leg2Terminal = m_leg2Open.empty();
+    }
+
+    if (!m_failed) {
+        if (is_leg2 && (m_leg2Filled < m_leg1Filled || m_leg1Filled < m_totalSize)) {
+            // A partial leg2 is acceptable only when leg1 is also terminal and
+            // both sides matched exactly (flat residual). Otherwise leg1 can
+            // still fill or is already over-filled vs the hedge.
+            if (!(m_leg1Terminal && m_leg1Filled == m_leg2Filled)) {
+                markFailed("leg2 terminal before hedge complete");
+            }
+        } else if (is_leg1 && !m_leg2Sent && m_leg1Filled > 0) {
+            markFailed("leg1 terminal without hedge");
+        } else if (is_leg1 && !m_leg2Sent && m_leg1Filled == 0) {
+            markFailed("leg1 terminal before hedge");
+        }
+    }
+
+    if (!m_failed && checkDone(false)) {
+        m_done = true;
+        m_active = false;
+    }
+    return true;
+}
+
+void SpreadComboOrder::markFailed(const char* reason)
+{
+    if (m_failed) return;
+    m_failed = true;
+    WTSLogger::log_by_cat("strategy", LL_ERROR,
+        "SpreadComboOrder {} FAILED: {} (leg1 {}/{} leg2 {}/{} committed={})",
+        m_name, reason, m_leg1Filled, m_totalSize,
+        m_leg2Filled, m_totalSize, m_leg2Committed);
+    cancelAll();
+    m_done = true;
+    m_active = false;
 }
 
 void SpreadComboOrder::onFill(const OptionOrder& order, const FillEvent& fill)
@@ -135,19 +182,23 @@ void SpreadComboOrder::onFill(const OptionOrder& order, const FillEvent& fill)
 bool SpreadComboOrder::checkDone(bool timeout)
 {
     if (timeout) {
-        // Timeout - cancel any unfilled legs
         cancelAll();
         m_done = true;
         m_active = false;
         return true;
     }
 
-    // Done if leg2 is sent and both legs are filled or cancelled
-    if (!m_leg2Sent) return false;
+    if (m_failed) return true;
 
-    // For simplicity: done if leg2 was sent (we don't track individual fills
-    // in this simplified version - the OQM handles per-order fills)
-    return m_leg2Sent;
+    // Both legs must be fully filled.
+    if (m_leg1Filled >= m_totalSize && m_leg2Filled >= m_totalSize)
+        return true;
+
+    // Matched partial: both legs are terminal and exactly flat vs each other.
+    if (m_leg1Terminal && m_leg2Terminal && m_leg1Filled == m_leg2Filled)
+        return true;
+
+    return false;
 }
 
 bool SpreadComboOrder::checkTimeout()
@@ -168,11 +219,11 @@ bool SpreadComboOrder::checkTimeout()
 void SpreadComboOrder::cancelAll()
 {
     if (m_execCtx && m_execCtx->cancelOrder) {
-        if (m_leg1LocalId > 0 && !m_leg2Sent) {
+        if (m_leg1LocalId > 0 && !m_leg1Terminal && m_leg1Filled < m_totalSize)
             m_execCtx->cancelOrder(m_leg1LocalId);
-        }
-        if (m_leg2LocalId > 0) {
-            m_execCtx->cancelOrder(m_leg2LocalId);
+        for (uint32_t id : m_leg2Ids) {
+            if (m_leg2Open.count(id))
+                m_execCtx->cancelOrder(id);
         }
     }
     m_active = false;
@@ -338,8 +389,46 @@ bool SynComboOrder::checkDone(bool timeout)
         return true;
     }
 
-    // Done when last leg is sent (simplified)
-    return m_legExecs[2].sent;
+    if (m_failed) return true;
+
+    // All three legs must be fully filled (future leg is ratio-adjusted).
+    for (const auto& leg : m_legExecs) {
+        if (leg.filledQty < leg.desiredQty)
+            return false;
+    }
+    return true;
+}
+
+bool SynComboOrder::onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty)
+{
+    (void)leftQty;
+    if (!canceled) return false;
+
+    for (size_t i = 0; i < m_legExecs.size(); ++i) {
+        auto& leg = m_legExecs[i];
+        if (!leg.sent || leg.localId != localid) continue;
+        if (leg.filledQty < leg.desiredQty) {
+            markFailed("leg canceled before full fill");
+            return true;
+        }
+        if (checkDone(false)) {
+            m_done = true;
+            m_active = false;
+        }
+        return true;
+    }
+    return false;
+}
+
+void SynComboOrder::markFailed(const char* reason)
+{
+    if (m_failed) return;
+    m_failed = true;
+    WTSLogger::log_by_cat("strategy", LL_ERROR,
+        "SynComboOrder {} FAILED: {}", m_name, reason);
+    cancelAll();
+    m_done = true;
+    m_active = false;
 }
 
 bool SynComboOrder::checkTimeout()

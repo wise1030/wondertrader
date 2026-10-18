@@ -33,7 +33,10 @@ public:
         int32_t  targetDelta = 0;       // recenter to this (usually 0)
         uint32_t maxOrderSize = 5;
         double cooldownSec = 3.0;
-        double minHedgeQty = 1.0;       // per-unit delta of one hedge lot (≈ multiplier×|Δ_fut|=mult)
+        // Delta of one hedge lot (futures: contract multiplier × |Δ_fut|, usually the multiplier).
+        // Keep this explicit: `portfolioDelta` is already multiplied by contract size, so a
+        // default of 1.0 would over-hedge by the multiplier (e.g. IO ≈ 300x).
+        double deltaPerLot = 1.0;
         Config() = default;
     };
 
@@ -58,7 +61,7 @@ public:
         d.isBuy = excess < 0;
         // Lot count: |excess| / delta-per-lot (futures ≈ multiplier), rounded UP
         // so we never stay under-hedged.
-        const double lotsRaw = std::fabs(excess) / std::max(cfg.minHedgeQty, 1e-9);
+        const double lotsRaw = std::fabs(excess) / std::max(cfg.deltaPerLot, 1e-9);
         uint32_t lots = static_cast<uint32_t>(std::ceil(lotsRaw - 1e-9));
         if (lots == 0) return d;
         if (lots > cfg.maxOrderSize) lots = cfg.maxOrderSize;

@@ -16,6 +16,8 @@
 #include "../TradingState.h"
 #include "../CommandBus.h"
 #include "../DeltaHedgeExecutor.h"
+#include "../ComboOrders.h"
+#include "../OptionData.h"
 #include "../PredictionEvaluator.h"
 #include "../CffexIOStrikeFinder.h"
 #include "../DceMOStrikeFinder.h"
@@ -593,7 +595,8 @@ void test_oqm_pretrade_and_retry() {
     MultiMarket mm;
     mm.setBest(0, PriceSize(50.0, 1));
     mm.setBest(1, PriceSize(51.0, 1));
-    oqm.updateOrders(mm, false);
+    const int32_t txns = oqm.updateOrders(mm, false);
+    ASSERT_EQ(txns, 1);   // actual transactions, not the old hard-coded 1
     // Only the bid was issued; the ask was blocked pre-trade
     ASSERT_EQ(sendCount, 1);
     ASSERT_TRUE(!anySell);
@@ -611,6 +614,121 @@ void test_oqm_pretrade_and_retry() {
     oqm.updateOrders(mm, false);
     ASSERT_EQ(sendCount, 2);
     ASSERT_TRUE(!oqm.isRetryPending());   // consumed
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// OQM: cancel-ack watchdog must not freeze a side forever
+// ============================================================================
+void test_oqm_cancel_timeout() {
+    std::cout << "=== test_oqm_cancel_timeout ===" << std::endl;
+
+    OptionQuoteManager::Config cfg;
+    cfg.wait_for_cancels = true;
+    cfg.cancel_ack_timeout_ms = 500;
+    cfg.cancel_max_retries = 2;
+    OptionQuoteManager oqm("ct", cfg, nullptr);
+
+    uint32_t nextId = 700;
+    int sends = 0;
+    oqm.setSendSingleFn([&](bool, double, uint32_t) { sends++; return nextId++; });
+    double now = 0.0;
+    oqm.setGetTimeFn([&] { return now; });
+    oqm.setActive(true);
+
+    MultiMarket mm;
+    mm.setBest(0, PriceSize(50.0, 1));
+    mm.setBest(1, PriceSize(51.0, 1));
+    oqm.updateOrders(mm, false);
+    ASSERT_EQ(sends, 2);
+
+    oqm.onOrderStatusChange(700, true, 1, 1, 50.0, false);
+    oqm.onOrderStatusChange(701, false, 1, 1, 51.0, false);
+
+    MultiMarket empty;
+    oqm.updateOrders(empty, false);          // send cancels, cancelPending=true
+    now = 0.6;
+    oqm.updateOrders(empty, false);          // bootstrap cancelSentTime
+    now = 1.2;
+    oqm.updateOrders(empty, false);          // retry #1
+    now = 1.8;
+    oqm.updateOrders(empty, false);          // retry #2
+    now = 2.4;
+    oqm.updateOrders(empty, false);          // exhausted -> stuck
+    ASSERT_TRUE(oqm.isCancelStuck());
+
+    // A terminal callback clears the latch and allows quoting again.
+    oqm.onOrderStatusChange(700, true, 1, 1, 50.0, true);
+    oqm.onOrderStatusChange(701, false, 1, 1, 51.0, true);
+    ASSERT_TRUE(!oqm.isCancelStuck());
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// SpreadComboOrder: leg2 terminal must not leave leg1 naked
+// ============================================================================
+void test_spread_combo_state() {
+    std::cout << "=== test_spread_combo_state ===" << std::endl;
+
+    ComboExecContext ctx;
+    uint32_t nextId = 1;
+    std::vector<uint32_t> sent, canceled;
+    ctx.sendOrder = [&](const std::string&, bool, double, uint32_t) {
+        uint32_t id = nextId++;
+        sent.push_back(id);
+        return id;
+    };
+    ctx.cancelOrder = [&](uint32_t id) { canceled.push_back(id); return true; };
+    ctx.getTime = [] { return 0.0; };
+
+    OptionInfo i1; i1.code = "L1";
+    OptionInfo i2; i2.code = "L2";
+    OptionData o1(i1), o2(i2);
+
+    // Case 1: leg1 partial fill -> hedge; leg2 canceled -> FAILED + leg1 canceled.
+    {
+        SpreadComboOrder combo("c1", 5, 0.5, &ctx);
+        combo.setupLegs(&o1, true, &o2, false, 10.0, 20.0);
+        ASSERT_EQ(combo.sendOrders(), ComboOrder::SendResult::Success);
+        ASSERT_EQ(sent.size(), 1u);
+        ASSERT_TRUE(combo.onLegFill(1, 2));
+        ASSERT_EQ(sent.size(), 2u);              // hedge sent
+        ASSERT_TRUE(!combo.isDone());
+        ASSERT_TRUE(combo.onLegTerminal(2, true, 2));
+        ASSERT_TRUE(combo.isFailed());
+        ASSERT_TRUE(combo.isDone());
+        ASSERT_TRUE(!canceled.empty());          // leg1 was canceled
+    }
+
+    // Case 2: both legs fully filled -> done, not failed.
+    {
+        SpreadComboOrder combo("c2", 2, 0.5, &ctx);
+        combo.setupLegs(&o1, true, &o2, false, 10.0, 20.0);
+        uint32_t base = nextId;
+        ASSERT_EQ(combo.sendOrders(), ComboOrder::SendResult::Success);
+        uint32_t leg1 = base;
+        combo.onLegFill(leg1, 2);                // full leg1 -> hedge
+        uint32_t leg2 = base + 1;
+        combo.onLegFill(leg2, 2);                // full leg2
+        ASSERT_TRUE(combo.isDone());
+        ASSERT_TRUE(!combo.isFailed());
+    }
+
+    // Case 3: SynCombo must not report done just because leg3 was sent.
+    {
+        SynComboOrder syn("c3", 2, 0.5, 1, &ctx);
+        syn.setupLegs(&o1, &o2, "FUT", true, false, false, 10.0, 20.0, 30.0);
+        ASSERT_EQ(syn.sendOrders(), ComboOrder::SendResult::Success);
+        uint32_t leg0 = sent.back();
+        syn.onLegFill(leg0, 2);                  // leg1 full -> leg2 sent
+        ASSERT_TRUE(!syn.isDone());
+        uint32_t leg1 = sent.back();
+        ASSERT_TRUE(syn.onLegTerminal(leg1, true, 2));
+        ASSERT_TRUE(syn.isFailed());
+        ASSERT_TRUE(syn.isDone());
+    }
 
     std::cout << "  PASS" << std::endl;
 }
@@ -640,7 +758,7 @@ void test_pnl_tracker_fifo() {
     ASSERT_TRUE(std::fabs(t.getWeightedEntryPrice() - 102.0) < 1e-6);
 
     // Ledger dump returns rows without crashing
-    size_t rows = t.dumpLedgerCsv("/tmp/opencode/test_ledger.csv");
+    size_t rows = t.dumpLedgerCsv("/tmp/test_ledger.csv");
     ASSERT_TRUE(rows >= 1);
 
     // Non-FIFO mode unaffected aggregate path still runs
@@ -973,7 +1091,7 @@ void test_delta_hedge_decide() {
     std::cout << "=== test_delta_hedge_decide ===" << std::endl;
     using DH = wt_option::DeltaHedgeExecutor;
     DH::Config cfg; cfg.thresholdDelta = 10; cfg.maxOrderSize = 5;
-    cfg.cooldownSec = 3.0; cfg.minHedgeQty = 1.0;
+    cfg.cooldownSec = 3.0; cfg.deltaPerLot = 1.0;
 
     auto d = DH::decide(cfg, 15.0, 100.0, 0.0);      // long excess → sell 15
     ASSERT_TRUE(d.fire && !d.isBuy && d.qty == 5);   // capped by maxOrderSize
@@ -986,6 +1104,14 @@ void test_delta_hedge_decide() {
 
     d = DH::decide(cfg, 50.0, 101.0, 100.0);         // cooldown active
     ASSERT_TRUE(!d.fire && d.reason == "cooldown");
+
+    // delta_per_lot: portfolioDelta is already multiplier-scaled. With IO
+    // multiplier 300, 150 delta must map to ONE hedge lot, not 150.
+    cfg.thresholdDelta = 10; cfg.maxOrderSize = 5; cfg.deltaPerLot = 300.0;
+    d = DH::decide(cfg, 150.0, 200.0, 0.0);
+    ASSERT_TRUE(d.fire && d.qty == 1);
+    d = DH::decide(cfg, 900.0, 200.0, 0.0);
+    ASSERT_TRUE(d.fire && d.qty == 3);
 
     cfg.thresholdDelta = 0;                          // disabled
     ASSERT_TRUE(!DH::decide(cfg, 999.0, 100.0, 0.0).fire);
@@ -1006,6 +1132,7 @@ int main() {
     test_options_short_limit_filter();
     test_oqm_quote_style_and_guard();
     test_oqm_pretrade_and_retry();
+    test_oqm_cancel_timeout();
     test_pnl_tracker_fifo();
     test_position_guard_staleness();
     test_order_anomaly_guard();
@@ -1017,6 +1144,7 @@ int main() {
     test_command_bus();
     test_trading_state_flags();
     test_delta_hedge_decide();
+    test_spread_combo_state();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

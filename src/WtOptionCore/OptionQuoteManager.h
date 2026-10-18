@@ -49,6 +49,9 @@ public:
         bool leave_outer_orders = true;
         bool wait_for_cancels = false;
         double order_delay_ms = 0;
+        // Cancel-ack watchdog: a lost cancel callback must not freeze a side forever.
+        double cancel_ack_timeout_ms = 2000;   // 0 = disabled
+        uint32_t cancel_max_retries = 3;       // re-sends before declaring stuck
 
         // --- 撤单限制 (三层) ---
         int32_t max_cancels_allowed = 0;      // hard limit (0=unlimited)
@@ -143,6 +146,9 @@ public:
     int32_t getNumNewOrders() const { return m_numNewOrders; }
     int32_t getNumLateFills() const { return m_numLateFills; }
     bool isHardFlatMode() const { return m_hardFlatMode; }
+    /// True when cancel retries exhausted without a terminal callback; new
+    /// orders on this instrument are suppressed until the order goes terminal.
+    bool isCancelStuck() const { return m_cancelStuck; }
     const std::string& getCode() const { return m_code; }
     int32_t getTrueMaxCancels() const;
 
@@ -154,6 +160,7 @@ private:
                                               double askP, uint32_t askQ);
     uint32_t sendSingle(bool isBuy, double price, uint32_t qty);  // A4
     bool sendCancelById(uint32_t localid);
+    void scanCancelTimeouts(double now);
     void sendCancelAll();
     void applyOffsetGuard(uint32_t& qty, bool isBuy);             // A1 guard
 
@@ -167,7 +174,7 @@ private:
 
     // --- Incremental diffing ---
     int32_t getMissingPriceLevelSize(double price, uint32_t desiredSize, bool isBuy) const;
-    void updateSide(bool isBuy, const PriceSize& desired);
+    int32_t updateSide(bool isBuy, const PriceSize& desired);   // txns issued this call
     void trackOrder(bool isBuy, double px, uint32_t sz, uint32_t localid);  // B21
 
     // --- STP ---
@@ -188,6 +195,8 @@ private:
         uint32_t filled = 0;
         bool active = false;
         bool cancelPending = false;
+        double cancelSentTime = 0;   // last cancel send (seconds)
+        uint32_t cancelRetry = 0;    // cancel re-sends
         double issueTime = 0;
         bool acknowledged = false;  // B24: set on first exchange ack
         Phase phase = Phase::New;   // C4: explicit lifecycle phase
@@ -219,6 +228,8 @@ private:
     double m_lastUpdateTime = 0;
     static constexpr double LATE_FILL_THRESHOLD = 1.0;
     bool m_hardFlatMode = false;
+    bool m_cancelStuck = false;
+    double m_lastCancelStuckLog = 0;
 
     // Runtime scale factor (separate from config for runtime adjustment)
     double m_runtimeScale = 1.0;

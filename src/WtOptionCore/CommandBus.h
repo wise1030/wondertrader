@@ -16,6 +16,7 @@
 #pragma once
 
 #include <functional>
+#include <exception>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -50,7 +51,15 @@ public:
             err = "unknown command: " + tokens[0];
             return false;
         }
-        return it->second(tokens, err);
+        try {
+            return it->second(tokens, err);
+        } catch (const std::exception& e) {
+            err = std::string("command handler exception: ") + e.what();
+            return false;
+        } catch (...) {
+            err = "command handler unknown exception";
+            return false;
+        }
     }
 
     bool has(const std::string& name) const { return m_handlers.count(name) != 0; }

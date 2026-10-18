@@ -44,6 +44,17 @@ void IScanModule::removeListener(IScannerListener* listener) {
     );
 }
 
+void IScanModule::publishHit(OptionData* option, double signal, const std::string& reason) {
+    if (!option || signal <= 0) return;
+    ScannerHitEvent ev;
+    ev.option = option;
+    ev.valueIndex = 0;
+    ev.signal = signal;
+    ev.reason = reason;
+    ev.timestamp = getTimestamp();
+    notifyHit(ev);
+}
+
 void IScanModule::notifyHit(const ScannerHitEvent& event) {
     for (auto* listener : m_listeners) {
         listener->onScannerHit(event);

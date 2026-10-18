@@ -540,6 +540,15 @@ void OptionPricer2::computeValue(OptionData* option)
     double vol  = spVolCurve  ? (*spVolCurve)(*option, atmforward)  * atmvol : atmvol;
     double vol2 = spVolCurve2 ? (*spVolCurve2)(*option, atmforward) * atmvol : atmvol;
     double theoVol = gvv_weight * vol + (1.0 - gvv_weight) * vol2;
+    if (!std::isfinite(theoVol)) {
+        // Never turn a failed vol (NaN/Inf) into a 1% quote: that silently
+        // prices every option off a fake vol and keeps sending orders.
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "OptionPricer2: non-finite theoVol for {} (gvv_weight={}), skip pricing",
+            option->getCode(), gvv_weight);
+        values.setPriced(false);
+        return;
+    }
     values.m_theoVol = std::max(0.01, theoVol);
     std::shared_ptr<BlackCalculatorInfo> bci = __setupBlackCalculatorInfo(option);
 

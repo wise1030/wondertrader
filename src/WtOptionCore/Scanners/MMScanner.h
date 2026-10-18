@@ -32,6 +32,11 @@ public:
     {
         if (!sc.name.empty()) m_config.ident = sc.name;
         m_config.enable = sc.enabled;
+        m_config.min_edge = sc.min_edge;
+        m_config.delta_min = sc.delta_min;
+        m_config.delta_max = sc.delta_max;
+        m_config.max_spread = sc.max_spread;
+        m_config.min_size = sc.min_size;
     }
     virtual ~MMScanner() {}
 
@@ -39,7 +44,8 @@ public:
     void onStart() override { m_active = true; }
     void onStop() override { m_active = false; }
     void onPanic() override { m_active = false; }
-    void onOptionHit(OptionData* od, int32_t index) override {}
+    void onOptionHit(OptionData* od, int32_t index) override { (void)index; onOptionUpdate(od); }
+    void onOptionUpdate(OptionData* od) override;
 
     enum ScanMode { SCANNER = 0, MAKER = 1 };
 
@@ -53,7 +59,6 @@ public:
 private:
     Config m_config;
     OptionTraderContextPtr m_ctx;
-    bool m_active = false;
 };
 
 } // namespace wt_option

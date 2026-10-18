@@ -16,6 +16,13 @@ double SimplexScanner::scanOption(OptionData* opt) {
     return edge;
 }
 
+void SimplexScanner::onOptionUpdate(OptionData* od) {
+    if (!od || !m_active || !isEnabled()) return;
+    const double score = scanOption(od);
+    if (score > 0)
+        publishHit(od, score, "simplex_edge");
+}
+
 // R6: factory registration — closes the "factory map empty" defect
 REGISTER_SCANNER("SimplexScanner", SimplexScanner);
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 namespace wt_option {
 
@@ -42,9 +43,14 @@ public:
 
     // B04: lightweight fill routing entry — the strategy matches fills by
     // localid and calls this. Returns true if the id belongs to one of our legs.
-    // Fixes: onFill() was never invoked (empty routing loop), so leg2 was
-    // never sent and scanner fills stayed unhedged.
     bool onLegFill(uint32_t localid, uint32_t fillQty);
+
+    // Terminal callback (cancel/reject). `leftQty` is the unfilled remainder.
+    // A leg2 cancellation before the hedge is complete cancels leg1 and marks
+    // the combo FAILED instead of silently dropping it from the active list.
+    bool onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty);
+
+    bool isFailed() const { return m_failed; }
 
     // Check timeout - returns true if timed out and needs cancel
     bool checkTimeout();
@@ -75,7 +81,14 @@ private:
     uint32_t m_leg1LocalId = 0, m_leg2LocalId = 0;
     uint32_t m_totalSize = 0;
     uint32_t m_leg1Filled = 0;     // B27: cumulative leg1 fills
+    uint32_t m_leg2Filled = 0;     // cumulative hedge fills
     uint32_t m_leg2Committed = 0;  // B27: hedge qty already ordered
+    std::vector<uint32_t> m_leg2Ids;          // every hedge order id (top-ups included)
+    std::unordered_set<uint32_t> m_leg2Open;  // hedge ids not yet terminal
+    bool m_leg1Terminal = false;
+    bool m_leg2Terminal = false;
+    bool m_failed = false;
+    void markFailed(const char* reason);
 };
 
 // ============================================================================
@@ -99,6 +112,12 @@ public:
 
     // B04: lightweight fill routing entry (see SpreadComboOrder)
     bool onLegFill(uint32_t localid, uint32_t fillQty);
+
+    // Terminal callback for a canceled/rejected leg. A partial leg must not be
+    // treated as success; cancel the remaining legs and mark FAILED.
+    bool onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty);
+
+    bool isFailed() const { return m_failed; }
 
     bool checkTimeout();
     void cancelAll();
@@ -131,6 +150,8 @@ private:
         uint32_t committedQty = 0;  // cumulative qty actually ordered
     };
     std::vector<LegExec> m_legExecs;
+    bool m_failed = false;
+    void markFailed(const char* reason);
 };
 
 using SpreadComboOrderPtr = std::shared_ptr<SpreadComboOrder>;

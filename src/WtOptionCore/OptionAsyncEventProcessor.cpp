@@ -143,10 +143,13 @@ void OptionAsyncEventProcessor::enqueue_tick(const char* stdCode, WTSTickData* n
     if (!_worker_running) return;
     AsyncEvent ev = AsyncEvent::make_tick(stdCode, newTick);
     if (!_md_queue.push(ev)) {
-        // Ring full -> overflow
-        {
-            std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+        // Ring full -> bounded overflow. Never let a slow worker turn a tick
+        // burst into unbounded memory growth.
+        std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+        if (_md_overflow.size() < kMaxOverflow) {
             _md_overflow.push_back(std::move(ev));
+        } else {
+            _queue_drops.fetch_add(1, std::memory_order_relaxed);
         }
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
@@ -159,7 +162,11 @@ void OptionAsyncEventProcessor::enqueue_timer(uint32_t curDate, uint32_t curTime
     AsyncEvent ev = AsyncEvent::make_timer(curDate, curTime);
     if (!_md_queue.push(ev)) {
         std::lock_guard<std::mutex> lock(_md_overflow_mtx);
-        _md_overflow.push_back(std::move(ev));
+        if (_md_overflow.size() < kMaxOverflow) {
+            _md_overflow.push_back(std::move(ev));
+        } else {
+            _queue_drops.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
@@ -168,13 +175,21 @@ void OptionAsyncEventProcessor::enqueue_timer(uint32_t curDate, uint32_t curTime
 //=============================================================================
 // Trader/main thread producers (mutex-protected, multi-producer safe)
 //=============================================================================
+bool OptionAsyncEventProcessor::push_trader(AsyncEvent&& ev)
+{
+    std::lock_guard<std::mutex> lock(_trader_mtx);
+    if (_trader_queue.size() >= kMaxTraderQueue) {
+        _queue_drops.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    _trader_queue.push_back(std::move(ev));
+    return true;
+}
+
 void OptionAsyncEventProcessor::enqueue_trade(uint32_t localid, const char* stdCode, bool isBuy, double vol, double price)
 {
     if (!_worker_running) return;
-    {
-        std::lock_guard<std::mutex> lock(_trader_mtx);
-        _trader_queue.push_back(AsyncEvent::make_trade(stdCode, localid, isBuy, vol, price));
-    }
+    push_trader(AsyncEvent::make_trade(stdCode, localid, isBuy, vol, price));
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
@@ -183,10 +198,7 @@ void OptionAsyncEventProcessor::enqueue_order(uint32_t localid, const char* stdC
                                                 double totalQty, double leftQty, double price, bool isCanceled)
 {
     if (!_worker_running) return;
-    {
-        std::lock_guard<std::mutex> lock(_trader_mtx);
-        _trader_queue.push_back(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled));
-    }
+    push_trader(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled));
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
@@ -194,10 +206,7 @@ void OptionAsyncEventProcessor::enqueue_order(uint32_t localid, const char* stdC
 void OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
 {
     if (!_worker_running) return;
-    {
-        std::lock_guard<std::mutex> lock(_trader_mtx);
-        _trader_queue.push_back(AsyncEvent::make_session(tdate, isBegin));
-    }
+    push_trader(AsyncEvent::make_session(tdate, isBegin));
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
@@ -207,10 +216,7 @@ void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLon
                                                   double newvol, double newavail)
 {
     if (!_worker_running) return;
-    {
-        std::lock_guard<std::mutex> lock(_trader_mtx);
-        _trader_queue.push_back(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
-    }
+    push_trader(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }
@@ -218,10 +224,7 @@ void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLon
 void OptionAsyncEventProcessor::enqueue_channel(bool isReady)
 {
     if (!_worker_running) return;
-    {
-        std::lock_guard<std::mutex> lock(_trader_mtx);
-        _trader_queue.push_back(AsyncEvent::make_channel(isReady));
-    }
+    push_trader(AsyncEvent::make_channel(isReady));
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
 }

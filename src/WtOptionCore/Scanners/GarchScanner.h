@@ -37,14 +37,23 @@ public:
     {
         if (!sc.name.empty()) m_config.ident = sc.name;
         m_config.enable = sc.enabled;
+        m_config.min_edge = sc.min_edge;
+        m_config.delta_min = sc.delta_min;
+        m_config.delta_max = sc.delta_max;
+        m_config.garch_omega = sc.garch_omega;
+        m_config.garch_alpha = sc.garch_alpha;
+        m_config.garch_beta = sc.garch_beta;
+        m_config.warmup_returns = sc.warmup_returns;
+        m_config.annualization_factor = sc.annualization_factor;
     }
     virtual ~GarchScanner() {}
 
     std::string getName() const override { return m_config.ident; }
-    void onStart() override { m_active = true; }
+    void onStart() override;
     void onStop() override { m_active = false; }
     void onPanic() override { m_active = false; }
-    void onOptionHit(OptionData* od, int32_t index) override {}
+    void onOptionHit(OptionData* od, int32_t index) override { (void)index; onOptionUpdate(od); }
+    void onOptionUpdate(OptionData* od) override;
 
     /// R7: feed underlying mid prices; maintains the GARCH(1,1) state on close-to-close returns
     void onUnderlyingUpdate(double price) override;
@@ -60,7 +69,6 @@ private:
 
     Config m_config;
     OptionTraderContextPtr m_ctx;
-    bool m_active = false;
 
     // R7: GARCH(1,1) state
     double m_lastPrice = 0.0;

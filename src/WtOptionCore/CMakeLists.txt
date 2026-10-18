@@ -12,6 +12,10 @@ set(OPTION_CORE_SOURCES
     HftOptionStrategy.cpp
     HftOptionStraFact.cpp
     OptionAsyncEventProcessor.cpp
+    OptionScanCoordinator.cpp
+    OptionHedgeCoordinator.cpp
+    OptionExpiryLifecycle.cpp
+    OptionCommandHandlers.cpp
 
     # Math
     OptionGreeks.cpp
@@ -43,6 +47,7 @@ set(OPTION_CORE_SOURCES
 
     # Risk + Trading data
     OptionRisk.cpp
+    StressAnalyzer.cpp
     OptionTradingData.cpp
     UnderlyingTradingData.cpp
     OptionOrderInfo.cpp
@@ -102,6 +107,11 @@ set(OPTION_CORE_SOURCES
 
 set(OPTION_CORE_HEADERS
     HftOptionStrategy.h
+    OptionScanCoordinator.h
+    OptionHedgeCoordinator.h
+    OptionExpiryLifecycle.h
+    OptionCommandHandlers.h
+    OptionPricerMode.h
     OptionAsyncEventProcessor.h
     optioncoretypes.h
     OptionGreeks.h
@@ -132,6 +142,7 @@ set(OPTION_CORE_HEADERS
     CffexIOStrikeFinder.h
     DceMOStrikeFinder.h
     OptionRisk.h
+    StressAnalyzer.h
     OptionTradingData.h
     UnderlyingTradingData.h
     ExpiryTradingData.h
@@ -174,14 +185,17 @@ add_library(WtOptionCore SHARED ${OPTION_CORE_SOURCES} ${OPTION_CORE_HEADERS})
 
 # PERF: Aggressive optimization for HFT low-latency
 # -O3: maximum optimization level
-# -march=native: use all available CPU instructions (AVX2/FMA)
+# -march=x86-64-v3: AVX2/FMA without binding to the build host CPU
 # -flto: link-time optimization for cross-TU inlining
 # -ffinite-math-only: assume no NaN/Inf (faster sqrt/exp), but we use NAN as sentinel
 #   so we use -fno-math-errno instead which only removes errno overhead from sqrt
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(WtOptionCore PRIVATE
         -O3
-        -march=native
+        # x86-64-v3 (AVX2/FMA) keeps the fast path but avoids binding the
+        # shipped .so to the build host's exact CPU (native can SIGILL on
+        # another machine).  Use an explicit target matrix if v3 is too new.
+        -march=x86-64-v3
         -flto
         -fno-math-errno
         -fno-trapping-math
@@ -193,15 +207,15 @@ target_include_directories(WtOptionCore PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../Includes
     ${CMAKE_CURRENT_SOURCE_DIR}/../Share
-    ${CMAKE_CURRENT_SOURCE_DIR}/../WtCore
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSTools
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSUtils
     ${CMAKE_CURRENT_SOURCE_DIR}/../build_all/compat_inc
     ${INCS}
 )
 
+# 插件边界: WtOptionCore 是 HFT 引擎上的策略插件, 头文件只依赖 Includes/*;
+# libWtOptionCore.so 的 nm -D -u 中无任何 Wt/wtp 符号, 故不链接 WtCore。
 target_link_libraries(WtOptionCore PUBLIC
-    WtCore
     WTSTools
     Share
     boost_filesystem
@@ -249,3 +263,27 @@ add_executable(test_enhancements tests/test_enhancements.cpp)
 target_link_libraries(test_enhancements PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
 target_include_directories(test_enhancements PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME test_enhancements COMMAND test_enhancements)
+
+# Test: Scanner factory/lifecycle/signal acceptance
+add_executable(test_scanners tests/test_scanners.cpp)
+target_link_libraries(test_scanners PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_scanners PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_scanners COMMAND test_scanners)
+
+# Test: Phase 2 stress analyzer
+add_executable(test_stress tests/test_stress.cpp)
+target_link_libraries(test_stress PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_stress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_stress COMMAND test_stress)
+
+# Test: Phase 2 hedge coordinator (in-flight/cooldown/sizing)
+add_executable(test_hedge_coordinator tests/test_hedge_coordinator.cpp)
+target_link_libraries(test_hedge_coordinator PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_hedge_coordinator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_hedge_coordinator COMMAND test_hedge_coordinator)
+
+# Test: Phase 2 command handlers
+add_executable(test_command_handlers tests/test_command_handlers.cpp)
+target_link_libraries(test_command_handlers PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_command_handlers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_command_handlers COMMAND test_command_handlers)

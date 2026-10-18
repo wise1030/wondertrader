@@ -16,6 +16,13 @@ double SyntheticFutureScanner::scanOption(OptionData* opt) {
     return edge;
 }
 
+void SyntheticFutureScanner::onOptionUpdate(OptionData* od) {
+    if (!od || !m_active || !isEnabled()) return;
+    const double score = scanOption(od);
+    if (score > 0)
+        publishHit(od, score, "synthetic_future_edge");
+}
+
 // R6: factory registration — closes the "factory map empty" defect
 REGISTER_SCANNER("SyntheticFutureScanner", SyntheticFutureScanner);
 

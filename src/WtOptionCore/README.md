@@ -11,10 +11,34 @@
 >   CommandBus 热指令、ConfigValidator 启动校验、PredictionEvaluator 闭环、PowerVolCurve 双曲线(R2)、
 >   StrikeFinders(R3)、涨跌停护栏(R1)、FIFO PnL+加权入场价。
 > - **性能**: -O3/-flto、timer 源头 100ms 合并、GVV α=1 闭式快路径（拟合后 α 数据驱动，通用翼部查表仍延后）。
-> - **Scanner 子系统**: 工厂注册已修复可加载，但各 scanner 信号逻辑仍为占位级实现，启用前需自行评估。
+> - **Scanner 子系统（2026-10-18 验收）**: 9 个 scanner 均已接入 `onOptionUpdate`/`onUnderlyingUpdate` 并 `publishHit`；连接器生命周期、数值参数、GARCH warmup、panic 门控均有验收测试。
 > - **配置新增键**: `orderManager.*.quote_style/enable_offset_guard`、`margin{}`、`pnl.fifo_mode`、
->   `delta_hedge{}`、`riskLimits.maxShortCall/PutPerSymbol`、`pricer.blackCalc.volCurve.curve2_type`；
+>   `delta_hedge{delta_per_lot}`、`orderManager.{option,future}.{wait_for_cancels,cancel_ack_timeout_ms,cancel_max_retries}`、
+>   `riskLimits.maxShortCall/PutPerSymbol`、`pricer.blackCalc.volCurve.curve2_type`；
 >   启动时未知键会 WARN（ConfigValidator）。
+
+### 2026-10-18 阶段二（架构/风险切片）
+
+- **Scanner 验收**：工厂注册、`setEnabled`/`onStart`/`onStop`/`onPanic` 生命周期、9 类 scanner 的 edge/delta 过滤、`publishHit` 事件、每类数值参数（`min_edge`/`delta_*`/`max_spread`/GARCH 参数）全部覆盖，`test_scanners` 通过。
+- **组件拆分**：`OptionScanCoordinator` 统一 scanner 生命周期/派发；`OptionHedgeCoordinator` 承接 delta 对冲决策/冷却/在途；`OptionExpiryLifecycle` 承接 refresh/purge/roll 与 session-end cancel；`OptionCommandHandlers` 承接 STOP/RESUME/PANIC/QMODE/ORDER/CANCEL；`StressAnalyzer` 提供 spot/vol/theta 情景压力。
+- **策略模式边界**：`OptionPricerMode` 明确 `CompositeMM`（做市）与 `GammaScalp`（gamma scalping）是两个独立策略 pricer，只共享 Black/vol 定价内核 `OptionPricer2`，不合并策略逻辑。
+- **Grid 状态归属**：`OptionGrid` 市场/定价状态、`OptionTradingGrid` 逐合约交易/OQM 状态、`ControllableTradingGrid` 执行/报价状态；跨线程只经 async 队列，worker 单写。详见下表。
+- **配置迁移**：`delta_hedge.minHedgeQty` 自动迁移到 `delta_per_lot` 并告警；`ConfigValidator` 通用遍历覆盖新键。
+- **测试**：`test_scanners`、`test_stress`、`test_hedge_coordinator` 新增，连同 `test_enhancements`/`test_ctg_ranking` 全过。
+- **未完成**：完整 SPAN/多 underlying 组合压力（当前已有组合 + per-expiry 情景压力）、到期强平/结算/移仓、GVV 数据化、回测 harness；`HftOptionStrategy` 仍承担 Shell 职责。
+
+### 2026-10-18 做市生命周期加固
+
+- **SpreadComboOrder / SynComboOrder 终态**：不再“发出即完成”；两腿/三腿必须 `filledQty >= desiredQty` 或全部终态且残量匹配才完成；任一腿撤单/拒单会撤其余腿并置 FAILED，不再静默留下裸腿；所有 hedge id 保留，可撤。
+- **Delta 对冲**：新增 `delta_hedge.delta_per_lot`（缺省从对冲合约乘数解析）；解析失败禁用并告警；在途 hedge 单未终态不重复发单。
+- **OQM 撤单 ack 看门狗**：`cancel_ack_timeout_ms` + `cancel_max_retries`；超时重发撤单，耗尽后 `cancelAll` 清扫并冻结该合约，直到终态回调。
+- **过期合约**：`daysToExpiry() < 0` 的合约清空报价并 deactivate，不再报价。
+- **数值/构建**：`thetaPerDay` 头文件参数语义修正；非有限 `theoVol` 不再回落 1%；发行构建改 `-march=x86-64-v3`（避免 `-march=native` 换机 SIGILL）。
+- **热参数**：`on_params_updated` 只置位，命令/TPS/QMode 在 async worker 应用，避免跨线程直写 grid/CTG。
+- **TPS**：`OptionQuoteManager::updateOrders` 返回本次实际发单/撤单数，不再恒返回 1。
+- **收盘/到期**：session_end 显式 `stra_cancel_all` 并告警非零 gross 持仓；`enable_auto_close` 不再受 delta 区间门控；过期合约不报价。
+- **配置/健壮性**：`ConfigValidator` 使用 `memberNames()` 通用遍历；`CommandBus` 异常兜底；MD overflow 有上限并计入 drops。
+- **测试**：新增 `test_oqm_cancel_timeout`、`test_spread_combo_state`，扩展 `test_delta_hedge_decide`/OQM TPS；`test_enhancements` / `test_ctg_ranking` 全过。
 
 ## 概述
 
@@ -181,8 +205,39 @@ TraderAdapter 回调线程          ShareManager 监控线程        Async Worke
 | expiries | array | - | 到期月配置 (含 per-expiry underlyingCode/hedgeCode) |
 | riskLimits | object | - | 扩展风控参数 (RiskLimitsEx) |
 | signals | object | - | Alpha + Risk 信号 |
-| scanners | array | - | 扫描器列表 |
+| scanners | array | - | 扫描器列表；每项支持 `type`/`name`/`enable`/`priority`、`min_edge`/`delta_min`/`delta_max`/`max_spread`/`min_size`、GARCH `garch_*`/`warmup_returns`/`annualization_factor` |
 | optionValueWriter | object | - | 值记录器配置 |
+
+### Scanner 验收（2026-10-18）
+
+9 类 scanner 均通过 `ScannerFactory` 注册，生命周期为 `setEnabled(config) → onStart() → onOptionUpdate() → onStop()/onPanic()`。
+`onOptionUpdate` 调用各自的 `scanOption`，分数 > `min_edge` 时通过 `publishHit` 向 `ControllableTradingGrid` 发 `ScannerHitEvent`；
+数值参数从 `scanners[]` 读取（此前工厂桥接忽略所有参数）；`expiryOverrides[].enabled` 由 `OptionScanCoordinator` 在派发前按 expiry 过滤。GARCH 需 `warmup_returns` 个 underlying 更新后才出信号。
+验收程序：`test_scanners`（工厂/生命周期/信号/参数/GARCH/协调器/到期生命周期）。
+
+### 阶段二组件（2026-10-18）
+
+- `OptionScanCoordinator`：scanner 生命周期与派发的单一归属；
+- `OptionHedgeCoordinator`：delta 对冲决策、冷却、在途订单；
+- `OptionExpiryLifecycle`：session begin 的 refresh/purge/roll、session end 的 cancelAll/持仓告警；
+- `StressAnalyzer`：spot/vol/theta 情景压力，每 60s 输出 `STRESS worst=...`。
+- 仍未做：完整 SPAN/多 underlying 组合压力、到期强平/结算/移仓、GVV 数据化、回测 harness。Composite/Gamma 是独立策略 pricer，不做合并；Grid 三层状态归属见下表。
+
+### Grid 三层状态归属
+
+| 层 | 拥有的状态 | 写入者 | 读取者 |
+|---|---|---|---|
+| `OptionGrid` | 合约发现、expiry/strike、盘口快照、定价输出 | async worker（pricer/tick） | pricer、scanner、strategy |
+| `OptionTradingGrid` | 每 option/underlying 的 OTD、OQM（订单、持仓、QuoteMode） | worker（回调入队后） | CTG、strategy |
+| `ControllableTradingGrid` | desired quote/执行、scanner 注册、TPS/状态机 | worker | CTG 自身、strategy |
+
+约束：MD/交易回调只入队，不在回调线程直写上述状态；`HftOptionStrategy` 作为 Shell 只做装配/生命周期/回调路由。
+
+### 策略 pricer 边界
+
+- `pricerType=composite_mm` → `CompositeOptionPricer`，做市报价/alpha/风控调整；
+- `pricerType=gammascalp` → `GammaScalpOptionPricer`，gamma scalping + 动态对冲；
+- 两者共享 `OptionPricer2` 的 Black/GVV/vol 计算，但策略状态、报价/对冲逻辑独立，禁止合并为单一 pricer。
 
 ### Vol Curve Fitter 配置 (`pricer.blackCalc.volCurve.fitter`)
 
@@ -442,6 +497,13 @@ TraderAdapter 回调线程          ShareManager 监控线程        Async Worke
 6. **channel_ready 延迟启用** - 无标的价格时不启用交易，首个 underlying tick 到达时启用
 7. **_needsRefresh 标志** - on_trade/on_position/on_order 标记后，下一 on_batch_complete 强制重新计算
 
+### Delta 对冲（`delta_hedge`）
+
+- `enable` / `threshold_delta` / `target_delta` / `max_order_size` / `cooldown_sec`：原有开关与阈值。
+- **`delta_per_lot`**：一手对冲合约的 delta（期货≈合约乘数）。不配置时由对冲合约的 `contractSize/VolScale` 解析；
+  解析失败则**禁用对冲并告警**，不再回退到 1.0（旧行为会把 IO 的 150 delta 发成 150 手）。
+- **在途抑制**：上一批对冲单未到终态（全成/撤单/拒单）前不再发新批，避免 mid 限价挂单反复叠单。
+
 ## 标的/对冲模型
 
 ### 设计原则
@@ -572,7 +634,7 @@ src/WtOptionCore/
 ├── WtOptEngine.h/.cpp                # 引擎 (legacy)
 ├── WtOptContext.h/.cpp               # 上下文 (legacy)
 ├── WtOptTicker.h/.cpp                # 定时器
-├── Scanners/                         # 扫描器 (10种)
+├── Scanners/                         # 扫描器 (9种)
 ├── Signals/                          # 信号 (Alpha + Risk, 含 ForwardSpreadSignal)
 ├── config/                           # 配置文件
 └── tests/                            # 单元测试 (test_ctg_ranking + test_enhancements)
@@ -639,3 +701,11 @@ src/WtOptionCore/
 - **报价延迟**：tick -> 订单确认的微秒级延迟
 - **成交/撤单/拒绝率**：fills/cancels/rejects / ordersSent
 - **会话级报告**：onSessionEnd 自动输出汇总日志
+
+## 插件边界（2026-10-18）
+
+`WtOptionCore` 是 HFT 引擎上的策略插件，公共头文件只依赖 `Includes/*`。本轮构建收敛：
+
+- `CMakeLists.txt` 不再 include/link `WtCore`；`libWtOptionCore.so` 的 `nm -D -u` 无任何 `Wt*` 符号，`ldd` 无 `WtCore`。
+- 部署位置仍为 `./hft/libWtOptionCore.so`，由 `WtRunner` 的 `HftStrategyMgr` 加载（`strategies.hft[]`）。
+- 验证：`dlopen(RTLD_NOW)`（宿主导出 `WTSCfgLoader`，与真实 Runner 一致）通过；`test_ctg_ranking` 全过。

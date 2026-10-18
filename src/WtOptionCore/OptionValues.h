@@ -274,6 +274,7 @@ public:
 
     OptionValues& setTheo(double v) { m_theo=v; return *this; }
     OptionValues& setTheoVol(double v) { m_theoVol=v; return *this; }
+    OptionValues& setImpliedVol(double v) { m_impliedVol=v; return *this; }
     OptionValues& setForward(double fwd) { m_fwd=fwd; return *this; }
 //    OptionValues& setStrikeForward(double fwd) { m_stkfwd=fwd; return *this; }
 

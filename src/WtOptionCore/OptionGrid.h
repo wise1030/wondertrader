@@ -121,6 +121,10 @@ public:
     // Refresh daysToExpiration for all expiries (call on session begin)
     void refreshExpiryDays();
 
+    // Remove expired expiries from the grid (quotes are already suppressed by
+    // the pricer; this releases the data and keeps session roll bounded).
+    void purgeExpired();
+
     // --- Risk-free rate (B2: flat or curve-based per expiry) ---
     void setRiskFreeRate(double r) { m_riskFreeRate = r; }
     double getRiskFreeRate() const { return m_riskFreeRate; }

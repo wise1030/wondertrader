@@ -136,6 +136,9 @@ public:
     // MD overflow fallback (rare: ring full)
     std::mutex _md_overflow_mtx;
     std::vector<AsyncEvent> _md_overflow;
+    static constexpr size_t kMaxOverflow = 65536;
+    static constexpr size_t kMaxTraderQueue = 65536;
+    bool push_trader(AsyncEvent&& ev);
 
     // === Trader queue: mutex-protected (multi-producer safe) ===
     // Trader events (trade/order/position/session/channel) are ~100-500/s,

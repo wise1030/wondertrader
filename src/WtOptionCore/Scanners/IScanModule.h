@@ -68,6 +68,14 @@ public:
     // Enable/disable
     bool isEnabled() const { return m_enabled; }
     void setEnabled(bool enabled);
+    bool isActive() const { return m_active; }
+
+    // Per-expiry override (ScannerConfig.expiryOverrides); default enabled.
+    void setExpiryEnabled(uint32_t expiry, bool enabled) { m_expiryEnabled[expiry] = enabled; }
+    bool isExpiryEnabled(uint32_t expiry) const {
+        auto it = m_expiryEnabled.find(expiry);
+        return it == m_expiryEnabled.end() ? true : it->second;
+    }
     virtual void onEnable() {}
     virtual void onDisable() {}
 
@@ -105,11 +113,18 @@ protected:
      * @brief Log message
      */
     void log(const std::string& message);
+
+    // Derived scanners call this when a signal fires; keeps event construction
+    // (timestamp/valueIndex/reason) consistent across all scanners.
+    void publishHit(OptionData* option, double signal, const std::string& reason);
+
+    bool m_active = false;    // session-start gate; dispatch also checks enabled
     
 private:
     std::string m_name;
-    bool m_enabled;
+    bool m_enabled = false;   // BUGFIX: default ctor left this indeterminate
     std::vector<IScannerListener*> m_listeners;
+    std::map<uint32_t, bool> m_expiryEnabled;
 };
 
 using IScanModulePtr = std::shared_ptr<IScanModule>;
@@ -143,6 +158,21 @@ struct ScannerConfig {
     std::string name;
     bool enabled = true;
     int32_t priority = 0;
+
+    // Common numeric overrides (R6 follow-up: the factory bridge used to
+    // ignore all per-scanner params and always run code defaults).
+    double min_edge = 0.5;
+    double delta_min = 0.1;
+    double delta_max = 0.9;
+    double max_spread = 10.0;
+    int32_t min_size = 1;
+
+    // GARCH-specific overrides
+    double garch_omega = 1e-10;
+    double garch_alpha = 0.08;
+    double garch_beta = 0.90;
+    int32_t warmup_returns = 50;
+    double annualization_factor = 60480.0;
     
     /// Per-expiry overrides, keyed by expiry date (e.g. 202505)
     std::map<uint32_t, ScannerExpiryOverrides> expiryOverrides;

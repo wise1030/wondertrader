@@ -16,6 +16,13 @@ double VolSpreadScanner::scanOption(OptionData* opt) {
     return edge;
 }
 
+void VolSpreadScanner::onOptionUpdate(OptionData* od) {
+    if (!od || !m_active || !isEnabled()) return;
+    const double score = scanOption(od);
+    if (score > 0)
+        publishHit(od, score, "vol_spread_edge");
+}
+
 // R6: factory registration — closes the "factory map empty" defect
 REGISTER_SCANNER("VolSpreadScanner", VolSpreadScanner);
 

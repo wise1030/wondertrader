@@ -32,6 +32,13 @@ bool MMScanner::fireOption(OptionData* opt, int dir, double px, double score, Sc
     return true;
 }
 
+void MMScanner::onOptionUpdate(OptionData* od) {
+    if (!od || !m_active || !isEnabled()) return;
+    const double score = scanOption(od, SCANNER);
+    if (score > 0)
+        publishHit(od, score, "mm_edge");
+}
+
 // R6: factory registration — closes the "factory map empty" defect
 REGISTER_SCANNER("MMScanner", MMScanner);
 

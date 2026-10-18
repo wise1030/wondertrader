@@ -265,6 +265,17 @@ void CompositeOptionPricer::setupRiskTolerances() {
 // ============================================================================
 // computeValues — FAST/SLOW scheduling
 // ============================================================================
+void CompositeOptionPricer::setAlphaWeights(double vegaflow, double frontfut_skew,
+                                            double deltaflow, double atmsig,
+                                            double rollema)
+{
+    m_config.wgt_vegaflow      = vegaflow;
+    m_config.wgt_frontfut_skew = frontfut_skew;
+    m_config.wgt_deltaflow     = deltaflow;
+    m_config.wgt_atmsig        = atmsig;
+    m_config.wgt_rollema       = rollema;
+}
+
 bool CompositeOptionPricer::computeValues(OptionGrid* grid) {
     // Don't compute if we already did it this cycle
     if (getTime() == m_tvLastCompute)
@@ -848,6 +859,16 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     uint32_t exp = option->getExpiry();
     OptionValues& black_values = option->values(0);
 
+    // Expired contracts must never be quoted. Keep the grid entry (for PnL /
+    // settlement/reporting), but clear the desired market and deactivate it.
+    auto expiry_data = option->getExpiryData();
+    if (expiry_data && expiry_data->daysToExpiry() < 0) {
+        black_values.ourMarket().clear();
+        black_values.theoPrices().clear();
+        option->setActive(false);
+        return;
+    }
+
     auto erc_it = m_mapExpiryRiskConfig.find(exp);
     if (erc_it == m_mapExpiryRiskConfig.end() || !erc_it->second.enable) {
         black_values.ourMarket().clear();
@@ -956,6 +977,16 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
         return;
     }
 
+    // Auto-close is a position-risk action, not a quoting preference: honor it
+    // even when the contract has drifted outside the delta band (the old gate
+    // made QM_CLOSE unreachable for exactly the positions that needed it).
+    if (qmode == QM_AUTO && erc.enable_auto_close && otd) {
+        int32_t pos = otd->getPosition();
+        double close_thresh = erc.close_pos_thresh;
+        if (pos != 0 && std::abs(pos) > close_thresh)
+            qmode = QM_CLOSE;
+    }
+
     bool is_within_delta_range = delta > erc.delta_min && delta < erc.delta_max
         && is_strike_near_the_money(sdata);
 
@@ -965,14 +996,6 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     } else if (qmode == QM_AUTO && is_within_delta_range) {
         enable_bid = true;
         enable_ask = true;
-        if (erc.enable_auto_close && otd) {
-            int32_t pos = otd->getPosition();
-            // B11b fix: enter CLOSE when |pos| exceeds the threshold
-            // (thresh==0 → any non-zero position, preserving old semantics)
-            double close_thresh = erc.close_pos_thresh;
-            if (pos != 0 && std::abs(pos) > close_thresh)
-                otd->setQuoteMode(QM_CLOSE);
-        }
     } else if (qmode == QM_CLOSE) {
         int32_t pos = otd ? otd->getPosition() : static_cast<int32_t>(option->getPosition());
         if (pos == 0) {
