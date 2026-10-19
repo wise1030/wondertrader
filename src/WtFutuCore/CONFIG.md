@@ -223,6 +223,8 @@ P1-4(2026-09-19) 增补：
 
 ### 2.5 src 样例配置（`src/WtFutuCore/config/config.yaml`，87 键 = 审计 present 口径）
 
+> 2026-10-18 远程生产快照另存为 `src/WtFutuCore/config/config_demo_prod.yaml`（不含凭据；仅作部署 demo，生产权威仍是远程 `config.yaml`）。
+
 **这是 src 样例/开发模板**（ag2608 身份；线上 `dist/config.yaml` 由历史派生但**生产权威=远程配置**，
 R15-a 规程：禁止整文件覆盖，单键热更/sed。见 §1）。
 下列值 = 仓库样例当前取值（2026-09-20 核对）；回测示例见 §2.1–§2.4。

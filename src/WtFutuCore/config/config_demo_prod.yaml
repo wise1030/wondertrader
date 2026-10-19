@@ -1,0 +1,240 @@
+# ============================================================
+# WtFutuCore 生产配置 demo（2026-10-18 抓取并部署）
+# 来源: <prod-host>:/home/ubuntu/projects/wondertrader/dist/config.yaml
+# 说明: 仅作配置示例；不含账户/通道凭据。实际部署以远程 config.yaml 为准。
+# ============================================================
+
+basefiles:
+  session: ./common/sessions.json
+  commodity: ./common/commodities.json
+  contract: ./common/contracts.json
+  holiday: ./common/holidays.json
+  hot: ./common/hots.json
+  second: ./common/seconds.json
+  fees: ./common/fees.json
+  feesstock: ./common/fees_stk.json
+parsers: mdparsers.yaml
+traders: tdtraders.yaml
+bspolicy: ./actpolicy.yaml
+env:
+  name: uft
+  product:
+    session: TRADING
+
+share_domain:
+  module: ./libWtShareHelper.so
+  name: uft
+
+data:
+  store:
+    path: ./data/
+strategies:
+  uft:
+  - active: true
+    id: futu_mm_ao_live
+    name: FutuStraFact.FutuMM
+    trader: trader_ctp
+    params:
+      anchorCode: SHFE.ao2611
+      isBacktest: false
+      contracts:
+      - code: SHFE.ao2611
+        alias: ao2611
+        maxPosition: 60
+        maxDelta: 30
+        targetPosition: 0
+      - code: SHFE.ao2612
+        alias: ao2612
+        maxPosition: 60
+        maxDelta: 30
+        targetPosition: 0
+      maxOrders: 32
+      quoting:
+        numLevels: 2
+        baseSpread: 2.0
+        baseQty: 10.0
+        levelQtyMultiplier: 0.7
+        obligationLevel: 1
+        scoutQty: 1.0
+        qtyDecayFactor: 0.7
+        levelStep: 1.0
+        protectTicks: -1.0
+        stickyThreshold: 2.0
+        priceProtection: false
+        obligationMinQty: 10.0
+        obligationMaxSpreadTicks: 10
+        improveRetreatRatio: 2.0
+        maxPriceDeviation: 20.0
+        useBilateralQuote: false
+      portfolio:
+        maxDelta: 30
+        hedgeRatio: 1.0
+      risk:
+        maxExposure: 100000000.0
+        maxDailyLoss: -20000.0
+        frequency:
+          maxOrdersPerSec: 50
+          maxCancelsPerSec: 30
+          maxTradesPerSec: 20
+          maxDeltaChangePerSec: 50.0
+          deltaRateWindowSec: 10
+          deltaRateCooldownMs: 5000
+          maxRecoveryCount: 3
+          pnlRecoveryRatio: 0.5
+          maxLossForRecovery: 0
+          positionBreachPauseThreshold: 1.2
+          deltaCriticalMult: 1.5
+          deltaWarningMult: 0.8
+          widenThreshold: 1
+          positionWarningL1: 0.8
+          positionWarningL2: 0.9
+          positionHardBlockRatio: 1.0
+          maxConsecutiveSameSide: 5
+          sameSideWindowMs: 3000
+          sameSidePauseMs: 5000
+          checkIntervalMs: 5000
+          cooldownMs: 30000
+          recoveryThreshold: 0.8
+          orderRatePauseMs: 3000
+          autoClearIrreversibleOnReset: false
+      maxPendingPerSide: 30
+      orderErrorThreshold: 1000   # 临时(2026-08-17夜盘): 账户保证金被其他策略打爆, 31拒单为预期常态; 框架层分类修复后调回
+      closeout:
+        minutesBefore: 2
+        flattenPosition: true
+        maxRetries: 10
+        retryIntervalMs: 2000
+        nightMinutesBefore: 2
+        useFak: true
+
+      # V10-R8-c(4): PERF threshold calibration (old defaults 10us/50us were 33x below normal p99, 26,312 error-level floods per day)
+        closeOnly: false
+        drainTimeoutMs: 3000
+        sweepThresholdMs: 5000
+        sweepTicks: 3
+        depthRatioPassive: 0.3
+        depthRatioMid: 0.5
+        depthRatioAggressive: 0.8
+      performance:
+        latencyThreshold: 500000
+        enabled: true
+        logInterval: 1000
+        warnThresholdNs: 500000
+        criticalThresholdNs: 1000000
+        alertThrottleMs: 300000     # P2(2026-09-17): 同通道告警日志限频 (原每秒重复打印, 15448 行/日)
+
+      # F-core P0-B(2026-09-18): 热路径日志闸门
+      logging:
+        hotQuoteEnabled: true
+        hotQuoteSampleEvery: 10
+      coordinatorConfig: ./coordinator.yaml
+      spreadArbitrageConfig: ./spread_arbitrage.yaml
+      monitor:
+        enabled: true
+        flushIntervalMs: 1000
+  - active: true
+    id: futu_mm_ec_live
+    name: FutuStraFact.FutuMM
+    trader: trader_ctp
+    params:
+      anchorCode: INE.ec2611
+      isBacktest: false
+      contracts:
+      - code: INE.ec2611
+        alias: ec2611
+        maxPosition: 24
+        maxDelta: 30
+        targetPosition: 0
+      - code: INE.ec2612
+        alias: ec2612
+        maxPosition: 24
+        maxDelta: 30
+        targetPosition: 0
+      maxOrders: 32
+      quoting:
+        numLevels: 2
+        baseSpread: 9.0
+        baseQty: 10.0
+        levelQtyMultiplier: 0.7
+        obligationLevel: 1
+        scoutQty: 1.0
+        qtyDecayFactor: 0.7
+        levelStep: 1.0
+        protectTicks: -1.0
+        stickyThreshold: 2.0
+        priceProtection: false
+        obligationMinQty: 10.0
+        obligationMaxSpreadTicks: 10
+        improveRetreatRatio: 2.0
+        maxPriceDeviation: 20.0
+        useBilateralQuote: false
+      portfolio:
+        maxDelta: 30
+        hedgeRatio: 1.0
+      risk:
+        maxExposure: 100000000.0
+        maxDailyLoss: -50000.0
+        frequency:
+          maxOrdersPerSec: 50
+          maxCancelsPerSec: 30
+          maxTradesPerSec: 20
+          maxDeltaChangePerSec: 50.0
+          deltaRateWindowSec: 10
+          deltaRateCooldownMs: 5000
+          maxRecoveryCount: 3
+          pnlRecoveryRatio: 0.5
+          maxLossForRecovery: 0
+          positionBreachPauseThreshold: 1.2
+          deltaCriticalMult: 1.5
+          deltaWarningMult: 0.8
+          widenThreshold: 1
+          positionWarningL1: 0.8
+          positionWarningL2: 0.9
+          positionHardBlockRatio: 1.0
+          maxConsecutiveSameSide: 5
+          sameSideWindowMs: 3000
+          sameSidePauseMs: 5000
+          checkIntervalMs: 5000
+          cooldownMs: 30000
+          recoveryThreshold: 0.8
+          orderRatePauseMs: 3000
+          autoClearIrreversibleOnReset: false
+      maxPendingPerSide: 30
+      orderErrorThreshold: 1000   # 临时(2026-08-17夜盘): 账户保证金被其他策略打爆, 31拒单为预期常态; 框架层分类修复后调回
+      closeout:
+        minutesBefore: 2
+        flattenPosition: true
+        maxRetries: 10
+        retryIntervalMs: 2000
+        nightMinutesBefore: 2
+        useFak: true
+
+      # V10-R8-c(4): PERF threshold calibration (old defaults 10us/50us were 33x below normal p99, 26,312 error-level floods per day)
+        closeOnly: false
+        drainTimeoutMs: 3000
+        sweepThresholdMs: 5000
+        sweepTicks: 3
+        depthRatioPassive: 0.3
+        depthRatioMid: 0.5
+        depthRatioAggressive: 0.8
+      performance:
+        latencyThreshold: 500000
+        enabled: true
+        logInterval: 1000
+        warnThresholdNs: 500000
+        criticalThresholdNs: 1000000
+        alertThrottleMs: 300000     # P2(2026-09-17): 同通道告警日志限频 (原每秒重复打印, 15448 行/日)
+
+      # F-core P0-B(2026-09-18): 热路径日志闸门
+      logging:
+        hotQuoteEnabled: true
+        hotQuoteSampleEvery: 10
+      hotparamsFile: hotparams_ec.yaml
+      coordinatorConfig: ./coordinator_ec.yaml
+      spreadArbitrageConfig: ./spread_arbitrage_ec.yaml
+      monitor:
+        enabled: true
+        flushIntervalMs: 1000
+notifier:
+  active: true
+  url: ipc:///tmp/wt_futu_mm.ipc
