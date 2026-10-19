@@ -880,6 +880,14 @@ uint32_t UftStraContext::stra_get_secs()
 	return _engine->get_secs();
 }
 
+void UftStraContext::registerOrder(uint32_t localid, const char* stdCode)
+{
+	if (localid == 0)
+		return;
+	_order_ids[localid] = NULL;
+	_order_codes[localid] = stdCode ? stdCode : "";
+}
+
 bool UftStraContext::stra_cancel(uint32_t localid)
 {
 	return _trader->cancel(localid);
@@ -887,11 +895,24 @@ bool UftStraContext::stra_cancel(uint32_t localid)
 
 OrderIDs UftStraContext::stra_cancel_all(const char* stdCode)
 {
-	//撤单频率检查
-	//if (!_trader->checkCancelLimits(stdCode))
-	//	return OrderIDs();
+	// 2026-10-18: 只撤本策略 context 下的单。多策略共享账户时，
+	// TraderAdapter::cancelAll 是账户/合约级，会把其他策略的单一起撤掉。
+	const std::string code = stdCode ? stdCode : "";
+	std::vector<uint32_t> ids;
+	ids.reserve(_order_codes.size());
+	for (auto it = _order_codes.begin(); it != _order_codes.end(); ++it)
+	{
+		if (code.empty() || it->second == code)
+			ids.push_back(it->first);
+	}
 
-	return _trader->cancelAll(stdCode);
+	OrderIDs ret;
+	for (uint32_t localid : ids)
+	{
+		if (_trader->cancel(localid))
+			ret.emplace_back(localid);
+	}
+	return ret;
 }
 
 OrderIDs UftStraContext::stra_buy(const char* stdCode, double price, double qty, int flag /* = 0 */)
@@ -899,9 +920,7 @@ OrderIDs UftStraContext::stra_buy(const char* stdCode, double price, double qty,
 	auto ids = _trader->buy(stdCode, price, qty, flag, false);
 
 	for(uint32_t localid : ids)
-	{
-		_order_ids[localid] = NULL;
-	}
+		registerOrder(localid, stdCode);
 	return std::move(ids);
 }
 
@@ -909,37 +928,35 @@ OrderIDs UftStraContext::stra_sell(const char* stdCode, double price, double qty
 {
 	auto ids = _trader->sell(stdCode, price, qty, flag, false);
 	for (uint32_t localid : ids)
-	{
-		_order_ids[localid] = NULL;
-	}
+		registerOrder(localid, stdCode);
 	return std::move(ids);
 }
 
 uint32_t UftStraContext::stra_enter_long(const char* stdCode, double price, double qty, int flag /* = 0 */)
 {
 	uint32_t localid = _trader->openLong(stdCode, price, qty, flag);
-	_order_ids[localid] = NULL;
+	registerOrder(localid, stdCode);
 	return localid;
 }
 
 uint32_t UftStraContext::stra_exit_long(const char* stdCode, double price, double qty, bool isToday /* = false */, int flag /* = 0 */)
 {
 	uint32_t localid = _trader->closeLong(stdCode, price, qty, isToday, flag);
-	_order_ids[localid] = NULL;
+	registerOrder(localid, stdCode);
 	return localid;
 }
 
 uint32_t UftStraContext::stra_enter_short(const char* stdCode, double price, double qty, int flag /* = 0 */)
 {
 	uint32_t localid = _trader->openShort(stdCode, price, qty, flag);
-	_order_ids[localid] = NULL;
+	registerOrder(localid, stdCode);
 	return localid;
 }
 
 uint32_t UftStraContext::stra_exit_short(const char* stdCode, double price, double qty, bool isToday /* = false */, int flag /* = 0 */)
 {
 	uint32_t localid = _trader->closeShort(stdCode, price, qty, isToday, flag);
-	_order_ids[localid] = NULL;
+	registerOrder(localid, stdCode);
 	return localid;
 }
 
@@ -1394,7 +1411,7 @@ std::pair<uint32_t, uint32_t> UftStraContext::stra_quote(const char* stdCode, do
 		log_error("Quote failed: {} BID {}@{} ASK {}@{}", stdCode, bidQty, bidPrice, askQty, askPrice);
 		return {0, 0};
 	}
-	_order_ids[localId] = NULL;
+	registerOrder(localId, stdCode);
 
 	log_info("Quote placed: {} BID {}@{} ASK {}@{} (local_id={})",
 		stdCode, bidQty, bidPrice, askQty, askPrice, localId);
@@ -1411,8 +1428,10 @@ bool UftStraContext::stra_cancel_quote(uint32_t localid)
 		return false;
 
 	bool ret = _trader->cancelQuote(localid);
-	if (ret)
+	if (ret) {
 		_order_ids.erase(localid);
+		_order_codes.erase(localid);
+	}
 
 	return ret;
 }

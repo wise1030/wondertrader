@@ -2158,6 +2158,27 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 
 	std::string stdCode = cInfo->getFullCode();
 
+	// 2026-10-18: 实时成交去重。key 带交易日+交易所，避免跨交易所 TradeID
+	// 碰撞；交易日切换清空。空 TradeID 跳过，不阻塞正常入账。
+	{
+		const char* tradeId = tradeRecord->getTradeID();
+		if (tradeId && tradeId[0] != '\0') {
+			uint32_t tradeDate = tradeRecord->getTradeDate();
+			if (tradeDate == 0) tradeDate = _trading_day;
+			if (tradeDate != _trade_dedup_date) {
+				_trade_dedup.clear();
+				_trade_dedup_date = tradeDate;
+			}
+			const std::string dk = TradeIdDedup::makeKey(tradeDate, tradeRecord->getExchg(), tradeId);
+			if (_trade_dedup.seen(dk)) {
+				WTSLogger::log_dyn("trader", _id.c_str(), LL_DEBUG,
+					"[{}] DUPLICATE TRADE suppressed: tradeid={}, exchange={}, date={}",
+					_id.c_str(), tradeId, tradeRecord->getExchg(), tradeDate);
+				return;
+			}
+		}
+	}
+
 	WTSLogger::log_dyn("trader", _id.c_str(), LL_DEBUG,
 		"[{}] Trade notified, instrument: {}, usertag: {}, trdqty: {}, trdprice: {}", 
 			_id.c_str(), stdCode.c_str(), tradeRecord->getUserTag(), tradeRecord->getVolume(), tradeRecord->getPrice());
@@ -2178,12 +2199,16 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 		{
 			WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
 				"[{}] ORPHAN FILL: trade localid {} not tracked by this process (ghost/leftover order filled, "
-				"ledger drift expected) - instrument: {}, usertag: {}, trdqty: {}, trdprice: {}",
+				"ledger drift expected) - instrument: {}, usertag: {}, trdqty: {}, trdprice: {}, dir={}, off={}",
 				_id.c_str(), localid, stdCode.c_str(), tradeRecord->getUserTag(),
-				tradeRecord->getVolume(), tradeRecord->getPrice());
+				tradeRecord->getVolume(), tradeRecord->getPrice(),
+				isLong ? "BUY" : "SELL", isOpen ? "OPEN" : "CLOSE");
 		}
 
-		updateUndone(stdCode.c_str(), -tradeRecord->getVolume());
+		// 2026-10-18: 未知 localid 的成交不扣账户 undone（原逻辑无条件扣减，
+		// 会把幽灵成交注入未完成量）；真正本进程订单才扣。
+		if (isKnownLocalId(localid))
+			updateUndone(stdCode.c_str(), -tradeRecord->getVolume());
 
 		// F-core v3.1 C3: 成交只累计"不可归还量"(撤单归还 qty-traded); 全成交由台账销账
 		_close_freeze.onTrade(localid, tradeRecord->getVolume());
@@ -2327,28 +2352,14 @@ void TraderAdapter::onTraderError(WTSError* err, void* pData /* = NULL */)
 		return;
 	}
 
-	// (c) 缓存未命中: insert 丢失, 合成骨架终态
-	WTSOrderInfo* synth = WTSOrderInfo::create();
-	synth->setContractInfo(cInfo);
-	synth->setCode(action->getCode());
-	synth->setExchange(action->getExchg());
-	synth->setUserTag(usertag);
-	wt_strcpy(synth->getEntrustID(), action->getEntrustID());
-	synth->setDirection(WDT_LONG);
-	synth->setOffsetType(WOT_OPEN);
-	synth->setPrice(0.0);
-	synth->setVolume(0.0);
-	synth->setVolTraded(0.0);
-	synth->setVolLeft(0.0);
-	synth->setOrderState(WOS_Canceled);
-	synth->setStateMsg("cancel-err-resolved");
-	synth->setOrderDate(_trading_day);
-	synth->setOrderTime(TimeUtils::makeTime(_trading_day, 0));
+	// (c) 缓存未命中: 不能断言交易所没有该单。旧逻辑合成 volume=0 的
+	// WOS_Canceled 假终态（"insert lost, no exchange record"），真实活单
+	// 之后成交时会被当成"已知"而静默漂移。改为 UNCONFIRMED 告警，交给
+	// 交易所回报/重试链确认；宁可多等一次终态，不伪造终态。
 	WTSLogger::log_dyn("trader", _id.c_str(), LL_WARN,
-		"[{}] cancel-error resolved: synthesized terminal order {} (insert lost, no exchange record)",
+		"[{}] CANCEL-UNCONFIRMED: cancel error for {} but order cache miss; "
+		"NOT synthesizing terminal (await exchange/order query/retry)",
 		_id.c_str(), usertag);
-	onPushOrder(synth);
-	synth->release();
 }
 
 IBaseDataMgr* TraderAdapter::getBaseDataMgr()

@@ -16,6 +16,7 @@
 #include "../Includes/WTSCollection.hpp"
 #include "../Share/SpinMutex.hpp"
 #include "CloseFreezeLedger.h"
+#include "TradeIdDedup.h"
 #include <mutex>
 
 NS_WTP_BEGIN
@@ -327,6 +328,9 @@ private:
 	// (孤儿成交告警判据: usertag 匹配本通道但不在册 = 幽灵/残留单成交;
 	//  不再于登录回放/任意推送写入, 避免幽灵单被误判"已知"而哑火)
 	wt_hashset<uint32_t> _known_localids;
+	// 2026-10-18: 实时成交去重（交易日|交易所|TradeID）；空 TradeID 不去重
+	TradeIdDedup _trade_dedup;
+	uint32_t _trade_dedup_date = 0;
 
 	wt_hashmap<std::string, double> _undone_qty;	//未完成数量
 

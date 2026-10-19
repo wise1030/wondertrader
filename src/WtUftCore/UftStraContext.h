@@ -333,6 +333,11 @@ private:
 	wt_hashmap<std::string, PosInfo> _positions;
 
 	wt_hashmap<uint32_t, uft::OrderStruct*> _order_ids;
+	// 2026-10-18: 本 context 的 localid -> stdCode，用于策略级 cancelAll；
+	// 多策略共享一个 TraderAdapter 时，禁止账户级 cancelAll 误撤其他策略。
+	wt_hashmap<uint32_t, std::string> _order_codes;
+
+	void registerOrder(uint32_t localid, const char* stdCode);
 
 	inline bool is_my_order(uint32_t localid) const
 	{

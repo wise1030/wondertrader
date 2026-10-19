@@ -443,13 +443,18 @@ void FutuRuntimeOps::onChannelReady(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     if (s._order_tracker)
         zombie_ids = s._order_tracker->clearZombies();
     if (!zombie_ids.empty()) {
-        WTSLogger::error("UftFutuMmStrategy[{}] channel ready with {} zombie orders -> engine cancelAll sweep + slot purge",
+        WTSLogger::error("UftFutuMmStrategy[{}] channel ready with {} zombie orders -> per-id cancel sweep + slot purge",
                          s.id(),
                          zombie_ids.size());
-        orderApiCall([&] { return ctx->stra_cancel_all(""); });
-        for (auto& [code, quoter] : _quoters)
-            for (uint32_t id : zombie_ids)
+        // 2026-10-18: UftStraContext::stra_cancel_all 已改为策略级（只撤本
+        // context 登记的单）；这里必须按 zombie localid 精确撤旧进程残留单，
+        // 不能再依赖账户级 cancelAll，否则重启后的孤儿单不会被清扫。
+        for (uint32_t id : zombie_ids) {
+            const uint32_t oid = id;
+            orderApiCall([&, oid] { return ctx->stra_cancel(oid); });
+            for (auto& [code, quoter] : _quoters)
                 quoter->onOrder(id, true, 0, 0, 0);
+        }
     }
     if (_risk_monitor)
         _risk_monitor->clearZombieHalts();

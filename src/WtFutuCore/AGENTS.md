@@ -6259,3 +6259,156 @@ WtOptionCore：
 
 **未做（另案）**：`WtRunner` 去 `WtOptionCore` 硬链接（运行器）、`IAlertSink` 框架接口、
 策略业务 P0/P1 修复；远程生产部署未执行。
+
+**§20 ORPHAN FILL 修正方案（2026-10-16 入档，用户批准后实施；框架层 WtUftCore，已授权立项）**
+
+**事实底座（2026-10-15/16 复核实证，全部日志闭环）**
+- 近三日 15 笔 ORPHAN FILL：10-13×5（00:19 夜盘中重启 → 00:23/00:59 成交）、
+  10-14×3（11:32 盘中重启 → 13:30 开盘成交）、10-14×7（14:44:49 盘中重启 →
+  14:50:19 同一秒成交，含 3 个 10 手块）；10-15×0（唯一重启在盘前 08:40）；
+  10-09~10-12 连续 4 天 0 笔（无盘中重启）——**15/15 为"重启边界孤儿"**：
+  localid 计数器跨重启连续（10-13: 1230667429→1234987978；10-14: →1239307685），
+  孤儿单全部落在本策略当日下单区间，是**本进程重启前自己所挂、重启后失认领**的单。
+- 影响链实锤（10-14 14:50 案例）：Position sync portfolio=0 → local_net 1/3/±10
+  （策略账本被注入，ec 瞬时多出 ±10 对锁日历仓）→ 14:52 zombie-cancel-latch 四合约
+  全停 → 14:58 closeout 在幽灵库存基础上强平 → **10-14 的 -19,360 含重启孤儿造成
+  的被动平仓，"清历史库存"归因需修正份额**。
+- v3.2-P1 历史取舍被证伪：当时删 onRspOrders 播种是为让"真幽灵"告警；实证告警
+  对象 100% 是重启孤儿。R16"交易所侧不存在幽灵单"的前提亦被推翻（SimNow 日单
+  跨日存续，10-14 实证隔夜存活并成交）。
+- 今日（10-15）"平昨信号 1529 次 vs 昨仓 2 手"疑点**与孤儿无关**（当日 0 孤儿），
+  嫌疑在 adapter prevol 维护/重基线后迟到成交双计，归本方案批 4 闭环。
+
+**已核实的代码事实（方案依据）**
+| 事实 | 位置 |
+|---|---|
+| 实时成交唯一入口 OnRtnTrade → onPushTrade；**初始化成交查询走独立 onRspTrades（OnRspQryTrade :1141）**——去重放 onPushTrade 不会误杀回放 | TraderCTP.cpp:1220-1231 / 1141-1164 |
+| TradeID 已采集无人消费（getTradeID 可用） | TraderCTP.cpp:1506 |
+| 无 TradeID 查重 → 重复推送双计 | onPushTrade 全函数 |
+| undone 负漂：幽灵单从未 +vol 却被无条件 -vol | :2186 |
+| `_known_localids` 仅 doEntrust:395/doQuoteEntrust 写入；进程生命周期；回放不播种 | v3.2-P1 |
+| 回放重建 undone 基线（clear + VolLeft 累加），播种认领后与后续成交扣减自洽 | onRspOrders:1698-1700/:1816 |
+| 持仓入账计入孤儿（**正确，保留**——柜台真相原则）；sink 转发策略，策略 Portfolio 无条件入账 | :2194-2249 / FutuRuntimeOps:120 |
+| close-freeze 台账对未知 localid 免疫 | CloseFreezeLedger::onTrade |
+| Trade notified 日志无方向字段（ao2612 那笔 10 手 @2620 无法对账的观测缺口） | :2161-2163 |
+
+**设计原则**：①柜台真相——持仓账/sink 转发对孤儿**维持全量**（拦截≠不入账，
+  否则 close-avail 失真引发 50/51 风暴）；②fail-closed，可平量只减不增；
+  ③不认领外来单——播种仅限本通道 prefix 匹配且在册水位保护；
+  ④不改 zombie/停报/退避语义。
+
+**批 1：成交去重（TradeID，纯框架）**
+1. 新增 `TradeIdDedup`（header-only 组件，仿 CloseFreezeLedger 先例，可单测）：
+   `std::unordered_set<std::string>` + `seen(id)->bool` + `clear()` + size 探针；
+   空 id/非本柜台 → 调用方跳过去重。
+2. onPushTrade 首行：`if (tid[0] && !_traded_ids.insert(tid).second) { debug 抑制
+   计数+1 + return; }`（不入账/不转发/不 queryAccount）。
+3. 生命周期：onSessionBegin（交易日切换）`clear()`——CTP TradeID 为当日序列。
+4. 回放隔离已核实（实时/回放双路径分离），无需播种豁免。
+
+**批 2：重启边界认领（核心）**
+1. onRspOrders 回放在 `_orderids.insert` 同处，对 **prefix 匹配且存活**
+   （!Canceled && vol_traded < volume）订单 `_known_localids.insert(localid)`；
+   播种计数 `adopted_orders` 入巡检行。
+2. 水位保护（防误领同账户另一实例的单）：仅播种 `localid <= 本进程首个
+   makeLocalOrderID()` 的单；超出水位的 prefix 匹配单记 warn 不播种
+   （多实例并存场景留观测口）。
+3. undone 修正：onPushTrade 的 `updateUndone(-vol)` 仅在 `isKnownLocalId`
+   时执行——播种后重启孤儿=已知，扣减与回放基线自洽；真未知（外来）跳过，
+   消除负漂。
+4. ORPHAN FILL 语义恢复真告警：播种后仍未知的 prefix 匹配成交才 WARN
+   （预期归零）；WARN 行补方向/开平字段。
+5. `Trade notified` 日志行补 `dir=BUY/SELL off=OPEN/CLOSE`（观测补齐，
+   不改任何判定逻辑）。
+
+**批 3：重启纪律（运维规程 + 19.31 重提，二选一或都做）**
+1. 规程：盘中（09:00-15:00 / 21:00-01:00）禁止重启；部署一律等 11:30/15:00/
+   01:00 后窗口（10-14 一天 3 次盘中重启制造 10 笔孤儿+1 次全停是直接教训）。
+2. 19.31 控制文件优雅退出重提（本轮有了 15 笔孤儿的新论据）：复用
+   FutuHotParamWatcher 模式，control/shutdown_request → 策略全撤 → 等
+   undone=0（≤5s）→ shutdown_ready；wt_restart.sh 改造为先请求后轮询再
+   SIGTERM。纯策略层+脚本，无 ABI 问题。**若用户仍裁搁置，规程 1 单独执行。**
+
+**批 4：观测与验收**
+1. 巡检行扩展：`trade-guard: adopted=N dup=N orphan=N undone_min=%.0f`
+   （undone_min=各合约 undone 最小值，负漂探针）。
+2. 平昨疑点闭环：批 1/2 上线后首个交易日，对账"平昨信号次数 vs 柜台昨仓"，
+   若仍发散则确诊独立根因（重基线双计），另立小修。
+3. 验收矩阵：
+   - 单测：TradeIdDedup（首过/重复/空 id/clear/容量告警）；TestUnits 基线
+     212/214 不破（theta_grid 两例需回放数据在位）；
+   - v5 冒烟（mocker 不经 adapter，零关联预期）+ _ec_5d 5/5 Delta=0；
+   - 生产 A/B：下次盘中重启事件 adopted>0/orphan(自身)=0；正常日 dup=0；
+     巡检行 trade-guard 逐日可见。
+4. 部署铁律：**TraderAdapter.h 加成员（_traded_ids/水位）→ sizeof 变化 →
+   WtUftRunner 必须同树重编译、成对部署、md5 双校验**（19.12 ABI 事故）；
+   备份 .bak_YYYYMMDD_orphan；干净窗口（休市）重启。
+
+**风险与回退**
+| 风险 | 缓解 |
+|---|---|
+| 去重误伤 | 实时/回放双路径已核实分离；空 TradeID 跳过 |
+| 误领他实例单 | 水位保护 + warn 观测口；单实例现行，方向良性 |
+| 播种漏撤单终态单 | 仅播存活单；终态单后续推送走既有 _orderids 去重 |
+| 回退 | 单 commit revert + runner/lib 成对回滚备份 |
+
+**明确不做**：不拦截持仓账/sink 转发；不改 zombie/停报/退避；不做主动
+queryOrders 对账 C 链（本次不含）；不解析柜台错误码；平昨疑点若确诊独立
+根因另立小修不混入。
+
+### §20.1 新方案实施计划（2026-10-18，用户批准“按新方案执行”）
+
+**范围**：仅 `WtUftCore` 框架层；`WtFutuCore` 策略代码不改。按“先预防、再去噪、最后对账”的顺序，本批落地可验证的 P0：
+
+1. **P0-A 策略级撤单归属**（`UftStraContext`）：为每个 context 维护 `localid -> stdCode` 映射，`stra_cancel_all` 只撤本 context 的单，禁止账户级 `cancelAll` 跨策略误撤；覆盖 buy/sell/enter/exit/quote。
+2. **P0-B 未知成交不再扣 `undone`**（`TraderAdapter::onPushTrade`）：仅 `isKnownLocalId` 才 `updateUndone(-vol)`；未知/幽灵成交保留告警，不污染账户未完成量。
+3. **P0-C 撤单缓存未命中不再伪造终态**（`TraderAdapter` cancel-error）：缓存未命中时不合成 `volume=0/WOS_Canceled` 的假单，改为 `CANCEL_UNCONFIRMED` 告警，等待交易所/重试链确认，避免“假终态 + 真活单”。
+4. **P1-A 成交去重**（`TradeIdDedup` + `TraderAdapter`）：key=`tradeDate|exchange|tradeID`，按交易日切换清空；先接入并保留重复计数日志；空 TradeID 跳过去重。
+
+**不在本批**：策略级 legacy 子账、session-end 撤单确认、按策略 ID 的 usertag/持久化 owner、账户 residual 管理——这些需要更大改动，单独批次处理。
+
+**验证**：`WtUftCore` + `WtFutuCore` + `TestUnits` 编译；新增/运行 TradeIdDedup 单测；远端只做只读复核，不部署；ABI 变更（`TraderAdapter.h`/`UftStraContext.h`）必须同树重编 runner/lib 并成对 md5。
+
+#### §20.1 实施记录（2026-10-18，本地构建，未部署）
+
+**已落地**
+- `WtUftCore/TradeIdDedup.h`：`交易日|交易所|TradeID` 去重，空 ID 跳过；`TraderAdapter::onPushTrade` 首部接入，重复成交仅 debug 记录并直接返回。
+- `TraderAdapter::onPushTrade`：只有 `isKnownLocalId(localid)` 才 `updateUndone(-vol)`；未知/孤儿成交不再污染账户未完成量；ORPHAN 日志补 `dir/off`。
+- `TraderAdapter` cancel-error 缓存未命中：不再合成 `volume=0/WOS_Canceled` 假终态，改为 `CANCEL-UNCONFIRMED` WARN，等待交易所/重试链确认。
+- `UftStraContext`：维护本 context 的 `localid -> stdCode`；`stra_cancel_all` 改为只撤本策略已登记的单，避免多策略共享账户时账户级 `cancelAll` 误撤其他策略。
+- `FutuRuntimeOps` channel-ready zombie 清扫：由账户级 `stra_cancel_all("")` 改为按 zombie localid `stra_cancel(id)`，保留旧进程残留单清扫能力。
+
+**验证**
+- `WtUftCore` / `WtFutuCore` / `WtUftRunner` / `TestUnits` 均编译成功；`WtUftRunner` 已随头文件成员变化重编，满足 ABI 成对构建。
+- `TestUnits --gtest_filter=TradeIdDedup.*`：5/5 PASS。
+- 远端生产未部署、未重启；仍为 `WtUftRunner 5ed33e19 / libWtUftCore 4e29fc35`。
+
+**风险与观察**
+- `CANCEL-UNCONFIRMED` 不再伪造终态，若交易所确实无此单，tracker 需依赖超时/重试链收口；上线前应在隔离环境覆盖“insert lost”场景，观察 zombie/停报是否上升。
+- 去重当前为直接抑制（非 shadow）；若出现合法成交被误判，可从 `DUPLICATE TRADE suppressed` 日志取 tradeid 回退。
+- `stra_cancel_all` 语义改为策略级；已核对 WtFutuCore 调用点（zombie 清扫改按 id，其余按 quoter/order id 撤单），仍需实盘前回归。
+
+**未完成（下一批）**：策略级 legacy 子账、session-end 撤单确认/优雅退出、按策略 ID 的 usertag/owner 持久化、账户 residual 管理。
+
+#### §20.1 部署记录（2026-10-18 22:37-22:38，生产）
+
+- **停旧**：PID 3015760（旧 `WtUftRunner 5ed33e19 / libWtUftCore 4e29fc35 / uft/libWtFutuCore 2b0480bb`），`SIGTERM` 3s 退出。
+- **备份**：`dist/.deploy_20261018_orphanfix/backup/`（runner/lib/plugin/config + `BEFORE.sha256`）。
+- **替换**（原子 install+mv）：
+  - `WtUftRunner md5 fd4d15fe1812b3715aeca8eee774d66a`
+  - `libWtUftCore.so md5 f59641686ae0ee00f337b3f6899bbacc`
+  - `uft/libWtFutuCore.so md5 e2e5ff8b0ff63ac29b4e663d244eb1f1`
+- **配置**：`config.yaml md5 7d73655a5bd1dc57e7f3ffdd0f31efa3`；仅增加 2026-10-18 框架行为注释，**无键值变更**；备份为旧配置。
+- **启动**：`start.sh` 启动，PID 3723251，稳定运行；日志 `Trading day 20261019 begun` / `1 parsers started` / `1 trading channels started` / `Share domain is on watch`。
+- **周末登录**：SimNow 在 `registerFront` 后无登录回包（周日静默，历史同路径），进程未崩溃；周一开盘前需确认 `Login succeed / Trading channel ready`。
+- **配置 demo**：`src/WtFutuCore/config/config_demo_prod.yaml`（远端生产快照，已脱敏无凭据）。
+
+**回滚**（若周一登录/交易异常）：
+```bash
+cd /home/ubuntu/projects/wondertrader/dist
+cp .deploy_20261018_orphanfix/backup/WtUftRunner WtUftRunner
+cp .deploy_20261018_orphanfix/backup/libWtUftCore.so libWtUftCore.so
+cp .deploy_20261018_orphanfix/backup/uft/libWtFutuCore.so uft/libWtFutuCore.so
+cp .deploy_20261018_orphanfix/backup/config.yaml config.yaml
+# stop current, start old runner
+```
