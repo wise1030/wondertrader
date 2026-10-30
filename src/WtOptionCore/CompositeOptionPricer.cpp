@@ -33,6 +33,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <set>
 #include <numeric>
 #include <cstdio>
 
@@ -1394,9 +1395,44 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
         }
     }
 
+    // Algorithmic pre-aggregation: group non-zero positions by expiry and a
+    // small delta bucket.  Correlation decay is then evaluated once per
+    // (option,bucket) instead of once per (option,position), reducing the hot
+    // path from O(options × positions) to O(options × buckets).
+    struct VegaBucket {
+        uint32_t expiry = 0;
+        int bucket = 0;
+        double repDelta = 0.0;
+        double baseVega = 0.0;  // sum(pos*mult*atmVega*wingAdj)
+        std::set<std::string> codes; // for exact self-bucket exclusion
+    };
+    const double deltaBucketWidth = 0.05;
+    std::map<std::pair<uint32_t, int>, VegaBucket> vegaBuckets;
+    for (OptionRiskData* rd1 : positions) {
+        const OptionValues& values1 = rd1->getOptionValues();
+        ExpiryDataPtr ed1 = rd1->getExpiryData();
+        const double df1 = ed1 ? ed1->getDiscountFactor() : 1.0;
+        const double delta1 = (rd1->getRight() == OR_Call)
+            ? values1.greeks().delta()
+            : values1.greeks().delta() + df1;
+        const int bucketIdx = static_cast<int>(std::floor(delta1 / deltaBucketWidth));
+        const double repDelta = (bucketIdx + 0.5) * deltaBucketWidth;
+        const uint32_t exp1 = rd1->getExpiry();
+        auto key = std::make_pair(exp1, bucketIdx);
+        auto& bucket = vegaBuckets[key];
+        bucket.expiry = exp1;
+        bucket.bucket = bucketIdx;
+        bucket.repDelta = repDelta;
+        // ATM vega is normalized per target expiry inside the option loop, so
+        // aggregate only the position-scale and wing terms here.
+        bucket.baseVega += rd1->getPosition() * rd1->getContractSize()
+            * std::exp(-m_prop_lambda_vega_wing * std::abs(repDelta - 0.5));
+        bucket.codes.insert(rd1->getInstrument());
+    }
+
     // Hot-path precomputation: ATM lookup and expiry scalar maps are per
     // expiry, not per option.  This removes repeated strike-vector scans and
-    // repeated expiry-map lookups inside the O(options × positions) loop.
+    // repeated expiry-map lookups inside the O(options × buckets) loop.
     std::map<uint32_t, double> atmVegaCache;
     std::map<uint32_t, double> expiryFracCache;
     std::map<uint32_t, double> expiryTargetCache;
@@ -1436,30 +1472,22 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
         double lambda_vega_wing = m_prop_lambda_vega_wing;
         double pg_other = 0.0;
 
-        for (OptionRiskData* rd1 : positions) {
-            const std::string& instr1 = rd1->getInstrument();
-            const OptionValues& values1 = rd1->getOptionValues();
-            ExpiryDataPtr ed1 = rd1->getExpiryData();
-            double df1 = ed1 ? ed1->getDiscountFactor() : 1.0;
-            // Note: OptionRight OR_Call=0, OR_Put=1
-            double delta1 = (rd1->getRight() == OR_Call)
-                ? values1.greeks().delta()
-                : values1.greeks().delta() + df1;
-            double frac1 = ed1 ? ed1->getExpireGreeksFrac() : 1.0;
+        for (const auto& [bucketKey, bucket] : vegaBuckets) {
+            (void)bucketKey;
+            // Preserve the old exact self-exclusion when the bucket contains
+            // only the current option's position.
+            if (bucket.codes.size() == 1 && bucket.codes.count(instr0) != 0)
+                continue;
 
-            if (instr1 != instr0) {
-                double stk_distance = std::abs(delta0 - delta1);
-                uint32_t exp1 = rd1->getExpiry();
-                double corr_exp = (exp1 == od0->getExpiry())
-                    ? 1.0
-                    : m_prop_hedge_ratio_vega * frac0 * frac1;
-                double corr_stk = std::exp(-m_prop_lambda_vega_decay * stk_distance);
-                double corr = corr_exp * corr_stk;
-                double vega_adj = std::exp(-lambda_vega_wing * std::abs(delta1 - 0.5));
-                double vega_other = rd1->getPosition() * rd1->getContractSize()
-                    * atm_vega_tw * vega_adj;
-                pg_other += corr * vega_other;
-            }
+            const uint32_t exp1 = bucket.expiry;
+            const double frac1 = expiryFracCache[exp1];
+            const double corr_exp = (exp1 == optExpiry)
+                ? 1.0
+                : m_prop_hedge_ratio_vega * frac0 * frac1;
+            const double corr_stk = std::exp(
+                -m_prop_lambda_vega_decay * std::abs(delta0 - bucket.repDelta));
+            const double vega_other = bucket.baseVega * atm_vega_tw;
+            pg_other += corr_exp * corr_stk * vega_other;
         }
 
         // subtract vega_tw risk targets from other expiries

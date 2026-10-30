@@ -301,3 +301,8 @@ add_executable(test_async_event_processor tests/test_async_event_processor.cpp)
 target_link_libraries(test_async_event_processor PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
 target_include_directories(test_async_event_processor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME test_async_event_processor COMMAND test_async_event_processor)
+
+# Synthetic replay-style benchmark harness (not registered as a pass/fail test)
+add_executable(test_replay_benchmark tests/test_replay_benchmark.cpp)
+target_link_libraries(test_replay_benchmark PRIVATE WtOptionCore)
+target_include_directories(test_replay_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
