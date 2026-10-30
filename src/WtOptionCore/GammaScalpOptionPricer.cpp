@@ -9,6 +9,8 @@
 #include "OptionData.h"
 #include "OptionGrid.h"
 #include "OptionRisk.h"
+#include "ExpiryData.h"
+#include "UnderlyingTradingData.h"
 #include "../Share/TimeUtils.hpp"
 #include "../WTSTools/WTSLogger.h"
 #include <algorithm>
@@ -310,47 +312,56 @@ void GammaScalpOptionPricer::evaluateDynamicHedging(OptionGrid* grid)
     if (std::abs(totalGamma) < 1e-4) return;
 
     // 2. Expected Hedging Band Strategy (Whalley-Wilmott)
+    auto expiryIt = grid->expiries().begin();
+    if (expiryIt == grid->expiries().end() || !expiryIt->second) return;
+    ExpiryData* ed = expiryIt->second.get();
+    const UnderlyingTradingData* hedgeUtd = ed->getHedgeUTD();
+
     GammaScalpConfig activeConfig;
     if (!m_expiryConfigs.empty()) {
-        activeConfig = m_expiryConfigs.begin()->second;
+        auto cfgIt = m_expiryConfigs.find(ed->getExpiry());
+        activeConfig = (cfgIt != m_expiryConfigs.end()) ? cfgIt->second : m_expiryConfigs.begin()->second;
     }
 
-    double cost = activeConfig.transactionCost;
-    double vol = activeConfig.impliedVolatility;
-    double riskAversion = activeConfig.hedgeThresholdRisk;
+    const double cost = activeConfig.transactionCost;
+    const double vol = activeConfig.impliedVolatility;
+    const double riskAversion = activeConfig.hedgeThresholdRisk;
+    const double deltaPerLot = hedgeUtd && hedgeUtd->getContractSize() > 0
+        ? hedgeUtd->getContractSize() : 1.0;
+    const double tickSize = hedgeUtd && hedgeUtd->getTickSize() > 0
+        ? hedgeUtd->getTickSize() : activeConfig.minUnderlyingSpread;
 
-    // Optimal Hedging Bandwidth H (approx)
+    // Optimal Hedging Bandwidth H (approx).  H is expressed in the same
+    // currency-delta units as totalDelta, so compare it to deltaPerLot rather
+    // than order count.
     double H = std::pow((1.5 * cost * undPrice) / (riskAversion * vol * vol), 1.0/3.0);
-    H = H * totalGamma;
-    H = std::max(H, activeConfig.maxOrderSize * 1.0);
+    H *= std::abs(totalGamma);
+    H = std::max(H, deltaPerLot);
 
     // 3. Check Delta against bandwidth
     if (std::abs(totalDelta) > H) {
         m_lastHedgeCheckSec = nowSec;
 
-        double hedgeQty = -totalDelta;
-        int32_t orderQty = static_cast<int32_t>(std::round(std::abs(hedgeQty)));
+        const double hedgeQty = -totalDelta;
+        const bool isBuy = (hedgeQty > 0);
+        int32_t orderQty = static_cast<int32_t>(std::llround(std::abs(hedgeQty) / deltaPerLot));
+        orderQty = std::max<int32_t>(1, orderQty);
+        orderQty = std::min<int32_t>(orderQty, std::max<int32_t>(1, activeConfig.maxOrderSize));
         if (orderQty == 0) return;
 
-        bool isBuy = (hedgeQty > 0);
         double execPrice = undPrice;
-        if (isBuy) {
-            execPrice += activeConfig.minUnderlyingSpread;
-        } else {
-            execPrice -= activeConfig.minUnderlyingSpread;
-        }
+        if (isBuy) execPrice += tickSize;
+        else       execPrice -= tickSize;
+        execPrice = round_to_tick(execPrice, tickSize);
+
+        const std::string& hedgeCode = ed->getHedgeCode().empty()
+            ? ed->getUnderlyingCode() : ed->getHedgeCode();
+        if (hedgeCode.empty()) return;
 
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "GammaScalp: Delta {:.2f} > Band {:.2f}, Hedging qty {} at {:.2f}",
-            totalDelta, H, isBuy ? orderQty : -orderQty, execPrice);
-
-        std::string hedgeCode;
-        if (!grid->expiries().empty()) {
-            hedgeCode = grid->expiries().begin()->second->getUnderlyingCode();
-        }
-        if (!hedgeCode.empty()) {
-            m_orderSender(hedgeCode, isBuy, execPrice, orderQty);
-        }
+            "GammaScalp: Delta {:.2f} > Band {:.2f}, Hedging {} {} lots at {:.2f} (perLot={})",
+            totalDelta, H, isBuy ? "BUY" : "SELL", orderQty, execPrice, deltaPerLot);
+        m_orderSender(hedgeCode, isBuy, execPrice, orderQty);
     }
 }
 
