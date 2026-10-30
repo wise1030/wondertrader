@@ -1,0 +1,70 @@
+replayer:
+    basefiles:
+        commodity: ../common/commodities.json
+        contract: ../common/contracts.json
+        holiday: ../common/holidays.json
+        hot: ../common/hots.json
+        session: ../common/sessions.json
+    fees: ../common/fees.json
+    hft_stime: 202606020900
+    hft_etime: 202606051500
+    mode: bin
+    path: ../WtBtFutu/storage/his/
+    tick: true
+
+env:
+    mocker: hft
+    slippage: 0
+
+hft:
+    module: hft/libWtOptionCore.so
+    use_newpx: true
+    error_rate: 100
+    match_this_tick: false
+    strategy:
+        id: opt_mm_cu
+        name: OptionMM
+        params:
+            exchange: SHFE
+            futuresProduct: cu
+            optionProduct: cu
+            underlyingCode: SHFE.cu.2606
+            riskFreeRate: 0.03
+            maxTPS: 50
+            marketFreshTimeoutMs: 3000
+
+            pricerType: composite_mm
+
+            wgt_vegaflow: 0.35
+            wgt_frontfut_skew: 0.25
+            wgt_deltaflow: 0.20
+            wgt_atmsig: 0.15
+            wgt_rollema: 0.05
+            sticky_base: 0.5
+            improve_retreat_ratio: 3.0
+
+            expiries:
+                "2606":
+                    enable: true
+                    delta_min: 0.05
+                    delta_max: 0.95
+
+            pricer:
+                quoting:
+                    numLevels: 1
+                    baseSpread: 2.0
+                    baseQty: 1
+                blackCalc:
+                    volCurve:
+                        type: gvv
+                        fitter:
+                            period: 60
+
+            orderManager:
+                option:
+                    maxQuoteSize: 5
+                    maxPendingQuotes: 10
+                    maxPosPerStrike: 20
+                future:
+                    maxQuoteSize: 10
+                    maxPendingQuotes: 5
