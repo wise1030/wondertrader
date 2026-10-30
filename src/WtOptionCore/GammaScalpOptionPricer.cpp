@@ -289,6 +289,11 @@ void GammaScalpOptionPricer::computeOurMarketsForOption(OptionData* option, cons
         mkt.setAsk(PriceSize(ask_price, static_cast<uint32_t>(ask_size)));
 }
 
+void GammaScalpOptionPricer::onOrderTerminal(uint32_t localid)
+{
+    m_hedgeInflight.erase(localid);
+}
+
 void GammaScalpOptionPricer::evaluateDynamicHedging(OptionGrid* grid)
 {
     if (!grid || !m_risk || !m_orderSender) return;
@@ -300,6 +305,7 @@ void GammaScalpOptionPricer::evaluateDynamicHedging(OptionGrid* grid)
         ? m_timeProvider()
         : static_cast<double>(TimeUtils::getLocalTimeNow()) / 1000.0;
     if (nowSec - m_lastHedgeCheckSec < 1.0) return;
+    if (!m_hedgeInflight.empty()) return;   // one hedge batch at a time
 
     double undPrice = grid->getUnderlyingPrice();
     if (undPrice <= 0) return;
@@ -361,7 +367,16 @@ void GammaScalpOptionPricer::evaluateDynamicHedging(OptionGrid* grid)
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "GammaScalp: Delta {:.2f} > Band {:.2f}, Hedging {} {} lots at {:.2f} (perLot={})",
             totalDelta, H, isBuy ? "BUY" : "SELL", orderQty, execPrice, deltaPerLot);
-        m_orderSender(hedgeCode, isBuy, execPrice, orderQty);
+        const auto ids = m_orderSender(hedgeCode, isBuy, execPrice, orderQty);
+        if (ids.empty()) {
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "GammaScalp hedge send failed: {} {} lots @ {}",
+                hedgeCode, orderQty, execPrice);
+            return;
+        }
+        for (uint32_t id : ids) {
+            if (id != 0) m_hedgeInflight.insert(id);
+        }
     }
 }
 

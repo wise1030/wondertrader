@@ -18,6 +18,8 @@
 #include <string>
 #include <chrono>
 #include <functional>
+#include <unordered_set>
+#include <vector>
 
 // Forward declarations for WonderTrader infrastructure
 namespace wtp {
@@ -107,9 +109,14 @@ public:
     void setOptionRisk(OptionRiskPtr risk) { m_risk = risk; }
     void setExpiryConfig(uint32_t expiry, const GammaScalpConfig& config);
 
-    // Order execution callback (replaces direct strategy dependency)
-    using OrderSender = std::function<void(const std::string& code, bool isBuy, double price, int32_t qty)>;
+    // Order execution callback (replaces direct strategy dependency).
+    // Must return every framework localid produced for the hedge batch.
+    using OrderSender = std::function<std::vector<uint32_t>(const std::string& code,
+                                                             bool isBuy, double price,
+                                                             int32_t qty)>;
     void setOrderSender(OrderSender sender) { m_orderSender = std::move(sender); }
+    void onOrderTerminal(uint32_t localid);
+    bool hasInflight() const { return !m_hedgeInflight.empty(); }
 
     /// Continuous strategy time source for hedge cooldown.  When unset, the
     /// pricer falls back to local milliseconds/1000 for standalone tests.
@@ -137,6 +144,7 @@ private:
     IOptionPricerPtr m_theoPricer;
     OptionRiskPtr m_risk;
     OrderSender m_orderSender;
+    std::unordered_set<uint32_t> m_hedgeInflight;
     TimeProvider m_timeProvider;
     FillPriceProvider m_fillPriceProvider;
     std::map<uint32_t, GammaScalpConfig> m_expiryConfigs;

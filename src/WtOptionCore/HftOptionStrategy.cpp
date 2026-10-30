@@ -939,7 +939,7 @@ void HftOptionStrategy::setupPricer()
         // Wire order execution for dynamic hedging
         _gammaPricer->setOrderSender([this](const std::string& code, bool isBuy,
                                              double price, int32_t qty) {
-            executeOrder(code, isBuy, price, static_cast<uint32_t>(qty));
+            return executeOrderIds(code, isBuy, price, static_cast<uint32_t>(qty));
         });
         _gammaPricer->setTimeProvider([this]() {
             return _timeService.nowSeconds(_ctx);
@@ -1785,8 +1785,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_order = [this](const std::string& code, uint32_t localid, bool isBuy,
                            double totalQty, double leftQty, double price, bool isCanceled) {
         // Delta-hedge in-flight bookkeeping: release the slot on terminal state.
-        if (isCanceled || leftQty <= 0)
+        if (isCanceled || leftQty <= 0) {
             _hedgeCoord.onTerminal(localid);
+            if (_gammaPricer) _gammaPricer->onOrderTerminal(localid);
+        }
         // Combo terminal routing: a canceled leg must reach the combo state
         // machine, otherwise a leg2 cancel silently leaves leg1 exposed.
         if (isCanceled && !_activeCombos.empty()) {
