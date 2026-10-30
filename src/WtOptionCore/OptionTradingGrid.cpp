@@ -36,6 +36,7 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     // 1. Create OTD
     auto otd = std::make_shared<OptionTradingData>();
     otd->init(od);
+    m_tblOptionTradingData[od->getCode()] = otd;
     od->setTradingData(otd);
 
     // 2. Bind RiskData (if OptionRisk is set)
@@ -46,22 +47,32 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
 
     // B03 fix: inject static contract facts (tick size / multiplier) from the
     // option product's comm info. setupGrid has no IBaseDataMgr in live mode,
-    // so OptionData used to be stuck at tickSize=1.0 — rounding every quote
-    // onto invalid price lattices for ag(0.5)/IO(0.2) etc.
+    // so OptionData starts with tickSize=1.0.  A live contract may also have a
+    // legitimate 1.0 tick, so always prefer exchange metadata when available.
     // NOTE: must run BEFORE the OQM is created (it copies tick_size).
-    if (m_hftCtx && (od->getTickSize() <= 0 || od->getMultiplier() <= 1.0)) {
-        auto ed = od->getExpiryData();
-        if (ed && !ed->getOptionProduct().empty()) {
-            std::string commKey = m_exchange + "." + ed->getOptionProduct();
-            WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(commKey.c_str());
-            if (commInfo) {
-                if (od->getTickSize() <= 0 && commInfo->getPriceTick() > 0)
-                    od->setTickSize(commInfo->getPriceTick());
-                if (commInfo->getVolScale() > 1.0)
-                    od->setMultiplier(commInfo->getVolScale());
-            }
+    WTSCommodityInfo* optionCommInfo = nullptr;
+    if (m_hftCtx) {
+        // Derive the commodity from the concrete option code.  This handles
+        // CZCE call/put dual products correctly (SRC/SRP) and avoids relying on
+        // the grid-level product string, which is only a coarse default.
+        auto ci = CodeHelper::extractStdCode(od->getCode().c_str(), nullptr);
+        std::string commKey = fmt::format("{}.{}", ci._exchg, ci._product);
+        optionCommInfo = m_hftCtx->stra_get_comminfo(commKey.c_str());
+        if (optionCommInfo) {
+            if (optionCommInfo->getPriceTick() > 0)
+                od->setTickSize(optionCommInfo->getPriceTick());
+            if (optionCommInfo->getVolScale() > 0)
+                od->setMultiplier(optionCommInfo->getVolScale());
         }
     }
+
+    // Propagate late-arriving contract facts to components that cache them.
+    if (m_spPositionRisk) {
+        auto rd = m_spPositionRisk->get(od->getCode());
+        if (rd)
+            rd->setContractSize(od->getMultiplier());
+    }
+    otd->getPnlTracker()->setMultiplier(od->getMultiplier());
 
     // 3. Bind executors (wrap with code capture for per-contract dispatch)
     const std::string& code = od->getCode();
@@ -98,6 +109,21 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     auto om = std::make_shared<OptionQuoteManager>(code, omCfg, m_hftCtx);
     if (m_quoteStats) om->setQuoteStatistics(m_quoteStats);
     if (m_preTradeFn) om->setPreTradeCheckFn(m_preTradeFn);   // A2
+    if (m_optionFilterChain) om->setRiskFilterChain(m_optionFilterChain);
+    if (m_positionGuardLookup) {
+        auto guard = m_positionGuardLookup(code);
+        if (guard) om->setPositionGuard(guard);
+    }
+    if (m_positionOffsetLookup) {
+        auto offset = m_positionOffsetLookup(code);
+        if (offset) om->setPositionOffsetMgr(offset);
+    }
+    if (m_orderIssuedFn) {
+        om->setOrderIssuedFn([this, code](bool isBuy, double px,
+                                           uint32_t qty, uint32_t localid) {
+            m_orderIssuedFn(code, isBuy, px, qty, localid);
+        });
+    }
     // B23 fix: wire the clock — TTL / min_intra_update / reject-retry timing
     // were all dead because m_getTime was never set
     om->setGetTimeFn([ctx = m_hftCtx]() -> double {
@@ -117,22 +143,25 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     otd->enable();
     otd->setActive(false);
 
-    // 6. Inject fee from commodity info (P0-3 fix)
+    // 6. Inject fee from the concrete option product's commodity info.
     if (m_hftCtx && od->getFee() == 0) {
-        auto ed = od->getExpiryData();
-        if (ed) {
-            std::string commKey = m_exchange + "." + ed->getOptionProduct();
-            WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(commKey.c_str());
-            if (commInfo) {
-                // calcFee(price, qty, offset): offset 0=open, 1=close, 2=closeToday
-                // For volume-based fee (nFeeAlg==0): fee = rate * qty = rate * 1
-                // For amount-based fee (nFeeAlg==1): fee = rate * amount = rate * price * volScale
-                // We use a nominal price for amount-based; volume-based is exact.
-                double mid = od->getMid();
-                double nominalPx = (mid > 0) ? mid : 1.0;
-                double fee = commInfo->calcFee(nominalPx, 1, 0);
-                od->setFee(fee);
-            }
+        auto ci = CodeHelper::extractStdCode(od->getCode().c_str(), nullptr);
+        std::string commKey = fmt::format("{}.{}", ci._exchg, ci._product);
+        WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(commKey.c_str());
+        if (commInfo) {
+            // calcFee(price, qty, offset): offset 0=open, 1=close, 2=closeToday
+            // For volume-based fee (nFeeAlg==0): fee = rate * qty = rate * 1
+            // For amount-based fee (nFeeAlg==1): fee = rate * amount = rate * price * volScale
+            // We use a nominal price for amount-based; volume-based is exact.
+            double mid = od->getMid();
+            double nominalPx = (mid > 0) ? mid : 1.0;
+            double fee = commInfo->calcFee(nominalPx, 1, 0);
+            od->setFee(fee);
+            // PnlTracker charges multiplier * qty * price * feePct.
+            // Convert the per-lot exchange fee into that proportional form.
+            double feeBase = od->getMultiplier() * nominalPx;
+            if (fee > 0 && feeBase > 0)
+                otd->getPnlTracker()->setFeePct(fee / feeBase);
         }
     }
 
@@ -149,7 +178,9 @@ void OptionTradingGrid::onAddExpiry(const ExpiryDataPtr& ed)
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "OTG hedge override: exp={} hedge={}", ed->getExpiry(), it->second);
     }
-    getExpiryTradingData(ed->getExpiry());
+    auto existing = m_tblExpiryTradingData.find(ed->getExpiry());
+    if (existing == m_tblExpiryTradingData.end())
+        __createExpiryTradingData(ed);
 }
 
 void OptionTradingGrid::onComputeValuesCompleted(const IOptionGrid* /*grid*/)
@@ -165,9 +196,11 @@ void OptionTradingGrid::onComputeValuesCompleted(const IOptionGrid* /*grid*/)
 
 OptionTradingDataPtr OptionTradingGrid::getTradingData(const std::string& code) const
 {
+    auto it = m_tblOptionTradingData.find(code);
+    if (it != m_tblOptionTradingData.end())
+        return it->second;
     auto od = m_spGrid->get(code);
-    if (!od) return nullptr;
-    return od->getTradingData();
+    return od ? od->getTradingData() : nullptr;
 }
 
 OptionTradingDataPtr OptionTradingGrid::getTradingData(
@@ -175,6 +208,9 @@ OptionTradingDataPtr OptionTradingGrid::getTradingData(
 {
     auto od = m_spGrid->get(exp, stk, right);
     if (!od) return nullptr;
+    auto it = m_tblOptionTradingData.find(od->getCode());
+    if (it != m_tblOptionTradingData.end())
+        return it->second;
     return od->getTradingData();
 }
 
@@ -271,20 +307,35 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
         }
     }
 
-    // Create per-future OQM (same pattern as option OTD)
-    if (m_hftCtx) {
-        OptionQuoteManager::Config futOmCfg = m_futureOqmCfg;
-        futOmCfg.exchange = m_exchange;
-        futOmCfg.tick_size = utd->getTickSize();
-        auto futOm = std::make_shared<OptionQuoteManager>(hedgeCode, futOmCfg, m_hftCtx);
-        if (m_quoteStats) futOm->setQuoteStatistics(m_quoteStats);
-        if (m_preTradeFn) futOm->setPreTradeCheckFn(m_preTradeFn);   // A2
-        // B23 fix: wire the clock for the future OQM as well
-        futOm->setGetTimeFn([ctx = m_hftCtx]() -> double {
-            return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
-        });
-        utd->setQuoteManager(futOm);
+    // Create per-future OQM (same pattern as option OTD).  The OQM is also
+    // present without an IHftStraCtx for deterministic unit tests; send calls
+    // remain inert until a sender/ctx is supplied.
+    OptionQuoteManager::Config futOmCfg = m_futureOqmCfg;
+    futOmCfg.exchange = m_exchange;
+    futOmCfg.tick_size = utd->getTickSize();
+    auto futOm = std::make_shared<OptionQuoteManager>(hedgeCode, futOmCfg, m_hftCtx);
+    if (m_quoteStats) futOm->setQuoteStatistics(m_quoteStats);
+    if (m_preTradeFn) futOm->setPreTradeCheckFn(m_preTradeFn);   // A2
+    if (m_futureFilterChain) futOm->setRiskFilterChain(m_futureFilterChain);
+    if (m_positionGuardLookup) {
+        auto guard = m_positionGuardLookup(hedgeCode);
+        if (guard) futOm->setPositionGuard(guard);
     }
+    if (m_positionOffsetLookup) {
+        auto offset = m_positionOffsetLookup(hedgeCode);
+        if (offset) futOm->setPositionOffsetMgr(offset);
+    }
+    if (m_orderIssuedFn) {
+        futOm->setOrderIssuedFn([this, hedgeCode](bool isBuy, double px,
+                                                   uint32_t qty, uint32_t localid) {
+            m_orderIssuedFn(hedgeCode, isBuy, px, qty, localid);
+        });
+    }
+    // B23 fix: wire the clock for the future OQM as well
+    futOm->setGetTimeFn([ctx = m_hftCtx]() -> double {
+        return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
+    });
+    utd->setQuoteManager(futOm);
     // B5: FIFO PnL mode for the hedge tracker too
     if (m_fifoPnl)
         utd->getPnlTracker()->setFifoMode(true);

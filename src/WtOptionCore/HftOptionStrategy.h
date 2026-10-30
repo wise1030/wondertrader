@@ -47,6 +47,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <map>
+#include <vector>
 
 namespace wt_option {
 class OptionGrid;
@@ -239,6 +240,9 @@ private:
     // R5: timer-event dedup state (suppress the per-tick timer storm)
     uint32_t _lastTimerDate = 0;
     double   _lastTimerSecOfDay = -1e9;
+    // Per-instance batch counter; a function-static here races when multiple
+    // strategy workers are running in the same process.
+    uint64_t _batchCount = 0;
 
     // R8: unified trading state — single writer for enabled/panicked
     wt_option::TradingState _tstate;
@@ -333,5 +337,12 @@ private:
     int32_t executeQuote(const std::string& code, double bidP, uint32_t bidQ,
                          double askP, uint32_t askQ);
     int32_t executeOrder(const std::string& code, bool isBuy, double price, uint32_t qty);
+    /// Submit a single order and return every exchange localid produced by the
+    /// framework action policy.  Callers that track in-flight state (hedge,
+    /// combo) must use this instead of the success-count wrapper below.
+    OrderIDs executeOrderIds(const std::string& code, bool isBuy,
+                             double price, uint32_t qty);
+    void registerIssuedOrderIds(const std::string& code, const OrderIDs& ids,
+                                double price, uint32_t qty);
     int32_t executeCancel(const std::string& code);
 };

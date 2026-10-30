@@ -80,6 +80,25 @@ public:
 
     /// A2: pre-trade limit checker applied to every OQM at creation time
     void setPreTradeCheckFn(OptionQuoteManager::PreTradeCheckFn fn) { m_preTradeFn = std::move(fn); }
+
+    /// R-P0: dynamic OQM wiring.  Contracts are discovered after setupCTG(), so
+    /// filter/guard/offset dependencies must be injected here and consumed at
+    /// every future onAddOption()/onAddExpiry() as well.
+    void setOptionRiskFilterChain(RiskFilterChainPtr chain) { m_optionFilterChain = std::move(chain); }
+    void setFutureRiskFilterChain(RiskFilterChainPtr chain) { m_futureFilterChain = std::move(chain); }
+    void setPositionGuardLookup(std::function<PositionGuardPtr(const std::string&)> fn) {
+        m_positionGuardLookup = std::move(fn);
+    }
+    void setPositionOffsetLookup(std::function<PositionOffsetMgrPtr(const std::string&)> fn) {
+        m_positionOffsetLookup = std::move(fn);
+    }
+    /// Called whenever an OQM tracks a newly issued localid.  The strategy
+    /// registers it with FillPriceChecker / OrderAnomalyGuard.
+    using OrderIssuedFn = std::function<void(const std::string& code, bool isBuy,
+                                             double price, uint32_t qty,
+                                             uint32_t localid)>;
+    void setOrderIssuedFn(OrderIssuedFn fn) { m_orderIssuedFn = std::move(fn); }
+
     /// B5: FIFO PnL matching mode for newly created trackers
     void setFifoPnlMode(bool on) { m_fifoPnl = on; }
 
@@ -130,9 +149,17 @@ private:
     wt_option::QuoteStatistics* m_quoteStats = nullptr;  // non-owning
     PositionSourceFn m_positionSource;                    // B11
     OptionQuoteManager::PreTradeCheckFn m_preTradeFn;     // A2
+    RiskFilterChainPtr m_optionFilterChain;               // R-P0 dynamic wiring
+    RiskFilterChainPtr m_futureFilterChain;               // R-P0 dynamic wiring
+    std::function<PositionGuardPtr(const std::string&)> m_positionGuardLookup;
+    std::function<PositionOffsetMgrPtr(const std::string&)> m_positionOffsetLookup;
+    OrderIssuedFn m_orderIssuedFn;                        // R-P0 registration
     bool m_fifoPnl = false;                               // B5
 
-    // Trading object tables
+    // Trading object tables.  OptionData/UnderlyingTradingData expose weak
+    // back-pointers, so OTG must own the strong references.
+    typedef std::map<std::string, OptionTradingDataPtr> OptionTradingTable;
+    OptionTradingTable m_tblOptionTradingData;
     typedef std::map<std::string, UnderlyingTradingDataPtr> UnderlyingTable;
     UnderlyingTable m_tblUnderlyingTradingData;
 

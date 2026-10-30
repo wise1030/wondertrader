@@ -42,18 +42,26 @@ bool OptionHedgeCoordinator::check(double nowSec, double portfolioDelta)
     const double px = m_price(m_code);
     if (!(px > 0)) return false;
 
-    const int32_t id = m_send(m_code, d.isBuy, px, d.qty);
-    if (id <= 0) return false;
+    const std::vector<uint32_t> ids = m_send(m_code, d.isBuy, px, d.qty);
+    if (ids.empty()) return false;
 
+    bool insertedAny = false;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
-        m_inflight.insert(static_cast<uint32_t>(id));
+        for (uint32_t id : ids) {
+            if (id != 0) {
+                m_inflight.insert(id);
+                insertedAny = true;
+            }
+        }
     }
+    if (!insertedAny) return false;
+
     m_lastFire = nowSec;
     if (m_log) {
         m_log("DeltaHedger fired: " + m_code + (d.isBuy ? " BUY " : " SELL ")
               + std::to_string(d.qty) + "@" + std::to_string(px)
-              + " (" + d.reason + ") id=" + std::to_string(id));
+              + " (" + d.reason + ") ids=" + std::to_string(ids.size()));
     }
     return true;
 }

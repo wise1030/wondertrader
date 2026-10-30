@@ -24,9 +24,9 @@ int main()
     uint32_t next_id = 100;
     uint32_t last_qty = 0;
     OptionHedgeCoordinator hc;
-    hc.configure(cfg, 300.0, "IF", 
+    hc.configure(cfg, 300.0, "IF",
         [&](const std::string&, bool, double, uint32_t qty) {
-            ++sent; last_qty = qty; return next_id++;
+            ++sent; last_qty = qty; return std::vector<uint32_t>{next_id++};
         },
         [](const std::string&) { return 4000.0; });
 

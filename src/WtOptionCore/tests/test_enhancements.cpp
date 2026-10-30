@@ -18,6 +18,9 @@
 #include "../DeltaHedgeExecutor.h"
 #include "../ComboOrders.h"
 #include "../OptionData.h"
+#include "../OptionTradingGrid.h"
+#include "../OptionRisk.h"
+#include "../ExpiryData.h"
 #include "../PredictionEvaluator.h"
 #include "../CffexIOStrikeFinder.h"
 #include "../DceMOStrikeFinder.h"
@@ -152,26 +155,26 @@ void test_position_offset_mgr() {
 
     PositionOffsetMgr mgr;
 
-    // A1: WT on_position reports ABSOLUTE snapshots (prevol/preavail are the
-    // previous totals, newvol/newavail the current ones). The old delta-style
-    // bookkeeping (`prevol + newvol`) double-counted and is fixed.
-    // Conservative today/prev split: all available volume books as close-today
-    // (matches intraday MM reality on SHFE); closePrev stays 0 until a richer
-    // position-detail source exists.
+    // WT on_position semantics: prevol/preavail are yesterday's position and
+    // availability; newvol/newavail are today's.  Total volume is prev+new and
+    // the today/prev availability split must be preserved for action policy.
     mgr.onPositionUpdate(true, 5.0, 5.0, 10.0, 10.0);
-    ASSERT_EQ(mgr.getLongTotal(), 10);            // absolute new volume
+    ASSERT_EQ(mgr.getLongTotal(), 15);            // 5 yesterday + 10 today
     ASSERT_EQ(mgr.getLongToday(), 10);
-    ASSERT_EQ(mgr.getCloseableToday(false), 10);  // closeable long for sell
+    ASSERT_EQ(mgr.getLongPrev(), 5);
+    ASSERT_EQ(mgr.getCloseableToday(false), 10);  // closeable long today for sell
+    ASSERT_EQ(mgr.getCloseablePrev(false), 5);    // closeable long yesterday
 
     // Second report overwrites absolutely (no accumulation)
     mgr.onPositionUpdate(true, 10.0, 8.0, 12.0, 9.0);
-    ASSERT_EQ(mgr.getLongTotal(), 12);
+    ASSERT_EQ(mgr.getLongTotal(), 22);
     ASSERT_EQ(mgr.getLongToday(), 9);
+    ASSERT_EQ(mgr.getLongPrev(), 8);
 
-    // Simulate short position: 8 short available
+    // Simulate short position: 8 short available today
     mgr.onPositionUpdate(false, 0.0, 0.0, 8.0, 8.0);
     ASSERT_EQ(mgr.getShortToday(), 8);
-    ASSERT_EQ(mgr.getCloseableToday(true), 8);   // closeable short for buy
+    ASSERT_EQ(mgr.getCloseableToday(true), 8);   // closeable short today for buy
 
     // Order breakdown: buy 20 → close 8 short today, open 12
     auto bd = mgr.getOrderBreakdown(true, 20);
@@ -179,14 +182,16 @@ void test_position_offset_mgr() {
     ASSERT_EQ(bd.closePrevQty, 0u);
     ASSERT_EQ(bd.openQty, 12u);
 
-    // Sell 20 vs long 9 avail: close 9, open 11
+    // Sell 20 vs long availability 9 today + 8 yesterday: close both, open 3
     bd = mgr.getOrderBreakdown(false, 20);
     ASSERT_EQ(bd.closeTodayQty, 9u);
-    ASSERT_EQ(bd.openQty, 11u);
+    ASSERT_EQ(bd.closePrevQty, 8u);
+    ASSERT_EQ(bd.openQty, 3u);
 
-    // Frozen tracking: send close order
-    mgr.onOrderSent(false, 3, true);  // sell 3 to close long
+    // Frozen tracking: send close-today order
+    mgr.onOrderSent(false, 3, true);  // sell 3 to close long today
     ASSERT_EQ(mgr.getCloseableToday(false), 6);   // 9 - 3 frozen
+    ASSERT_EQ(mgr.getCloseablePrev(false), 8);    // prev bucket unaffected
 
     // Cancel the order
     mgr.onOrderCancelled(false, 3, true);
@@ -496,6 +501,7 @@ void test_oqm_quote_style_and_guard() {
 
     struct SendRec { bool isBuy; double px; uint32_t qty; };
     std::vector<SendRec> sends;
+    std::vector<uint32_t> issuedIds;
     uint32_t nextId = 100;
 
     OptionQuoteManager::Config cfg;
@@ -508,6 +514,9 @@ void test_oqm_quote_style_and_guard() {
     oqm.setSendSingleFn([&](bool isBuy, double px, uint32_t qty) -> uint32_t {
         sends.push_back({isBuy, px, qty});
         return nextId++;
+    });
+    oqm.setOrderIssuedFn([&](bool, double, uint32_t, uint32_t localid) {
+        issuedIds.push_back(localid);
     });
     double now = 1000.0;
     oqm.setGetTimeFn([&]{ return now; });
@@ -522,6 +531,9 @@ void test_oqm_quote_style_and_guard() {
     // Two independent single-leg orders sent (not one paired quote)
     ASSERT_EQ(sends.size(), (size_t)2);
     ASSERT_TRUE(sends[0].isBuy && !sends[1].isBuy);
+    ASSERT_EQ(issuedIds.size(), (size_t)2);
+    ASSERT_EQ(issuedIds[0], 100u);
+    ASSERT_EQ(issuedIds[1], 101u);
 
     // C4: phases — New before ack; tracker rebuilds on first ack
     ASSERT_TRUE(oqm.getCurrentMarket().empty());   // nothing acked yet
@@ -1085,6 +1097,81 @@ void test_trading_state_flags() {
 }
 
 // ============================================================================
+// R-P0: dynamically discovered option/future OQMs receive strategy wiring
+// ============================================================================
+void test_dynamic_otg_wiring() {
+    std::cout << "=== test_dynamic_otg_wiring ===" << std::endl;
+
+    auto grid = std::make_shared<OptionGrid>("TEST", "TEST.UNDER", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+    auto otg = std::make_shared<OptionTradingGrid>(grid);
+    otg->setPositionRisk(risk);
+
+    // A disabled guard proves the dependency was injected into the OQM created
+    // after setup time (the production dynamic-discovery path).
+    auto guard = std::make_shared<PositionGuard>();
+    guard->onBrokerPosition(true, 10.0);
+    guard->onFill(true, 20);   // internal=30, broker=10 -> disabled
+    otg->setPositionGuardLookup([&](const std::string&) { return guard; });
+
+    auto ed = std::make_shared<ExpiryData>(202612, "TEST");
+    ed->setHedgeCode("TEST.HEDGE");
+    otg->onAddExpiry(ed);
+
+    OptionInfo info;
+    info.code = "TEST.OPT";
+    info.expiry = 202612;
+    info.multiplier = 100;
+    auto od = std::make_shared<OptionData>(info);
+    od->setExpiryData(ed);
+    otg->onAddOption(od);
+
+    ASSERT_TRUE(od->getTradingData() != nullptr);
+    ASSERT_TRUE(od->getTradingData()->getQuoteManager() != nullptr);
+    ASSERT_TRUE(!od->getTradingData()->getQuoteManager()->isGuardOK());
+
+    auto utd = otg->getUnderlyingTradingData("TEST.HEDGE");
+    ASSERT_TRUE(utd != nullptr);
+    ASSERT_TRUE(utd->getQuoteManager() != nullptr);
+    ASSERT_TRUE(!utd->getQuoteManager()->isGuardOK());
+
+    // Expired contracts must expose a negative DTE so purge/deactivate paths
+    // are reachable after the expiration date.
+    ExpiryData expired(202610, "TEST");
+    expired.updateDaysToExpiration(20261030, 20261029);
+    ASSERT_TRUE(expired.daysToExpiry() < 0);
+    ASSERT_EQ(expired.getSettlementFraction(), 0.0);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// B20b: session-boundary PnL ledger reset
+// ============================================================================
+void test_pnl_tracker_session_reset() {
+    std::cout << "=== test_pnl_tracker_session_reset ===" << std::endl;
+
+    PnlTracker t(300.0);
+    t.onFill(true, 1, 10.0);
+    t.onPriceUpdate(11.0, 11.0);
+    ASSERT_TRUE(t.getCurPnl() > 0.0);
+    ASSERT_TRUE(t.getFillSize() > 0);
+
+    t.resetSession();
+    ASSERT_EQ(t.getCurPnl(), 0.0);
+    ASSERT_EQ(t.getRealizedPnl(), 0.0);
+    ASSERT_EQ(t.getCurTurnover(), 0.0);
+    ASSERT_EQ(t.getFillSize(), 0u);
+    ASSERT_EQ(t.getFifoRealizedPnl(), 0.0);
+
+    // Carried position uses the new session basis and multiplier.
+    t.resetSession(2, 10.0);
+    t.onPriceUpdate(11.0, 11.0);
+    ASSERT_EQ(t.getCurPnl(), 600.0);
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
 // R10: DeltaHedgeExecutor::decide pure logic
 // ============================================================================
 void test_delta_hedge_decide() {
@@ -1144,6 +1231,8 @@ int main() {
     test_command_bus();
     test_trading_state_flags();
     test_delta_hedge_decide();
+    test_dynamic_otg_wiring();
+    test_pnl_tracker_session_reset();
     test_spread_combo_state();
 
     std::cout << std::endl << "========================================" << std::endl;

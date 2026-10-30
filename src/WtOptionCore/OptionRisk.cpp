@@ -22,6 +22,7 @@
 #include "../WTSTools/WTSLogger.h"
 
 #include <memory>
+#include <set>
 
 namespace wt_option {
 
@@ -172,7 +173,6 @@ void OptionRisk::setHedgePosition(const std::string& code, int32_t position)
 void OptionRisk::update()
 {
     m_spPositionGreeks->reset();
-    double udelta = 0;
 
     for (const ExpiryTable::value_type& v : m_expiryTable)
     {
@@ -181,8 +181,18 @@ void OptionRisk::update()
         m_spPositionGreeks->accum(eg->frac(), *eg);
         m_spPositionGreeks->delta() -= eg->frac()      * eg->delta();
         m_spPositionGreeks->delta() += eg->frac_delta() * eg->delta();
+    }
 
-        udelta += (eg->frac_delta() * eg->getUnderlierDelta());
+    // A physical hedge instrument is one broker position even when several
+    // expiries register the same code separately.  Count each instrument once
+    // at portfolio level; otherwise shared futures are multiplied by the
+    // number of expiries and delta hedging is over/under-sized.
+    double udelta = 0;
+    std::set<std::string> countedHedges;
+    for (const HedgeDataPtr& hd : m_hedgeDataList) {
+        if (!hd || hd->code.empty() || !countedHedges.insert(hd->code).second)
+            continue;
+        udelta += hd->multiplier * hd->position;
     }
     m_pfuDelta = udelta;
 

@@ -15,13 +15,18 @@
 #include <mutex>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace wt_option {
 
 class OptionHedgeCoordinator {
 public:
-    using SendFn = std::function<int32_t(const std::string& code, bool isBuy,
-                                         double price, uint32_t qty)>;
+    /// Must return ALL framework localids created for the hedge batch.  A
+    /// boolean success value (e.g. 1) is not a valid order id and would leave
+    /// the in-flight latch stuck forever.
+    using SendFn = std::function<std::vector<uint32_t>(const std::string& code,
+                                                       bool isBuy, double price,
+                                                       uint32_t qty)>;
     using PriceFn = std::function<double(const std::string& code)>;
     using LogFn = std::function<void(const std::string& message)>;
 

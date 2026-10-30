@@ -180,7 +180,9 @@ public:
     bool isDisplayShark() const { return m_bDisplayShark; }
 
     const ExpiryDataPtr& getExpiryData() const { return m_spExpiryData; }
-    const OptionTradingGridPtr& getOptionTradingGrid() const { return m_spOptionTradingGrid; }
+    /// Non-owning back-reference: OTG owns UTD, so a strong shared_ptr here
+    /// creates an unloadable ownership cycle.
+    OptionTradingGridPtr getOptionTradingGrid() const { return m_wpOptionTradingGrid.lock(); }
 
     PnlTrackerPtr getPnlTracker();
 
@@ -214,7 +216,7 @@ protected:
     bool m_bDisplayShark;
     std::string m_instr;
     ExpiryDataPtr m_spExpiryData;
-    OptionTradingGridPtr m_spOptionTradingGrid;
+    OptionTradingGridWeakPtr m_wpOptionTradingGrid;
 
     PnlTrackerPtr m_pnlTracker;
 

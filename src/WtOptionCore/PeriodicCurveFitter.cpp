@@ -57,20 +57,36 @@ bool dp_comp(const IVolCurve::datapoint_t& p1, const IVolCurve::datapoint_t& p2)
 
 // threshold table is now a per-instance member (m_threshTable) — B30 fix
 
-// find_range: returns the two map iterators bracketing `key` from below/above
+// Nearest/linear ATM vol lookup with explicit boundary handling.  The old
+// call site dereferenced both find_range iterators; for one point or a
+// forward outside the fitted strike range one of them is end(), which is UB.
 template<typename Map>
-std::pair<typename Map::iterator, typename Map::iterator>
-find_range(Map& m, double key) {
-    // returns (lo, hi) such that lo->first <= key <= hi->first
+bool interpolate_value(const Map& m, double key, double& out) {
+    if (m.empty()) return false;
+
     auto hi = m.lower_bound(key);
-    if (hi == m.end()) {
-        if (m.empty()) return {m.end(), m.end()};
-        auto lo = std::prev(m.end());
-        return {lo, m.end()};
+    if (hi == m.begin()) {
+        out = hi->second;
+        return true;
     }
-    if (hi == m.begin()) return {m.end(), hi};
+    if (hi == m.end()) {
+        out = std::prev(m.end())->second;
+        return true;
+    }
+    if (EQ(hi->first, key)) {
+        out = hi->second;
+        return true;
+    }
+
     auto lo = std::prev(hi);
-    return {lo, hi};
+    double hiW = std::fabs(hi->first - key);
+    double loW = std::fabs(key - lo->first);
+    if (EQ(hiW + loW, 0.0)) {
+        out = lo->second;
+        return true;
+    }
+    out = (lo->second * hiW + hi->second * loW) / (hiW + loW);
+    return true;
 }
 } // anonymous namespace
 
@@ -188,24 +204,13 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
         // 2. maturity
         double mat = m_spBlackPricer->getMaturity(exp);
 
-        // 3. atm_vol
+        // 3. atm_vol — safe for 0/1 points and forwards outside the fitted range
         double atm_vol = 0.0;
-        {
-            auto p = find_range(strike_vol, atm_forward);
-            if (p.first == p.second) {
-                if (p.first == strike_vol.begin() || p.first == strike_vol.end()) {
-                    WTSLogger::log_by_cat("strategy", LL_WARN,
-                        "PeriodicCurveFitter exp={} t={:.1f} cannot interpolate atmvol (no vol points near forward), exit",
-                        exp, getTime());
-                    return false;
-                }
-                atm_vol = p.first->second;
-            } else {
-                double strike1_wt = std::fabs(p.second->first - atm_forward);
-                double strike2_wt = std::fabs(p.first->first  - atm_forward);
-                atm_vol = (p.first->second * strike1_wt + p.second->second * strike2_wt)
-                        / (strike1_wt + strike2_wt);
-            }
+        if (!interpolate_value(strike_vol, atm_forward, atm_vol)) {
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "PeriodicCurveFitter exp={} t={:.1f} cannot interpolate atmvol (no vol points), exit",
+                exp, getTime());
+            return false;
         }
         m_spBlackPricer->setATMVol(exp, atm_vol);
 

@@ -16,10 +16,19 @@
 #include "../OptionData.h"
 #include "../check_markets.h"
 #include <iostream>
-#include <cassert>
 #include <cmath>
+#include <cstdlib>
 
 using namespace wt_option;
+
+// Standard assert disappears in Release/NDEBUG builds, which made this test
+// binary print PASS without executing any checks.  Use explicit test macros.
+#define ASSERT_TRUE(x) do { \
+    if (!(x)) { \
+        std::cerr << "FAIL: " #x << std::endl; \
+        std::exit(1); \
+    } \
+} while (0)
 
 // ============================================================================
 // Test 1: check_markets basic behavior
@@ -30,21 +39,21 @@ void test_check_markets_basic() {
     // Both empty -> NONE
     {
         MultiMarket desired, current;
-        assert(check_markets(desired, current) == UT_NONE);
+        ASSERT_TRUE(check_markets(desired, current) == UT_NONE);
     }
 
     // Desired has bid, current empty -> NEW
     {
         MultiMarket desired, current;
         desired.setBid(100.0, 5);
-        assert(check_markets(desired, current) == UT_NEW);
+        ASSERT_TRUE(check_markets(desired, current) == UT_NEW);
     }
 
     // Desired empty, current has bid -> CANCEL
     {
         MultiMarket desired, current;
         current.setBid(100.0, 5);
-        assert(check_markets(desired, current) == UT_CANCEL);
+        ASSERT_TRUE(check_markets(desired, current) == UT_CANCEL);
     }
 
     // Same price -> NONE
@@ -52,7 +61,7 @@ void test_check_markets_basic() {
         MultiMarket desired, current;
         desired.setBid(100.0, 5);
         current.setBid(100.0, 5);
-        assert(check_markets(desired, current) == UT_NONE);
+        ASSERT_TRUE(check_markets(desired, current) == UT_NONE);
     }
 
     // Price differs -> UPDATE
@@ -60,7 +69,7 @@ void test_check_markets_basic() {
         MultiMarket desired, current;
         desired.setBid(101.0, 5);
         current.setBid(100.0, 5);
-        assert(check_markets(desired, current) == UT_UPDATE);
+        ASSERT_TRUE(check_markets(desired, current) == UT_UPDATE);
     }
 
     // Size differs -> UPDATE
@@ -68,7 +77,7 @@ void test_check_markets_basic() {
         MultiMarket desired, current;
         desired.setBid(100.0, 10);
         current.setBid(100.0, 5);
-        assert(check_markets(desired, current) == UT_UPDATE);
+        ASSERT_TRUE(check_markets(desired, current) == UT_UPDATE);
     }
 
     std::cout << "  PASS" << std::endl;
@@ -81,20 +90,20 @@ void test_multimarket_mid() {
     std::cout << "=== test_multimarket_mid ===" << std::endl;
 
     MultiMarket m;
-    assert(m.getMidPrice() == 0.0);
-    assert(!m.hasBids());
-    assert(!m.hasAsks());
-    assert(m.empty());
+    ASSERT_TRUE(m.getMidPrice() == 0.0);
+    ASSERT_TRUE(!m.hasBids());
+    ASSERT_TRUE(!m.hasAsks());
+    ASSERT_TRUE(m.empty());
 
     m.setBid(100.0, 5);
     m.setAsk(102.0, 5);
-    assert(m.hasBids());
-    assert(m.hasAsks());
-    assert(!m.empty());
-    assert(std::abs(m.getMidPrice() - 101.0) < 1e-10);
+    ASSERT_TRUE(m.hasBids());
+    ASSERT_TRUE(m.hasAsks());
+    ASSERT_TRUE(!m.empty());
+    ASSERT_TRUE(std::abs(m.getMidPrice() - 101.0) < 1e-10);
 
     m.clear();
-    assert(m.empty());
+    ASSERT_TRUE(m.empty());
 
     std::cout << "  PASS" << std::endl;
 }
@@ -106,8 +115,8 @@ void test_optionmarket_depth() {
     std::cout << "=== test_optionmarket_depth ===" << std::endl;
 
     OptionMarket m;
-    assert(m.numBidLevels == 0);
-    assert(m.numAskLevels == 0);
+    ASSERT_TRUE(m.numBidLevels == 0);
+    ASSERT_TRUE(m.numAskLevels == 0);
 
     // Simulate 3-level depth
     for (int i = 0; i < 3; i++) {
@@ -120,27 +129,27 @@ void test_optionmarket_depth() {
     }
 
     // Best level
-    assert(m.numBidLevels == 3);
-    assert(m.numAskLevels == 3);
+    ASSERT_TRUE(m.numBidLevels == 3);
+    ASSERT_TRUE(m.numAskLevels == 3);
 
     // getBidLevel
     auto l0 = m.getBidLevel(0);
-    assert(l0.valid);
-    assert(l0.price == 100.0);
-    assert(l0.qty == 5);
+    ASSERT_TRUE(l0.valid);
+    ASSERT_TRUE(l0.price == 100.0);
+    ASSERT_TRUE(l0.qty == 5);
 
     auto l2 = m.getBidLevel(2);
-    assert(l2.valid);
-    assert(l2.price == 98.0);
+    ASSERT_TRUE(l2.valid);
+    ASSERT_TRUE(l2.price == 98.0);
 
     // Out of range
     auto l5 = m.getBidLevel(5);
-    assert(!l5.valid);
+    ASSERT_TRUE(!l5.valid);
 
     // getAskLevel
     auto a0 = m.getAskLevel(0);
-    assert(a0.valid);
-    assert(a0.price == 102.0);
+    ASSERT_TRUE(a0.valid);
+    ASSERT_TRUE(a0.price == 102.0);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -152,21 +161,21 @@ void test_ema_filter() {
     std::cout << "=== test_ema_filter ===" << std::endl;
 
     EMAFilter f(120.0);  // 120 second half-life
-    assert(!f.isOK());
+    ASSERT_TRUE(!f.isOK());
 
     // First update
     f.update(0.0, 100.0);
-    assert(f.isOK());
-    assert(std::abs(f.getMean() - 100.0) < 1e-10);
+    ASSERT_TRUE(f.isOK());
+    ASSERT_TRUE(std::abs(f.getMean() - 100.0) < 1e-10);
 
     // Update with same value
     f.update(1.0, 100.0);
-    assert(std::abs(f.getMean() - 100.0) < 1e-10);
+    ASSERT_TRUE(std::abs(f.getMean() - 100.0) < 1e-10);
 
     // Update with new value - should move towards new value
     f.update(2.0, 200.0);
-    assert(f.getMean() > 100.0);
-    assert(f.getMean() < 200.0);
+    ASSERT_TRUE(f.getMean() > 100.0);
+    ASSERT_TRUE(f.getMean() < 200.0);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -178,21 +187,21 @@ void test_pricesize() {
     std::cout << "=== test_pricesize ===" << std::endl;
 
     PriceSize ps;
-    assert(ps.empty());
-    assert(ps.px() == 0.0);
-    assert(ps.sz() == 0);
+    ASSERT_TRUE(ps.empty());
+    ASSERT_TRUE(ps.px() == 0.0);
+    ASSERT_TRUE(ps.sz() == 0);
 
     ps.set(100.5, 10);
-    assert(!ps.empty());
-    assert(ps.px() == 100.5);
-    assert(ps.sz() == 10);
+    ASSERT_TRUE(!ps.empty());
+    ASSERT_TRUE(ps.px() == 100.5);
+    ASSERT_TRUE(ps.sz() == 10);
 
     PriceSize ps2(200.0, 5);
-    assert(ps2.px() == 200.0);
-    assert(ps2.sz() == 5);
+    ASSERT_TRUE(ps2.px() == 200.0);
+    ASSERT_TRUE(ps2.sz() == 5);
 
-    assert(ps != ps2);
-    assert(ps == ps);
+    ASSERT_TRUE(ps != ps2);
+    ASSERT_TRUE(ps == ps);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -216,17 +225,17 @@ void test_optiongreeks() {
 
     // g.apply(2.0, src): g.delta = 2 * 0.5 = 1.0 (assigns, not adds)
     g.apply(2.0, src);
-    assert(std::abs(g.delta() - 1.0) < 1e-10);
+    ASSERT_TRUE(std::abs(g.delta() - 1.0) < 1e-10);
 
     // Reset
     g.reset();
-    assert(g.delta() == 0.0);
+    ASSERT_TRUE(g.delta() == 0.0);
 
     // Accum(m, g): self += m * g
     g.accum(1.0, src);
-    assert(std::abs(g.delta() - 0.5) < 1e-10);
+    ASSERT_TRUE(std::abs(g.delta() - 0.5) < 1e-10);
     g.accum(1.0, src);
-    assert(std::abs(g.delta() - 1.0) < 1e-10);
+    ASSERT_TRUE(std::abs(g.delta() - 1.0) < 1e-10);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -238,12 +247,12 @@ void test_update_types() {
     std::cout << "=== test_update_types ===" << std::endl;
 
     // Verify ordering: CANCEL > UPDATE > NEW > NONE
-    assert(UT_CANCEL > UT_UPDATE);
-    assert(UT_UPDATE > UT_NEW);
-    assert(UT_NEW > UT_NONE);
+    ASSERT_TRUE(UT_CANCEL > UT_UPDATE);
+    ASSERT_TRUE(UT_UPDATE > UT_NEW);
+    ASSERT_TRUE(UT_NEW > UT_NONE);
 
     // UT_REPLACE is same as UT_UPDATE
-    assert(UT_REPLACE == UT_UPDATE);
+    ASSERT_TRUE(UT_REPLACE == UT_UPDATE);
 
     std::cout << "  PASS" << std::endl;
 }

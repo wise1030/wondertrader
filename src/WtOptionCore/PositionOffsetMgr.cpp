@@ -7,25 +7,24 @@ namespace wt_option {
 
 void PositionOffsetMgr::onPositionUpdate(bool isLong, double prevol, double preavail,
                                            double newvol, double newavail) {
-    // A1 fix: WT's on_position reports ABSOLUTE volumes (prev/new snapshots),
-    // not deltas — the old `prevol + newvol` double-counted.
-    // NOTE: the callback does not expose a today/prev split of availability,
-    // so we conservatively book ALL available volume as close-today (matches
-    // intraday MM reality on SHFE) and keep closePrev at 0 until a richer
-    // position-detail source exists. getOrderBreakdown stays correct for the
-    // combined view used by the offset guard.
-    int32_t vol = static_cast<int32_t>(newvol);
-    int32_t avail = static_cast<int32_t>(newavail);
+    // WT on_position semantics: prevol/preavail are yesterday's position and
+    // availability; newvol/newavail are today's.  Total position is the sum;
+    // keep the today/prev split because close-today and close-yesterday have
+    // different exchange action policies.
+    int32_t vol = static_cast<int32_t>(prevol + newvol);
+    int32_t avail = static_cast<int32_t>(preavail + newavail);
+    int32_t todayAvail = static_cast<int32_t>(newavail);
+    int32_t prevAvail = static_cast<int32_t>(preavail);
     if (isLong) {
         m_brokerLongVol = vol;
         m_brokerLongAvail = avail;
-        m_brokerLongTodayAvail = avail;
-        m_brokerLongPrevAvail = 0;
+        m_brokerLongTodayAvail = todayAvail;
+        m_brokerLongPrevAvail = prevAvail;
     } else {
         m_brokerShortVol = vol;
         m_brokerShortAvail = avail;
-        m_brokerShortTodayAvail = avail;
-        m_brokerShortPrevAvail = 0;
+        m_brokerShortTodayAvail = todayAvail;
+        m_brokerShortPrevAvail = prevAvail;
     }
 }
 

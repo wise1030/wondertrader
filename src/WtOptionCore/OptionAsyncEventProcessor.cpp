@@ -102,6 +102,12 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     return ev;
 }
 
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_control() {
+    AsyncEvent ev;
+    ev.type = Custom;
+    return ev;
+}
+
 //=============================================================================
 // Constructor / Destructor
 //=============================================================================
@@ -183,50 +189,50 @@ bool OptionAsyncEventProcessor::push_trader(AsyncEvent&& ev)
         return false;
     }
     _trader_queue.push_back(std::move(ev));
+    _trader_count.fetch_add(1, std::memory_order_release);
+    return true;
+}
+
+bool OptionAsyncEventProcessor::enqueue_trader_event(AsyncEvent&& ev)
+{
+    if (!_worker_running.load(std::memory_order_acquire)) return false;
+    if (!push_trader(std::move(ev))) return false;
+    _total_events.fetch_add(1, std::memory_order_relaxed);
+    _worker_cv.notify_one();
     return true;
 }
 
 void OptionAsyncEventProcessor::enqueue_trade(uint32_t localid, const char* stdCode, bool isBuy, double vol, double price)
 {
-    if (!_worker_running) return;
-    push_trader(AsyncEvent::make_trade(stdCode, localid, isBuy, vol, price));
-    _total_events.fetch_add(1, std::memory_order_relaxed);
-    _worker_cv.notify_one();
+    enqueue_trader_event(AsyncEvent::make_trade(stdCode, localid, isBuy, vol, price));
 }
 
 void OptionAsyncEventProcessor::enqueue_order(uint32_t localid, const char* stdCode, bool isBuy,
                                                 double totalQty, double leftQty, double price, bool isCanceled)
 {
-    if (!_worker_running) return;
-    push_trader(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled));
-    _total_events.fetch_add(1, std::memory_order_relaxed);
-    _worker_cv.notify_one();
+    enqueue_trader_event(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled));
 }
 
 void OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
 {
-    if (!_worker_running) return;
-    push_trader(AsyncEvent::make_session(tdate, isBegin));
-    _total_events.fetch_add(1, std::memory_order_relaxed);
-    _worker_cv.notify_one();
+    enqueue_trader_event(AsyncEvent::make_session(tdate, isBegin));
 }
 
 void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLong,
                                                   double prevol, double preavail,
                                                   double newvol, double newavail)
 {
-    if (!_worker_running) return;
-    push_trader(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
-    _total_events.fetch_add(1, std::memory_order_relaxed);
-    _worker_cv.notify_one();
+    enqueue_trader_event(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
 }
 
 void OptionAsyncEventProcessor::enqueue_channel(bool isReady)
 {
-    if (!_worker_running) return;
-    push_trader(AsyncEvent::make_channel(isReady));
-    _total_events.fetch_add(1, std::memory_order_relaxed);
-    _worker_cv.notify_one();
+    enqueue_trader_event(AsyncEvent::make_channel(isReady));
+}
+
+void OptionAsyncEventProcessor::enqueue_control()
+{
+    enqueue_trader_event(AsyncEvent::make_control());
 }
 
 //=============================================================================
@@ -258,7 +264,9 @@ void OptionAsyncEventProcessor::worker_loop()
         {
             std::unique_lock<std::mutex> lock(_worker_sleep_mtx);
             _worker_cv.wait_for(lock, std::chrono::microseconds(100), [this]() {
-                return !_worker_running || !_md_queue.empty() || !_trader_queue.empty();
+                return !_worker_running.load(std::memory_order_acquire)
+                    || !_md_queue.empty()
+                    || _trader_count.load(std::memory_order_acquire) > 0;
             });
         }
         if (!_worker_running) break;
@@ -293,17 +301,23 @@ void OptionAsyncEventProcessor::worker_loop()
             {
                 std::lock_guard<std::mutex> lock(_trader_mtx);
                 trader_batch.swap(_trader_queue);
+                _trader_count.store(0, std::memory_order_release);
             }
-            for (auto& tev : trader_batch) {
+            size_t firstUnprocessed = 0;
+            for (; firstUnprocessed < trader_batch.size(); ++firstUnprocessed) {
                 if (events.size() >= 1024) {
-                    // Put back events that didn't fit (rare)
+                    // Requeue only the unconsumed suffix.  Reinserting the whole
+                    // batch would repeat trade/order/position events that were
+                    // already moved into this batch.
                     std::lock_guard<std::mutex> lock(_trader_mtx);
                     _trader_queue.insert(_trader_queue.begin(),
-                        std::make_move_iterator(trader_batch.begin()),
+                        std::make_move_iterator(trader_batch.begin() + firstUnprocessed),
                         std::make_move_iterator(trader_batch.end()));
+                    _trader_count.fetch_add(trader_batch.size() - firstUnprocessed,
+                                            std::memory_order_release);
                     break;
                 }
-                events.push_back(std::move(tev));
+                events.push_back(std::move(trader_batch[firstUnprocessed]));
             }
         }
 

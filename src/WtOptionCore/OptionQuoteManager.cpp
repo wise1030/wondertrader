@@ -308,6 +308,8 @@ void OptionQuoteManager::trackOrder(bool isBuy, double px, uint32_t sz, uint32_t
     st.phase = OrderState::Phase::New;   // C4: Live on first ack
     orders.push_back(std::move(st));
     m_numNewOrders++;
+    if (m_orderIssued)
+        m_orderIssued(isBuy, px, sz, localid);
 }
 
 int32_t OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)

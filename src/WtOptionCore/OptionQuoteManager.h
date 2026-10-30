@@ -115,6 +115,13 @@ public:
     using SendSingleFn = std::function<uint32_t(bool isBuy, double price, uint32_t qty)>;
     void setSendSingleFn(SendSingleFn fn) { m_sendSingle = std::move(fn); }
 
+    /// Called for every localid that enters OQM tracking, including ids issued
+    /// by the direct IHftStraCtx path.  The strategy uses this to keep
+    /// OrderAnomalyGuard / FillPriceChecker in sync with production OQM orders.
+    using OrderIssuedFn = std::function<void(bool isBuy, double price,
+                                             uint32_t qty, uint32_t localid)>;
+    void setOrderIssuedFn(OrderIssuedFn fn) { m_orderIssued = std::move(fn); }
+
     // --- Runtime param adjustment ---
     void setScaleFactor(double scale);
     void setMaxPosition(uint32_t maxPos) { m_cfg.max_position = maxPos; }
@@ -171,6 +178,7 @@ private:
 
     PreTradeCheckFn m_preTradeCheck;   // A2
     SendSingleFn m_sendSingle;         // A4 test seam
+    OrderIssuedFn m_orderIssued;       // production registration hook
 
     // --- Incremental diffing ---
     int32_t getMissingPriceLevelSize(double price, uint32_t desiredSize, bool isBuy) const;

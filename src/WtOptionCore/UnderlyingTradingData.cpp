@@ -21,7 +21,7 @@ UnderlyingTradingData::UnderlyingTradingData(const std::string& code,
     , m_bDisplayShark(false)
     , m_instr(code)
     , m_spExpiryData(ed)
-    , m_spOptionTradingGrid(otg)
+    , m_wpOptionTradingGrid(otg)
 {
 }
 

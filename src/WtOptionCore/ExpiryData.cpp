@@ -62,6 +62,12 @@ uint32_t ExpiryData::countTradingDays(uint32_t fromDate, uint32_t toDate) const 
     return count;
 }
 
+int32_t ExpiryData::daysBetween(uint32_t fromDate, uint32_t toDate) const {
+    if (fromDate <= toDate)
+        return static_cast<int32_t>(countCalendarDays(fromDate, toDate));
+    return -static_cast<int32_t>(countCalendarDays(toDate, fromDate));
+}
+
 uint32_t ExpiryData::countCalendarDays(uint32_t fromDate, uint32_t toDate) const {
     if (fromDate >= toDate) return 0;
     // Approximate: convert YYYYMMDD to ordinal, subtract
@@ -83,8 +89,13 @@ uint32_t ExpiryData::countCalendarDays(uint32_t fromDate, uint32_t toDate) const
 void ExpiryData::updateDaysToExpiration(uint32_t currentDate, uint32_t expirationDate) {
     m_currentDate = currentDate;
     m_expirationDate = expirationDate;
-    m_daysToExpiration = countCalendarDays(currentDate, expirationDate);
-    m_bdaysToExpiration = countTradingDays(currentDate, expirationDate);
+    m_daysToExpiration = daysBetween(currentDate, expirationDate);
+    if (m_daysToExpiration >= 0) {
+        m_bdaysToExpiration = static_cast<int32_t>(countTradingDays(currentDate, expirationDate));
+    } else {
+        // Preserve sign after expiry so purge/deactivate conditions are reachable.
+        m_bdaysToExpiration = -static_cast<int32_t>(countTradingDays(expirationDate, currentDate));
+    }
     // Prevent bdays=0 leading to maturity=0 (causes division by zero in GvvVolCurve)
     if (m_bdaysToExpiration == 0 && m_daysToExpiration > 0)
         m_bdaysToExpiration = 1;
@@ -109,14 +120,16 @@ double ExpiryData::getIntradayFraction() const {
 }
 
 double ExpiryData::getSettlementFraction() const {
-    if (m_daysToExpiration != 0) return 1.0;
+    if (m_daysToExpiration > 0) return 1.0;
+    if (m_daysToExpiration < 0) return 0.0;   // expired: no further optionality
     // On expiration day, fraction depends on settlement time
     // For simplicity, use intraday fraction
     return getIntradayFraction();
 }
 
 double ExpiryData::getPremiumFadeFraction() const {
-    if (m_daysToExpiration != 0) return 1.0;
+    if (m_daysToExpiration > 0) return 1.0;
+    if (m_daysToExpiration < 0) return 0.0;
     return getIntradayFraction();
 }
 

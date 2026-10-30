@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cmath>
 #include <string>
 #include <memory>
 #include <deque>
@@ -21,6 +22,12 @@ class PnlTracker {
 public:
     PnlTracker(double multiplier = 1.0);
 
+    /// Session-boundary reset.  Realized PnL, turnover, fill counters and FIFO
+    /// ledgers restart at zero; an optional carried position/cost basis is set
+    /// for the new session.  This keeps daily-loss limits daily even when the
+    /// process stays alive across sessions.
+    void resetSession(int32_t carriedPosition = 0, double costBasis = 0.0);
+
     // B5: enable FIFO matching mode (quantbox FillDequeLedger absorption).
     // In FIFO mode every fill is matched against the head of the opposite
     // side's deque to realize PnL per matched pair, in addition to the
@@ -30,6 +37,13 @@ public:
 
     // Set fee percentage (e.g. 0.0001 = 1bp)
     void setFeePct(double feepct) { m_feepct = feepct; }
+
+    /// Contract facts may arrive after tracker creation (dynamic discovery).
+    /// Update the money multiplier before any fill is recorded.
+    void setMultiplier(double multiplier) {
+        if (std::isfinite(multiplier) && multiplier > 0)
+            m_multiplier = multiplier;
+    }
 
     // Call on every tick/book update (unrealized PnL)
     void onPriceUpdate(double bid, double ask);

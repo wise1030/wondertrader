@@ -434,7 +434,9 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
 
     _hedgeCoord.configure(_hedgeCfg, 0.0, "",
         [this](const std::string& code, bool isBuy, double px, uint32_t qty) {
-            return executeOrder(code, isBuy, px, qty);
+            // Hedge in-flight tracking requires the real framework localids,
+            // not the executeOrder() success-count wrapper.
+            return executeOrderIds(code, isBuy, px, qty);
         },
         [this](const std::string& code) -> double {
             if (_otg && !code.empty()) {
@@ -596,8 +598,15 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
         }
         // Also collect hedge codes
         std::string hedgeCode = ec.hedgeCode.empty() ? ulCode : ec.hedgeCode;
-        if (!hedgeCode.empty() && hedgeCode != _underlyingCode)
+        if (!hedgeCode.empty() && hedgeCode != _underlyingCode) {
             _hedgeCodes.insert(hedgeCode);
+            // Ensure future OQMs created for per-expiry hedge codes also have
+            // guard/offset objects available through the dynamic lookup.
+            if (!_positionGuards.count(hedgeCode))
+                _positionGuards[hedgeCode] = std::make_shared<wt_option::PositionGuard>();
+            if (!_positionOffsets.count(hedgeCode))
+                _positionOffsets[hedgeCode] = std::make_shared<wt_option::PositionOffsetMgr>();
+        }
     }
     for (const auto& code : perExpiryUnderlyingCodes) {
         ctx->stra_sub_ticks(code.c_str());
@@ -643,7 +652,7 @@ void HftOptionStrategy::setupGrid()
     wtp::WTSSessionInfo* sessInfo = _sessionInfo;
 
     _grid = std::make_shared<wt_option::OptionGrid>(
-        _futuresProduct, _underlyingCode, bdMgr, sessInfo);
+        _optionProduct, _underlyingCode, bdMgr, sessInfo);
 
     // Load holidays from holidays.json (same as longbeach ExchangeCalendar)
     // This is used by ExpiryData::countTradingDays when m_bdMgr is null
@@ -964,6 +973,17 @@ void HftOptionStrategy::setupPricer()
     }
 
     // Common per-expiry setup (shared by both pricer types)
+    auto hedgeMultiplier = [this](const std::string& code) -> double {
+        if (_ctx && !code.empty()) {
+            auto ci = CodeHelper::extractStdCode(code.c_str(), nullptr);
+            std::string prodKey = fmt::format("{}.{}", ci._exchg, ci._product);
+            WTSCommodityInfo* cinfo = _ctx->stra_get_comminfo(prodKey.c_str());
+            if (cinfo && cinfo->getVolScale() > 0)
+                return cinfo->getVolScale();
+        }
+        return 1.0;
+    };
+
     for (const auto& [exp, ec] : _expiryConfigs) {
         // Per-expiry underlying code registration
         std::string ulCode = ec.underlyingCode.empty() ? _underlyingCode : ec.underlyingCode;
@@ -978,20 +998,17 @@ void HftOptionStrategy::setupPricer()
         }
         // Hedge override
         std::string hedgeCode = ec.hedgeCode.empty() ? ulCode : ec.hedgeCode;
-        if (!hedgeCode.empty())
+        if (!hedgeCode.empty()) {
             _otg->setHedgeOverride(exp, hedgeCode);
+            // B18 primary hedge: register with the real multiplier before
+            // OptionExpiryGreeks auto-registers the same code with 1.0.
+            _risk->registerHedgeInstrument(hedgeCode, exp, hedgeMultiplier(hedgeCode));
+        }
         // B14: Register secondary hedge instruments with OptionRisk
         for (const auto& shc : ec.secondaryHedgeCodes) {
             // B18 fix: pass the real contract multiplier (was hardcoded 1.0,
             // breaking unit consistency vs option greeks scaled by volScale)
-            double mult = 1.0;
-            if (_ctx) {
-                auto ci = CodeHelper::extractStdCode(shc.c_str(), nullptr);
-                std::string prodKey = fmt::format("{}.{}", ci._exchg, ci._product);
-                WTSCommodityInfo* cinfo = _ctx->stra_get_comminfo(prodKey.c_str());
-                if (cinfo && cinfo->getVolScale() > 0)
-                    mult = cinfo->getVolScale();
-            }
+            double mult = hedgeMultiplier(shc);
             _risk->registerHedgeInstrument(shc, exp, mult);
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "Secondary hedge registered: {} for expiry {} (mult={})", shc, exp, mult);
@@ -1113,6 +1130,25 @@ void HftOptionStrategy::setupCTG()
     }
 
     if (_otg) {
+        // R-P0: keep the dependencies on OTG so contracts discovered later via
+        // ticks receive the same filter/guard/offset wiring at creation time.
+        _otg->setOptionRiskFilterChain(_optionFilterChain);
+        _otg->setFutureRiskFilterChain(_futureFilterChain);
+        _otg->setPositionGuardLookup([this](const std::string& code) -> wt_option::PositionGuardPtr {
+            auto it = _positionGuards.find(code);
+            return it != _positionGuards.end() ? it->second : nullptr;
+        });
+        _otg->setPositionOffsetLookup([this](const std::string& code) -> wt_option::PositionOffsetMgrPtr {
+            auto it = _positionOffsets.find(code);
+            return it != _positionOffsets.end() ? it->second : nullptr;
+        });
+        _otg->setOrderIssuedFn([this](const std::string& code, bool,
+                                      double px, uint32_t qty, uint32_t localid) {
+            // OQM normally sends via IHftStraCtx directly; mirror every issued
+            // localid into the same guard/checker registration as Strategy orders.
+            registerIssuedOrderIds(code, {localid}, px, qty);
+        });
+
         for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
             auto utd = pair.second;
             if (utd && utd->getQuoteManager()) {
@@ -1276,23 +1312,30 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (_hotUpdatePending.exchange(false, std::memory_order_acq_rel))
             applyHotParams();
 
-        static int batchCount = 0;
-        batchCount++;
-        if (batchCount <= 5 || batchCount % 100 == 0) {
+        ++_batchCount;
+        if (_batchCount <= 5 || _batchCount % 100 == 0) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy batch #{} enabled={} options={} strikes={} underlying={}",
-                batchCount, _traderCtx ? _traderCtx->enabled.load() : false,
+                _batchCount, _traderCtx ? _traderCtx->enabled.load() : false,
                 _grid->numOptions(), _grid->numStrikes(), _grid->getUnderlyingPrice());
         }
         if (_traderCtx && _traderCtx->enabled) {
             for (const auto& [code, pos] : _positions) {
                 auto od = _grid->get(code);
-                if (od) od->setPosition(pos);
-                // Sync OQM position from broker position (fixes fill-counter divergence)
-                if (_otg) {
-                    auto otd = _otg->getTradingData(code);
-                    if (otd && otd->getQuoteManager())
-                        otd->getQuoteManager()->setPosition(static_cast<int32_t>(pos));
+                if (od) {
+                    od->setPosition(pos);
+                    // Sync option OQM position from broker position.
+                    if (_otg) {
+                        auto otd = _otg->getTradingData(code);
+                        if (otd && otd->getQuoteManager())
+                            otd->getQuoteManager()->setPosition(static_cast<int32_t>(pos));
+                    }
+                } else if (_otg) {
+                    // Broker snapshots may describe hedge/future instruments that
+                    // are not OptionData entries; keep their OQM position live too.
+                    auto utd = _otg->getUnderlyingTradingData(code);
+                    if (utd && utd->getQuoteManager())
+                        utd->getQuoteManager()->setPosition(static_cast<int32_t>(pos));
                 }
             }
 
@@ -1524,7 +1567,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
         _positions[code] += (isBuy ? 1 : -1) * vol;
 
-        // Forward to OQM (per-contract order tracker)
+        // Forward to OQM (per-contract order tracker).  Futures use UTD/OQM;
+        // leaving them unrouted leaves hedge order state permanently stale.
         if (_otg && !skipOqm) {
             auto otd = _otg->getTradingData(code);
             if (otd && otd->getQuoteManager()) {
@@ -1535,6 +1579,16 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     otd->getQuoteManager()->setCurrentTime(curTime, secs % 60);
                 }
                 otd->getQuoteManager()->onFill(localid, isBuy, price, fq);
+            } else {
+                auto utd = _otg->getUnderlyingTradingData(code);
+                if (utd && utd->getQuoteManager()) {
+                    if (_ctx) {
+                        uint32_t curTime = _ctx->stra_get_time();
+                        uint32_t secs = _ctx->stra_get_secs();
+                        utd->getQuoteManager()->setCurrentTime(curTime, secs % 60);
+                    }
+                    utd->getQuoteManager()->onFill(localid, isBuy, price, fq);
+                }
             }
         }
 
@@ -1642,20 +1696,24 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // B2: record done/cancel in the anomaly guard
         _anomalyGuard.onOrderDone(localid, isCanceled, leftQty);
 
-        // Forward to OQM (order status tracking)
+        // Forward to OQM (order status tracking), including future OQMs.
         if (_otg) {
+            wt_option::OptionQuoteManager* qm = nullptr;
             auto otd = _otg->getTradingData(code);
-            if (otd && otd->getQuoteManager()) {
-                otd->getQuoteManager()->setTickTimestampUs(_tickTimestampUs);
+            if (otd) qm = otd->getQuoteManager().get();
+            if (!qm) {
+                auto utd = _otg->getUnderlyingTradingData(code);
+                if (utd) qm = utd->getQuoteManager().get();
+            }
+            if (qm) {
+                qm->setTickTimestampUs(_tickTimestampUs);
                 // Set current time for QuoteStatistics (HHMM + sec_in_min)
                 if (_ctx) {
                     uint32_t curTime = _ctx->stra_get_time();
-                    uint32_t hhmm = curTime;
                     uint32_t secs = _ctx->stra_get_secs();
-                    otd->getQuoteManager()->setCurrentTime(hhmm, secs % 60);
+                    qm->setCurrentTime(curTime, secs % 60);
                 }
-                otd->getQuoteManager()->onOrderStatusChange(
-                    localid, isBuy, totalQty, leftQty, price, isCanceled);
+                qm->onOrderStatusChange(localid, isBuy, totalQty, leftQty, price, isCanceled);
             }
         }
 
@@ -1778,6 +1836,27 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // B07 fix: reset OQM lifetime counters — without this, MaxCancel /
             // MaxNewOrders / hard_flat thresholds permanently lock all quoting
             if (_otg) _otg->onSessionBegin();
+
+            // B20b: reset per-instrument PnL ledgers at the session boundary.
+            // Signal latches alone are not enough; otherwise a long-running
+            // process carries yesterday's realized PnL into today's limit.
+            if (_otg) {
+                for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
+                    if (pair.second)
+                        pair.second->getPnlTracker()->resetSession();
+                }
+            }
+            if (_grid) {
+                for (const auto& od : _grid->getAllOptions()) {
+                    if (od && od->getTradingData())
+                        od->getTradingData()->getPnlTracker()->resetSession();
+                }
+            }
+            // Re-arm cost-basis initialization for carried positions.  The next
+            // preClose tick will seed each tracker with the new session basis.
+            for (const auto& [posCode, posVal] : _positions)
+                _pnlPendingInit.insert(posCode);
+
             // B2: clear anomaly-guard registries for the new session
             _anomalyGuard.reset();
             // B20 fix: clear risk-signal latches (PnlLimit panic used to
@@ -1829,16 +1908,26 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_position = [this](const std::string& code, bool isLong,
                              double prevol, double preavail,
                              double newvol, double newavail) {
-        double pos = isLong ? newvol : -newvol;
+        // WT semantics: prevol/preavail = previous-day position/availability,
+        // newvol/newavail = today.  Total signed position must include both.
+        const double sign = isLong ? 1.0 : -1.0;
+        const double pos = sign * (prevol + newvol);
         _positions[code] = pos;
-        if (_risk)
+
+        if (_risk) {
+            // Initialize option RiskData from the broker snapshot as well as
+            // hedge data; otherwise restart/overnight option Greeks are empty.
+            auto rd = _risk->get(code);
+            if (rd)
+                rd->setPosition(static_cast<int32_t>(pos));
             _risk->setHedgePosition(code, static_cast<int32_t>(pos));
+        }
         _pnlPendingInit.insert(code);
 
-        // Enhancement: PositionGuard - update broker position for discrepancy check
+        // Enhancement: PositionGuard - update broker total position
         auto git = _positionGuards.find(code);
         if (git != _positionGuards.end())
-            git->second->onBrokerPosition(isLong, newvol);
+            git->second->onBrokerPosition(isLong, pos);
 
         // A1 fix: pass the REAL four-tuple to PositionOffsetMgr (was newvol×4)
         auto oit = _positionOffsets.find(code);
@@ -2181,9 +2270,10 @@ void HftOptionStrategy::on_session_end(IHftStraCtx* ctx, uint32_t uTDate)
 // Executor bridges — IHftStraCtx order placement
 // ============================================================================
 
-// R1: exchange price-limit guard — the last line of defense before anything
-// leaves the process. Covers ALL order paths (OQM quotes/orders, scanner
-// takers, gamma hedges, manual orders) because they all funnel through here.
+// R1: exchange price-limit guard for paths submitted through the strategy
+// executor.  OQM/scanner still call IHftStraCtx directly today; their localids
+// are mirrored via OrderIssuedFn, while full pre-send unification belongs to
+// the OrderGateway refactor.
 bool HftOptionStrategy::withinPriceLimits(const std::string& code, double price)
 {
     if (price <= 0) return true;
@@ -2200,6 +2290,26 @@ bool HftOptionStrategy::withinPriceLimits(const std::string& code, double price)
     return true;
 }
 
+void HftOptionStrategy::registerIssuedOrderIds(const std::string& code,
+                                                const OrderIDs& ids,
+                                                double price, uint32_t qty)
+{
+    // B14 fix: record issued prices so fill-deviation monitoring is live.
+    if (_fillPriceChecker && price > 0) {
+        for (uint32_t id : ids) {
+            if (id != 0)
+                _fillPriceChecker->onOrderSent(code, id, price);
+        }
+    }
+
+    // B2: register EVERY framework localid.  A split action policy can return
+    // multiple ids; tracking only ids[0] makes the remaining fills "Unknown".
+    for (uint32_t id : ids) {
+        if (id != 0)
+            _anomalyGuard.onIssued(id, code, qty);
+    }
+}
+
 int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, uint32_t bidQ,
                                          double askP, uint32_t askQ)
 {
@@ -2211,38 +2321,35 @@ int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, ui
     WTSLogger::log_by_cat("strategy", LL_DEBUG,
         "Quote: {} bid={}x{} ask={}x{} → ids={},{}",
         code, bidP, bidQ, askP, askQ, ids.first, ids.second);
-    // B14 fix: record issued prices so fill-deviation monitoring is live
-    if (_fillPriceChecker) {
-        if (ids.first != 0 && bidP > 0)
-            _fillPriceChecker->onOrderSent(code, ids.first, bidP);
-        if (ids.second != 0 && askP > 0)
-            _fillPriceChecker->onOrderSent(code, ids.second, askP);
-    }
-    // B2: register issued orders with the anomaly guard
-    if (ids.first != 0)  _anomalyGuard.onIssued(ids.first, code, bidQ);
-    if (ids.second != 0) _anomalyGuard.onIssued(ids.second, code, askQ);
+
+    if (ids.first != 0)
+        registerIssuedOrderIds(code, {ids.first}, bidP, bidQ);
+    if (ids.second != 0)
+        registerIssuedOrderIds(code, {ids.second}, askP, askQ);
     return static_cast<int32_t>(ids.first + ids.second > 0 ? 1 : 0);
 }
 
-int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
-                                         double price, uint32_t qty)
+OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
+                                             double price, uint32_t qty)
 {
-    if (!_ctx || !_channelReady) return 0;
+    if (!_ctx || !_channelReady) return {};
     // R1
-    if (!withinPriceLimits(code, price)) return 0;
+    if (!withinPriceLimits(code, price)) return {};
 
     auto ids = isBuy
         ? _ctx->stra_buy(code.c_str(), price, qty, "OptionMM")
         : _ctx->stra_sell(code.c_str(), price, qty, "OptionMM");
 
-    // B14 fix
-    if (_fillPriceChecker && !ids.empty() && price > 0)
-        _fillPriceChecker->onOrderSent(code, ids[0], price);
-    // B2
-    if (!ids.empty())
-        _anomalyGuard.onIssued(ids[0], code, qty);
+    registerIssuedOrderIds(code, ids, price, qty);
+    return ids;
+}
 
-    return static_cast<int32_t>(!ids.empty() ? 1 : 0);
+int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
+                                         double price, uint32_t qty)
+{
+    // Preserve the legacy success-count contract for CTG/manual callers.
+    const OrderIDs ids = executeOrderIds(code, isBuy, price, qty);
+    return static_cast<int32_t>(ids.size());
 }
 
 int32_t HftOptionStrategy::executeCancel(const std::string& code)
@@ -2363,9 +2470,21 @@ bool HftOptionStrategy::_tradingStateEnabled() const
 
 void HftOptionStrategy::setState(wt_option::TradingStateType t, const std::string& reason)
 {
+    const wt_option::TradingStateType prev = _tstate.type;
     _tstate.type = t;
     _tstate.reason = reason;
     applyTradingState();
+
+    // A STOP/Disabled transition is an order-management action, not merely a
+    // flag change.  Refresh after enabled=false clears desired markets and
+    // drains the resulting cancels unconditionally.
+    if (t == wt_option::TradingStateType::Disabled
+        && prev != wt_option::TradingStateType::Disabled
+        && reason == "hotcmd_stop"
+        && _ctg && _channelReady.load()) {
+        _ctg->refresh();
+        _ctg->drainPendingQuotes();
+    }
 }
 
 // ============================================================================
@@ -2446,6 +2565,10 @@ void HftOptionStrategy::on_params_updated()
 {
     // Framework callback thread: only signal; the worker owns grid/CTG/OQM.
     _hotUpdatePending.store(true, std::memory_order_release);
+    // Wake the worker even in a completely quiet market.  Without a reliable
+    // control event, STOP/PANIC could sit behind an empty event loop forever.
+    if (_async)
+        _async->enqueue_control();
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "HftOptionStrategy[{}] PARAMS HOT UPDATE queued", id());
 }

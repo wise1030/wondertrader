@@ -154,6 +154,8 @@ private:
     bool isTradingDay(uint32_t date) const;
     uint32_t countTradingDays(uint32_t fromDate, uint32_t toDate) const;
     uint32_t countCalendarDays(uint32_t fromDate, uint32_t toDate) const;
+    /// Signed calendar-day difference: negative once currentDate is past expiry.
+    int32_t daysBetween(uint32_t fromDate, uint32_t toDate) const;
 
     uint32_t m_expiry;          // YYYYMM
     std::string m_optionProduct;

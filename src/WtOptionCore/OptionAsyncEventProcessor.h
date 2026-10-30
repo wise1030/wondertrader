@@ -90,6 +90,9 @@ public:
                           double prevol, double preavail,
                           double newvol, double newavail);
     void enqueue_channel(bool isReady);
+    /// Reliable worker wakeup for hot control commands.  Unlike MD ticks this
+    /// event must not be coalesced or dropped; it only drives on_batch_complete.
+    void enqueue_control();
 
     uint64_t totalEvents() const { return _total_events.load(std::memory_order_relaxed); }
     uint64_t queueDrops() const { return _queue_drops.load(std::memory_order_relaxed); }
@@ -127,6 +130,7 @@ public:
                                     double prevol, double preavail,
                                     double newvol, double newavail);
     static AsyncEvent make_channel(bool isReady);
+        static AsyncEvent make_control();
     };
 
     // === MD queue: SPSC (single producer = MD thread) ===
@@ -139,12 +143,16 @@ public:
     static constexpr size_t kMaxOverflow = 65536;
     static constexpr size_t kMaxTraderQueue = 65536;
     bool push_trader(AsyncEvent&& ev);
+    bool enqueue_trader_event(AsyncEvent&& ev);
 
     // === Trader queue: mutex-protected (multi-producer safe) ===
     // Trader events (trade/order/position/session/channel) are ~100-500/s,
     // negligible compared to tick ~10000/s. Mutex contention is near-zero.
     std::mutex _trader_mtx;
     mutable std::vector<AsyncEvent> _trader_queue;
+    // Atomic mirror of _trader_queue.size(), updated while holding _trader_mtx.
+    // The CV predicate reads this counter instead of touching the vector.
+    std::atomic<size_t> _trader_count{0};
 
     // Worker thread
     std::thread _worker;

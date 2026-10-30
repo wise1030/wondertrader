@@ -117,4 +117,18 @@ void PnlTracker::initPosition(int32_t position, double costBasis) {
     m_curpnl = m_lastpnl;
 }
 
+void PnlTracker::resetSession(int32_t carriedPosition, double costBasis) {
+    m_curturnover = 0;
+    m_curpnl = 0;
+    m_lastpnl = 0;
+    m_lastpos = carriedPosition;
+    m_lastfillpx = costBasis;
+    m_fillsz = 0;
+    m_fifoBid.clear();
+    m_fifoAsk.clear();
+    m_fifoRealized = 0;
+    m_wavgEntryQty = static_cast<double>(carriedPosition);
+    m_wavgEntryPx = carriedPosition != 0 ? costBasis : 0.0;
+}
+
 } // namespace wt_option

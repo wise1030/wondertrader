@@ -287,3 +287,9 @@ add_executable(test_command_handlers tests/test_command_handlers.cpp)
 target_link_libraries(test_command_handlers PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
 target_include_directories(test_command_handlers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME test_command_handlers COMMAND test_command_handlers)
+
+# Test: Phase 0 async event exactly-once / control wakeup regressions
+add_executable(test_async_event_processor tests/test_async_event_processor.cpp)
+target_link_libraries(test_async_event_processor PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_async_event_processor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_async_event_processor COMMAND test_async_event_processor)
