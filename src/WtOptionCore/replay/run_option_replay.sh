@@ -1,33 +1,32 @@
 #!/usr/bin/env bash
-# 端到端期权tick replay: KS缓存 -> TickConverter -> DSB -> WtBtRunner -> p99/p99.9
+# 端到端期权tick replay: 取数(缺数据时) -> DSB校验 -> WtBtRunner -> p99/p99.9
 # 用法: ./run_option_replay.sh [DATES_CSV]   默认 20260602,20260603,20260604,20260605
 set -euo pipefail
 
 DATES="${1:-20260602,20260603,20260604,20260605}"
+CHAIN=cu2607
 REPO=/mnt/d/gf_pc/WonderTrader/wondertrader
-KS2WTPY=/mnt/d/gf_pc/WonderTrader/wtpy/tools/ks2wtpy
-CACHE=/tmp/opencode/ks_s3cache
 STORAGE="$REPO/dist/WtBtFutu/storage"
 RUNNER_DIR="$REPO/dist/WtBtRunner"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cd "$KS2WTPY"
-echo "=== [1/3] tick -> DSB (dates=$DATES) ==="
-python3 main.py --tick --s3 \
-  --s3-endpoint 172.16.36.3:6900 \
-  --s3-access-key "$(python3 -c "import json;print(json.load(open('credentials.json'))['accessKey'])")" \
-  --s3-secret-key "$(python3 -c "import json;print(json.load(open('credentials.json'))['secretKey'])")" \
-  --s3-bucket ks-data \
-  --s3-cache-dir "$CACHE" \
-  --products SHFE.cu \
-  --include-option \
-  --tick-dates "$DATES" \
-  --output "$STORAGE" \
-  --log-level INFO
+echo "=== [1/3] tick -> DSB (dates=$DATES, chain=$CHAIN) ==="
+need_fetch=0
+for d in ${DATES//,/ }; do
+  n=$(ls "$STORAGE/his/ticks/SHFE/$d" 2>/dev/null | grep -c -E "^${CHAIN}[CP]" || true)
+  [ "$n" -gt 0 ] || need_fetch=1
+done
+if [ "$need_fetch" -eq 1 ]; then
+  echo "local option DSBs missing, fetching via server-side pipeline..."
+  bash "$SCRIPT_DIR/fetch_option_ticks.sh" cu "$CHAIN" "$DATES"
+else
+  echo "local option DSBs already present, skip fetch"
+fi
 
 echo "=== [2/3] verify option DSBs ==="
 total_opt=0
 for d in ${DATES//,/ }; do
-  n=$(ls "$STORAGE/his/ticks/SHFE/$d" 2>/dev/null | grep -c -E '[0-9](C|P)[0-9]{4}\.dsb' || true)
+  n=$(ls "$STORAGE/his/ticks/SHFE/$d" 2>/dev/null | grep -c -E "^${CHAIN}[CP]" || true)
   echo "  $d: $n option DSB files"
   total_opt=$((total_opt + n))
 done
@@ -35,7 +34,8 @@ done
 
 echo "=== [3/3] WtBtRunner replay ==="
 cd "$RUNNER_DIR"
-cp "$REPO/src/WtOptionCore/replay/configbt_option_replay.yaml" .
+cp "$SCRIPT_DIR/configbt_option_replay.yaml" .
+rm -rf replay_common && cp -r "$SCRIPT_DIR/replay_common" .
 env LD_LIBRARY_PATH="$REPO/src/build_all/build_x64/Debug/bin" \
   ./WtBtRunner.fresh -c configbt_option_replay.yaml -l logcfgbt_option.yaml
 

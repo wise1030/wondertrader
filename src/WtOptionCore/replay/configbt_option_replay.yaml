@@ -1,11 +1,11 @@
 replayer:
     basefiles:
-        commodity: ../common/commodities.json
-        contract: ../common/contracts.json
-        holiday: ../common/holidays.json
-        hot: ../common/hots.json
-        session: ../common/sessions.json
-    fees: ../common/fees.json
+        commodity: replay_common/commodities.json
+        contract: replay_common/contracts.json
+        holiday: replay_common/holidays.json
+        hot: replay_common/hots.json
+        session: replay_common/sessions.json
+    fees: replay_common/fees.json
     hft_stime: 202606020900
     hft_etime: 202606051500
     mode: bin
@@ -28,7 +28,7 @@ hft:
             exchange: SHFE
             futuresProduct: cu
             optionProduct: cu
-            underlyingCode: SHFE.cu.2606
+            underlyingCode: SHFE.cu.2607
             riskFreeRate: 0.03
             maxTPS: 50
             marketFreshTimeoutMs: 3000
@@ -44,7 +44,7 @@ hft:
             improve_retreat_ratio: 3.0
 
             expiries:
-                "2606":
+                "2607":
                     enable: true
                     delta_min: 0.05
                     delta_max: 0.95
