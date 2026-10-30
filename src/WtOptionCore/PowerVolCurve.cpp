@@ -67,7 +67,15 @@ bool PowerVolCurve::fit(const dataset_t& src_pts)
     ws.reserve(src_pts.size());
 
     for (const auto& pt : src_pts) {
-        const double x = pt.first;
+        // PeriodicCurveFitter supplies K-F, while eval() uses log(K/F).
+        // When ATM forward is available, normalize the training x to the same
+        // log-ratio feature space as prediction.
+        double x = pt.first;
+        if (m_atmforward > 0) {
+            const double strike = pt.first + m_atmforward;
+            if (strike > 0)
+                x = std::log(strike / m_atmforward);
+        }
         const double sv = pt.second;
         if (!std::isfinite(x) || !std::isfinite(sv))
             continue;

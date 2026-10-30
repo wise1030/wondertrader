@@ -991,6 +991,19 @@ void test_power_vol_curve() {
     ASSERT_TRUE(!c3.isInitialized());
     ASSERT_EQ(c3.eval(0.5), 1.0);
 
+    // Production fit path: PeriodicCurveFitter supplies K-F while eval uses
+    // log(K/F).  With ATM forward set, fit must normalize to log-ratio space.
+    PowerVolCurve c5;   // RHO regime, baseline −1
+    c5.setATMForward(4000.0);
+    IVolCurve::dataset_t pts5;
+    for (double x : {-0.10, -0.05, 0.0, 0.05, 0.10}) {
+        const double diff = 4000.0 * (std::exp(x) - 1.0);
+        pts5.push_back({diff, 1.5 * std::exp(0.30 * x) - 1.0});
+    }
+    ASSERT_TRUE(c5.fit(pts5));
+    ASSERT_TRUE(std::fabs(c5.getParameter(PowerVolCurve::PAR_A) - 1.5) < 1e-6);
+    ASSERT_TRUE(std::fabs(c5.getParameter(PowerVolCurve::PAR_B) - 0.30) < 1e-6);
+
     // Domain guard: sv<=0 points are skipped, remaining 3 still fit
     PowerVolCurve c4(GvvVolCurve::SPOTVOL);
     IVolCurve::dataset_t neg = {{0.1, -0.5}, {0.2, 0.6}, {0.3, 0.7}, {0.4, 0.8}};
