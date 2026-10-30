@@ -170,6 +170,44 @@ private:
     void markFailed(const char* reason);
 };
 
+// ============================================================================
+// SimulComboOrder — simultaneous N-leg execution (Butterfly / VolSpread)
+// ============================================================================
+class SimulComboOrder : public ComboOrder {
+public:
+    struct LegInput { std::string code; bool isBuy; double price; uint32_t qty; };
+    SimulComboOrder(const std::string& name, std::vector<LegInput> legs,
+                    ComboExecContext* ctx);
+
+    SendResult sendOrders() override;
+    void onFill(const OptionOrder& order, const FillEvent& fill) override;
+    bool checkDone(bool timeout) override;
+
+    bool onLegFill(uint32_t localid, uint32_t fillQty);
+    bool onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty);
+    void cancelAll();
+    bool checkTimeout();
+
+    bool isActive() const { return m_active; }
+    bool isDone() const { return m_done; }
+    bool isFailed() const { return m_failed; }
+    bool hasOpenOrders() const;
+
+private:
+    struct LegExec {
+        std::string code; bool isBuy = false; double price = 0; uint32_t qty = 0;
+        uint32_t localId = 0; uint32_t filled = 0; bool terminal = false;
+    };
+    std::vector<LegExec> m_execLegs;
+    ComboExecContext* m_execCtx = nullptr;
+    bool m_active = false;
+    bool m_done = false;
+    bool m_failed = false;
+    double m_sendTime = 0;
+    double m_timeoutSec = 0.130;
+};
+
+using SimulComboOrderPtr = std::shared_ptr<SimulComboOrder>;
 using SpreadComboOrderPtr = std::shared_ptr<SpreadComboOrder>;
 using SynComboOrderPtr = std::shared_ptr<SynComboOrder>;
 

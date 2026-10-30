@@ -17,6 +17,7 @@ void VolSpreadScanner::onTick(const OptionGrid* grid) {
 
     uint32_t baseExp = 0;
     double baseIv = 0.0;
+    const OptionData* baseOd = nullptr;
     for (const auto& [exp, ed] : grid->expiries()) {
         if (!ed || !isExpiryEnabled(exp) || !ed->isValuesReady()) continue;
         StrikeDataPtr atm = const_cast<OptionGrid*>(grid)->getAtmStrike(exp);
@@ -29,6 +30,7 @@ void VolSpreadScanner::onTick(const OptionGrid* grid) {
         if (baseExp == 0) {
             baseExp = exp;
             baseIv = iv;
+            baseOd = od;
             continue;
         }
 
@@ -39,8 +41,13 @@ void VolSpreadScanner::onTick(const OptionGrid* grid) {
             std::fabs(edge - it->second) < m_config.min_edge * 0.5)
             continue;
         m_lastEdge[exp] = edge;
-        publishHit(const_cast<OptionData*>(od), edge,
-                   iv > baseIv ? "vol_spread_far_rich" : "vol_spread_far_cheap");
+        ScannerHitEvent ev;
+        ev.option = const_cast<OptionData*>(od);
+        ev.legs = {const_cast<OptionData*>(baseOd), const_cast<OptionData*>(od)};
+        ev.signal = edge;
+        ev.reason = iv > baseIv ? "vol_spread_far_rich" : "vol_spread_far_cheap";
+        ev.timestamp = getTimestamp();
+        notifyHit(ev);
     }
 }
 

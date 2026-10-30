@@ -1646,10 +1646,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     if (syn && syn->isActive() && syn->checkTimeout()) {
                         syn->cancelAll();
                     }
+                    auto sim = std::dynamic_pointer_cast<wt_option::SimulComboOrder>(combo);
+                    if (sim && sim->isActive() && sim->checkTimeout()) {
+                        sim->cancelAll();
+                    }
                     // Keep active combos AND recently failed/timed-out combos
                     // until every leg/top-up/unwind id reaches terminal state.
                     bool active = (spread && (spread->isActive() || spread->hasOpenOrders()))
-                               || (syn && (syn->isActive() || syn->hasOpenOrders()));
+                               || (syn && (syn->isActive() || syn->hasOpenOrders()))
+                               || (sim && (sim->isActive() || sim->hasOpenOrders()));
                     if (active) stillActive.push_back(combo);
                 }
                 _activeCombos = std::move(stillActive);
@@ -1760,6 +1765,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 if (spread && spread->onLegFill(localid, fq)) continue;
                 auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
                 if (syn && syn->onLegFill(localid, fq)) continue;
+                auto sim = std::dynamic_pointer_cast<wt_option::SimulComboOrder>(combo);
+                if (sim && sim->onLegFill(localid, fq)) continue;
             }
         }
 
@@ -1797,6 +1804,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 if (spread) spread->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
                 auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
                 if (syn) syn->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                auto sim = std::dynamic_pointer_cast<wt_option::SimulComboOrder>(combo);
+                if (sim) sim->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
             }
         }
         if (isCanceled) {
@@ -2243,48 +2252,52 @@ void HftOptionStrategy::setupScanners()
             "Total scanners loaded: {}", _scanCoord.size());
     }
 
-    // Wire scanner execution callback into CTG
-    _ctg->setScannerExecuteFn([this](const std::string& code, double edge,
-                                       const wt_option::OptionData* od) {
-        if (!od || !_grid) return;
+    // Wire scanner execution callback into CTG.  Scanners may provide full
+    // simultaneous legs (Butterfly=3, VolSpread=2); otherwise fall back to the
+    // legacy call/put sibling spread path.
+    _ctg->setScannerExecuteFn([this](const wt_option::ScannerHitEvent& event) {
+        if (!_grid) return;
+        if (event.legs.size() >= 2) {
+            std::vector<wt_option::SimulComboOrder::LegInput> legs;
+            legs.reserve(event.legs.size());
+            for (const wt_option::OptionData* legOd : event.legs) {
+                if (!legOd || legOd->getBid() <= 0 || legOd->getAsk() <= 0) return;
+                const double theo = legOd->values(0).theo();
+                const double mid = legOd->getMid();
+                if (theo <= 0 || mid <= 0) return;
+                const bool buyLeg = theo > mid;   // underpriced -> buy
+                legs.push_back({legOd->getCode(), buyLeg,
+                                buyLeg ? legOd->getAsk() : legOd->getBid(), 1});
+            }
+            auto combo = std::make_shared<wt_option::SimulComboOrder>(
+                event.reason, std::move(legs), &_comboCtx);
+            if (combo->sendOrders() == wt_option::ComboOrder::SendResult::Success) {
+                _activeCombos.push_back(combo);
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "Scanner simultaneous combo sent: {} legs={} edge={:.4f}",
+                    event.reason, event.legs.size(), event.signal);
+            }
+            return;
+        }
 
-        // Find the strike data for this option to get the sibling
+        const wt_option::OptionData* od = event.option;
+        if (!od) return;
         auto sd = od->getStrikeData();
         if (!sd) return;
-
-        // Get sibling option (call<->put)
         const auto& sibling = (od->getRight() == wt_option::OR_Call) ? sd->put() : sd->call();
         if (!sibling) return;
-
-        // Determine direction: if theo > mid, option is underpriced -> buy
-        double theo = od->values(0).theo();
-        double mid = od->getMid();
+        const double theo = od->values(0).theo();
+        const double mid = od->getMid();
         if (theo <= 0 || mid <= 0) return;
-
-        bool buyMain = (theo > mid);
-        uint32_t orderSize = 1;  // Conservative default
-
-        // Create spread combo order (2-leg: main + hedge with sibling)
+        const bool buyMain = (theo > mid);
         auto combo = std::make_shared<wt_option::SpreadComboOrder>(
-            "SpreadScanner", orderSize,
-            od->getTickSize() > 0 ? od->getTickSize() : 1.0,
-            &_comboCtx);
-
-        // Leg1 = main option (mispriced one), Leg2 = sibling (hedge)
-        double leg1Price = buyMain ? od->getAsk() : od->getBid();
-        double leg2Price = buyMain ? sibling->getBid() : sibling->getAsk();
-
+            "SpreadScanner", 1, od->getTickSize() > 0 ? od->getTickSize() : 1.0, &_comboCtx);
         combo->setupLegs(const_cast<wt_option::OptionData*>(od), buyMain,
                          const_cast<wt_option::OptionData*>(sibling.get()), !buyMain,
-                         leg1Price, leg2Price);
-
-        auto result = combo->sendOrders();
-        if (result == wt_option::ComboOrder::SendResult::Success) {
+                         buyMain ? od->getAsk() : od->getBid(),
+                         buyMain ? sibling->getBid() : sibling->getAsk());
+        if (combo->sendOrders() == wt_option::ComboOrder::SendResult::Success)
             _activeCombos.push_back(combo);
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "Scanner combo sent: {} edge={:.4f} buy={}",
-                code, edge, buyMain ? "main" : "sibling");
-        }
     });
 }
 

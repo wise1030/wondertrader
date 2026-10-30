@@ -58,7 +58,13 @@ void ButterflyScanner::onTick(const OptionGrid* grid) {
                 continue;   // avoid resubmitting the same fly every tick
             m_lastEdge[exp] = edge;
 
-            publishHit(mo, edge, fly < 0 ? "butterfly_cheap_long" : "butterfly_cheap_short");
+            ScannerHitEvent ev;
+            ev.option = mo;
+            ev.legs = {lo, mo, uo};   // simultaneous 3-leg butterfly
+            ev.signal = edge;
+            ev.reason = fly < 0 ? "butterfly_cheap_long" : "butterfly_cheap_short";
+            ev.timestamp = getTimestamp();
+            notifyHit(ev);
             break;
         }
     }

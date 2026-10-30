@@ -72,8 +72,7 @@ public:
     void setQuoteExecutor(QuoteExecutor exec) { m_quoteExec = std::move(exec); }
 
     // Scanner combo execution callback (set by strategy to bridge to IHftStraCtx)
-    using ScannerExecuteFn = std::function<void(const std::string& code, double edge,
-                                                 const OptionData* od)>;
+    using ScannerExecuteFn = std::function<void(const ScannerHitEvent& event)>;
     void setScannerExecuteFn(ScannerExecuteFn fn) { m_scannerExec = std::move(fn); }
 
     /// R8: session stop/resume notifications route through the strategy's

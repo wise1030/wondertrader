@@ -821,6 +821,40 @@ void test_syn_combo_unwind_lifecycle() {
 }
 
 // ============================================================================
+// SimulComboOrder: simultaneous multi-leg execution
+// ============================================================================
+void test_simul_combo_order() {
+    std::cout << "=== test_simul_combo_order ===" << std::endl;
+    ComboExecContext ctx;
+    uint32_t nextId = 1;
+    std::vector<uint32_t> sent, canceled;
+    ctx.sendOrder = [&](const std::string&, bool, double, uint32_t) { uint32_t id = nextId++; sent.push_back(id); return id; };
+    ctx.cancelOrder = [&](uint32_t id) { canceled.push_back(id); return true; };
+    ctx.getTime = [] { return 0.0; };
+
+    wt_option::SimulComboOrder combo("fly", {{"A", true, 1, 1}, {"B", false, 2, 2}, {"C", true, 3, 1}}, &ctx);
+    ASSERT_EQ(combo.sendOrders(), ComboOrder::SendResult::Success);
+    ASSERT_EQ(sent.size(), 3u);
+    ASSERT_TRUE(combo.hasOpenOrders());
+
+    ASSERT_TRUE(combo.onLegFill(1, 1));
+    ASSERT_TRUE(combo.onLegFill(2, 2));
+    ASSERT_TRUE(combo.onLegFill(3, 1));
+    ASSERT_TRUE(combo.onLegTerminal(1, false, 0));
+    ASSERT_TRUE(combo.onLegTerminal(2, false, 0));
+    ASSERT_TRUE(combo.onLegTerminal(3, false, 0));
+    ASSERT_TRUE(combo.isDone());
+    ASSERT_TRUE(!combo.hasOpenOrders());
+
+    wt_option::SimulComboOrder fail("fly2", {{"A", true, 1, 1}, {"B", false, 2, 2}, {"C", true, 3, 1}}, &ctx);
+    fail.sendOrders();
+    ASSERT_TRUE(fail.onLegTerminal(4, true, 0));  // leg B cancel before fill
+    ASSERT_TRUE(fail.isFailed());
+    ASSERT_EQ(canceled.size(), 2u);               // remaining open legs canceled
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
 // B5: PnlTracker FIFO matching + weighted entry price
 // ============================================================================
 void test_pnl_tracker_fifo() {
@@ -1761,6 +1795,7 @@ int main() {
     test_pnl_tracker_session_reset();
     test_spread_combo_state();
     test_syn_combo_unwind_lifecycle();
+    test_simul_combo_order();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

@@ -90,7 +90,7 @@ void ControllableTradingGrid::onScannerHit(const ScannerHitEvent& event) {
 
     // Trigger scanner order execution if callback is set
     if (m_scannerExec && event.signal > 0) {
-        m_scannerExec(event.option->getCode(), event.signal, event.option);
+        m_scannerExec(event);
     }
 
     // Mark for priority update in next refresh cycle

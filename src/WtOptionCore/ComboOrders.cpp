@@ -534,4 +534,118 @@ void SynComboOrder::cancelAll()
     m_active = false;
 }
 
+// ============================================================================
+// SimulComboOrder
+// ============================================================================
+
+SimulComboOrder::SimulComboOrder(const std::string& name, std::vector<LegInput> legs,
+                                 ComboExecContext* ctx)
+    : ComboOrder(name), m_execCtx(ctx)
+{
+    m_execLegs.reserve(legs.size());
+    for (auto& l : legs) m_execLegs.push_back({l.code, l.isBuy, l.price, l.qty, 0, 0, false});
+}
+
+ComboOrder::SendResult SimulComboOrder::sendOrders()
+{
+    if (!m_execCtx || !m_execCtx->sendOrder || m_execLegs.empty())
+        return SendResult::Failed;
+
+    bool anySent = false;
+    for (auto& leg : m_execLegs) {
+        uint32_t id = m_execCtx->sendOrder(leg.code, leg.isBuy, leg.price, leg.qty);
+        if (id != 0) {
+            leg.localId = id;
+            anySent = true;
+        } else {
+            m_failed = true;
+        }
+    }
+    m_active = anySent && !m_failed;
+    m_done = !m_active;
+    m_sendTime = m_execCtx->getTime ? m_execCtx->getTime() : 0;
+    return m_active ? SendResult::Success : (anySent ? SendResult::PartialSend : SendResult::Failed);
+}
+
+void SimulComboOrder::onFill(const OptionOrder& order, const FillEvent& fill)
+{
+    onLegFill(order.getOrderId(), fill.fillQty);
+}
+
+bool SimulComboOrder::checkDone(bool timeout)
+{
+    if (timeout) { cancelAll(); m_done = true; m_active = false; return true; }
+    if (m_failed) return true;
+    for (const auto& leg : m_execLegs) {
+        if (!leg.terminal || leg.filled < leg.qty) return false;
+    }
+    m_done = true;
+    m_active = false;
+    return true;
+}
+
+bool SimulComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
+{
+    for (auto& leg : m_execLegs) {
+        if (leg.localId == localid) {
+            leg.filled += fillQty;
+            checkDone(false);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SimulComboOrder::onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty)
+{
+    (void)leftQty;
+    for (auto& leg : m_execLegs) {
+        if (leg.localId == localid) {
+            leg.terminal = true;
+            if (canceled && leg.filled < leg.qty) {
+                m_failed = true;
+                cancelAll();
+                m_done = true;
+                m_active = false;
+            } else {
+                checkDone(false);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SimulComboOrder::checkTimeout()
+{
+    if (!m_active || m_done) return false;
+    if (m_sendTime == 0 || !m_execCtx || !m_execCtx->getTime) return false;
+    if ((m_execCtx->getTime() - m_sendTime) > m_timeoutSec) {
+        cancelAll();
+        m_done = true;
+        m_active = false;
+        return true;
+    }
+    return false;
+}
+
+void SimulComboOrder::cancelAll()
+{
+    if (m_execCtx && m_execCtx->cancelOrder) {
+        for (auto& leg : m_execLegs) {
+            if (leg.localId != 0 && !leg.terminal && leg.filled < leg.qty)
+                m_execCtx->cancelOrder(leg.localId);
+        }
+    }
+    m_active = false;
+}
+
+bool SimulComboOrder::hasOpenOrders() const
+{
+    for (const auto& leg : m_execLegs) {
+        if (!leg.terminal && leg.filled < leg.qty) return true;
+    }
+    return false;
+}
+
 } // namespace wt_option
