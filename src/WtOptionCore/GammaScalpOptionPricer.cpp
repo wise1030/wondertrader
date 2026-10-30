@@ -291,9 +291,13 @@ void GammaScalpOptionPricer::evaluateDynamicHedging(OptionGrid* grid)
 {
     if (!grid || !m_risk || !m_orderSender) return;
 
-    // Limit hedging frequency to avoid thrashing (e.g. max once per second)
-    uint64_t nowMs = TimeUtils::getLocalTimeNow();
-    if (nowMs - m_lastHedgeCheckMs < 1000) return;
+    // Limit hedging frequency to avoid thrashing (e.g. max once per second).
+    // Use the strategy's continuous clock in production so night sessions do
+    // not wrap at midnight.
+    const double nowSec = m_timeProvider
+        ? m_timeProvider()
+        : static_cast<double>(TimeUtils::getLocalTimeNow()) / 1000.0;
+    if (nowSec - m_lastHedgeCheckSec < 1.0) return;
 
     double undPrice = grid->getUnderlyingPrice();
     if (undPrice <= 0) return;
@@ -322,7 +326,7 @@ void GammaScalpOptionPricer::evaluateDynamicHedging(OptionGrid* grid)
 
     // 3. Check Delta against bandwidth
     if (std::abs(totalDelta) > H) {
-        m_lastHedgeCheckMs = nowMs;
+        m_lastHedgeCheckSec = nowSec;
 
         double hedgeQty = -totalDelta;
         int32_t orderQty = static_cast<int32_t>(std::round(std::abs(hedgeQty)));

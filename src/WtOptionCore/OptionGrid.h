@@ -83,12 +83,21 @@ public:
         double bidQty = 0;
         double askQty = 0;
         uint32_t expireDate = 0;   // B28: exact expiry YYYYMMDD (0 = unknown)
+        uint32_t actionTime = 0;   // exchange action time (HHMMSSmmm when available)
+        uint64_t updateTime = 0;   // local receive timestamp, epoch milliseconds
     };
     void onTick(const std::string& stdCode, const TickDataRef& tick);
 
     // --- Underlying price ---
     void setUnderlyingPrice(double price);
     void onUnderlyingTick(double price);
+    void onUnderlyingTick(double price, uint64_t updateTime);
+
+    // Market freshness gate.  Timeout 0 disables the check.
+    void setMarketStaleTimeoutMs(uint64_t ms) { m_marketStaleTimeoutMs = ms; }
+    uint64_t getMarketStaleTimeoutMs() const { return m_marketStaleTimeoutMs; }
+    bool isUnderlyingFresh(uint64_t nowMs) const;
+    bool hasFreshOptionMarket(uint64_t nowMs) const;
 
     // --- Compute time (set by pricer before computeValues for EMA updates) ---
     void setComputeTime(double t) { m_computeTime = t; }
@@ -207,7 +216,9 @@ private:
 
     // Underlying
     double m_underlyingPrice = 0;
+    uint64_t m_underlyingUpdateTime = 0;  // epoch ms, 0 = unknown
     mutable std::shared_mutex m_priceMutex;
+    uint64_t m_marketStaleTimeoutMs = 3000;
 
     // Per-expiry underlying: contract code -> list of expiries that use it as pricing underlying
     std::unordered_map<std::string, std::vector<uint32_t>> m_expiryUnderlyingMap;

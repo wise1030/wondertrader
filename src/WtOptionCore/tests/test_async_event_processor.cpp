@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <thread>
+#include <vector>
 
 using namespace wt_option;
 
@@ -70,6 +71,76 @@ void test_trader_suffix_requeued_exactly_once() {
     std::cout << "  PASS" << std::endl;
 }
 
+// MD overflow must stay bounded while retaining the newest tick per contract.
+void test_md_overflow_coalesces_ticks_by_code() {
+    std::cout << "=== test_md_overflow_coalesces_ticks_by_code ===" << std::endl;
+
+    OptionAsyncEventProcessor proc;
+    for (size_t i = 0; i < OptionAsyncEventProcessor::kMaxOverflow; ++i)
+        proc.push_md_overflow(OptionAsyncEventProcessor::AsyncEvent::make_timer(20261030, 900));
+
+    ASSERT_EQ(proc._md_overflow.size(), OptionAsyncEventProcessor::kMaxOverflow);
+
+    auto tick1 = OptionAsyncEventProcessor::AsyncEvent::make_control();
+    tick1.type = OptionAsyncEventProcessor::AsyncEvent::Tick;
+    tick1.setCode("SHFE.ag2601");
+    tick1.tick.bid = 1.0;
+    proc.push_md_overflow(std::move(tick1));
+    ASSERT_EQ(proc._md_overflow.size(), OptionAsyncEventProcessor::kMaxOverflow);
+    ASSERT_EQ(proc.queueDrops(), 1u);
+
+    auto tick2 = OptionAsyncEventProcessor::AsyncEvent::make_control();
+    tick2.type = OptionAsyncEventProcessor::AsyncEvent::Tick;
+    tick2.setCode("SHFE.ag2601");
+    tick2.tick.bid = 2.0;
+    proc.push_md_overflow(std::move(tick2));
+    ASSERT_EQ(proc._md_overflow.size(), OptionAsyncEventProcessor::kMaxOverflow);
+    ASSERT_EQ(proc.queueDrops(), 1u);  // coalesced, not dropped
+
+    bool found = false;
+    for (const auto& ev : proc._md_overflow) {
+        if (ev.type == OptionAsyncEventProcessor::AsyncEvent::Tick &&
+            ev.getCode() == "SHFE.ag2601") {
+            ASSERT_EQ(ev.tick.bid, 2.0);
+            found = true;
+        }
+    }
+    ASSERT_TRUE(found);
+    std::cout << "  PASS" << std::endl;
+}
+
+// Trader events must retain enqueue order; position-before-trade reordering
+// breaks PositionBook snapshot/fill bridging.
+void test_trader_events_preserve_fifo_order() {
+    std::cout << "=== test_trader_events_preserve_fifo_order ===" << std::endl;
+
+    OptionAsyncEventProcessor proc;
+    std::vector<int> order;
+    std::atomic<uint32_t> done{0};
+
+    AsyncCallbacks cbs;
+    cbs.on_trade = [&](const std::string&, uint32_t, bool, double, double) {
+        order.push_back(1);
+        done.fetch_add(1);
+    };
+    cbs.on_position = [&](const std::string&, bool, double, double, double, double) {
+        order.push_back(2);
+        done.fetch_add(1);
+    };
+    proc.setCallbacks(cbs);
+    proc.start();
+
+    proc.enqueue_trade(1, "A", true, 1, 10.0);
+    proc.enqueue_position("A", true, 0, 0, 1, 1);
+    ASSERT_TRUE(wait_until(done, 2));
+    proc.stop();
+
+    ASSERT_EQ(order.size(), (size_t)2);
+    ASSERT_EQ(order[0], 1);
+    ASSERT_EQ(order[1], 2);
+    std::cout << "  PASS" << std::endl;
+}
+
 // Hot STOP/control must wake a completely quiet worker.
 void test_control_event_wakes_quiet_worker() {
     std::cout << "=== test_control_event_wakes_quiet_worker ===" << std::endl;
@@ -94,6 +165,8 @@ int main() {
     std::cout << "========================================" << std::endl;
 
     test_trader_suffix_requeued_exactly_once();
+    test_md_overflow_coalesces_ticks_by_code();
+    test_trader_events_preserve_fifo_order();
     test_control_event_wakes_quiet_worker();
 
     std::cout << "\nALL TESTS PASSED" << std::endl;

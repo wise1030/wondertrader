@@ -81,13 +81,31 @@ HftOptionStrategy::~HftOptionStrategy()
 // ============================================================================
 bool HftOptionStrategy::init(WTSVariant* cfg)
 {
+    if (!cfg) return false;
+
+    // Typed loader: high-risk drift keys are validated here and their actual
+    // effective values are dumped below.  Unknown/legacy keys that look valid
+    // but are ignored are reported as warnings.
+    _configLoad = wt_option::OptionConfigLoader::load(cfg);
+    for (const auto& err : _configLoad.errors)
+        WTSLogger::log_by_cat("strategy", LL_ERROR, "ConfigLoader: {}", err);
+    for (const auto& warn : _configLoad.warnings)
+        WTSLogger::log_by_cat("strategy", LL_WARN, "ConfigLoader: {}", warn);
+    if (!_configLoad.ok) {
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "ConfigLoader: invalid config; strategy init aborted");
+        return false;
+    }
+
+    const auto& cv = _configLoad.values;
     _underlyingCode = cfg->getCString("underlyingCode");
     _futuresProduct = cfg->has("futuresProduct") ? cfg->getCString("futuresProduct") : "";
     _exchange = cfg->getCString("exchange");
     _underlyingType = cfg->has("underlyingType") ? cfg->getCString("underlyingType") : "future";
-    _riskFreeRate = cfg->getDouble("riskFreeRate");
-    _maxTPS = cfg->getInt32("maxTPS");
-    _minComputeInterval = cfg->has("minComputeInterval") ? cfg->getDouble("minComputeInterval") : 0.02;
+    _riskFreeRate = cv.riskFreeRate;
+    _maxTPS = cv.maxTPS;
+    _minComputeInterval = cv.minComputeInterval;
+    _marketStaleTimeoutMs = cv.marketFreshTimeoutMs;
 
     // Derive option product IDs from exchange + futures product
     if (cfg->has("optionProduct")) {
@@ -258,9 +276,8 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     // Save config pointer for setupPricer
     cfgPtr_ = cfg;
 
-    // Defaults if not in config
-    if (_riskFreeRate == 0.0) _riskFreeRate = 0.03;
-    if (_maxTPS == 0) _maxTPS = 50;
+    // riskFreeRate/maxTPS defaults are already normalized by OptionConfigLoader;
+    // an explicitly configured zero risk rate remains valid.
 
     // Read expiry configs from params top-level
     WTSVariant* expCfg = cfg->get("expiries");
@@ -419,6 +436,11 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "Enhancement modules initialized: RiskLimitsEx FillPriceChecker");
 
+    // Effective-value dump: proves which high-risk keys were actually consumed
+    // and with what value, instead of relying on schema membership alone.
+    WTSLogger::log_by_cat("strategy", LL_INFO, "{}",
+        wt_option::OptionConfigLoader::dumpEffectiveValues(_configLoad));
+
     // R-B33: startup config schema validation — unknown keys WARN loudly
     wt_option::ConfigValidator::validate(cfg);
     return true;
@@ -495,13 +517,13 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     _async = std::make_shared<wt_option::OptionAsyncEventProcessor>();
 
     // B2: anomaly guard (IssuedOrderTracker absorption)
-    _anomalyGuard.setGetTimeFn([this]() { return _ctx ? wt_option::ctxTimeSeconds(_ctx) : 0.0; });
+    _anomalyGuard.setGetTimeFn([this]() { return _ctx ? _timeService.nowSeconds(_ctx) : 0.0; });
     _anomalyGuard.setAlertCallback([](const std::string& msg) {
         WTSLogger::log_by_cat("strategy", LL_ERROR, "OrderAnomaly: {}", msg);
     });
 
     // R-P1: prediction accuracy loop closure + R9 command bus
-    _predEvaluator.setGetTimeFn([this]() { return _ctx ? wt_option::ctxTimeSeconds(_ctx) : 0.0; });
+    _predEvaluator.setGetTimeFn([this]() { return _ctx ? _timeService.nowSeconds(_ctx) : 0.0; });
     registerCommands();
 
     setupGrid();
@@ -548,7 +570,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
             if (frontEd) {
                 state.atmVol = 0;
                 state.timestamp = static_cast<uint64_t>(
-                    wt_option::ctxTimeSeconds(_ctx) * 1000);
+                    _timeService.nowSeconds(_ctx) * 1000);
                 state.confidence = frontEd->isValuesReady() ? 1.0 : 0.0;
             }
             _predictor->update(state);
@@ -653,6 +675,7 @@ void HftOptionStrategy::setupGrid()
 
     _grid = std::make_shared<wt_option::OptionGrid>(
         _optionProduct, _underlyingCode, bdMgr, sessInfo);
+    _grid->setMarketStaleTimeoutMs(_marketStaleTimeoutMs);
 
     // Load holidays from holidays.json (same as longbeach ExchangeCalendar)
     // This is used by ExpiryData::countTradingDays when m_bdMgr is null
@@ -766,6 +789,32 @@ void HftOptionStrategy::setupPricer()
     });
     _grid->addListener(_otg.get());  // OTG receives onAddOption/onAddExpiry
     _otg->setHftCtx(_ctx);
+
+    // Formal production order gateway.  OQM never calls IHftStraCtx directly;
+    // all exchange operations enter through this adapter after strategy-side
+    // price-limit and issuance-registration policy.
+    _orderGateway = std::make_shared<wt_option::OrderGateway>(
+        wt_option::OrderGateway::Handlers{
+            [this](const std::string& code, double bidP, uint32_t bidQ,
+                   double askP, uint32_t askQ) {
+                return executeQuoteIds(code, bidP, bidQ, askP, askQ);
+            },
+            [this](const std::string& code, bool isBuy,
+                   double price, uint32_t qty) {
+                return executeOrderIds(code, isBuy, price, qty);
+            },
+            [this](uint32_t localid) -> bool {
+                return executeCancel(localid);
+            },
+            [this](const std::string& code) {
+                executeCancel(code);
+            }
+        });
+    _otg->setOrderGateway(_orderGateway);
+    _otg->setTimeFn([this]() {
+        return _timeService.nowSeconds(_ctx);
+    });
+
     _otg->setOptionOQMConfig(_optionOqmCfg);
     _otg->setFutureOQMConfig(_futureOqmCfg);
     _otg->setQuoteStatistics(&_quoteStats);
@@ -795,7 +844,9 @@ void HftOptionStrategy::setupPricer()
 
     // Create shared theoretical pricer (OptionPricer2) — used by both strategies
     wt_option::OptionPricer2Config p2cfg;
-    p2cfg.enable_fitter = true;
+    // AsyncVolFitter replaces the legacy synchronous PeriodicCurveFitter.
+    // Keeping both enabled would mutate the same curves from two paths.
+    p2cfg.enable_fitter = false;
     p2cfg.use_parallel_for = cfgPtr_->has("use_parallel")
         ? cfgPtr_->getBoolean("use_parallel") : false;
 
@@ -836,6 +887,10 @@ void HftOptionStrategy::setupPricer()
         }
         p2cfg.trace_level = pCfg0->has("trace_level")
             ? pCfg0->getInt32("trace_level") : 0;
+        p2cfg.fast_use_gamma_correction = pCfg0->has("fast_use_gamma_correction")
+            ? pCfg0->getBoolean("fast_use_gamma_correction") : true;
+        p2cfg.fast_full_reprice_forward_step = pCfg0->has("fast_full_reprice_forward_step")
+            ? pCfg0->getDouble("fast_full_reprice_forward_step") : 0.0;
 
         // R2: curve2 type — "power" restores the original GVV×Power dual-curve
         // design and makes volcurve_weight effective; "gvv" keeps legacy behavior
@@ -854,6 +909,8 @@ void HftOptionStrategy::setupPricer()
     }
 
     auto pricer2 = std::make_shared<wt_option::OptionPricer2>(p2cfg, _grid.get(), _risk.get());
+    _blackPricer = pricer2;
+    _asyncVolFitter.setCurve2Type(p2cfg.curve2_type);
 
     // Read pricer config from nested section
     WTSVariant* pCfg = cfgPtr_->get("pricer");
@@ -883,6 +940,9 @@ void HftOptionStrategy::setupPricer()
         _gammaPricer->setOrderSender([this](const std::string& code, bool isBuy,
                                              double price, int32_t qty) {
             executeOrder(code, isBuy, price, static_cast<uint32_t>(qty));
+        });
+        _gammaPricer->setTimeProvider([this]() {
+            return _timeService.nowSeconds(_ctx);
         });
 
         // Wire fill price provider for trade shock back-away
@@ -921,6 +981,7 @@ void HftOptionStrategy::setupPricer()
     } else {
         // --- CompositeOptionPricer (default: market making) ---
         wt_option::CompositeOptionPricerConfig copCfg;
+        copCfg.slow_compute_interval = _configLoad.values.slowComputeInterval;
         copCfg.wgt_vegaflow      = pCfg->has("wgt_vegaflow") ? pCfg->getDouble("wgt_vegaflow") :
             (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_vegaflow") : 0.0);
         copCfg.wgt_frontfut_skew = pCfg->has("wgt_frontfut_skew") ? pCfg->getDouble("wgt_frontfut_skew") :
@@ -1046,7 +1107,7 @@ void HftOptionStrategy::setupCTG()
     // getTime → seconds-of-day (WT: HHMM + SSmmm). Used by CTG's TPS limiter,
     // which compares against a 1.0-second window, so it must be in seconds.
     _traderCtx->getTimeFn = [this]() {
-        return _ctx ? wt_option::ctxTimeSeconds(_ctx) : 0.0;
+        return _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
     };
 
     _ctg = std::make_shared<wt_option::ControllableTradingGrid>(_grid, _traderCtx);
@@ -1183,7 +1244,7 @@ void HftOptionStrategy::setupCTG()
     // worked (now==0) and every breach re-alerted / re-disabled instantly
     for (auto& [gcode, guard] : _positionGuards) {
         if (guard)
-            guard->setGetTimeFn([this]() { return _ctx ? wt_option::ctxTimeSeconds(_ctx) : 0.0; });
+            guard->setGetTimeFn([this]() { return _ctx ? _timeService.nowSeconds(_ctx) : 0.0; });
     }
 
     // B11: position source for OTD::getPosition() (QM_CLOSE / auto-close).
@@ -1213,7 +1274,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (_otg) {
             auto utd = _otg->getUnderlyingTradingData(code);
             if (utd) {
-                utd->setMarket(tick.bid, tick.ask);
+                utd->setMarket(tick.bid, tick.ask, tick.updateTime);
                 isHedge = true;
             }
         }
@@ -1232,6 +1293,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 ref.bidQty = tick.bidQty;
                 ref.askQty = tick.askQty;
                 ref.expireDate = tick.expireDate;  // B28: exact expiry backfill
+                ref.actionTime = tick.actionTime;
+                ref.updateTime = tick.updateTime;
                 _grid->onTick(code, ref);
             }
 
@@ -1241,6 +1304,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 if (tick.upperLimit > 0) pl.upper = tick.upperLimit;
                 if (tick.lowerLimit > 0) pl.lower = tick.lowerLimit;
             }
+
+            if (!isUnderlying && !isPerExpiryUnderlying)
+                _dirtyOptions.insert(code);
 
             // Feed trade ticks to alpha signals (vega flow / delta flow)
             // Only for option ticks with non-zero trade volume
@@ -1256,14 +1322,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // Any underlying tick (global or per-expiry) triggers compute
             if (isUnderlying || isPerExpiryUnderlying) {
                 _underlyingChanged = true;
-                // Deferred enable: if channel is ready but trading was not enabled
-                // (because underlying price was 0 at channel_ready time), enable now.
                 _tstate.underlyingReady = true;
-                if (_channelReady && !_tradingStateEnabled()) {
+
+                // Recovery gate: after channel ready/restart we stay in
+                // Recovering until broker snapshots have been processed and a
+                // fresh underlying tick arrives.  Only then may quoting start.
+                if (_channelReady && _tstate.type == wt_option::TradingStateType::Recovering) {
                     if (_otg) _otg->enableAll();
-                    applyTradingState();
+                    setState(wt_option::TradingStateType::Normal,
+                             "recovery_first_underlying_tick");
                     WTSLogger::log_by_cat("strategy", LL_INFO,
-                        "Deferred enable: trading activated on first underlying tick");
+                        "Recovery complete: trading activated on first underlying tick");
                 }
             }
         }
@@ -1286,8 +1355,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
     // Batch start: set pricer time (use stra_get_time for FAST/SLOW scheduling)
     cbs.on_tick_batch = [this]() {
+        _batchStartSteady = std::chrono::steady_clock::now();
+        _batchStartValid = true;
         double timeSec = 0;
-        if (_ctx) timeSec = wt_option::ctxTimeSeconds(_ctx);
+        if (_ctx) timeSec = _timeService.nowSeconds(_ctx);
         if (_compositePricer) {
             _compositePricer->setTime(timeSec);
             // B05/B19 fix: drive the signal clock — Toxicity windows, EMA decay
@@ -1299,7 +1370,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
         }
         // Record tick batch timestamp for quote latency measurement
         if (_ctx) {
-            _tickTimestampUs = static_cast<uint64_t>(_ctx->stra_get_secs()) * 1000000ULL;
+            // Use continuous event microseconds.  stra_get_secs() is SSmmm,
+            // so multiplying it by 1e6 was not a valid timestamp.
+            _tickTimestampUs = static_cast<uint64_t>(
+                _timeService.nowSeconds(_ctx) * 1000000.0);
         }
         // A6: Notify scanners of underlying price update
         if (_grid && !_scanCoord.empty())
@@ -1309,17 +1383,49 @@ void HftOptionStrategy::setupAsyncCallbacks()
     // Batch complete: computeValues + refresh + drainPendingQuotes (single pass per batch)
     cbs.on_batch_complete = [this]() {
         if (!_grid || !_pricer) return;
+        publishAsyncVolFit();
         if (_hotUpdatePending.exchange(false, std::memory_order_acq_rel))
             applyHotParams();
+
+        if (_batchStartValid) {
+            const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - _batchStartSteady).count();
+            _batchLatencyUs.add(static_cast<double>(elapsedUs));
+            _batchStartValid = false;
+        }
 
         ++_batchCount;
         if (_batchCount <= 5 || _batchCount % 100 == 0) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
-                "HftOptionStrategy batch #{} enabled={} options={} strikes={} underlying={}",
+                "HftOptionStrategy batch #{} enabled={} options={} strikes={} underlying={} p99={:.1f}us p99.9={:.1f}us",
                 _batchCount, _traderCtx ? _traderCtx->enabled.load() : false,
-                _grid->numOptions(), _grid->numStrikes(), _grid->getUnderlyingPrice());
+                _grid->numOptions(), _grid->numStrikes(), _grid->getUnderlyingPrice(),
+                _batchLatencyUs.p99(), _batchLatencyUs.p999());
         }
-        if (_traderCtx && _traderCtx->enabled) {
+
+        // Market freshness gate: stale quotes are pulled once and no new quote
+        // is generated until the underlying and option feeds are both fresh.
+        const uint64_t nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const bool marketFresh = isMarketFresh(nowMs);
+        if (!marketFresh && _traderCtx && _traderCtx->enabled && !_marketStaleActive) {
+            _marketStaleActive = true;
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "Market data stale (>{} ms); cancelling desired quotes and suspending refresh",
+                _marketStaleTimeoutMs);
+            if (_ctg) {
+                _ctg->refresh();             // enabled=true here, so refresh stages CANCEL
+                _ctg->drainPendingQuotes();  // unconditional drain sends those cancels
+            }
+        } else if (marketFresh && _marketStaleActive) {
+            _marketStaleActive = false;
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "Market data fresh again; resuming quote refresh");
+            _needsRefresh = true;
+            _underlyingChanged = true;
+        }
+
+        if (_traderCtx && _traderCtx->enabled && marketFresh) {
             for (const auto& [code, pos] : _positions) {
                 auto od = _grid->get(code);
                 if (od) {
@@ -1343,6 +1449,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // into a single pass each. Previously 4+ separate loops.
             double portfolioPnl = 0;
 
+            double now = _timeService.nowSeconds(_ctx);
+            const bool collectAttrs = _attrPub && _attrPub->shouldCollect(now);
+
             // Single pass over underlyings: PnlTracker update + portfolio PnL
             if (_otg) {
                 for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
@@ -1354,34 +1463,31 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 }
             }
 
-            // Single pass over options: PnlTracker update + portfolio PnL +
-            // scanner dispatch + attribute collection
+            // Option loop: full portfolio PnL still needs every tracker's last
+            // value, but expensive mark/scanner/attribute work is dirty-gated.
             const auto& allOpts = _grid->getAllOptions();
             for (const auto& od : allOpts) {
                 if (!od) continue;
-                // PnlTracker
-                if (od->isActive() && od->getBid() > 0 && od->getAsk() > 0) {
-                    auto otd = od->getTradingData();
-                    if (otd) {
-                        otd->getPnlTracker()->onPriceUpdate(od->getBid(), od->getAsk());
-                        portfolioPnl += otd->getPnlTracker()->getCurPnl();
-                    }
-                }
-                // Scanner dispatch
-                if (od->isActive())
+                auto otd = od->getTradingData();
+                if (!otd) continue;
+                const bool dirty = _dirtyOptions.count(od->getCode()) > 0;
+
+                if (dirty && od->isActive() && od->getBid() > 0 && od->getAsk() > 0)
+                    otd->getPnlTracker()->onPriceUpdate(od->getBid(), od->getAsk());
+                portfolioPnl += otd->getPnlTracker()->getCurPnl();
+
+                if (dirty && od->isActive())
                     _scanCoord.dispatchOption(od.get());
-                // Attribute collection
-                if (_attrPub) {
-                    auto otd = od->getTradingData();
+                if (collectAttrs)
                     _attrPub->collectOption(od->getCode(), otd.get(), od.get());
-                }
             }
+            _dirtyOptions.clear();
 
             // Scanner grid-level dispatch
             _scanCoord.dispatchTick(_grid.get());
 
-            // Attribute collection for underlyings
-            if (_attrPub && _otg) {
+            // Attribute collection for underlyings only when publish is due.
+            if (collectAttrs && _attrPub && _otg) {
                 for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
                     if (pair.second)
                         _attrPub->collectUnderlying(pair.first, pair.second.get());
@@ -1402,7 +1508,6 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // but skip the expensive computeValues pass.
             // drainPendingQuotes still runs every batch to update quotes
             // based on the latest market data.
-            double now = wt_option::ctxTimeSeconds(_ctx);
             bool shouldCompute = _underlyingChanged && (now - _lastComputeTime) >= _minComputeInterval;
             // Also compute if a trade/position/order event marked _needsRefresh
             // and the debounce interval has elapsed (even without underlying tick).
@@ -1464,6 +1569,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     }
                 }
 
+                if (_compositePricer)
+                    _compositePricer->setMarketTime(nowMs, _marketStaleTimeoutMs);
                 _grid->computeValues(_pricer.get());
 
                 // Propagate pricer panic state to the CTG context.
@@ -1522,7 +1629,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
             // B11: Trigger predictor updates
             if (_triggerEngine) {
-                double now = wt_option::ctxTimeSeconds(_ctx);
+                double now = _timeService.nowSeconds(_ctx);
                 _triggerEngine->onTick(now);
             }
 
@@ -1534,15 +1641,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     auto spread = std::dynamic_pointer_cast<wt_option::SpreadComboOrder>(combo);
                     if (spread && spread->isActive() && spread->checkTimeout()) {
                         spread->cancelAll();
-                        continue;
                     }
                     auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
                     if (syn && syn->isActive() && syn->checkTimeout()) {
                         syn->cancelAll();
-                        continue;
                     }
-                    // Keep if still active
-                    bool active = (spread && spread->isActive()) || (syn && syn->isActive());
+                    // Keep active combos AND recently failed/timed-out combos
+                    // until every leg/top-up/unwind id reaches terminal state.
+                    bool active = (spread && (spread->isActive() || spread->hasOpenOrders()))
+                               || (syn && (syn->isActive() || syn->hasOpenOrders()));
                     if (active) stillActive.push_back(combo);
                 }
                 _activeCombos = std::move(stillActive);
@@ -1565,7 +1672,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
         auto fillClass = _anomalyGuard.onFill(localid, fq);
         const bool skipOqm = (fillClass == wt_option::OrderAnomalyGuard::FillClass::Unknown);
 
-        _positions[code] += (isBuy ? 1 : -1) * vol;
+        _positionBook.addFill(code, isBuy, vol);
+        _positions[code] = _positionBook.net(code);
+        _dirtyOptions.insert(code);
 
         // Forward to OQM (per-contract order tracker).  Futures use UTD/OQM;
         // leaving them unrouted leaves hedge order state permanently stale.
@@ -1635,7 +1744,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // Feed risk signals
         if (_compositePricer) {
             // B05: refresh signal clock before fill-driven updates
-            double nowSec = _ctx ? wt_option::ctxTimeSeconds(_ctx) : 0;
+            double nowSec = _ctx ? _timeService.nowSeconds(_ctx) : 0;
             for (auto& sig : _compositePricer->getRiskSignals()) {
                 sig->setSignalTime(nowSec);
                 sig->onFill(code, isBuy, vol, price);
@@ -1664,7 +1773,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 if (odEx) fee = odEx->getFee() * vol;
             }
             uint64_t tsMs = static_cast<uint64_t>(
-                (_ctx ? wt_option::ctxTimeSeconds(_ctx) : 0.0) * 1000);
+                (_ctx ? _timeService.nowSeconds(_ctx) : 0.0) * 1000);
             _expSim->onFill(code, isBuy, price, static_cast<uint32_t>(vol), fee, tsMs);
         }
 
@@ -1788,22 +1897,27 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
         }
 
-        // Path 1: periodic doFit (equivalent to quantbox ClockMonitor onClockWakeup)
-        if (_compositePricer && _traderCtx && _traderCtx->enabled) {
-            auto p2 = _compositePricer->getBlackPricer();
-            if (p2 && p2->hasFitter()) {
-                p2->triggerDoFit();
-            }
+        // Path 1: periodic async vol-fit snapshot.  The expensive curve fit runs
+        // on SingleFlightTaskRunner; worker publishes completed curves later.
+        if (_traderCtx && _traderCtx->enabled) {
+            if (submitAsyncVolFit())
+                WTSLogger::log_by_cat("strategy", LL_DEBUG, "AsyncVolFitter snapshot submitted");
         }
 
         // Pricer timeout retry (equivalent to onComputeValuesTimeout):
         // If the underlying hasn't changed but interval elapsed, force a
         // recompute to catch vol curve / time decay changes.
         if (_grid && _pricer && _traderCtx && _traderCtx->enabled) {
-            double now = wt_option::ctxTimeSeconds(_ctx);
+            double now = _timeService.nowSeconds(_ctx);
             if ((now - _lastComputeTime) >= _minComputeInterval * 5) {
                 _lastComputeTime = now;
                 _underlyingChanged = false;
+                if (_compositePricer) {
+                    const uint64_t nowMs = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                    _compositePricer->setMarketTime(nowMs, _marketStaleTimeoutMs);
+                }
                 _grid->computeValues(_pricer.get());
             }
         }
@@ -1824,7 +1938,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (isBegin) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy session begin: {}", tdate);
-            setState(_channelReady.load() ? wt_option::TradingStateType::Normal
+            // Rebase the continuous clock at the session boundary.  Overnight
+            // sessions keep the same trading date, so the wrap detector in
+            // OptionTimeService is responsible for the actual midnight jump.
+            _timeService.reset();
+            _tstate.underlyingReady = false;
+            setState(_channelReady.load() ? wt_option::TradingStateType::Recovering
                                           : wt_option::TradingStateType::Disabled,
                      "session_begin");
             if (_grid) {
@@ -1908,10 +2027,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_position = [this](const std::string& code, bool isLong,
                              double prevol, double preavail,
                              double newvol, double newavail) {
-        // WT semantics: prevol/preavail = previous-day position/availability,
-        // newvol/newavail = today.  Total signed position must include both.
-        const double sign = isLong ? 1.0 : -1.0;
-        const double pos = sign * (prevol + newvol);
+        // PositionBook is authoritative and keeps long/short plus prev/new
+        // availability.  `_positions` remains as a legacy net projection.
+        _positionBook.onBrokerPosition(code, isLong, prevol, preavail, newvol, newavail);
+        const auto& fullPos = _positionBook.get(code);
+        const double pos = fullPos.net();
         _positions[code] = pos;
 
         if (_risk) {
@@ -1924,15 +2044,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
         }
         _pnlPendingInit.insert(code);
 
-        // Enhancement: PositionGuard - update broker total position
+        // Enhancement: PositionGuard - consume the authoritative full snapshot
         auto git = _positionGuards.find(code);
         if (git != _positionGuards.end())
-            git->second->onBrokerPosition(isLong, pos);
+            git->second->onBrokerPosition(fullPos);
 
-        // A1 fix: pass the REAL four-tuple to PositionOffsetMgr (was newvol×4)
+        // Offset manager receives long/short + today/prev availability split.
         auto oit = _positionOffsets.find(code);
         if (oit != _positionOffsets.end())
-            oit->second->onPositionUpdate(isLong, prevol, preavail, newvol, newavail);
+            oit->second->onPositionUpdate(fullPos);
 
         // Mark for refresh: position changes affect risk/quote sizing
         _needsRefresh = true;
@@ -1942,13 +2062,23 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_channel = [this](bool isReady) {
         if (isReady) {
             WTSLogger::log_by_cat("strategy", LL_INFO, "channel_ready (worker)");
-            // R8: route through the unified state machine. Underlying may not
-            // be priced yet — enabledFlag() gates on it for the deferred enable.
+            // Restart/reconnect recovery: do not quote immediately.  Wait for
+            // broker position snapshots and a fresh underlying tick, and sweep
+            // any orders that survived the restart before enabling trading.
             _tstate.channelReady = true;
-            setState(wt_option::TradingStateType::Normal, "channel_ready");
+            _tstate.underlyingReady = false;
+            _positionBook.clearAll();
+            _positions.clear();
+            setState(wt_option::TradingStateType::Recovering, "channel_ready");
+            if (_ctx) {
+                _ctx->stra_cancel_all("");  // exchange-side recovery sweep
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "Recovery: exchange order sweep issued; waiting for broker snapshots and first underlying tick");
+            }
         } else {
             WTSLogger::log_by_cat("strategy", LL_WARN, "channel_lost (worker)");
             _tstate.channelReady = false;
+            _tstate.underlyingReady = false;
             setState(wt_option::TradingStateType::Disabled, "channel_lost");
             if (_otg) _otg->disableAll();
             // Cancel all existing quotes on channel loss
@@ -2028,19 +2158,17 @@ void HftOptionStrategy::setupScanners()
     if (!cfgPtr_ || !_ctg) return;
 
     // Initialize combo execution context (bridges scanners to IHftStraCtx)
-    _comboCtx.sendOrder = [this](const std::string& code, bool isBuy, double price, uint32_t qty) -> uint32_t {
-        if (!_ctx || !_channelReady.load()) return 0;
-        auto ids = isBuy
-            ? _ctx->stra_buy(code.c_str(), price, qty, "ScannerCombo")
-            : _ctx->stra_sell(code.c_str(), price, qty, "ScannerCombo");
+    _comboCtx.sendOrder = [this](const std::string& code, bool isBuy,
+                                   double price, uint32_t qty) -> uint32_t {
+        // Scanner orders now use the same gateway as market-making orders.
+        const auto ids = executeOrderIds(code, isBuy, price, qty);
         return ids.empty() ? 0 : ids[0];
     };
     _comboCtx.cancelOrder = [this](uint32_t localid) -> bool {
-        if (!_ctx) return false;
-        return _ctx->stra_cancel(localid);
+        return executeCancel(localid);
     };
     _comboCtx.getTime = [this]() -> double {
-        return wt_option::ctxTimeSeconds(_ctx);
+        return _timeService.nowSeconds(_ctx);
     };
 
     WTSVariant* scannersCfg = cfgPtr_->has("scanners") ? cfgPtr_->get("scanners") : nullptr;
@@ -2310,12 +2438,13 @@ void HftOptionStrategy::registerIssuedOrderIds(const std::string& code,
     }
 }
 
-int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, uint32_t bidQ,
-                                         double askP, uint32_t askQ)
+std::pair<uint32_t, uint32_t> HftOptionStrategy::executeQuoteIds(
+    const std::string& code, double bidP, uint32_t bidQ,
+    double askP, uint32_t askQ)
 {
-    if (!_ctx || !_channelReady) return 0;
+    if (!_ctx || !_channelReady) return {0, 0};
     // R1: reject out-of-limit quotes before hitting the wire
-    if (!withinPriceLimits(code, bidP) || !withinPriceLimits(code, askP)) return 0;
+    if (!withinPriceLimits(code, bidP) || !withinPriceLimits(code, askP)) return {0, 0};
 
     auto ids = _ctx->stra_quote(code.c_str(), bidP, bidQ, askP, askQ, "OptionMM");
     WTSLogger::log_by_cat("strategy", LL_DEBUG,
@@ -2326,6 +2455,13 @@ int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, ui
         registerIssuedOrderIds(code, {ids.first}, bidP, bidQ);
     if (ids.second != 0)
         registerIssuedOrderIds(code, {ids.second}, askP, askQ);
+    return ids;
+}
+
+int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, uint32_t bidQ,
+                                         double askP, uint32_t askQ)
+{
+    const auto ids = executeQuoteIds(code, bidP, bidQ, askP, askQ);
     return static_cast<int32_t>(ids.first + ids.second > 0 ? 1 : 0);
 }
 
@@ -2350,6 +2486,12 @@ int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
     // Preserve the legacy success-count contract for CTG/manual callers.
     const OrderIDs ids = executeOrderIds(code, isBuy, price, qty);
     return static_cast<int32_t>(ids.size());
+}
+
+bool HftOptionStrategy::executeCancel(uint32_t localid)
+{
+    if (!_ctx || !_channelReady) return false;
+    return _ctx->stra_cancel(localid);
 }
 
 int32_t HftOptionStrategy::executeCancel(const std::string& code)
@@ -2390,6 +2532,77 @@ void HftOptionStrategy::checkRiskLimitsEx()
             rep.reason, rep.value, rep.limit);
     }
     _limitsBreached = breach;
+}
+
+// ============================================================================
+// AsyncVolFitter: worker builds an immutable snapshot from the last IV pass;
+// background thread fits fresh curves; worker publishes them at a later batch.
+// ============================================================================
+bool HftOptionStrategy::submitAsyncVolFit()
+{
+    if (!_grid || !_blackPricer) return false;
+
+    std::vector<wt_option::VolFitExpirySnapshot> snapshots;
+    for (const auto& [exp, ed] : _grid->expiries()) {
+        if (!ed || !ed->isForwardReady()) continue;
+        const double fwd = ed->getForward();
+        const double maturity = _blackPricer->getMaturity(exp);
+        const double atmVol = _blackPricer->getATMVol(exp);
+        if (!(fwd > 0) || !(maturity > 0) || !(atmVol > 0)) continue;
+
+        wt_option::VolFitExpirySnapshot s;
+        s.expiry = exp;
+        s.forward = fwd;
+        s.maturity = maturity;
+        s.atmVol = atmVol;
+        s.version = _blackPricer->getCurveVersion(exp) + 1;
+
+        for (const auto& sd : _grid->getStrikesByExpiry(exp)) {
+            if (!sd) continue;
+            const wt_option::OptionData* pricing = nullptr;
+            if (sd->call() && sd->call()->getMid() > 0)
+                pricing = sd->call().get();
+            if (sd->put() && sd->put()->getMid() > 0 &&
+                (!pricing || sd->put()->getMid() < pricing->getMid()))
+                pricing = sd->put().get();
+            if (!pricing) continue;
+            const double iv = pricing->values(0).impliedVol();
+            if (iv > 0)
+                s.points.push_back({sd->getStrikePrice() - fwd, iv / atmVol});
+        }
+        if (!s.points.empty()) snapshots.push_back(std::move(s));
+    }
+    return _asyncVolFitter.submit(std::move(snapshots));
+}
+
+void HftOptionStrategy::publishAsyncVolFit()
+{
+    if (_blackPricer)
+        _asyncVolFitter.tryPublish(*_blackPricer);
+}
+
+// ============================================================================
+// Market freshness gate — stale feeds must not keep refreshing forward or keep
+// old quotes working.  When the feed recovers, normal quoting resumes on the
+// next batch.
+// ============================================================================
+bool HftOptionStrategy::isMarketFresh(uint64_t nowMs) const
+{
+    if (_marketStaleTimeoutMs == 0) return true;
+    if (!_grid) return false;
+    if (!_grid->isUnderlyingFresh(nowMs)) return false;
+    if (!_grid->hasFreshOptionMarket(nowMs)) return false;
+
+    if (_otg) {
+        for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
+            const auto& utd = pair.second;
+            if (utd && utd->isActive() &&
+                !utd->isMarketFresh(nowMs, _marketStaleTimeoutMs)) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -2514,7 +2727,7 @@ void HftOptionStrategy::registerCommands()
         return executeOrder(code, isBuy, px, qty);
     };
     hooks.cancelAll = [this](const std::string& code) {
-        if (_ctx) _ctx->stra_cancel_all(code.c_str());
+        executeCancel(code);
     };
     _cmdHandlers.registerAll(_cmdBus, std::move(hooks));
 }

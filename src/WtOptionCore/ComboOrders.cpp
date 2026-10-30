@@ -244,6 +244,60 @@ SynComboOrder::SynComboOrder(const std::string& name, uint32_t totalSize,
 {
 }
 
+void SynComboOrder::recordLegId(LegExec& leg, uint32_t localid)
+{
+    if (localid == 0) return;
+    if (leg.localId == 0) leg.localId = localid;
+    leg.localIds.push_back(localid);
+    leg.openIds.insert(localid);
+    leg.sent = true;
+}
+
+bool SynComboOrder::isLegId(const LegExec& leg, uint32_t localid) const
+{
+    return std::find(leg.localIds.begin(), leg.localIds.end(), localid) != leg.localIds.end();
+}
+
+bool SynComboOrder::allOrdersTerminal() const
+{
+    for (const auto& leg : m_legExecs) {
+        if (!leg.openIds.empty()) return false;
+    }
+    return m_unwindOpen.empty();
+}
+
+bool SynComboOrder::hasOpenOrders() const
+{
+    return !allOrdersTerminal();
+}
+
+void SynComboOrder::unwindResidual()
+{
+    if (m_unwound) return;
+    m_unwound = true;
+    if (!m_execCtx || !m_execCtx->sendOrder) return;
+
+    // Flatten any filled leg exposure by sending the opposite side.  These
+    // unwind ids are tracked until terminal so late fills cannot be lost.
+    for (size_t i = 0; i < m_legExecs.size(); ++i) {
+        const auto& leg = m_legExecs[i];
+        if (leg.filledQty == 0) continue;
+        uint32_t id = m_execCtx->sendOrder(leg.code, !leg.isBuy, leg.price, leg.filledQty);
+        if (id != 0) {
+            m_unwindIds.push_back(id);
+            m_unwindOpen.insert(id);
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "SynComboOrder {} residual unwind leg{}: {} {} {}@{} id={}",
+                m_name, i, leg.code, !leg.isBuy ? "BUY" : "SELL",
+                leg.filledQty, leg.price, id);
+        } else {
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "SynComboOrder {} residual unwind FAILED leg{} {}; manual flatten required",
+                m_name, i, leg.code);
+        }
+    }
+}
+
 void SynComboOrder::setupLegs(OptionData* call, OptionData* put,
                                 const std::string& futureCode,
                                 bool buyCall, bool buyPut, bool buyFuture,
@@ -303,14 +357,14 @@ void SynComboOrder::sendNextLeg()
         price += (leg.isBuy ? 1 : -1) * m_tickSize;
     }
 
-    leg.localId = m_execCtx->sendOrder(leg.code, leg.isBuy, price, leg.desiredQty);
-    if (leg.localId > 0) {
-        leg.sent = true;
+    const uint32_t id = m_execCtx->sendOrder(leg.code, leg.isBuy, price, leg.desiredQty);
+    if (id > 0) {
+        recordLegId(leg, id);
         leg.committedQty = leg.desiredQty;  // B27: track actual commitment
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "SynComboOrder {} leg{} sent: {} {} {}@{}",
+            "SynComboOrder {} leg{} sent: {} {} {}@{} id={}",
             m_name, m_nextLegToSend, leg.code,
-            leg.isBuy ? "BUY" : "SELL", leg.desiredQty, price);
+            leg.isBuy ? "BUY" : "SELL", leg.desiredQty, price, id);
     } else {
         WTSLogger::log_by_cat("strategy", LL_ERROR,
             "SynComboOrder {} leg{} send FAILED: {}",
@@ -323,24 +377,29 @@ void SynComboOrder::sendNextLeg()
 
 bool SynComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
 {
+    if (std::find(m_unwindIds.begin(), m_unwindIds.end(), localid) != m_unwindIds.end()) {
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "SynComboOrder {} residual unwind fill id={} qty={}", m_name, localid, fillQty);
+        return true;
+    }
+
     bool matched = false;
     for (int i = 0; i < (int)m_legExecs.size(); i++) {
         auto& leg = m_legExecs[i];
-        if (leg.localId != localid || !leg.sent)
+        if (!leg.sent || !isLegId(leg, localid))
             continue;
         matched = true;
 
         // B27 fix: accumulate fills; a leg completes only when fully filled
         leg.filledQty += fillQty;
-        if (leg.filledQty >= leg.desiredQty)
-            leg.filled = true;
+        leg.filled = (leg.filledQty >= leg.desiredQty);
 
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "SynComboOrder {} leg{} filled: {} qty={}/{}",
             m_name, i, leg.code, leg.filledQty, leg.desiredQty);
 
         // Size the next leg from cumulative fills
-        if (i + 1 < (int)m_legExecs.size()) {
+        if (!m_failed && i + 1 < (int)m_legExecs.size()) {
             auto& nxt = m_legExecs[i + 1];
             // Future hedge: round UP so the delta hedge is never short (B27)
             uint32_t need = (i == 1)
@@ -357,10 +416,13 @@ bool SynComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
                     double price = nxt.price + (nxt.isBuy ? 1 : -1) * m_tickSize;
                     uint32_t id = m_execCtx->sendOrder(nxt.code, nxt.isBuy, price, extra);
                     if (id > 0) {
+                        recordLegId(nxt, id);
                         nxt.committedQty += extra;
                         WTSLogger::log_by_cat("strategy", LL_INFO,
-                            "SynComboOrder {} leg{} top-up {} extra={} (committed={})",
-                            m_name, i + 1, nxt.code, extra, nxt.committedQty);
+                            "SynComboOrder {} leg{} top-up id={} extra={} (committed={})",
+                            m_name, i + 1, nxt.code, id, extra, nxt.committedQty);
+                    } else {
+                        markFailed("top-up send failed");
                     }
                 }
             }
@@ -368,7 +430,7 @@ bool SynComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
         break;
     }
 
-    if (matched && checkDone(false)) {
+    if (matched && !m_failed && checkDone(false)) {
         m_done = true;
         m_active = false;
     }
@@ -391,12 +453,12 @@ bool SynComboOrder::checkDone(bool timeout)
 
     if (m_failed) return true;
 
-    // All three legs must be fully filled (future leg is ratio-adjusted).
+    // All legs must be fully filled and every order id must be terminal.
     for (const auto& leg : m_legExecs) {
-        if (leg.filledQty < leg.desiredQty)
+        if (leg.filledQty < leg.desiredQty || !leg.openIds.empty())
             return false;
     }
-    return true;
+    return m_unwindOpen.empty();
 }
 
 bool SynComboOrder::onLegTerminal(uint32_t localid, bool canceled, uint32_t leftQty)
@@ -404,9 +466,19 @@ bool SynComboOrder::onLegTerminal(uint32_t localid, bool canceled, uint32_t left
     (void)leftQty;
     if (!canceled) return false;
 
+    if (m_unwindOpen.erase(localid) != 0) {
+        if (allOrdersTerminal() && (m_failed || m_done)) {
+            m_done = true;
+            m_active = false;
+        }
+        return true;
+    }
+
     for (size_t i = 0; i < m_legExecs.size(); ++i) {
         auto& leg = m_legExecs[i];
-        if (!leg.sent || leg.localId != localid) continue;
+        if (!leg.sent || !isLegId(leg, localid)) continue;
+        leg.openIds.erase(localid);
+
         if (leg.filledQty < leg.desiredQty) {
             markFailed("leg canceled before full fill");
             return true;
@@ -427,7 +499,10 @@ void SynComboOrder::markFailed(const char* reason)
     WTSLogger::log_by_cat("strategy", LL_ERROR,
         "SynComboOrder {} FAILED: {}", m_name, reason);
     cancelAll();
-    m_done = true;
+    unwindResidual();
+    // Keep the object alive in the strategy until all leg/unwind ids reach a
+    // terminal state; m_done tells the strategy no new work is required.
+    m_done = checkDone(false);
     m_active = false;
 }
 
@@ -450,10 +525,11 @@ void SynComboOrder::cancelAll()
 {
     if (m_execCtx && m_execCtx->cancelOrder) {
         for (auto& leg : m_legExecs) {
-            if (leg.localId > 0 && !leg.filled) {
-                m_execCtx->cancelOrder(leg.localId);
-            }
+            for (uint32_t id : leg.openIds)
+                m_execCtx->cancelOrder(id);
         }
+        for (uint32_t id : m_unwindOpen)
+            m_execCtx->cancelOrder(id);
     }
     m_active = false;
 }

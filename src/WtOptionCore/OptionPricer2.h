@@ -120,6 +120,11 @@ public:
     std::string curve2_type          = "gvv";
     bool    use_sprd_vs_atmfwd       = true;
     double  slow_compute_interval    = 0.1;   // seconds
+    // FAST incremental update: second-order gamma correction is enabled by
+    // default.  A positive forward-step threshold forces full Black repricing
+    // when the underlying move is too large for local approximation.
+    bool    fast_use_gamma_correction = true;
+    double  fast_full_reprice_forward_step = 0.0; // 0 = disabled
     int32_t expire_greeks_window_bdays = 0;
     double  bid_offer_vol_spread_cap = 0.1;  // max IV bid-ask spread (10 vol points), matches quantbox default
     double  volcurve_weight          = 0.0;
@@ -134,6 +139,16 @@ using OptionPricer2ConfigPtr = std::shared_ptr<OptionPricer2Config>;
 class OptionPricer2 : public IOptionPricer
 {
 public:
+    /// Immutable fitted curve set produced by AsyncVolFitter and published by
+    /// the single worker thread at a batch boundary.
+    struct FittedCurveSet {
+        uint32_t expiry = 0;
+        IVolCurvePtr volCurve;
+        IVolCurvePtr volCurve2;
+        double atmVol = 0.0;
+        uint64_t version = 0;
+    };
+
     // fitCompleted event callback (replaces ListenerRelay<...>)
     typedef std::function<void(const PeriodicCurveFitter&)> fitCompletedEventSink;
     typedef std::vector<fitCompletedEventSink> fitCompletedEventSource;
@@ -210,6 +225,11 @@ public:
 
     fitCompletedEventSource& fitCompletedEvent() { return m_fitCompletedEvent; }
 
+    /// Publish async-fit curves at a worker batch boundary.  Older versions
+    /// are ignored; this is the only curve mutation path for AsyncVolFitter.
+    void publishFittedCurves(const std::vector<FittedCurveSet>& fitted);
+    uint64_t getCurveVersion(uint32_t exp) const;
+
     // 暴露 doFit 给定时器调用 (路径1: 独立定时 doFit)
     bool hasFitter() const { return m_spFitter != nullptr; }
     bool triggerDoFit();  // 实现在 .cpp 中 (需要 PeriodicCurveFitter 完整类型)
@@ -245,6 +265,7 @@ private:
     OptionGrid*   m_grid = nullptr;
     OptionRisk*   m_spPositionRisk = nullptr;
     mutable std::map<uint32_t, ExpiryInfoPtr> m_expiryInfoTable;
+    std::map<uint32_t, uint64_t> m_curveVersion;
     double m_defaultVolatility = 0.1;
     std::map<uint32_t, double> m_gvv_weight;
     double m_prop_atmsig = 0.0;

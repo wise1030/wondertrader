@@ -28,6 +28,7 @@
 #include "IOptionGridListener.h"
 #include "IOptionPricer.h"
 #include "OptionQuoteManager.h"
+#include "OrderGateway.h"
 
 // Forward declaration — IHftStraCtx defined in WT Includes
 namespace wtp { class IHftStraCtx; }
@@ -37,6 +38,7 @@ namespace wtp { class IHftStraCtx; }
 #include <vector>
 #include <memory>
 #include <functional>
+#include <utility>
 
 namespace wt_option {
 
@@ -63,6 +65,16 @@ public:
     void setQuoteExecutor(QuoteExecutor exec)   { m_quoteExec  = std::move(exec); }
     void setOrderExecutor(OrderExecutor exec)   { m_orderExec  = std::move(exec); }
     void setCancelExecutor(CancelExecutor exec) { m_cancelExec = std::move(exec); }
+
+    /// Production order gateway.  HftOptionStrategy composes price-limit and
+    /// issuance-registration policy before supplying this narrow interface.
+    void setOrderGateway(OrderGatewayPtr gateway) { m_orderGateway = std::move(gateway); }
+
+    /// Continuous time source used by OQM TTL / retry / min-update clocks.
+    /// Falls back to raw ctxTimeSeconds(ctx) when not supplied.
+    using TimeFn = std::function<double()>;
+    void setTimeFn(TimeFn fn) { m_timeFn = std::move(fn); }
+
     void setExchange(const std::string& exchg)  { m_exchange = exchg; }
     void setHftCtx(wtp::IHftStraCtx* ctx)            { m_hftCtx = ctx; }
 
@@ -141,6 +153,8 @@ private:
     QuoteExecutor  m_quoteExec;
     OrderExecutor  m_orderExec;
     CancelExecutor m_cancelExec;
+    OrderGatewayPtr m_orderGateway;
+    TimeFn         m_timeFn;
     std::string    m_exchange;
     wtp::IHftStraCtx*   m_hftCtx = nullptr;
     // P11: Per-instrument-type OQM config

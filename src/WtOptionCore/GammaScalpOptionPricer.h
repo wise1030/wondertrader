@@ -111,6 +111,11 @@ public:
     using OrderSender = std::function<void(const std::string& code, bool isBuy, double price, int32_t qty)>;
     void setOrderSender(OrderSender sender) { m_orderSender = std::move(sender); }
 
+    /// Continuous strategy time source for hedge cooldown.  When unset, the
+    /// pricer falls back to local milliseconds/1000 for standalone tests.
+    using TimeProvider = std::function<double()>;
+    void setTimeProvider(TimeProvider fn) { m_timeProvider = std::move(fn); }
+
     // Last fill price provider (for trade shock back-away)
     using FillPriceProvider = std::function<double(const std::string& code, bool isBuy)>;
     void setFillPriceProvider(FillPriceProvider provider) { m_fillPriceProvider = std::move(provider); }
@@ -132,6 +137,7 @@ private:
     IOptionPricerPtr m_theoPricer;
     OptionRiskPtr m_risk;
     OrderSender m_orderSender;
+    TimeProvider m_timeProvider;
     FillPriceProvider m_fillPriceProvider;
     std::map<uint32_t, GammaScalpConfig> m_expiryConfigs;
     bool m_bReprice;
@@ -144,7 +150,7 @@ private:
     uint64_t m_slowComputePeriodMs = 100;
     bool m_firstCompute = true;
 
-    uint64_t m_lastHedgeCheckMs = 0;
+    double m_lastHedgeCheckSec = -1e9;
 };
 
 using GammaScalpOptionPricerPtr = std::shared_ptr<GammaScalpOptionPricer>;

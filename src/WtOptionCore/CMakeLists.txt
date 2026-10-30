@@ -14,6 +14,7 @@ set(OPTION_CORE_SOURCES
     OptionAsyncEventProcessor.cpp
     OptionScanCoordinator.cpp
     OptionHedgeCoordinator.cpp
+    OptionConfigLoader.cpp
     OptionExpiryLifecycle.cpp
     OptionCommandHandlers.cpp
 
@@ -113,6 +114,13 @@ set(OPTION_CORE_HEADERS
     OptionCommandHandlers.h
     OptionPricerMode.h
     OptionAsyncEventProcessor.h
+    OptionTimeService.h
+    OptionConfigLoader.h
+    LatencyHistogram.h
+    SingleFlightTaskRunner.h
+    AsyncVolFitter.h
+    OrderGateway.h
+    PositionBook.h
     optioncoretypes.h
     OptionGreeks.h
     BlackCalc.h

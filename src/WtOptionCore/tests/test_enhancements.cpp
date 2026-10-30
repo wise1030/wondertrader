@@ -16,16 +16,26 @@
 #include "../TradingState.h"
 #include "../CommandBus.h"
 #include "../DeltaHedgeExecutor.h"
+#include "../BlackCalc.h"
 #include "../ComboOrders.h"
 #include "../OptionData.h"
 #include "../OptionTradingGrid.h"
 #include "../OptionRisk.h"
 #include "../ExpiryData.h"
+#include "../OptionTimeService.h"
+#include "../PositionBook.h"
+#include "../OptionConfigLoader.h"
+#include "../LatencyHistogram.h"
+#include "../SingleFlightTaskRunner.h"
+#include "../AsyncVolFitter.h"
 #include "../PredictionEvaluator.h"
 #include "../CffexIOStrikeFinder.h"
 #include "../DceMOStrikeFinder.h"
 #include <iostream>
 #include <cassert>
+#include <chrono>
+#include <thread>
+#include <atomic>
 #include <cmath>
 
 using namespace wt_option;
@@ -371,7 +381,7 @@ void test_oqm_enhancements() {
         cfg.cancel_soft_max = 5;
         // trueMax = 10 - 2 = 8
 
-        OptionQuoteManager oqm("test", cfg, nullptr);
+        OptionQuoteManager oqm("test", cfg);
 
         // Verify true max cancels via public API
         ASSERT_EQ(oqm.getTrueMaxCancels(), 8);
@@ -388,7 +398,7 @@ void test_oqm_enhancements() {
     // Test PositionGuard integration
     {
         OptionQuoteManager::Config cfg;
-        OptionQuoteManager oqm("test", cfg, nullptr);
+        OptionQuoteManager oqm("test", cfg);
 
         // No guard set -> should be OK
         ASSERT_TRUE(oqm.isGuardOK());
@@ -414,22 +424,35 @@ void test_oqm_enhancements() {
     {
         OptionQuoteManager::Config cfg;
         cfg.enable_quote_api = false;
-        OptionQuoteManager oqm("test", cfg, nullptr);
+        OptionQuoteManager oqm("test", cfg);
 
         // No orders -> getCurrentMarket should be empty
+        ASSERT_TRUE(oqm.getCurrentMarket().empty());
+    }
+
+    // Without an injected OrderGateway sender, OQM must be inert.  This is a
+    // regression guard against silently falling back to raw IHftStraCtx.
+    {
+        OptionQuoteManager::Config cfg;
+        cfg.enable_quote_api = false;
+        OptionQuoteManager oqm("inert", cfg);
+        oqm.setActive(true);
+        MultiMarket desired;
+        desired.setBest(0, PriceSize(100.0, 1));
+        ASSERT_EQ(oqm.updateOrders(desired, false), 0);
         ASSERT_TRUE(oqm.getCurrentMarket().empty());
     }
 
     // Test reject retry state
     {
         OptionQuoteManager::Config cfg;
-        OptionQuoteManager oqm("test", cfg, nullptr);
+        OptionQuoteManager oqm("test", cfg);
 
         ASSERT_TRUE(!oqm.isRetryPending());
 
         // Simulate order sent + full rejection
         // Need to create an order first, then reject it
-        // Since OQM requires WT context to send, we test the state indirectly:
+        // Since OQM requires an injected gateway sender, test state indirectly:
         // onOrderStatusChange with unknown localid won't trigger retry
         // (no matching order). This is correct behavior.
         oqm.onOrderStatusChange(9999, true, 10, 10, 100.0, true);
@@ -509,7 +532,7 @@ void test_oqm_quote_style_and_guard() {
     cfg.enable_quote_api = true;          // must be bypassed in BUYSELL mode
     cfg.enable_offset_guard = false;
 
-    OptionQuoteManager oqm("SHFE.cu2602C50000", cfg, nullptr);
+    OptionQuoteManager oqm("SHFE.cu2602C50000", cfg);
 
     oqm.setSendSingleFn([&](bool isBuy, double px, uint32_t qty) -> uint32_t {
         sends.push_back({isBuy, px, qty});
@@ -551,7 +574,7 @@ void test_oqm_quote_style_and_guard() {
         off->onPositionUpdate(true, 0,0, 5.0, 2.0);   // long 5, avail 2 (all counted today)
         OptionQuoteManager::Config cfg2 = cfg;
         cfg2.enable_offset_guard = true;              // A1 guard ON
-        OptionQuoteManager oqm2("g", cfg2, nullptr);
+        OptionQuoteManager oqm2("g", cfg2);
         oqm2.setPositionOffsetMgr(off);
         oqm2.setSendSingleFn([&](bool isBuy, double px, uint32_t qty) {
             sends.push_back({isBuy, px, qty});
@@ -585,7 +608,7 @@ void test_oqm_pretrade_and_retry() {
 
     OptionQuoteManager::Config cfg;
     cfg.enable_quote_api = false;
-    OptionQuoteManager oqm("pre", cfg, nullptr);
+    OptionQuoteManager oqm("pre", cfg);
 
     uint32_t nextId = 500;
     int sendCount = 0;
@@ -640,7 +663,7 @@ void test_oqm_cancel_timeout() {
     cfg.wait_for_cancels = true;
     cfg.cancel_ack_timeout_ms = 500;
     cfg.cancel_max_retries = 2;
-    OptionQuoteManager oqm("ct", cfg, nullptr);
+    OptionQuoteManager oqm("ct", cfg);
 
     uint32_t nextId = 700;
     int sends = 0;
@@ -741,6 +764,58 @@ void test_spread_combo_state() {
         ASSERT_TRUE(syn.isFailed());
         ASSERT_TRUE(syn.isDone());
     }
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// SynComboOrder: top-up/unwind ids must remain managed until terminal
+// ============================================================================
+void test_syn_combo_unwind_lifecycle() {
+    std::cout << "=== test_syn_combo_unwind_lifecycle ===" << std::endl;
+
+    ComboExecContext ctx;
+    uint32_t nextId = 100;
+    struct SentRec { std::string code; bool buy; uint32_t qty; };
+    std::vector<SentRec> sent;
+    std::vector<uint32_t> canceled;
+    ctx.sendOrder = [&](const std::string& code, bool buy, double, uint32_t qty) {
+        uint32_t id = nextId++;
+        sent.push_back({code, buy, qty});
+        return id;
+    };
+    ctx.cancelOrder = [&](uint32_t id) { canceled.push_back(id); return true; };
+    ctx.getTime = [] { return 0.0; };
+
+    OptionInfo ci; ci.code = "CALL";
+    OptionInfo pi; pi.code = "PUT";
+    OptionData call(ci), put(pi);
+
+    SynComboOrder syn("syn-unwind", 10, 0.5, 1, &ctx);
+    syn.setupLegs(&call, &put, "FUT", true, false, false, 10.0, 20.0, 30.0);
+    ASSERT_EQ(syn.sendOrders(), ComboOrder::SendResult::Success);
+    ASSERT_EQ(sent.size(), 1u);
+
+    // Partially fill leg0, which sends leg1.
+    ASSERT_TRUE(syn.onLegFill(100, 6));
+    ASSERT_EQ(sent.size(), 2u);
+
+    // leg1 rejects before fill: combo must cancel leg0, unwind its 6-lot
+    // residual, and keep managing all open ids until terminal callbacks.
+    ASSERT_TRUE(syn.onLegTerminal(101, true, 6));
+    ASSERT_TRUE(syn.isFailed());
+    ASSERT_TRUE(syn.hasOpenOrders());
+    ASSERT_EQ(sent.size(), 3u);              // unwind order sent
+    ASSERT_EQ(sent[2].code, "CALL");
+    ASSERT_TRUE(!sent[2].buy);               // opposite of original buy
+    ASSERT_EQ(sent[2].qty, 6u);
+    ASSERT_EQ(canceled.size(), 1u);          // still-open leg0 is canceled; leg1 was already terminal
+
+    // Late terminal for leg0 and unwind id releases the combo.
+    ASSERT_TRUE(syn.onLegTerminal(100, true, 4));
+    ASSERT_TRUE(syn.hasOpenOrders());        // unwind id 102 still open
+    ASSERT_TRUE(syn.onLegTerminal(102, true, 6));
+    ASSERT_TRUE(!syn.hasOpenOrders());
 
     std::cout << "  PASS" << std::endl;
 }
@@ -1087,6 +1162,7 @@ void test_trading_state_flags() {
     st.channelReady = true; st.underlyingReady = true;
 
     st.type = S::Normal;         ASSERT_TRUE(st.enabledFlag());  ASSERT_TRUE(!st.panickedFlag());
+    st.type = S::Recovering;     ASSERT_TRUE(!st.enabledFlag()); ASSERT_TRUE(!st.panickedFlag());
     st.type = S::Panic;          ASSERT_TRUE(st.enabledFlag());  ASSERT_TRUE(st.panickedFlag());
     st.type = S::SessionStopped; ASSERT_TRUE(!st.enabledFlag()); ASSERT_TRUE(!st.panickedFlag());
     st.type = S::Disabled;       ASSERT_TRUE(!st.enabledFlag());
@@ -1141,6 +1217,434 @@ void test_dynamic_otg_wiring() {
     expired.updateDaysToExpiration(20261030, 20261029);
     ASSERT_TRUE(expired.daysToExpiry() < 0);
     ASSERT_EQ(expired.getSettlementFraction(), 0.0);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// OrderGateway seams: OTG-created OQMs route production sends through strategy
+// callbacks instead of direct IHftStraCtx calls.
+// ============================================================================
+void test_otg_gateway_senders() {
+    std::cout << "=== test_otg_gateway_senders ===" << std::endl;
+
+    auto grid = std::make_shared<OptionGrid>("TEST", "TEST.UNDER", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+    auto otg = std::make_shared<OptionTradingGrid>(grid);
+    otg->setPositionRisk(risk);
+
+    OptionQuoteManager::Config cfg;
+    cfg.quote_style = OptionQuoteManager::Config::QS_BUYSELL;
+    cfg.enable_quote_api = false;
+    otg->setOptionOQMConfig(cfg);
+
+    std::pair<uint32_t, uint32_t> quoteSent{0, 0};
+    std::vector<uint32_t> orderSent;
+    std::vector<uint32_t> cancelSent;
+    std::vector<uint32_t> issued;
+    uint32_t orderCalls = 0;
+
+    auto gateway = std::make_shared<OrderGateway>(OrderGateway::Handlers{
+        [&](const std::string&, double, uint32_t, double, uint32_t) {
+            quoteSent = {321, 654};
+            return quoteSent;
+        },
+        [&](const std::string&, bool, double, uint32_t) -> std::vector<uint32_t> {
+            ++orderCalls;
+            orderSent = {700 + orderCalls, 800 + orderCalls};
+            return orderSent;
+        },
+        [&](uint32_t localid) {
+            cancelSent.push_back(localid);
+            return true;
+        },
+        [](const std::string&) {}
+    });
+    otg->setOrderGateway(gateway);
+    otg->setOrderIssuedFn([&](const std::string&, bool, double,
+                              uint32_t, uint32_t localid) {
+        issued.push_back(localid);
+    });
+
+    auto ed = std::make_shared<ExpiryData>(202612, "TEST");
+    otg->onAddExpiry(ed);
+    OptionInfo info;
+    info.code = "TEST.OPT";
+    info.expiry = 202612;
+    info.multiplier = 100;
+    auto od = std::make_shared<OptionData>(info);
+    od->setExpiryData(ed);
+    otg->onAddOption(od);
+
+    auto qm = od->getTradingData()->getQuoteManager();
+    ASSERT_TRUE(qm != nullptr);
+    qm->setActive(true);
+    MultiMarket mm;
+    mm.setBest(0, PriceSize(99.0, 3));
+    mm.setBest(1, PriceSize(101.0, 4));
+    qm->updateOrders(mm, false);
+
+    ASSERT_EQ(orderCalls, 2u);
+    ASSERT_EQ(quoteSent.first, 0u);   // buy/sell style must not use paired sender
+    ASSERT_EQ(issued.size(), (size_t)4);  // every split id from each side is registered
+    ASSERT_EQ(issued[0], 701u);
+    ASSERT_EQ(issued[1], 801u);
+    ASSERT_EQ(issued[2], 702u);
+    ASSERT_EQ(issued[3], 802u);
+
+    // Paired quote style must use the gateway paired-quote submission path.
+    OptionQuoteManager::Config pairedCfg;
+    pairedCfg.quote_style = OptionQuoteManager::Config::QS_PAIRED;
+    pairedCfg.enable_quote_api = true;
+    otg->setOptionOQMConfig(pairedCfg);
+    OptionInfo info2;
+    info2.code = "TEST.OPT2";
+    info2.expiry = 202612;
+    info2.multiplier = 100;
+    auto od2 = std::make_shared<OptionData>(info2);
+    od2->setExpiryData(ed);
+    otg->onAddOption(od2);
+    auto qm2 = od2->getTradingData()->getQuoteManager();
+    ASSERT_TRUE(qm2 != nullptr);
+    qm2->setActive(true);
+    MultiMarket pairedDesired;
+    pairedDesired.setBest(0, PriceSize(98.0, 2));
+    pairedDesired.setBest(1, PriceSize(102.0, 3));
+    const int32_t pairedTxns = qm2->updateOrders(pairedDesired, false);
+    ASSERT_EQ(pairedTxns, 2);
+    ASSERT_EQ(quoteSent.first, 321u);
+    ASSERT_EQ(quoteSent.second, 654u);
+    ASSERT_EQ(issued.size(), (size_t)6);
+    ASSERT_EQ(issued[4], 321u);
+    ASSERT_EQ(issued[5], 654u);
+
+    MultiMarket empty;
+    qm->updateOrders(empty, true);
+    ASSERT_EQ(cancelSent.size(), (size_t)2);
+    ASSERT_EQ(cancelSent[0], 701u);
+    ASSERT_EQ(cancelSent[1], 702u);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// LatencyHistogram: p50/p95/p99/p99.9/max baseline metrics
+// ============================================================================
+void test_latency_histogram() {
+    std::cout << "=== test_latency_histogram ===" << std::endl;
+    LatencyHistogram h;
+    for (int i = 1; i <= 100; ++i) h.add(static_cast<double>(i));
+    ASSERT_EQ(h.count(), (size_t)100);
+    ASSERT_EQ(h.p50(), 50.0);
+    ASSERT_EQ(h.p95(), 95.0);
+    ASSERT_EQ(h.p99(), 99.0);
+    ASSERT_EQ(h.p999(), 100.0);
+    ASSERT_EQ(h.max(), 100.0);
+    h.clear();
+    ASSERT_EQ(h.count(), (size_t)0);
+    ASSERT_EQ(h.p99(), 0.0);
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// SingleFlightTaskRunner: one slow task name never runs concurrently
+// ============================================================================
+void test_single_flight_task_runner() {
+    std::cout << "=== test_single_flight_task_runner ===" << std::endl;
+    SingleFlightTaskRunner runner;
+    std::atomic<int> running{0};
+    std::atomic<int> maxRunning{0};
+    std::atomic<int> done{0};
+
+    auto task = [&]() -> SingleFlightTaskRunner::TaskResult {
+        int cur = running.fetch_add(1) + 1;
+        int old = maxRunning.load();
+        while (cur > old && !maxRunning.compare_exchange_weak(old, cur)) {}
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        running.fetch_sub(1);
+        done.fetch_add(1);
+        return {"fit", true, ""};
+    };
+
+    ASSERT_TRUE(runner.submit("fit", task));
+    ASSERT_TRUE(!runner.submit("fit", task));  // single-flight coalesces duplicate
+    for (int i = 0; i < 20; ++i) {
+        if (!runner.isRunningOrQueued("fit")) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(done.load(), 1);
+    ASSERT_EQ(maxRunning.load(), 1);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// FAST incremental pricing: second-order gamma correction regression
+// ============================================================================
+void test_fast_incremental_gamma_correction() {
+    std::cout << "=== test_fast_incremental_gamma_correction ===" << std::endl;
+
+    const double F = 100.0;
+    const double K = 100.0;
+    const double maturity = 0.25;
+    const double vol = 0.20;
+    const double stdDev = vol * std::sqrt(maturity);
+
+    BlackCalc base(wt_option::OT_Call, K, F, stdDev, 1.0);
+    const double dF = 0.50;
+
+    BlackCalc moved(wt_option::OT_Call, K, F + dF, stdDev, 1.0);
+    const double firstOrder = base.value() + base.delta() * dF;
+    const double secondOrder = firstOrder + 0.5 * base.gamma() * dF * dF;
+    const double exact = moved.value();
+
+    const double firstErr = std::fabs(firstOrder - exact);
+    const double secondErr = std::fabs(secondOrder - exact);
+    ASSERT_TRUE(secondErr < firstErr);
+    ASSERT_TRUE(secondErr < 1e-3);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// AsyncVolFitter: immutable snapshot -> background fit -> versioned publish
+// ============================================================================
+void test_async_vol_fitter_publish() {
+    std::cout << "=== test_async_vol_fitter_publish ===" << std::endl;
+
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+    wt_option::OptionPricer2Config cfg;
+    wt_option::OptionPricer2 pricer(cfg, grid.get(), risk.get());
+
+    AsyncVolFitter fitter("gvv");
+    VolFitExpirySnapshot s;
+    s.expiry = 202612;
+    s.forward = 4000.0;
+    s.maturity = 0.25;
+    s.atmVol = 0.18;
+    s.version = 1;
+    for (double x : {-0.30, -0.20, -0.10, 0.0, 0.10, 0.20, 0.30})
+        s.points.push_back({x, 1.0 + 0.10 * x + 0.20 * x * x});
+
+    ASSERT_TRUE(fitter.submit({s}));
+    ASSERT_TRUE(!fitter.submit({s}));  // single-flight while running/queued
+    for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(fitter.hasResult());
+    ASSERT_TRUE(fitter.tryPublish(pricer));
+    ASSERT_TRUE(!fitter.tryPublish(pricer));   // result consumed
+
+    ASSERT_EQ(pricer.getCurveVersion(202612), 1u);
+    auto curve = pricer.getVolCurve(202612);
+    ASSERT_TRUE(curve != nullptr);
+    ASSERT_TRUE(curve->isInitialized());
+    const double eval = (*curve)(0.0);
+    ASSERT_TRUE(std::isfinite(eval));
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// OptionConfigLoader: typed values, effective dump, zero-rate and legacy keys
+// ============================================================================
+void test_option_config_loader() {
+    std::cout << "=== test_option_config_loader ===" << std::endl;
+
+    auto cfg = wtp::WTSVariant::createObject();
+    cfg->append("exchange", "SHFE");
+    cfg->append("futuresProduct", "cu");
+    cfg->append("riskFreeRate", 0.0);     // explicit zero is valid
+    cfg->append("maxTPS", 0);             // zero means default 50
+    cfg->append("minComputeInterval", 0.02);
+    cfg->append("marketFreshTimeoutMs", 1500);
+
+    auto pricer = wtp::WTSVariant::createObject();
+    pricer->append("slow_compute_interval", 0.1);
+    cfg->append("pricer", pricer);
+
+    auto om = wtp::WTSVariant::createObject();
+    auto optOm = wtp::WTSVariant::createObject();
+    optOm->append("cancel_timeout_ms", 3000);  // legacy ignored key
+    optOm->append("time_in_force_ms", 45000);
+    om->append("option", optOm);
+    cfg->append("orderManager", om);
+
+    auto expiries = wtp::WTSVariant::createArray();
+    auto exp = wtp::WTSVariant::createObject();
+    exp->append("expiry", 202612);
+    exp->append("delta_min", 0.1);
+    exp->append("delta_max", 0.9);
+    expiries->append(exp);
+    cfg->append("expiries", expiries);
+
+    auto r = OptionConfigLoader::load(cfg);
+    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.values.riskFreeRate, 0.0);
+    ASSERT_EQ(r.values.maxTPS, 50);
+    ASSERT_EQ(r.values.marketFreshTimeoutMs, 1500u);
+    ASSERT_EQ(r.values.slowComputeInterval, 0.1);
+    ASSERT_EQ(r.effective["riskFreeRate"], "0");
+    ASSERT_EQ(r.effective["pricer.slow_compute_interval"], "0.1");
+    ASSERT_TRUE(!r.warnings.empty());
+
+    bool sawLegacy = false;
+    for (const auto& w : r.warnings) {
+        if (w.find("cancel_timeout_ms") != std::string::npos)
+            sawLegacy = true;
+    }
+    ASSERT_TRUE(sawLegacy);
+
+    const std::string dump = OptionConfigLoader::dumpEffectiveValues(r);
+    ASSERT_TRUE(dump.find("effective config values") != std::string::npos);
+    ASSERT_TRUE(dump.find("marketFreshTimeoutMs = 1500") != std::string::npos);
+
+    // Invalid core values must abort startup.
+    auto bad = wtp::WTSVariant::createObject();
+    bad->append("exchange", "SHFE");
+    bad->append("futuresProduct", "cu");
+    bad->append("riskFreeRate", -0.01);
+    auto badR = OptionConfigLoader::load(bad);
+    ASSERT_TRUE(!badR.ok);
+    ASSERT_TRUE(!badR.errors.empty());
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// PositionBook: authoritative long/short prev+new snapshots with fill bridge
+// ============================================================================
+void test_position_book_long_short_bridge() {
+    std::cout << "=== test_position_book_long_short_bridge ===" << std::endl;
+
+    PositionBook book;
+
+    // Yesterday + today on both sides.
+    book.onBrokerPosition("A", true,  2, 1, 3, 2);   // long 5, avail 3
+    book.onBrokerPosition("A", false, 1, 1, 2, 1);   // short 3, avail 2
+    const auto& p = book.get("A");
+    ASSERT_EQ(p.longPos.vol(), 5.0);
+    ASSERT_EQ(p.longPos.avail(), 3.0);
+    ASSERT_EQ(p.shortPos.vol(), 3.0);
+    ASSERT_EQ(p.shortPos.avail(), 2.0);
+    ASSERT_EQ(p.net(), 2.0);
+    ASSERT_EQ(p.gross(), 8.0);
+
+    // Fills bridge from the authoritative snapshot.
+    book.addFill("A", true, 2);    // buy 2
+    book.addFill("A", false, 1);   // sell 1
+    ASSERT_EQ(book.get("A").longPos.vol(), 7.0);
+    ASSERT_EQ(book.get("A").shortPos.vol(), 4.0);
+    ASSERT_EQ(book.net("A"), 3.0);
+    ASSERT_TRUE(book.version() >= 4u);
+
+    // Restart/recovery: broker snapshot replaces stale bridge state.
+    book.clearAll();
+    book.onBrokerPosition("A", true, 0, 0, 5, 4);
+    ASSERT_EQ(book.get("A").longPos.vol(), 5.0);
+    ASSERT_EQ(book.get("A").shortPos.vol(), 0.0);
+    ASSERT_EQ(book.net("A"), 5.0);
+
+    // OffsetMgr consumes the full snapshot split.
+    PositionOffsetMgr off;
+    off.onPositionUpdate(book.get("A"));
+    ASSERT_EQ(off.getLongTotal(), 5);
+    ASSERT_EQ(off.getLongToday(), 4);
+    ASSERT_EQ(off.getLongPrev(), 0);
+    ASSERT_EQ(off.getShortTotal(), 0);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// Market freshness: OptionGrid must retain receive timestamps and reject stale
+// underlying/option feeds.
+// ============================================================================
+void test_optiongrid_market_freshness() {
+    std::cout << "=== test_optiongrid_market_freshness ===" << std::endl;
+
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    grid->setMarketStaleTimeoutMs(1000);
+
+    OptionGrid::TickDataRef und;
+    und.price = 4000.0;
+    und.bid = 3999.0;
+    und.ask = 4001.0;
+    und.updateTime = 1000;
+    grid->onTick("CFFEX.000300", und);
+
+    ASSERT_TRUE(grid->isUnderlyingFresh(1500));
+    ASSERT_TRUE(!grid->isUnderlyingFresh(2500));
+    ASSERT_TRUE(!grid->hasFreshOptionMarket(1500));   // no option market yet
+
+    OptionGrid::TickDataRef opt;
+    opt.price = 100.0;
+    opt.bid = 99.0;
+    opt.ask = 101.0;
+    opt.updateTime = 2000;
+    grid->onTick("CFFEX.IO2606.C.4300", opt);
+
+    auto od = grid->get("CFFEX.IO2606.C.4300");
+    ASSERT_TRUE(od != nullptr);
+    ASSERT_EQ(od->getMarket().updateTime, 2000u);
+    ASSERT_TRUE(grid->hasFreshOptionMarket(2500));
+    ASSERT_TRUE(!grid->hasFreshOptionMarket(3500));
+
+    // Disabled timeout preserves legacy behavior.
+    grid->setMarketStaleTimeoutMs(0);
+    ASSERT_TRUE(grid->isUnderlyingFresh(999999));
+    ASSERT_TRUE(grid->hasFreshOptionMarket(999999));
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// OptionTimeService: midnight rollover must produce monotonic strategy time
+// ============================================================================
+void test_time_service_midnight_rollover() {
+    std::cout << "=== test_time_service_midnight_rollover ===" << std::endl;
+
+    struct MockCtx {
+        uint32_t hhmm;
+        uint32_t ssms;
+        uint32_t stra_get_time() const { return hhmm; }
+        uint32_t stra_get_secs() const { return ssms; }
+    };
+
+    OptionTimeService svc;
+    MockCtx ctx{2359, 59900};
+
+    const double before = svc.nowSeconds(&ctx);
+    ASSERT_TRUE(std::fabs(before - 86399.9) < 1e-9);
+
+    ctx.hhmm = 0;
+    ctx.ssms = 100;
+    const double after = svc.nowSeconds(&ctx);
+    ASSERT_TRUE(after > before);
+    ASSERT_TRUE(std::fabs(after - 86400.1) < 1e-9);
+
+    // Durations remain positive across midnight (e.g. hedge cooldown).
+    DeltaHedgeExecutor::Config cfg;
+    cfg.thresholdDelta = 10;
+    cfg.cooldownSec = 3.0;
+    cfg.deltaPerLot = 1.0;
+    auto d = DeltaHedgeExecutor::decide(cfg, 15.0, after, before);
+    ASSERT_TRUE(!d.fire && d.reason == "cooldown");
+
+    // Session reset must not move persistent consumers backwards.
+    svc.reset();
+    ctx.hhmm = 900;
+    ctx.ssms = 0;
+    const double nextSession = svc.nowSeconds(&ctx);
+    ASSERT_TRUE(nextSession > after);
+    ASSERT_TRUE(std::fabs(nextSession - (86400.0 + 32400.0)) < 1e-9);
+
+    // An ordinary in-session backwards sample must not add a day.
+    ctx.hhmm = 859;
+    ctx.ssms = 59900;
+    const double backwards = svc.nowSeconds(&ctx);
+    ASSERT_TRUE(backwards < nextSession);
+    ASSERT_TRUE(std::fabs(backwards - (86400.0 + 32399.9)) < 1e-9);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -1232,8 +1736,18 @@ int main() {
     test_trading_state_flags();
     test_delta_hedge_decide();
     test_dynamic_otg_wiring();
+    test_otg_gateway_senders();
+    test_time_service_midnight_rollover();
+    test_position_book_long_short_bridge();
+    test_latency_histogram();
+    test_single_flight_task_runner();
+    test_fast_incremental_gamma_correction();
+    test_async_vol_fitter_publish();
+    test_option_config_loader();
+    test_optiongrid_market_freshness();
     test_pnl_tracker_session_reset();
     test_spread_combo_state();
+    test_syn_combo_unwind_lifecycle();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

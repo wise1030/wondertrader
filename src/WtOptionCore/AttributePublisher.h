@@ -28,6 +28,11 @@ public:
     void setPublishInterval(double seconds) { m_publishInterval = seconds; }
     double getPublishInterval() const { return m_publishInterval; }
 
+    /// True when the next publish interval has elapsed and collection is useful.
+    bool shouldCollect(double now) const {
+        return (now - m_lastPublishTime) >= m_publishInterval;
+    }
+
     // Collect attributes from a single option's trading data
     void collectOption(const std::string& code, OptionTradingData* otd, const OptionData* od);
     // Collect attributes from a single underlying's trading data

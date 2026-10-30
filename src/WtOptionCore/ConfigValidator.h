@@ -29,7 +29,7 @@ public:
         static const std::unordered_map<std::string, std::unordered_set<std::string>> s = {
             { "", { "exchange","futuresProduct","optionProduct","underlyingCode","underlyingType",
                     "riskFreeRate","riskFreeRateCurve","maxTPS","minComputeInterval",
-                    "use_parallel","sessionSchedule","pricer","orderManager","expiries",
+                    "marketFreshTimeoutMs","use_parallel","sessionSchedule","pricer","orderManager","expiries",
                     "riskLimits","signals","scanners","optionValueWriter","margin","pnl",
                     "pricerType","wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow",
                     "wgt_atmsig","wgt_rollema","sticky_base","improve_retreat_ratio",
@@ -41,6 +41,7 @@ public:
                           "gammascalp","trade_shock_ticks","trade_shock_interval",
                           "panic_blackout_interval","interesting_ticks_window",
                           "interesting_ticks_vol_multiple","risk_prem_bps","risk_prem_ratio",
+                          "fast_use_gamma_correction","fast_full_reprice_forward_step",
                           "rp_quote","rp_future","reduce_large_size","slow_compute_interval",
                           "min_compute_interval" } },
             { "pricer.blackCalc", { "volCurve","risk_free","dividend" } },
@@ -70,7 +71,7 @@ public:
             { "margin", { "enable","fut_rate","opt_short_rate","max_margin",
                           "warn_ratio","check_period_sec" } },
             { "pnl", { "fifo_mode" } },
-            { "sessionSchedule", { "stopLeadSeconds","resumeLagSeconds" } },
+            { "sessionSchedule", { "enabled","stopLeadSeconds","resumeLagSeconds" } },
             { "riskLimits", { "maxOrderSize","maxOrderValue","clearlyErroneousPercent",
                           "minSellPrice","maxPositionPerOption","maxTotalPosition",
                           "maxDelta","maxGamma","maxVega","maxLossPerDay",
@@ -138,7 +139,7 @@ private:
     static void validateProbed(wtp::WTSVariant* cfg, const std::string& path) {
         static const char* kAllKeys[] = {
             "exchange","futuresProduct","optionProduct","underlyingCode","underlyingType",
-            "riskFreeRate","riskFreeRateCurve","maxTPS","minComputeInterval","use_parallel",
+            "riskFreeRate","riskFreeRateCurve","maxTPS","minComputeInterval","marketFreshTimeoutMs","use_parallel",
             "sessionSchedule","pricer","orderManager","expiries","riskLimits","signals",
             "scanners","optionValueWriter","margin","pnl","pricerType",
             "wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow","wgt_atmsig","wgt_rollema",

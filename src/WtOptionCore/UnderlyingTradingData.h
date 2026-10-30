@@ -147,6 +147,17 @@ public:
     double getAsk() const { return m_ask; }
     double getMid() const { return (m_bid > 0 && m_ask > 0) ? (m_bid + m_ask) * 0.5 : 0.0; }
     void setMarket(double bid, double ask) { m_bid = bid; m_ask = ask; }
+    void setMarket(double bid, double ask, uint64_t updateTime) {
+        m_bid = bid; m_ask = ask;
+        if (updateTime != 0) m_marketUpdateTime = updateTime;
+    }
+    uint64_t getMarketUpdateTime() const { return m_marketUpdateTime; }
+    bool isMarketFresh(uint64_t nowMs, uint64_t staleTimeoutMs) const {
+        if (staleTimeoutMs == 0) return true;
+        if (m_marketUpdateTime == 0) return false;
+        if (nowMs < m_marketUpdateTime) return true;
+        return nowMs - m_marketUpdateTime <= staleTimeoutMs;
+    }
 
     double getContractSize() const { return m_contractSize; }
     void setContractSize(double cs) { m_contractSize = cs; }
@@ -205,6 +216,7 @@ protected:
     // Market (replaces InstrumentMDContext / IBook)
     double m_bid = 0;
     double m_ask = 0;
+    uint64_t m_marketUpdateTime = 0;  // epoch ms, 0 = unknown
     double m_contractSize = 1.0;
     double m_tickSize = 1.0;
     double m_feePct = 0;

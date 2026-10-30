@@ -62,6 +62,12 @@ void PositionGuard::onFill(bool isBuy, uint32_t qty) {
     }
 }
 
+void PositionGuard::onBrokerPosition(const PositionBook::InstrumentPosition& pos) {
+    // Guard's discrepancy engine is currently signed-net.  Feed the net of the
+    // full long/short snapshot; side detail remains available to callers.
+    onBrokerPosition(true, pos.net());
+}
+
 void PositionGuard::onBrokerPosition(bool isLong, double vol) {
     int32_t signedVol = isLong ? static_cast<int32_t>(vol) : -static_cast<int32_t>(vol);
 

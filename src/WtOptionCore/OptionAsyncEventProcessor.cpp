@@ -11,6 +11,7 @@
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include <cstring>
+#include <chrono>
 
 namespace wt_option {
 
@@ -30,7 +31,10 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     ev.tick.preClose = t->preclose();
     ev.tick.tradeVolume = t->volume();
     ev.tick.actionTime = t->actiontime();
-    ev.tick.updateTime = TimeUtils::getLocalTimeNow();
+    // Epoch milliseconds are used only for market freshness checks; duration
+    // logic uses OptionTimeService instead of this wall-clock value.
+    ev.tick.updateTime = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
     // B28: capture exact expiry date from contract info when available
     auto* ci = t->getContractInfo();
     ev.tick.expireDate = (ci && ci->getExpireDate() > 0) ? ci->getExpireDate() : 0;
@@ -137,6 +141,10 @@ void OptionAsyncEventProcessor::stop()
 {
     _worker_running = false;
     _worker_cv.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        _trader_cv.notify_all();
+    }
     if (_worker.joinable()) _worker.join();
     WTSLogger::log_by_cat("strategy", LL_INFO, "OptionAsyncEventProcessor stopped");
 }
@@ -149,14 +157,9 @@ void OptionAsyncEventProcessor::enqueue_tick(const char* stdCode, WTSTickData* n
     if (!_worker_running) return;
     AsyncEvent ev = AsyncEvent::make_tick(stdCode, newTick);
     if (!_md_queue.push(ev)) {
-        // Ring full -> bounded overflow. Never let a slow worker turn a tick
-        // burst into unbounded memory growth.
-        std::lock_guard<std::mutex> lock(_md_overflow_mtx);
-        if (_md_overflow.size() < kMaxOverflow) {
-            _md_overflow.push_back(std::move(ev));
-        } else {
-            _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        }
+        // Ring full -> bounded overflow.  Ticks are coalesced by code so a
+        // slow worker retains the latest market for each contract.
+        push_md_overflow(std::move(ev));
     }
     _total_events.fetch_add(1, std::memory_order_relaxed);
     _worker_cv.notify_one();
@@ -167,6 +170,8 @@ void OptionAsyncEventProcessor::enqueue_timer(uint32_t curDate, uint32_t curTime
     if (!_worker_running) return;
     AsyncEvent ev = AsyncEvent::make_timer(curDate, curTime);
     if (!_md_queue.push(ev)) {
+        // Timers are periodic and do not carry per-contract state; a bounded
+        // drop under saturation is acceptable and observable via drops.
         std::lock_guard<std::mutex> lock(_md_overflow_mtx);
         if (_md_overflow.size() < kMaxOverflow) {
             _md_overflow.push_back(std::move(ev));
@@ -181,13 +186,70 @@ void OptionAsyncEventProcessor::enqueue_timer(uint32_t curDate, uint32_t curTime
 //=============================================================================
 // Trader/main thread producers (mutex-protected, multi-producer safe)
 //=============================================================================
+void OptionAsyncEventProcessor::push_md_overflow(AsyncEvent&& ev)
+{
+    std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+
+    if (ev.type == AsyncEvent::Tick) {
+        // Coalesce by contract so the overflow retains the newest market even
+        // when the worker falls behind.
+        for (auto& old : _md_overflow) {
+            if (old.type == AsyncEvent::Tick && old.getCode() == ev.getCode()) {
+                old.tick = ev.tick;
+                return;
+            }
+        }
+
+        if (_md_overflow.size() < kMaxOverflow) {
+            _md_overflow.push_back(std::move(ev));
+            return;
+        }
+
+        // Overflow full: prefer evicting the oldest tick; if none is present,
+        // evict the oldest event so the newest market is still represented.
+        auto it = _md_overflow.begin();
+        for (; it != _md_overflow.end(); ++it) {
+            if (it->type == AsyncEvent::Tick) break;
+        }
+        if (it == _md_overflow.end()) it = _md_overflow.begin();
+        _md_overflow.erase(it);
+        _md_overflow.push_back(std::move(ev));
+        _queue_drops.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    if (_md_overflow.size() < kMaxOverflow) {
+        _md_overflow.push_back(std::move(ev));
+    } else {
+        _queue_drops.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 bool OptionAsyncEventProcessor::push_trader(AsyncEvent&& ev)
 {
-    std::lock_guard<std::mutex> lock(_trader_mtx);
+    std::unique_lock<std::mutex> lock(_trader_mtx);
+
+    // Trade/order/position/session/channel events are control facts.  Block
+    // briefly instead of silently dropping them; the queue is normally tiny
+    // and the worker drains it every batch.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+    while (_trader_queue.size() >= kMaxTraderQueue
+           && _worker_running.load(std::memory_order_acquire)) {
+        if (!_trader_cv.wait_until(lock, deadline, [this]() {
+                return _trader_queue.size() < kMaxTraderQueue
+                    || !_worker_running.load(std::memory_order_acquire);
+            })) {
+            break;
+        }
+    }
+
     if (_trader_queue.size() >= kMaxTraderQueue) {
         _queue_drops.fetch_add(1, std::memory_order_relaxed);
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "AEP trader queue full after backpressure wait; control event dropped");
         return false;
     }
+
     _trader_queue.push_back(std::move(ev));
     _trader_count.fetch_add(1, std::memory_order_release);
     return true;
@@ -271,15 +333,10 @@ void OptionAsyncEventProcessor::worker_loop()
         }
         if (!_worker_running) break;
 
-        // 1. Drain MD SPSC queue (wait-free, no mutex)
-        while (events.size() < 1024) {
-            bool got = _md_queue.consume_one([&events](AsyncEvent& ev) {
-                events.push_back(std::move(ev));
-            });
-            if (!got) break;
-        }
-
-        // 2. Drain MD overflow (rare, under mutex)
+        // 1. Drain MD overflow first (rare, under mutex).  Overflow events are
+        // older than anything currently entering the SPSC ring, so preserving
+        // this order prevents a stale overflow tick from overwriting a newer
+        // ring tick during dedup.
         {
             std::lock_guard<std::mutex> lock(_md_overflow_mtx);
             size_t consumed = 0;
@@ -287,12 +344,20 @@ void OptionAsyncEventProcessor::worker_loop()
                 if (events.size() >= 1024) break;
                 events.push_back(std::move(_md_overflow[consumed]));
             }
-            // B32 fix: events that do not fit were silently destroyed by
-            // clear() — account them as drops so saturation is observable.
-            if (consumed < _md_overflow.size())
-                _queue_drops.fetch_add(_md_overflow.size() - consumed,
-                                       std::memory_order_relaxed);
-            _md_overflow.clear();
+            if (consumed == _md_overflow.size()) {
+                _md_overflow.clear();
+            } else {
+                _md_overflow.erase(_md_overflow.begin(),
+                                   _md_overflow.begin() + consumed);
+            }
+        }
+
+        // 2. Drain MD SPSC queue (wait-free, no mutex)
+        while (events.size() < 1024) {
+            bool got = _md_queue.consume_one([&events](AsyncEvent& ev) {
+                events.push_back(std::move(ev));
+            });
+            if (!got) break;
         }
 
         // 3. Drain trader queue (swap under mutex for minimal lock time)
@@ -303,6 +368,7 @@ void OptionAsyncEventProcessor::worker_loop()
                 trader_batch.swap(_trader_queue);
                 _trader_count.store(0, std::memory_order_release);
             }
+            _trader_cv.notify_all();
             size_t firstUnprocessed = 0;
             for (; firstUnprocessed < trader_batch.size(); ++firstUnprocessed) {
                 if (events.size() >= 1024) {
@@ -324,30 +390,54 @@ void OptionAsyncEventProcessor::worker_loop()
         if (events.empty()) continue;
 
         try {
-            // O(N) bucket sort
-            std::vector<AsyncEvent*> bk_sess, bk_chan, bk_pos, bk_trade, bk_order, bk_timer;
+            // Trader/control events preserve enqueue/FIFO order.  Reordering
+            // position before trade destroyed the controlled bridge between
+            // broker snapshots and fills whenever both arrived in one batch.
+            std::vector<AsyncEvent*> bk_trader, bk_timer;
             bool has_tick = false;
             for (auto& ev : events) {
                 switch (ev.type) {
-                    case AsyncEvent::Session:   bk_sess.push_back(&ev); break;
-                    case AsyncEvent::Channel:   bk_chan.push_back(&ev); break;
-                    case AsyncEvent::Position:  bk_pos.push_back(&ev); break;
-                    case AsyncEvent::Trade:     bk_trade.push_back(&ev); break;
-                    case AsyncEvent::Order:     bk_order.push_back(&ev); break;
-                    case AsyncEvent::Timer:     bk_timer.push_back(&ev); break;
-                    case AsyncEvent::Tick:      has_tick = true; break;
+                    case AsyncEvent::Session:
+                    case AsyncEvent::Channel:
+                    case AsyncEvent::Position:
+                    case AsyncEvent::Trade:
+                    case AsyncEvent::Order:
+                        bk_trader.push_back(&ev);
+                        break;
+                    case AsyncEvent::Timer:
+                        bk_timer.push_back(&ev);
+                        break;
+                    case AsyncEvent::Tick:
+                        has_tick = true;
+                        break;
                     default: break;
                 }
             }
-            // Process in priority order: session → channel → position → trade → order → timer
-            for (auto* ev : bk_sess)  if (_cbs.on_session)  _cbs.on_session(ev->session.tdate, ev->session.isBegin);
-            for (auto* ev : bk_chan)  if (_cbs.on_channel) _cbs.on_channel(ev->channel.isReady);
-            for (auto* ev : bk_pos)   if (_cbs.on_position) _cbs.on_position(ev->getCode(), ev->position.isLong,
-                                                                             ev->position.prevol, ev->position.preavail,
-                                                                             ev->position.newvol, ev->position.newavail);
-            for (auto* ev : bk_trade) if (_cbs.on_trade)   _cbs.on_trade(ev->getCode(), ev->trade.localid, ev->trade.isBuy, ev->trade.vol, ev->trade.price);
-            for (auto* ev : bk_order) if (_cbs.on_order)   _cbs.on_order(ev->getCode(), ev->order.localid, ev->order.isBuy, ev->order.totalQty, ev->order.leftQty, ev->order.price, ev->order.isCanceled);
-            for (auto* ev : bk_timer) if (_cbs.on_timer)   _cbs.on_timer(ev->timer.date, ev->timer.time);
+            for (auto* ev : bk_trader) {
+                switch (ev->type) {
+                    case AsyncEvent::Session:
+                        if (_cbs.on_session) _cbs.on_session(ev->session.tdate, ev->session.isBegin);
+                        break;
+                    case AsyncEvent::Channel:
+                        if (_cbs.on_channel) _cbs.on_channel(ev->channel.isReady);
+                        break;
+                    case AsyncEvent::Position:
+                        if (_cbs.on_position) _cbs.on_position(ev->getCode(), ev->position.isLong,
+                                                                ev->position.prevol, ev->position.preavail,
+                                                                ev->position.newvol, ev->position.newavail);
+                        break;
+                    case AsyncEvent::Trade:
+                        if (_cbs.on_trade) _cbs.on_trade(ev->getCode(), ev->trade.localid, ev->trade.isBuy, ev->trade.vol, ev->trade.price);
+                        break;
+                    case AsyncEvent::Order:
+                        if (_cbs.on_order) _cbs.on_order(ev->getCode(), ev->order.localid, ev->order.isBuy,
+                                                         ev->order.totalQty, ev->order.leftQty, ev->order.price,
+                                                         ev->order.isCanceled);
+                        break;
+                    default: break;
+                }
+            }
+            for (auto* ev : bk_timer) if (_cbs.on_timer) _cbs.on_timer(ev->timer.date, ev->timer.time);
 
             if (has_tick) {
                 // string_view key dedup by content
@@ -385,7 +475,11 @@ void OptionAsyncEventProcessor::worker_loop()
         }
         if (queue_size > 3200) {
             uint64_t now = TimeUtils::getLocalTimeNow();
-            if (now - _last_warning_time > 5000000) {
+            // TimeUtils::getLocalTimeNow() is milliseconds; throttle at 5s.
+            // A large negative diff means the local ms-of-day clock wrapped.
+            const int64_t elapsed = static_cast<int64_t>(now) -
+                                    static_cast<int64_t>(_last_warning_time);
+            if (elapsed > 5000 || elapsed < -3600000) {
                 WTSLogger::log_by_cat("strategy", LL_WARN,
                     "OPTION ASYNC QUEUE BOTTLENECK! size={}, drops={}",
                     queue_size, _queue_drops.load(std::memory_order_relaxed));

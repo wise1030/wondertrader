@@ -1,5 +1,7 @@
 #pragma once
 
+#include "PositionBook.h"
+
 #include <cstdint>
 #include <string>
 #include <functional>
@@ -13,6 +15,7 @@ public:
 
     void onPositionUpdate(bool isLong, double prevol, double preavail,
                            double newvol, double newavail);
+    void onPositionUpdate(const PositionBook::InstrumentPosition& pos);
 
     void onOrderSent(bool isBuy, uint32_t qty, bool isCloseToday);
     void onOrderCancelled(bool isBuy, uint32_t qty, bool isCloseToday);

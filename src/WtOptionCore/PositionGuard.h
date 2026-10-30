@@ -1,5 +1,7 @@
 #pragma once
 
+#include "PositionBook.h"
+
 #include <cstdint>
 #include <string>
 #include <functional>
@@ -36,6 +38,10 @@ public:
 
     void onFill(bool isBuy, uint32_t qty);
     void onBrokerPosition(bool isLong, double vol);
+    /// Full long/short snapshot entry point.  The current discrepancy model is
+    /// net-based; this overload preserves that contract while accepting the
+    /// authoritative PositionBook view.
+    void onBrokerPosition(const PositionBook::InstrumentPosition& pos);
 
     bool isOK() const { return !m_disabled && !isBrokerStale(); }
     /// C1: true when broker feed went quiet beyond staleFreezeSec

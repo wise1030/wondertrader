@@ -256,6 +256,13 @@ public:
 
     void resetLastComputeTime();
 
+    /// Per-option market freshness used before generating a desired quote.
+    /// Timeout 0 disables the check (unit tests / backtests without receive ts).
+    void setMarketTime(uint64_t nowMs, uint64_t staleTimeoutMs) {
+        m_marketNowMs = nowMs;
+        m_marketStaleTimeoutMs = staleTimeoutMs;
+    }
+
     /// Hot-update the Composite MM alpha weights (worker thread only).
     /// GammaScalp has its own independent pricer/config and is not touched.
     void setAlphaWeights(double vegaflow, double frontfut_skew, double deltaflow,
@@ -375,6 +382,8 @@ private:
     double m_tvLastCompute = 0;
     double m_tvLastSlowCompute = 0;
     double m_time = 0;
+    uint64_t m_marketNowMs = 0;
+    uint64_t m_marketStaleTimeoutMs = 0;
     int32_t m_traceLevel = 0;
 
     UnderlyingTradingDataPtr m_frontUnderlier;

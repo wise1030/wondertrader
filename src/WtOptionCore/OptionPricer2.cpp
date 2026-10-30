@@ -231,6 +231,34 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
     return ei;
 }
 
+void OptionPricer2::publishFittedCurves(const std::vector<FittedCurveSet>& fitted)
+{
+    for (const auto& f : fitted) {
+        if (!f.volCurve || f.version == 0) continue;
+        uint64_t& version = m_curveVersion[f.expiry];
+        if (f.version <= version) continue;
+        ExpiryInfoPtr ei = getExpiryInfo(f.expiry);
+        ei->m_spVolCurve = f.volCurve;
+        ei->m_spVolCurve2 = f.volCurve2;
+        ei->m_atmvol = f.atmVol;
+        ei->m_spVolCurve->setATMVol(f.atmVol);
+        ei->m_spVolCurve->setATMForward(ei->m_atmforward);
+        ei->m_spVolCurve->setMaturity(ei->m_maturity);
+        if (ei->m_spVolCurve2) {
+            ei->m_spVolCurve2->setATMVol(f.atmVol);
+            ei->m_spVolCurve2->setATMForward(ei->m_atmforward);
+            ei->m_spVolCurve2->setMaturity(ei->m_maturity);
+        }
+        version = f.version;
+    }
+}
+
+uint64_t OptionPricer2::getCurveVersion(uint32_t exp) const
+{
+    auto it = m_curveVersion.find(exp);
+    return it == m_curveVersion.end() ? 0 : it->second;
+}
+
 // ----------------------------------------------------------------------------
 // updateGvvParams — DB read removed (no longbeach db dep). Stub kept so the
 // host can override later. Original logic preserved in comments.
@@ -615,9 +643,20 @@ bool OptionPricer2::updateTheoreticalValues(OptionData* option)
         }
     }
     const double dF = F - values.forward();
-    double theo = std::max(0.0, values.theo() + values.greeks().delta() * dF);
+    if (config().fast_full_reprice_forward_step > 0 &&
+        std::fabs(dF) > config().fast_full_reprice_forward_step) {
+        computeValue(option);
+        return true;
+    }
+
+    // First-order delta update is the legacy behavior.  A second-order gamma
+    // term materially improves FAST accuracy for index options and still costs
+    // only a few multiplies compared with a full Black reprice.
+    double theo = values.theo() + values.greeks().delta() * dF;
+    if (config().fast_use_gamma_correction)
+        theo += 0.5 * values.greeks().gamma() * dF * dF;
     values.setForward(F);
-    values.setTheo(theo);
+    values.setTheo(std::max(0.0, theo));
     values.greeks().delta() += values.greeks().gamma() * dF;
     return true;
 }

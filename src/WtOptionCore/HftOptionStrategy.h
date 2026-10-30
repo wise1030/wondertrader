@@ -12,6 +12,12 @@
 #include "../Includes/WTSVariant.hpp"
 #include "../Includes/WTSSessionInfo.hpp"
 #include "OptionAsyncEventProcessor.h"
+#include "OptionTimeService.h"
+#include "OptionConfigLoader.h"
+#include "LatencyHistogram.h"
+#include "AsyncVolFitter.h"
+#include "OrderGateway.h"
+#include "PositionBook.h"
 #include "OptionQuoteManager.h"
 #include "Scanners/IScanModule.h"
 #include "OptionScanCoordinator.h"
@@ -48,6 +54,8 @@
 #include <unordered_map>
 #include <map>
 #include <vector>
+#include <utility>
+#include <chrono>
 
 namespace wt_option {
 class OptionGrid;
@@ -98,17 +106,29 @@ private:
     // Async event processor
     wt_option::OptionAsyncEventProcessorPtr _async;
 
+    // Continuous per-strategy event clock; prevents midnight wrap from
+    // breaking duration-based timers on night sessions.
+    wt_option::OptionTimeService _timeService;
+
+    // Authoritative long/short position book.  `_positions` below is a net
+    // projection retained for legacy consumers/session accounting.
+    wt_option::PositionBook _positionBook;
+
     // Core components
     wt_option::OptionGridPtr _grid;
     wt_option::OptionTradingGridPtr _otg;       // middle layer
     wt_option::IOptionPricerPtr _pricer;          // generic pricer interface
+    std::shared_ptr<wt_option::OptionPricer2> _blackPricer;
+    wt_option::AsyncVolFitter _asyncVolFitter;
     wt_option::CompositeOptionPricerPtr _compositePricer;  // MM pricer (null when gammascalp)
     wt_option::GammaScalpOptionPricerPtr _gammaPricer;    // gamma scalp pricer (null when composite_mm)
     wt_option::ControllableTradingGridPtr _ctg;
     wt_option::OptionRiskPtr _risk;              // risk instance
     std::shared_ptr<wt_option::OptionTraderContext> _traderCtx;
+    wt_option::OrderGatewayPtr _orderGateway;    // narrow production order出口
 
     // Config
+    wt_option::OptionConfigLoader::Result _configLoad;
     std::string _underlyingCode;
     std::string _optionProduct;       // option product for contract discovery (e.g. "ag_o", "IO", "SRP")
     std::string _futuresProduct;      // futures product (e.g. "ag", "IF", "SR")
@@ -240,9 +260,20 @@ private:
     // R5: timer-event dedup state (suppress the per-tick timer storm)
     uint32_t _lastTimerDate = 0;
     double   _lastTimerSecOfDay = -1e9;
+    // Worker减负: options changed by tick/trade/position in the current batch.
+    std::unordered_set<std::string> _dirtyOptions;
+    // Baseline worker latency from on_tick_batch to on_batch_complete.
+    std::chrono::steady_clock::time_point _batchStartSteady{};
+    bool _batchStartValid = false;
+    wt_option::LatencyHistogram _batchLatencyUs;
     // Per-instance batch counter; a function-static here races when multiple
     // strategy workers are running in the same process.
     uint64_t _batchCount = 0;
+
+    // Market freshness gate.  0 disables the check.
+    uint64_t _marketStaleTimeoutMs = 3000;
+    bool _marketStaleActive = false;
+    bool isMarketFresh(uint64_t nowMs) const;
 
     // R8: unified trading state — single writer for enabled/panicked
     wt_option::TradingState _tstate;
@@ -293,6 +324,8 @@ private:
 
     void checkMarginLimits(double nowSec);       // B1
     void checkRiskLimitsEx();                    // A2 (Greeks / daily loss)
+    bool submitAsyncVolFit();                    // Phase 9 async fit snapshot
+    void publishAsyncVolFit();                   // worker batch-boundary publish
 
     // Option contracts to subscribe (from config)
     std::vector<std::string> _optionCodes;
@@ -336,6 +369,9 @@ private:
     // Order executors (bridge to IHftStraCtx)
     int32_t executeQuote(const std::string& code, double bidP, uint32_t bidQ,
                          double askP, uint32_t askQ);
+    std::pair<uint32_t, uint32_t> executeQuoteIds(const std::string& code,
+                                                  double bidP, uint32_t bidQ,
+                                                  double askP, uint32_t askQ);
     int32_t executeOrder(const std::string& code, bool isBuy, double price, uint32_t qty);
     /// Submit a single order and return every exchange localid produced by the
     /// framework action policy.  Callers that track in-flight state (hedge,
@@ -344,5 +380,6 @@ private:
                              double price, uint32_t qty);
     void registerIssuedOrderIds(const std::string& code, const OrderIDs& ids,
                                 double price, uint32_t qty);
+    bool executeCancel(uint32_t localid);
     int32_t executeCancel(const std::string& code);
 };

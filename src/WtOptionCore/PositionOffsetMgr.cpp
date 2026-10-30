@@ -28,6 +28,19 @@ void PositionOffsetMgr::onPositionUpdate(bool isLong, double prevol, double prea
     }
 }
 
+void PositionOffsetMgr::onPositionUpdate(const PositionBook::InstrumentPosition& pos)
+{
+    m_brokerLongVol = static_cast<int32_t>(pos.longPos.vol());
+    m_brokerLongAvail = static_cast<int32_t>(pos.longPos.avail());
+    m_brokerLongTodayAvail = static_cast<int32_t>(pos.longPos.newAvail);
+    m_brokerLongPrevAvail = static_cast<int32_t>(pos.longPos.prevAvail);
+
+    m_brokerShortVol = static_cast<int32_t>(pos.shortPos.vol());
+    m_brokerShortAvail = static_cast<int32_t>(pos.shortPos.avail());
+    m_brokerShortTodayAvail = static_cast<int32_t>(pos.shortPos.newAvail);
+    m_brokerShortPrevAvail = static_cast<int32_t>(pos.shortPos.prevAvail);
+}
+
 void PositionOffsetMgr::onOrderSent(bool isBuy, uint32_t qty, bool isCloseToday) {
     int32_t q = static_cast<int32_t>(qty);
     if (isBuy) {

@@ -881,7 +881,13 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     double adj_val = black_values.adj().total;
     double mid = black_values.theo();
 
-    bool inputs_good = black_values.isPriced()
+    const uint64_t mktTs = option->getMarket().updateTime;
+    const bool marketFresh = m_marketStaleTimeoutMs == 0
+        || (mktTs != 0 && (m_marketNowMs < mktTs
+                           || m_marketNowMs - mktTs <= m_marketStaleTimeoutMs));
+
+    bool inputs_good = marketFresh
+        && black_values.isPriced()
         && !std::isnan(alpha_val)
         && !std::isnan(adj_val)
         && !EQZ(mid)
@@ -1388,14 +1394,32 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
         }
     }
 
+    // Hot-path precomputation: ATM lookup and expiry scalar maps are per
+    // expiry, not per option.  This removes repeated strike-vector scans and
+    // repeated expiry-map lookups inside the O(options × positions) loop.
+    std::map<uint32_t, double> atmVegaCache;
+    std::map<uint32_t, double> expiryFracCache;
+    std::map<uint32_t, double> expiryTargetCache;
+    for (const auto& [exp, ed] : grid->expiries()) {
+        if (!ed) continue;
+        expiryFracCache[exp] = ed->getExpireGreeksFrac();
+        auto rt = m_prop_exp_vega_tw_targets.find(exp);
+        expiryTargetCache[exp] = (rt != m_prop_exp_vega_tw_targets.end()) ? rt->second : 0.0;
+
+        StrikeDataPtr atm_sd = grid->getAtmStrike(exp);
+        double atmVega = 0.0;
+        if (atm_sd && atm_sd->call() && atm_sd->call()->values().isPriced())
+            atmVega = atm_sd->call()->values().greeks().vegaTW();
+        atmVegaCache[exp] = atmVega;
+    }
+
     for (const auto& od0 : grid->getAllOptions()) {
         if (!od0->values(0).isPriced()) continue;
 
-        // ATM vega_tw for this expiry
-        StrikeDataPtr atm_sd = grid->getAtmStrike(od0->getExpiry());
-        double atm_vega_tw = (atm_sd && atm_sd->call())
-            ? atm_sd->call()->values().greeks().vegaTW()
-            : od0->values().greeks().vegaTW();
+        const uint32_t optExpiry = od0->getExpiry();
+        double atm_vega_tw = atmVegaCache[optExpiry];
+        if (!(atm_vega_tw > 0))
+            atm_vega_tw = od0->values().greeks().vegaTW();
 
         const std::string& instr0 = od0->getCode();
         const OptionValues& values0 = od0->values();
@@ -1404,11 +1428,9 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
         double delta0 = (od0->getRight() == OR_Call)
             ? values0.greeks().delta()
             : values0.greeks().delta() + df0;
-        double frac0 = ed0 ? ed0->getExpireGreeksFrac() : 1.0;
+        double frac0 = expiryFracCache[optExpiry];
 
-        double risk_targ0 = 0;
-        auto rtit = m_prop_exp_vega_tw_targets.find(od0->getExpiry());
-        if (rtit != m_prop_exp_vega_tw_targets.end()) risk_targ0 = rtit->second;
+        const double risk_targ0 = expiryTargetCache[optExpiry];
         od0->values().targ_vega_tw = risk_targ0;
 
         double lambda_vega_wing = m_prop_lambda_vega_wing;
@@ -1441,17 +1463,11 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
         }
 
         // subtract vega_tw risk targets from other expiries
-        for (const auto& v : grid->expiries()) {
-            const ExpiryDataPtr& ed1 = v.second;
-            uint32_t exp1 = ed1->getExpiry();
-            if (exp1 != od0->getExpiry()) {
-                double frac1 = ed1->getExpireGreeksFrac();
-                double risk_targ1 = 0;
-                auto rtit2 = m_prop_exp_vega_tw_targets.find(exp1);
-                if (rtit2 != m_prop_exp_vega_tw_targets.end()) risk_targ1 = rtit2->second;
-                double corr_exp = m_prop_hedge_ratio_vega * frac0 * frac1;
-                pg_other += -corr_exp * risk_targ1;
-            }
+        for (const auto& [exp1, frac1] : expiryFracCache) {
+            if (exp1 == optExpiry) continue;
+            const double risk_targ1 = expiryTargetCache[exp1];
+            const double corr_exp = m_prop_hedge_ratio_vega * frac0 * frac1;
+            pg_other += -corr_exp * risk_targ1;
         }
 
         // own position vega

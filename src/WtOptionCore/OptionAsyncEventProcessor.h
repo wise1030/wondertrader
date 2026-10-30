@@ -143,12 +143,14 @@ public:
     static constexpr size_t kMaxOverflow = 65536;
     static constexpr size_t kMaxTraderQueue = 65536;
     bool push_trader(AsyncEvent&& ev);
+    void push_md_overflow(AsyncEvent&& ev);
     bool enqueue_trader_event(AsyncEvent&& ev);
 
     // === Trader queue: mutex-protected (multi-producer safe) ===
     // Trader events (trade/order/position/session/channel) are ~100-500/s,
     // negligible compared to tick ~10000/s. Mutex contention is near-zero.
     std::mutex _trader_mtx;
+    std::condition_variable _trader_cv;  // producers wait during rare full-queue backpressure
     mutable std::vector<AsyncEvent> _trader_queue;
     // Atomic mirror of _trader_queue.size(), updated while holding _trader_mtx.
     // The CV predicate reads this counter instead of touching the vector.

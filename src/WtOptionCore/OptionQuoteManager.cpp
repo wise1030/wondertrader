@@ -8,7 +8,6 @@
 #include "OptionQuoteManager.h"
 #include "PositionOffsetMgr.h"
 #include "PositionGuard.h"
-#include "../Includes/IHftStraCtx.h"
 #include "../WTSTools/WTSLogger.h"
 
 #include <algorithm>
@@ -17,9 +16,8 @@
 
 namespace wt_option {
 
-OptionQuoteManager::OptionQuoteManager(const std::string& code, const Config& cfg,
-                                       wtp::IHftStraCtx* ctx)
-    : m_code(code), m_cfg(cfg), m_ctx(ctx)
+OptionQuoteManager::OptionQuoteManager(const std::string& code, const Config& cfg)
+    : m_code(code), m_cfg(cfg)
 {
     m_runtimeScale = m_cfg.scale_factor;
 }
@@ -641,8 +639,8 @@ void OptionQuoteManager::resetCounters() {
 std::pair<uint32_t, uint32_t> OptionQuoteManager::sendQuote(
     double bidP, uint32_t bidQ, double askP, uint32_t askQ)
 {
-    if (!m_ctx) return {0, 0};
-    return m_ctx->stra_quote(m_code.c_str(), bidP, bidQ, askP, askQ, "OptionMM");
+    if (!m_sendQuote) return {0, 0};
+    return m_sendQuote(bidP, bidQ, askP, askQ);
 }
 
 // A4: style-aware single-leg issuer
@@ -651,17 +649,13 @@ uint32_t OptionQuoteManager::sendSingle(bool isBuy, double price, uint32_t qty)
     if (qty == 0 || price <= 0) return 0;
     if (m_sendSingle)
         return m_sendSingle(isBuy, price, qty);
-    if (!m_ctx) return 0;
-    if (m_cfg.quote_style == OptionQuoteManager::Config::QS_BUYSELL) {
-        auto ids = isBuy
-            ? m_ctx->stra_buy(m_code.c_str(), price, qty, "OptionMM")
-            : m_ctx->stra_sell(m_code.c_str(), price, qty, "OptionMM");
-        return ids.empty() ? 0 : ids[0];
+    if (m_cfg.quote_style == OptionQuoteManager::Config::QS_PAIRED) {
+        // Paired API used single-sided (bid-only or ask-only).
+        auto ids = sendQuote(isBuy ? price : 0.0, isBuy ? qty : 0,
+                             isBuy ? 0.0 : price, isBuy ? 0 : qty);
+        return isBuy ? ids.first : ids.second;
     }
-    // Paired API used single-sided (bid-only or ask-only)
-    auto ids = sendQuote(isBuy ? price : 0.0, isBuy ? qty : 0,
-                         isBuy ? 0.0 : price, isBuy ? 0 : qty);
-    return isBuy ? ids.first : ids.second;
+    return 0;
 }
 
 // A1: close-side offset guard — cap by closeable total (today+prev combined;
@@ -691,8 +685,8 @@ void OptionQuoteManager::dumpCountersCsv(const std::string& path) const
 }
 
 bool OptionQuoteManager::sendCancelById(uint32_t localid) {
-    if (!m_ctx) return false;
-    return m_ctx->stra_cancel(localid);
+    if (!m_cancelOrder) return false;
+    return m_cancelOrder(localid);
 }
 
 void OptionQuoteManager::scanCancelTimeouts(double now)
@@ -740,8 +734,8 @@ void OptionQuoteManager::scanCancelTimeouts(double now)
 }
 
 void OptionQuoteManager::sendCancelAll() {
-    if (!m_ctx) return;
-    m_ctx->stra_cancel_all(m_code.c_str());
+    if (!m_cancelAll) return;
+    m_cancelAll();
     m_bidOrders.clear();
     m_askOrders.clear();
     m_orderMarketTracker.clear();

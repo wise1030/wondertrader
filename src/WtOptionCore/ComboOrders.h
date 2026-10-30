@@ -60,6 +60,10 @@ public:
 
     bool isActive() const { return m_active; }
     bool isDone() const { return m_done; }
+    bool hasOpenOrders() const {
+        return (m_leg1Sent && !m_leg1Terminal && m_leg1Filled < m_totalSize)
+            || !m_leg2Open.empty();
+    }
 
 private:
     void sendLeg2();
@@ -124,9 +128,29 @@ public:
 
     bool isActive() const { return m_active; }
     bool isDone() const { return m_done; }
+    /// True while any leg order or residual-unwind order is still open.
+    bool hasOpenOrders() const;
 
 private:
+    struct LegExec {
+        std::string code;
+        bool isBuy = false;
+        double price = 0;
+        uint32_t localId = 0;       // first id, for backward compatibility
+        std::vector<uint32_t> localIds;       // every order id for this leg
+        std::unordered_set<uint32_t> openIds; // ids not yet terminal
+        bool sent = false;
+        bool filled = false;
+        uint32_t filledQty = 0;     // cumulative fills received
+        uint32_t desiredQty = 0;
+        uint32_t committedQty = 0;  // cumulative qty actually ordered
+    };
+
     void sendNextLeg();
+    void recordLegId(LegExec& leg, uint32_t localid);
+    bool isLegId(const LegExec& leg, uint32_t localid) const;
+    void unwindResidual();
+    bool allOrdersTerminal() const;
 
     ComboExecContext* m_execCtx;
     double m_tickSize;
@@ -135,21 +159,13 @@ private:
     bool m_done = false;
     double m_sendTime = 0;
     double m_timeoutSec = 0.130;
+    bool m_unwound = false;
 
     int m_nextLegToSend = 0;  // 0=leg1, 1=leg2, 2=leg3(future)
 
-    struct LegExec {
-        std::string code;
-        bool isBuy = false;
-        double price = 0;
-        uint32_t localId = 0;
-        bool sent = false;
-        bool filled = false;
-        uint32_t filledQty = 0;     // cumulative fills received
-        uint32_t desiredQty = 0;
-        uint32_t committedQty = 0;  // cumulative qty actually ordered
-    };
     std::vector<LegExec> m_legExecs;
+    std::vector<uint32_t> m_unwindIds;
+    std::unordered_set<uint32_t> m_unwindOpen;
     bool m_failed = false;
     void markFailed(const char* reason);
 };

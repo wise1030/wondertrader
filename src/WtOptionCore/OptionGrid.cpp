@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 #include "../Includes/WTSDataDef.hpp"
 #include "../Includes/IBaseDataMgr.h"
@@ -57,12 +58,41 @@ void OptionGrid::setUnderlyingPrice(double price) {
 }
 
 void OptionGrid::onUnderlyingTick(double price) {
-    setUnderlyingPrice(price);
+    onUnderlyingTick(price, 0);
+}
+
+void OptionGrid::onUnderlyingTick(double price, uint64_t updateTime) {
+    {
+        std::unique_lock<std::shared_mutex> lock(m_priceMutex);
+        m_underlyingPrice = price;
+        if (updateTime != 0)
+            m_underlyingUpdateTime = updateTime;
+    }
     // Eager computeValues removed: computation is now owned by on_batch_complete's
     // debounce in HftOptionStrategy. This prevents:
     // 1. Redundant compute when on_batch_complete also calls computeValues
     // 2. Stale ourMarket from per-tick compute before all ticks are applied
     // 3. Debounce (_underlyingChanged + _minComputeInterval) being bypassed
+}
+
+bool OptionGrid::isUnderlyingFresh(uint64_t nowMs) const {
+    if (m_marketStaleTimeoutMs == 0) return true;
+    std::shared_lock<std::shared_mutex> lock(m_priceMutex);
+    if (m_underlyingUpdateTime == 0) return false;
+    if (nowMs < m_underlyingUpdateTime) return true;  // clock skew: accept
+    return nowMs - m_underlyingUpdateTime <= m_marketStaleTimeoutMs;
+}
+
+bool OptionGrid::hasFreshOptionMarket(uint64_t nowMs) const {
+    if (m_marketStaleTimeoutMs == 0) return true;
+    std::shared_lock<std::shared_mutex> lock(m_gridMutex);
+    for (const auto& od : m_allOptions) {
+        if (!od) continue;
+        const uint64_t ts = od->getMarket().updateTime;
+        if (ts != 0 && (nowMs < ts || nowMs - ts <= m_marketStaleTimeoutMs))
+            return true;
+    }
+    return false;
 }
 
 void OptionGrid::setExpiryUnderlying(uint32_t expiry, const std::string& code) {
@@ -112,6 +142,8 @@ void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick
     mkt.bidSize = tick->bidqty(0);
     mkt.askSize = tick->askqty(0);
     mkt.underlyingPrice = getUnderlyingPrice();
+    mkt.updateTime = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
 
     // B12: Capture multi-level depth (up to 10 levels)
     for (int32_t i = 0; i < MAX_MARKET_DEPTH; ++i) {
@@ -175,7 +207,7 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
                 ed->setFutureMid(tick.price, futSpread);
             }
         }
-        onUnderlyingTick(tick.price);
+        onUnderlyingTick(tick.price, tick.updateTime);
         return;
     }
 
@@ -188,7 +220,7 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
                 ed->setFutureMid(tick.price, futSpread);
             }
         }
-        onUnderlyingTick(tick.price);
+        onUnderlyingTick(tick.price, tick.updateTime);
         return;
     }
 
@@ -204,6 +236,7 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
     mkt.bidSize = tick.bidQty;
     mkt.askSize = tick.askQty;
     mkt.underlyingPrice = getUnderlyingPrice();
+    mkt.updateTime = tick.updateTime;
 
     // Dynamic discovery: create if not exists
     {

@@ -17,6 +17,7 @@ namespace wt_option {
 
 enum class TradingStateType : uint8_t {
     Disabled = 0,       // channel lost / hot-cmd stop / session end / guard halt
+    Recovering,         // channel ready; waiting for broker snapshot/fresh underlying
     Normal,             // quoting
     SessionStopped,     // B4 mid-day section pause (quotes pulled)
     Panic               // risk-off: quotes cancelled, futures hedge kept alive
@@ -25,6 +26,7 @@ enum class TradingStateType : uint8_t {
 inline const char* toString(TradingStateType t) {
     switch (t) {
     case TradingStateType::Disabled:       return "Disabled";
+    case TradingStateType::Recovering:     return "Recovering";
     case TradingStateType::Normal:         return "Normal";
     case TradingStateType::SessionStopped: return "SessionStopped";
     case TradingStateType::Panic:          return "Panic";
@@ -45,6 +47,7 @@ struct TradingState {
     bool enabledFlag() const {
         switch (type) {
         case TradingStateType::Normal:         return channelReady && underlyingReady;
+        case TradingStateType::Recovering:     return false;
         case TradingStateType::Panic:          return channelReady;
         case TradingStateType::SessionStopped: return false;
         case TradingStateType::Disabled:       return false;

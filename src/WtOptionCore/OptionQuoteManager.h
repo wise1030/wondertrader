@@ -6,7 +6,8 @@
  * Enhanced with: incremental diffing, cancel throttle, cautious flipping,
  * scale factor, wait-for-cancels, PositionGuard/PositionOffsetMgr integration.
  *
- * Uses WT stra_quote/stra_cancel/stra_cancel_all/stra_buy/sell as底层API.
+ * OQM is framework-agnostic: all exchange operations must be injected through
+ * OrderGateway sender functions by OptionTradingGrid.
  */
 #pragma once
 
@@ -26,9 +27,6 @@ class PositionGuard;
 using PositionOffsetMgrPtr = std::shared_ptr<PositionOffsetMgr>;
 using PositionGuardPtr = std::shared_ptr<PositionGuard>;
 }
-
-// Forward declaration - IHftStraCtx defined in WT Includes
-namespace wtp { class IHftStraCtx; }
 
 namespace wt_option {
 
@@ -78,7 +76,7 @@ public:
 
     using GetTimeFn = std::function<double()>;
 
-    OptionQuoteManager(const std::string& code, const Config& cfg, wtp::IHftStraCtx* ctx);
+    OptionQuoteManager(const std::string& code, const Config& cfg);
     ~OptionQuoteManager() = default;
 
     // --- Core: update desired market -> send orders ---
@@ -115,9 +113,22 @@ public:
     using SendSingleFn = std::function<uint32_t(bool isBuy, double price, uint32_t qty)>;
     void setSendSingleFn(SendSingleFn fn) { m_sendSingle = std::move(fn); }
 
-    /// Called for every localid that enters OQM tracking, including ids issued
-    /// by the direct IHftStraCtx path.  The strategy uses this to keep
-    /// OrderAnomalyGuard / FillPriceChecker in sync with production OQM orders.
+    /// Injectable paired-quote sender.  Production supplies the strategy
+    /// gateway; tests may supply a deterministic sender.
+    using SendQuoteFn = std::function<std::pair<uint32_t, uint32_t>(
+        double bidP, uint32_t bidQ, double askP, uint32_t askQ)>;
+    void setSendQuoteFn(SendQuoteFn fn) { m_sendQuote = std::move(fn); }
+
+    /// Injectable cancel endpoints.  Production routes these through the same
+    /// strategy gateway as new orders.
+    using CancelOrderFn = std::function<bool(uint32_t localid)>;
+    using CancelAllFn = std::function<void()>;
+    void setCancelOrderFn(CancelOrderFn fn) { m_cancelOrder = std::move(fn); }
+    void setCancelAllFn(CancelAllFn fn) { m_cancelAll = std::move(fn); }
+
+    /// Called for every localid that enters OQM tracking.  The strategy uses
+    /// this to keep OrderAnomalyGuard / FillPriceChecker in sync with production
+    /// OQM orders submitted through OrderGateway.
     using OrderIssuedFn = std::function<void(bool isBuy, double price,
                                              uint32_t qty, uint32_t localid)>;
     void setOrderIssuedFn(OrderIssuedFn fn) { m_orderIssued = std::move(fn); }
@@ -178,6 +189,9 @@ private:
 
     PreTradeCheckFn m_preTradeCheck;   // A2
     SendSingleFn m_sendSingle;         // A4 test seam
+    SendQuoteFn m_sendQuote;           // gateway seam
+    CancelOrderFn m_cancelOrder;       // gateway seam
+    CancelAllFn m_cancelAll;           // gateway seam
     OrderIssuedFn m_orderIssued;       // production registration hook
 
     // --- Incremental diffing ---
@@ -222,7 +236,6 @@ private:
 
     std::string m_code;
     Config m_cfg;
-    wtp::IHftStraCtx* m_ctx;
     GetTimeFn m_getTime;
 
     bool m_active = false;

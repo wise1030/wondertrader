@@ -106,7 +106,7 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
     omCfg.exchange = m_exchange;
     omCfg.tick_size = od->getTickSize();  // now carries the real tick (B03)
     omCfg.right_flag = (od->getRight() == OR_Call) ? 1 : 0;  // B3
-    auto om = std::make_shared<OptionQuoteManager>(code, omCfg, m_hftCtx);
+    auto om = std::make_shared<OptionQuoteManager>(code, omCfg);
     if (m_quoteStats) om->setQuoteStatistics(m_quoteStats);
     if (m_preTradeFn) om->setPreTradeCheckFn(m_preTradeFn);   // A2
     if (m_optionFilterChain) om->setRiskFilterChain(m_optionFilterChain);
@@ -118,15 +118,43 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
         auto offset = m_positionOffsetLookup(code);
         if (offset) om->setPositionOffsetMgr(offset);
     }
-    if (m_orderIssuedFn) {
-        om->setOrderIssuedFn([this, code](bool isBuy, double px,
-                                           uint32_t qty, uint32_t localid) {
-            m_orderIssuedFn(code, isBuy, px, qty, localid);
+    // Route all exchange operations through the formal OrderGateway.  OQM has
+    // no raw IHftStraCtx fallback; when no gateway is injected it is inert.
+    if (m_orderGateway) {
+        om->setSendQuoteFn([this, code](double bidP, uint32_t bidQ,
+                                         double askP, uint32_t askQ) {
+            return m_orderGateway->submitQuote(code, bidP, bidQ, askP, askQ);
+        });
+        if (omCfg.quote_style == OptionQuoteManager::Config::QS_BUYSELL) {
+            om->setSendSingleFn([this, code](bool isBuy, double px,
+                                              uint32_t qty) -> uint32_t {
+                auto ids = m_orderGateway->submitOrder(code, isBuy, px, qty);
+                if (m_orderIssuedFn) {
+                    for (uint32_t id : ids) {
+                        if (id != 0)
+                            m_orderIssuedFn(code, isBuy, px, qty, id);
+                    }
+                }
+                return ids.empty() ? 0 : ids[0];
+            });
+        } else if (m_orderIssuedFn) {
+            // Paired-quote path: OQM trackOrder sees the returned side id.
+            om->setOrderIssuedFn([this, code](bool isBuy, double px,
+                                               uint32_t qty, uint32_t localid) {
+                m_orderIssuedFn(code, isBuy, px, qty, localid);
+            });
+        }
+        om->setCancelOrderFn([this](uint32_t localid) {
+            return m_orderGateway->cancelOrder(localid);
+        });
+        om->setCancelAllFn([this, code]() {
+            m_orderGateway->cancelAll(code);
         });
     }
     // B23 fix: wire the clock — TTL / min_intra_update / reject-retry timing
     // were all dead because m_getTime was never set
-    om->setGetTimeFn([ctx = m_hftCtx]() -> double {
+    om->setGetTimeFn([this, ctx = m_hftCtx]() -> double {
+        if (m_timeFn) return m_timeFn();
         return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
     });
     // B11 fix: give OTD a live position source so QM_CLOSE/auto-close work
@@ -313,7 +341,7 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
     OptionQuoteManager::Config futOmCfg = m_futureOqmCfg;
     futOmCfg.exchange = m_exchange;
     futOmCfg.tick_size = utd->getTickSize();
-    auto futOm = std::make_shared<OptionQuoteManager>(hedgeCode, futOmCfg, m_hftCtx);
+    auto futOm = std::make_shared<OptionQuoteManager>(hedgeCode, futOmCfg);
     if (m_quoteStats) futOm->setQuoteStatistics(m_quoteStats);
     if (m_preTradeFn) futOm->setPreTradeCheckFn(m_preTradeFn);   // A2
     if (m_futureFilterChain) futOm->setRiskFilterChain(m_futureFilterChain);
@@ -325,14 +353,39 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
         auto offset = m_positionOffsetLookup(hedgeCode);
         if (offset) futOm->setPositionOffsetMgr(offset);
     }
-    if (m_orderIssuedFn) {
-        futOm->setOrderIssuedFn([this, hedgeCode](bool isBuy, double px,
-                                                   uint32_t qty, uint32_t localid) {
-            m_orderIssuedFn(hedgeCode, isBuy, px, qty, localid);
+    if (m_orderGateway) {
+        futOm->setSendQuoteFn([this, hedgeCode](double bidP, uint32_t bidQ,
+                                                 double askP, uint32_t askQ) {
+            return m_orderGateway->submitQuote(hedgeCode, bidP, bidQ, askP, askQ);
+        });
+        if (futOmCfg.quote_style == OptionQuoteManager::Config::QS_BUYSELL) {
+            futOm->setSendSingleFn([this, hedgeCode](bool isBuy, double px,
+                                                      uint32_t qty) -> uint32_t {
+                auto ids = m_orderGateway->submitOrder(hedgeCode, isBuy, px, qty);
+                if (m_orderIssuedFn) {
+                    for (uint32_t id : ids) {
+                        if (id != 0)
+                            m_orderIssuedFn(hedgeCode, isBuy, px, qty, id);
+                    }
+                }
+                return ids.empty() ? 0 : ids[0];
+            });
+        } else if (m_orderIssuedFn) {
+            futOm->setOrderIssuedFn([this, hedgeCode](bool isBuy, double px,
+                                                       uint32_t qty, uint32_t localid) {
+                m_orderIssuedFn(hedgeCode, isBuy, px, qty, localid);
+            });
+        }
+        futOm->setCancelOrderFn([this](uint32_t localid) {
+            return m_orderGateway->cancelOrder(localid);
+        });
+        futOm->setCancelAllFn([this, hedgeCode]() {
+            m_orderGateway->cancelAll(hedgeCode);
         });
     }
     // B23 fix: wire the clock for the future OQM as well
-    futOm->setGetTimeFn([ctx = m_hftCtx]() -> double {
+    futOm->setGetTimeFn([this, ctx = m_hftCtx]() -> double {
+        if (m_timeFn) return m_timeFn();
         return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
     });
     utd->setQuoteManager(futOm);
