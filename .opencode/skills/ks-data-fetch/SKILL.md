@@ -104,9 +104,11 @@ WtOptionCore 回放最低要求：commodities 含 SHFE.cu（category 为期货/�
 
 ## 端到端期权 tick replay 数据准备清单
 
+一键脚本（推荐）：`src/WtOptionCore/replay/run_option_replay.sh`（KS缓存→TickConverter→期权DSB校验→WtBtRunner→p99/p99.9提取）。手动步骤如下：
+
 1. 拉 tick：`main.py --tick --products SHFE.cu --include-option --tick-dates <D>` → `dist/WtBtFutu/storage/his/ticks/SHFE/<D>/*.dsb`
-2. basefiles：生成后挂到 replay 配置 `replayer.basefiles`（参考 `dist/WtBtRunner/configbt_option.yaml`，module 用 `hft/libWtOptionCore.so`，strategy exchange=SHFE optionProduct=cu）
-3. 运行：`cd dist/WtBtRunner && ./WtBtRunner -c configbt_option.yaml -l logcfgbt.yaml`（模块/库路径按实际 dist 布局调整，必要时 `LD_LIBRARY_PATH` 指向 so 所在目录）
+2. basefiles：生成后挂到 replay 配置 `replayer.basefiles`（参考 `src/WtOptionCore/replay/configbt_option_replay.yaml`，module 用 `hft/libWtOptionCore.so`，strategy exchange=SHFE optionProduct=cu；dist/common 已含 SHFE.cu 期货品种元数据，期权合约由 tick 动态发现）
+3. 运行：`LD_LIBRARY_PATH=<repo>/src/build_all/build_x64/Debug/bin ./WtBtRunner.fresh -c configbt_option_replay.yaml -l logcfgbt_option.yaml`（fresh 二进制/模块为当日构建，dist 自带旧 .so 已备份 libWtOptionCore.so.bak_20260708）
 4. 延迟指标：HftOptionStrategy batch 日志输出 `p99/p99.9`（OptionTimeService+LatencyHistogram）；replay 脚本 `src/WtOptionCore/tests/test_replay_benchmark.cpp` 输出合成基线 p50/p95/p99/p999
 
 ## 已知限制
