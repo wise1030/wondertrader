@@ -367,12 +367,14 @@ OptionDataPtr OptionGrid::__createOption(const std::string& stdCode) {
     od->setExpiryData(ed);
 
     StrikeDataPtr sd = __findOrCreateStrike(expiry, strike);
-    // Wire option into strike
+    // Wire option into strike and keep the reverse link; scanner execution
+    // and parity-based strategies need the sibling leg from OptionData.
     if (sd) {
         if (right == OR_Call)
             sd->setCall(od);
         else
             sd->setPut(od);
+        od->setStrikeData(sd);
     }
 
     m_allOptions.push_back(od);

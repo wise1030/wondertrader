@@ -12,6 +12,10 @@
 #include "../OptionData.h"
 #include "../OptionScanCoordinator.h"
 #include "../OptionExpiryLifecycle.h"
+#include "../OptionGrid.h"
+#include "../StrikeData.h"
+#include "../ExpiryData.h"
+#include "../Share/fmtlib.h"
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
@@ -79,28 +83,34 @@ void test_factory_and_edge_scanners()
         scanner->onStart();
         ASSERT_TRUE(scanner->isActive());
 
-        // mid=10, theo=12 → edge 2.0 > 0.5, delta 0.5 in [0.1,0.9]
+        // Structural scanners need full grid context; isolated option updates
+        // must not pretend to be a butterfly/calendar/parity signal.
+        const bool structural = type == "ButterflyScanner" ||
+                                type == "VolSpreadScanner" ||
+                                type == "SyntheticFutureScanner";
+        const int baseHits = structural ? 0 : 1;
+
         auto opt = makeOption(9.0, 11.0, 12.0, 0.5);
         scanner->onOptionUpdate(opt.get());
-        ASSERT_EQ(hits.hits, 1);
-        ASSERT_TRUE(hits.last.option == opt.get());
-        ASSERT_TRUE(!hits.last.reason.empty());
-        ASSERT_TRUE(hits.last.signal > 0.0);
+        ASSERT_EQ(hits.hits, baseHits);
+        if (!structural) {
+            ASSERT_TRUE(hits.last.option == opt.get());
+            ASSERT_TRUE(!hits.last.reason.empty());
+            ASSERT_TRUE(hits.last.signal > 0.0);
+        }
 
-        // Low edge (0.2 < 0.5) must be filtered.
         auto thin = makeOption(9.0, 11.0, 10.2, 0.5);
         scanner->onOptionUpdate(thin.get());
-        ASSERT_EQ(hits.hits, 1);
+        ASSERT_EQ(hits.hits, baseHits);
 
-        // Delta outside [0.1,0.9] must be filtered.
         auto wing = makeOption(9.0, 11.0, 12.0, 0.95);
         scanner->onOptionUpdate(wing.get());
-        ASSERT_EQ(hits.hits, 1);
+        ASSERT_EQ(hits.hits, baseHits);
 
         // Panic disables signal dispatch.
         scanner->onPanic();
         scanner->onOptionUpdate(opt.get());
-        ASSERT_EQ(hits.hits, 1);
+        ASSERT_EQ(hits.hits, baseHits);
 
         scanner->removeListener(&hits);
         scanner->onStop();
@@ -119,7 +129,7 @@ void test_scanner_numeric_config()
     sc.min_edge = 5.0;          // raise threshold above the 2.0 edge
     sc.delta_min = 0.2;
     sc.delta_max = 0.6;
-    auto scanner = ScannerFactory::instance().createScanner("ButterflyScanner", sc);
+    auto scanner = ScannerFactory::instance().createScanner("LowBidsScanner", sc);
     ASSERT_TRUE(scanner != nullptr);
     scanner->setEnabled(true);
     scanner->onStart();
@@ -131,7 +141,7 @@ void test_scanner_numeric_config()
     ASSERT_EQ(hits.hits, 0);    // min_edge override honored
 
     sc.min_edge = 0.5;
-    auto scanner2 = ScannerFactory::instance().createScanner("ButterflyScanner", sc);
+    auto scanner2 = ScannerFactory::instance().createScanner("LowBidsScanner", sc);
     scanner2->setEnabled(true);
     scanner2->onStart();
     HitCounter hits2;
@@ -139,6 +149,107 @@ void test_scanner_numeric_config()
     scanner2->onOptionUpdate(opt.get());
     ASSERT_EQ(hits2.hits, 1);
 
+    std::cout << "  PASS" << std::endl;
+}
+
+// Real parity semantics: C-P+K vs underlying forward.
+void test_synthetic_future_scanner_semantics()
+{
+    std::cout << "=== test_synthetic_future_scanner_semantics ===" << std::endl;
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    auto sd = grid->findOrCreateStrike(202612, 4000.0);
+    auto ed = sd->getExpiryData();
+    ed->setUnderlyingPrice(4000.0);
+
+    OptionInfo ci; ci.code = "C4000"; ci.expiry = 202612; ci.strike = 4000; ci.right = OR_Call;
+    OptionInfo pi; pi.code = "P4000"; pi.expiry = 202612; pi.strike = 4000; pi.right = OR_Put;
+    auto call = std::make_shared<OptionData>(ci);
+    auto put = std::make_shared<OptionData>(pi);
+    OptionMarket cm, pm;
+    cm.bid = 10.0; cm.ask = 12.0; call->updateMarket(cm);
+    pm.bid = 9.0;  pm.ask = 11.0; put->updateMarket(pm);
+    call->setExpiryData(ed); put->setExpiryData(ed);
+    sd->setCall(call); sd->setPut(put);
+    call->setStrikeData(sd); put->setStrikeData(sd);
+
+    ScannerConfig sc; sc.name = "syn"; sc.enabled = true; sc.min_edge = 0.5;
+    auto scanner = ScannerFactory::instance().createScanner("SyntheticFutureScanner", sc);
+    scanner->setEnabled(true); scanner->onStart();
+    HitCounter hits; scanner->addListener(&hits);
+
+    // synthetic forward = 11 - 10 + 4000 = 4001, edge = 1
+    scanner->onOptionUpdate(call.get());
+    ASSERT_EQ(hits.hits, 1);
+    ASSERT_TRUE(hits.last.reason.find("parity") != std::string::npos);
+    ASSERT_TRUE(std::fabs(hits.last.signal - 1.0) < 1e-9);
+    std::cout << "  PASS" << std::endl;
+}
+
+// Real butterfly semantics: lower - 2*middle + upper.
+void test_butterfly_scanner_semantics()
+{
+    std::cout << "=== test_butterfly_scanner_semantics ===" << std::endl;
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    grid->getExpiryData(202612);
+
+    auto mk = [&](uint32_t exp, double strike, double bid, double ask) {
+        auto sd = grid->findOrCreateStrike(exp, strike);
+        OptionInfo ii; ii.code = fmt::format("C{}", (int)strike); ii.expiry = exp; ii.strike = strike; ii.right = OR_Call;
+        auto od = std::make_shared<OptionData>(ii);
+        OptionMarket m; m.bid = bid; m.ask = ask; od->updateMarket(m);
+        sd->setCall(od); od->setStrikeData(sd);
+        return od;
+    };
+    mk(202612, 3900, 0.9, 1.1);   // mid 1
+    mk(202612, 4000, 0.0, 0.0);   // invalid middle: no hit
+    mk(202612, 4100, 1.5, 1.7);   // mid 1.6
+
+    ScannerConfig sc; sc.name = "fly"; sc.enabled = true; sc.min_edge = 0.5;
+    auto scanner = ScannerFactory::instance().createScanner("ButterflyScanner", sc);
+    scanner->setEnabled(true); scanner->onStart();
+    HitCounter hits; scanner->addListener(&hits);
+    scanner->onTick(grid.get());
+    ASSERT_EQ(hits.hits, 0);       // middle book missing
+
+    // Fix middle book: fly = 1 - 2*1 + 1.6 = 0.6 → cheap short edge 0.6
+    auto midSd = grid->findOrCreateStrike(202612, 4000);
+    OptionInfo mi; mi.code = "C4000"; mi.expiry = 202612; mi.strike = 4000; mi.right = OR_Call;
+    auto mid = std::make_shared<OptionData>(mi);
+    OptionMarket mm; mm.bid = 0.8; mm.ask = 1.2; mid->updateMarket(mm);
+    midSd->setCall(mid); mid->setStrikeData(midSd);
+    scanner->onTick(grid.get());
+    ASSERT_EQ(hits.hits, 1);
+    ASSERT_TRUE(std::fabs(hits.last.signal - 0.6) < 1e-9);
+    std::cout << "  PASS" << std::endl;
+}
+
+// Real vol-spread semantics: far-expiry ATM IV minus front ATM IV.
+void test_volspread_scanner_semantics()
+{
+    std::cout << "=== test_volspread_scanner_semantics ===" << std::endl;
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    grid->setUnderlyingPrice(4000.0);
+
+    auto mk = [&](uint32_t exp, double iv) {
+        auto sd = grid->findOrCreateStrike(exp, 4000.0);
+        auto ed = sd->getExpiryData();
+        ed->setForwardReady(true); ed->setFitReady(true);
+        OptionInfo ii; ii.code = fmt::format("C{}_{}", exp, (int)iv*100); ii.expiry = exp; ii.strike = 4000; ii.right = OR_Call;
+        auto od = std::make_shared<OptionData>(ii);
+        OptionMarket m; m.bid = 10; m.ask = 12; od->updateMarket(m);
+        od->values(0).setImpliedVol(iv);
+        sd->setCall(od); od->setStrikeData(sd);
+    };
+    mk(202612, 0.18);
+    mk(202701, 0.22);
+
+    ScannerConfig sc; sc.name = "volspread"; sc.enabled = true; sc.min_edge = 0.01;
+    auto scanner = ScannerFactory::instance().createScanner("VolSpreadScanner", sc);
+    scanner->setEnabled(true); scanner->onStart();
+    HitCounter hits; scanner->addListener(&hits);
+    scanner->onTick(grid.get());
+    ASSERT_EQ(hits.hits, 1);
+    ASSERT_TRUE(std::fabs(hits.last.signal - 0.04) < 1e-9);
     std::cout << "  PASS" << std::endl;
 }
 
@@ -252,6 +363,9 @@ int main()
     std::cout << "========================================" << std::endl;
     test_factory_and_edge_scanners();
     test_scanner_numeric_config();
+    test_synthetic_future_scanner_semantics();
+    test_butterfly_scanner_semantics();
+    test_volspread_scanner_semantics();
     test_garch_scanner();
     test_scan_coordinator();
     test_expiry_lifecycle();

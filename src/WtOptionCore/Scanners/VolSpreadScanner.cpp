@@ -1,19 +1,47 @@
 #include "VolSpreadScanner.h"
+#include "../OptionGrid.h"
+#include "../StrikeData.h"
 #include <cmath>
 
 namespace wt_option {
 
 double VolSpreadScanner::scanOption(OptionData* opt) {
-    if (!m_active || !opt) return 0.0;
-    if (opt->getBid() <= 0 || opt->getAsk() <= 0) return 0.0;
-    double delta = std::abs(opt->greeks().delta());
-    if (delta < m_config.delta_min || delta > m_config.delta_max) return 0.0;
-    double theo = opt->getTheoPrice();
-    if (theo <= 0) return 0.0;
-    double mid = (opt->getBid() + opt->getAsk()) * 0.5;
-    double edge = std::abs(theo - mid);
-    if (edge < m_config.min_edge) return 0.0;
-    return edge;
+    // A vol spread is a cross-expiry relationship and cannot be computed from
+    // one option in isolation.  The real scan happens in onTick().
+    (void)opt;
+    return 0.0;
+}
+
+void VolSpreadScanner::onTick(const OptionGrid* grid) {
+    if (!m_active || !isEnabled() || !grid) return;
+
+    uint32_t baseExp = 0;
+    double baseIv = 0.0;
+    for (const auto& [exp, ed] : grid->expiries()) {
+        if (!ed || !isExpiryEnabled(exp) || !ed->isValuesReady()) continue;
+        StrikeDataPtr atm = const_cast<OptionGrid*>(grid)->getAtmStrike(exp);
+        if (!atm) continue;
+        const OptionData* od = atm->call() ? atm->call().get()
+                            : (atm->put() ? atm->put().get() : nullptr);
+        if (!od) continue;
+        const double iv = od->values(0).impliedVol();
+        if (!(iv > 0)) continue;
+        if (baseExp == 0) {
+            baseExp = exp;
+            baseIv = iv;
+            continue;
+        }
+
+        const double edge = std::fabs(iv - baseIv);
+        if (edge < m_config.min_edge) continue;
+        auto it = m_lastEdge.find(exp);
+        if (it != m_lastEdge.end() &&
+            std::fabs(edge - it->second) < m_config.min_edge * 0.5)
+            continue;
+        m_lastEdge[exp] = edge;
+        publishHit(const_cast<OptionData*>(od), edge,
+                   iv > baseIv ? "vol_spread_far_rich" : "vol_spread_far_cheap");
+    }
 }
 
 void VolSpreadScanner::onOptionUpdate(OptionData* od) {
@@ -23,7 +51,6 @@ void VolSpreadScanner::onOptionUpdate(OptionData* od) {
         publishHit(od, score, "vol_spread_edge");
 }
 
-// R6: factory registration — closes the "factory map empty" defect
 REGISTER_SCANNER("VolSpreadScanner", VolSpreadScanner);
 
 } // namespace wt_option

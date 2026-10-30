@@ -4,6 +4,7 @@
 #include "../optioncoretypes.h"
 #include <string>
 #include <memory>
+#include <map>
 
 namespace wt_option {
 
@@ -37,12 +38,14 @@ public:
     void onPanic() override { m_active = false; }
     void onOptionHit(OptionData* od, int32_t index) override { (void)index; onOptionUpdate(od); }
     void onOptionUpdate(OptionData* od) override;
+    void onTick(const OptionGrid* grid) override;   // true 3-strike butterfly scan
 
     double scanOption(OptionData* opt);
 
 private:
     Config m_config;
     OptionTraderContextPtr m_ctx;
+    std::map<uint32_t, double> m_lastEdge;  // per-expiry dedup for onTick hits
 };
 
 } // namespace wt_option
