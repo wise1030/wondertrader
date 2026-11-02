@@ -1,578 +1,570 @@
-# WtOptionCore - WonderTrader 期权做市引擎
+# WtOptionCore — WonderTrader 期权做市引擎
 
-> **2026-08 状态更新**（详细见 `analysis/diagnostic-report-2026-08-24.md` 与
-> `analysis/fix-plan-2026-08-24.md`、`.opencode/plans/wtoptioncore_quantbox_absorption_plan.md`）：
-> - 本 README 撰写于迁移期，部分描述已过期，以代码与上述文档为准。
-> - **已修复**: SPSC 多生产者 UB→双队列、tick 去重 string_view、forward 粘性+午夜回绕防护、
->   total_risk 公式、fee/tickSize/multiplier 注入、OQM 计数器 session 复位、filter MODIFIED 采纳、
->   panic 单一写者（TradingState 状态机）、combo 腿路由、Toxicity/Prediction 时钟注入等。
-> - **新增**: RiskFilterChain(5+B3 short限额)、RiskLimitsEx 预检/Greeks/保证金护栏接线、
->   FillPriceChecker/PositionGuard/PositionOffsetMgr 通电、OrderAnomalyGuard、DeltaHedgeExecutor(默认关)、
->   CommandBus 热指令、ConfigValidator 启动校验、PredictionEvaluator 闭环、PowerVolCurve 双曲线(R2)、
->   StrikeFinders(R3)、涨跌停护栏(R1)、FIFO PnL+加权入场价。
-> - **性能**: -O3/-flto、timer 源头 100ms 合并、GVV α=1 闭式快路径（拟合后 α 数据驱动，通用翼部查表仍延后）。
-> - **Scanner 子系统（2026-10-18 验收）**: 9 个 scanner 均已接入 `onOptionUpdate`/`onUnderlyingUpdate` 并 `publishHit`；连接器生命周期、数值参数、GARCH warmup、panic 门控均有验收测试。
-> - **配置新增键**: `orderManager.*.quote_style/enable_offset_guard`、`margin{}`、`pnl.fifo_mode`、
->   `delta_hedge{delta_per_lot}`、`orderManager.{option,future}.{wait_for_cancels,cancel_ack_timeout_ms,cancel_max_retries}`、
->   `riskLimits.maxShortCall/PutPerSymbol`、`pricer.blackCalc.volCurve.curve2_type`；
->   启动时未知键会 WARN（ConfigValidator）。
+WtOptionCore 是 WonderTrader 量化交易平台下的**期权做市引擎**，从 quantbox/optiontrader（longbeach 框架）迁移而来。以 C++17 共享库（`libWtOptionCore.so`）形式被 WtRunner/WtBtRunner 以 HFT 策略工厂插件动态加载，实现完整期权做市管线：
 
-### 2026-10-18 阶段二（架构/风险切片）
-
-- **Scanner 验收**：工厂注册、`setEnabled`/`onStart`/`onStop`/`onPanic` 生命周期、9 类 scanner 的 edge/delta 过滤、`publishHit` 事件、每类数值参数（`min_edge`/`delta_*`/`max_spread`/GARCH 参数）全部覆盖，`test_scanners` 通过。
-- **组件拆分**：`OptionScanCoordinator` 统一 scanner 生命周期/派发；`OptionHedgeCoordinator` 承接 delta 对冲决策/冷却/在途；`OptionExpiryLifecycle` 承接 refresh/purge/roll 与 session-end cancel；`OptionCommandHandlers` 承接 STOP/RESUME/PANIC/QMODE/ORDER/CANCEL；`StressAnalyzer` 提供 spot/vol/theta 情景压力。
-- **策略模式边界**：`OptionPricerMode` 明确 `CompositeMM`（做市）与 `GammaScalp`（gamma scalping）是两个独立策略 pricer，只共享 Black/vol 定价内核 `OptionPricer2`，不合并策略逻辑。
-- **Grid 状态归属**：`OptionGrid` 市场/定价状态、`OptionTradingGrid` 逐合约交易/OQM 状态、`ControllableTradingGrid` 执行/报价状态；跨线程只经 async 队列，worker 单写。详见下表。
-- **配置迁移**：`delta_hedge.minHedgeQty` 自动迁移到 `delta_per_lot` 并告警；`ConfigValidator` 通用遍历覆盖新键。
-- **测试**：`test_scanners`、`test_stress`、`test_hedge_coordinator` 新增，连同 `test_enhancements`/`test_ctg_ranking` 全过。
-- **未完成**：完整 SPAN/多 underlying 组合压力（当前已有组合 + per-expiry 情景压力）、到期强平/结算/移仓、GVV 数据化、回测 harness；`HftOptionStrategy` 仍承担 Shell 职责。
-
-### 2026-10-18 做市生命周期加固
-
-- **SpreadComboOrder / SynComboOrder 终态**：不再“发出即完成”；两腿/三腿必须 `filledQty >= desiredQty` 或全部终态且残量匹配才完成；任一腿撤单/拒单会撤其余腿并置 FAILED，不再静默留下裸腿；所有 hedge id 保留，可撤。
-- **Delta 对冲**：新增 `delta_hedge.delta_per_lot`（缺省从对冲合约乘数解析）；解析失败禁用并告警；在途 hedge 单未终态不重复发单。
-- **OQM 撤单 ack 看门狗**：`cancel_ack_timeout_ms` + `cancel_max_retries`；超时重发撤单，耗尽后 `cancelAll` 清扫并冻结该合约，直到终态回调。
-- **过期合约**：`daysToExpiry() < 0` 的合约清空报价并 deactivate，不再报价。
-- **数值/构建**：`thetaPerDay` 头文件参数语义修正；非有限 `theoVol` 不再回落 1%；发行构建改 `-march=x86-64-v3`（避免 `-march=native` 换机 SIGILL）。
-- **热参数**：`on_params_updated` 只置位，命令/TPS/QMode 在 async worker 应用，避免跨线程直写 grid/CTG。
-- **TPS**：`OptionQuoteManager::updateOrders` 返回本次实际发单/撤单数，不再恒返回 1。
-- **收盘/到期**：session_end 显式 `stra_cancel_all` 并告警非零 gross 持仓；`enable_auto_close` 不再受 delta 区间门控；过期合约不报价。
-- **配置/健壮性**：`ConfigValidator` 使用 `memberNames()` 通用遍历；`CommandBus` 异常兜底；MD overflow 有上限并计入 drops。
-- **测试**：新增 `test_oqm_cancel_timeout`、`test_spread_combo_state`，扩展 `test_delta_hedge_decide`/OQM TPS；`test_enhancements` / `test_ctg_ranking` 全过。
-
-## 概述
-
-WtOptionCore 是 WonderTrader 量化交易平台下的**期权做市引擎**，从 quantbox/optiontrader 项目迁移而来。作为一个 C++17 共享库 (`libWtOptionCore.so`)，它被 WtRunner 以 HFT 策略工厂插件方式动态加载，实现了完整的期权做市管线：合约数据网格、Black-Scholes/Black76 定价、GVV 波动率曲面、组合风险/Greeks 聚合、订单管理、PnL 跟踪，以及一套套利/做市扫描器。
+**行情接入 → 异步事件处理 → 3 级合约网格 → 平价合成远期 + Black76 反推 IV → GVV 波动率曲面拟合 → 组合 Greeks 风控 → 双边报价/对冲执行 → PnL 跟踪**，并附带 9 类套利/做市扫描器与一整套回测验证工具链。
 
 支持三种期权业务场景：
-- **商品期货期权** (SHFE/DCE/INE)：定价标的=期货合约，对冲标的=同一期货合约
-- **郑州商品期权** (CZCE)：C/P 双品种自动发现 (如 SRC+SRP)
-- **股指期权** (CFFEX IO/MO/HO)：定价标的=现货指数（不可交易），对冲标的=股指期货（不同月份分别对冲）
 
-## 架构
+| 场景 | 交易所 | 定价标的 | 对冲标的 |
+|------|--------|---------|---------|
+| 商品期货期权 | SHFE / DCE / INE | 对应月份期货 | 同一期货合约 |
+| 郑州商品期权 | CZCE | C/P 双品种自动发现（如 SRC+SRP） | 对应期货 |
+| 股指期权 | CFFEX IO/MO/HO | 现货指数（不可交易） | 股指期货（分月对冲） |
 
-```
-Market Tick (CTP/XQP)
-    │
-    ▼
-OptionAsyncEventProcessor (异步事件队列 + worker线程)
-    │  事件按优先级桶排序: Session > Channel > Position > Trade > Order > Timer > Tick
-    │  Tick 去重 (unordered_map<const char*>)
-    │  on_batch_complete 始终执行 (即使无 tick, 也能处理 trade/position 事件)
-    │
-    ▼
-OptionGrid.onTick() -> 合约自动发现 -> 市场快照更新
-    │
-    ▼ (on_batch_complete, 防抖 debounce)
-CompositeOptionPricer.computeValues() -> FAST/SLOW path
-    │                                    ├── initValuesCompute (forward + maturity + risk greeks)
-    │                                    ├── BlackCalc / Black76 / BlackScholes (定价)
-    │                                    ├── GvvVolCurve / LinearVolCurve (波动率曲面)
-    │                                    ├── computeOurMarkets -> desired markets
-    │                                    └── OptionGrid.__notifyComputeCompleted
-    │                                         └── CTG listener -> refresh() (自动)
-    │
-    ▼
-ControllableTradingGrid.refresh() -> check_markets -> rank -> TPS限流
-    │  排序: isBest(+5/+1) + crossing(+10) + delta + spread + expiry + type权重
-    │  TPS: 正常限流 + Panic增强 + Drop重试 (retainedDrops 保留)
-    │
-    ▼
-OptionQuoteManager.updateOrders() -> stra_quote / stra_buy / stra_sell
-    │  ├── RiskFilterChain (MaxOrderSize/MinSellPrice/MaxPosition/MaxCancel/MaxNewOrders)
-    │  ├── PositionGuard 检查
-    │  └── 增量 diffing + 撤单节流
-    │
-    ▼
-OptionRisk -> 组合Greeks聚合 -> 风控限制 -> panic/widen
-    │
-    ▼
-PnlTracker -> mark-to-mid PnL -> PnlLimitSignal -> Auto-panic
-```
+---
 
-## 核心组件
+## 目录
 
-### 引擎层
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| HftOptionStrategy | HftOptionStrategy.h/.cpp | HFT 策略入口，协调所有组件 |
-| HftOptionStraFact | HftOptionStraFact.cpp | DLL 工厂，供 WtRunner 动态加载 |
-| OptionAsyncEventProcessor | OptionAsyncEventProcessor.h/.cpp | 异步事件队列 + worker 线程，桶排序 + tick 去重 + 异常保护 |
-| WtOptEngine | WtOptEngine.h/.cpp | 期权交易引擎 (legacy 路径) |
-| WtOptContext | WtOptContext.h/.cpp | 策略上下文 (legacy 路径) |
+1. [系统架构](#系统架构)
+2. [核心模块](#核心模块)
+3. [IV 定价链路（平价远期 → Black76 → GVV）](#iv-定价链路)
+4. [线程模型与状态归属](#线程模型与状态归属)
+5. [配置参考](#配置参考)
+6. [回测与 Replay 验证](#回测与-replay-验证)
+7. [构建与测试](#构建与测试)
+8. [文件清单](#文件清单)
+9. [迁移历史](#迁移历史)
 
-### 数据网格 (3级: Expiry -> Strike -> Call/Put)
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| OptionGrid | OptionGrid.h/.cpp | 3级期权数据网格，tick 驱动合约发现 |
-| OptionData | OptionData.h/.cpp | 单合约数据: 10档行情 + 计算值 + 监听器 |
-| ExpiryData | ExpiryData.h/.cpp | 到期月数据: 日历、forward、maturity、利率 |
-| StrikeData | StrikeData.h/.cpp | 行权价层: call/put 对 |
+---
 
-### 定价层
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| CompositeOptionPricer | CompositeOptionPricer.h/.cpp | 做市定价器 (FAST/SLOW, alpha/risk调整) |
-| OptionPricer2 | OptionPricer2.h/.cpp | Black76/GVV 定价器 (支持 OpenMP 并行) |
-| BlackCalc | BlackCalc.h/.cpp | 统一 BS/Black76 计算 |
-| GvvVolCurve | GvvVolCurve.h/.cpp | GVV 波动率曲面 (WLS3 替代 GSL) |
-| PeriodicCurveFitter | PeriodicCurveFitter.h/.cpp | 定时波动率曲面拟合 (period 间隔控制) |
-
-### 风险层
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| OptionRisk | OptionRisk.h/.cpp | 组合 Greeks 聚合 + 对冲 delta |
-| OptionRiskData | OptionRiskData.h/.cpp | 单合约仓位 Greeks (dirty flag 增量更新) |
-| OptionExpiryGreeks | OptionExpiryGreeks.h/.cpp | 到期月 Greeks 聚合 |
-
-### 执行层
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| ControllableTradingGrid | ControllableTradingGrid.h/.cpp | 执行调度: 排序 + TPS限流 + Panic模式 + Drop重试 |
-| OptionQuoteManager | OptionQuoteManager.h/.cpp | 单合约订单生命周期 + STP + late fill + 增量diffing |
-| check_markets | check_markets.h/.cpp | desired vs current 市场比较 |
-
-### 信号层
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| ToxicitySignal | Signals/RiskSignals.h/.cpp | 毒性流检测 (adverse fills + 自动 widen/panic) |
-| PnlLimitSignal | Signals/RiskSignals.h/.cpp | 日内 PnL 限制 (超限 -> auto panic) |
-| VegaFlowSignal | Signals/AlphaSignals.h/.cpp | Vega 流信号 |
-| DeltaFlowSignal | Signals/AlphaSignals.h/.cpp | Delta 流信号 |
-| ForwardSpreadSignal | Signals/AlphaSignals.h/.cpp | Forward spread EMA 信号 |
-
-### 风控增强模块
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| RiskFilterChain | RiskFilterChain.h/.cpp | 可组合订单过滤器链 (5个过滤器, 配置驱动) |
-| PositionOffsetMgr | PositionOffsetMgr.h/.cpp | 策略侧可平量跟踪 (平今/平昨/开仓) |
-| PositionGuard | PositionGuard.h/.cpp | 持仓不一致检测 (安全护栏) |
-| FillPriceChecker | FillPriceChecker.h/.cpp | 成交价偏离监控 (Warning/Panic) |
-| RiskLimitsEx | RiskLimitsEx.h/.cpp | 扩展预交易风控检查 |
-
-### 辅助组件
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| PnlTracker | PnlTracker.h/.cpp | 单合约 tick-by-tick mark-to-mid PnL |
-| AttributePublisher | AttributePublisher.h/.cpp | 结构化属性发布 (WTSLogger) |
-| QuoteStatistics | QuoteStatistics.h/.cpp | 报单统计 (回调驱动, 借鉴 BilateralQuoteStats) |
-| ExpirationSimulator | ExpirationSimulator.h/.cpp | 到期 PnL 模拟 |
-| OptionValueWriter | OptionValueWriter.h/.cpp | 定时 CSV 记录理论值/Greeks |
-| Predictor | Predictor.h | 预测器基础设施 (IPredictor + TriggerEngine) |
-
-## 线程模型
+## 系统架构
 
 ```
-TraderAdapter 回调线程          ShareManager 监控线程        Async Worker 线程
-    │                               │                          │
-    ├─ on_tick (enqueue)            ├─ on_params_updated       ├─ 事件桶排序
-    ├─ on_trade (enqueue)           │  (读写 atomic params)     ├─ Session/Channel/Position
-    ├─ on_order (enqueue)                                      ├─ Trade/Order/Timer
-    ├─ on_position (enqueue)                                   ├─ Tick 去重 + batch
-    ├─ on_channel_ready/lost (enqueue)                        ├─ computeValues (防抖)
-    └─ on_session_begin/end (enqueue)                          ├─ risk update + panic
-                                                                ├─ scanner dispatch
-                                                                ├─ CTG refresh + drain
-                                                                └─ attribute publish
+Market Tick / Order / Trade / Position 回调 (WtRunner 主线程或回测 replayer)
+    │
+    ▼
+OptionAsyncEventProcessor                ← 回调只入队，绝不在回调线程直写状态
+    │  双队列: MD SPSC 无锁队列 + Trader mutex 队列
+    │  事件优先级桶: Session > Channel > Position > Trade > Order > Timer > Tick
+    │  Tick 按合约去重 (保留最新)  → batch
+    ▼
+Worker 线程 (唯一状态写者)
+    │
+    ├── on_tick → OptionGrid → 合约自动发现 / 盘口快照 / per-expiry 标的路由
+    │
+    ├── on_timer → PeriodicCurveFitter → AsyncVolFitter(SingleFlightTaskRunner)
+    │       └── 平价合成远期 + Black76 反推 IV → GVV 拟合 → 发布曲线
+    │
+    ├── on_batch_complete (始终执行, 防抖)
+    │       └── CompositeOptionPricer.computeValues()  (FAST/SLOW 双速)
+    │             ├── initValuesCompute (forward / maturity / discount)
+    │             ├── BlackCalc (Black76) × GVV 曲线 → 理论价 + Greeks
+    │             ├── alpha 信号调整 (vega/delta/ATM flow/front spread/roll)
+    │             └── computeOurMarkets → desired bid/ask
+    │
+    ├── ControllableTradingGrid.refresh()
+    │       └── check_markets → 排序(isBest/crossing/δ/spread/expiry) → TPS 限流
+    │             └── OptionQuoteManager.updateOrders()
+    │                   ├── RiskFilterChain (5 过滤器)
+    │                   ├── PositionGuard / FillPriceChecker 预检
+    │                   └── 增量 diffing → OrderGateway → stra_quote/buy/sell
+    │
+    ├── OptionRisk → 组合 Greeks 聚合 → 风险限额 → panic / widen
+    ├── OptionScanCoordinator → 9 类 scanner 派发 → ScannerHit → CTG 执行
+    ├── OptionHedgeCoordinator → delta 对冲决策 / 冷却 / 在途抑制
+    └── PnlTracker → mark-to-mid → PnlLimitSignal → 自动 panic
 ```
-
-**线程安全保证**:
-- `_positions` / `_pnlPendingInit`: 仅 worker 线程访问 (on_position 已改为 enqueue)
-- `_traderCtx->enabled` / `panicked`: `std::atomic<bool>`
-- `_channelReady` / `_initialized` / `_tickCount`: `std::atomic`
-- `OptionGrid` 容器: `std::shared_mutex`
-- `worker_loop`: `try/catch` 包裹，异常不崩溃
-
-## 配置文件
-
-完整配置参见 `config/option_strategy_full.json`。主要配置项:
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| exchange | string | - | 交易所 (如 "SHFE", "CFFEX", "CZCE") |
-| futuresProduct | string | - | 期货品种 (如 "ag", "IF", "SR") |
-| optionProduct | string | 自动推导 | 期权品种 (不配则按交易所规则自动推导) |
-| underlyingCode | string | - | 全局定价标的 (期货合约或指数) |
-| underlyingType | string | "future" | 标的类型: "future" 或 "index" |
-| riskFreeRate | double | 0.03 | 无风险利率 (flat) |
-| riskFreeRateCurve | array | [] | 利率期限结构 [{days, rate}] |
-| maxTPS | int | 50 | 每秒最大交易数 |
-| minComputeInterval | double | 0.02 | 最小计算间隔 (秒) |
-| use_parallel | bool | false | 启用 OpenMP 并行定价 |
-| sessionSchedule | object | - | 盘中停止调度 |
-| pricer | object | - | 定价器参数 (含 volCurve.fitter) |
-| orderManager | object | - | OQM 参数 + riskFilters 风控过滤器 |
-| expiries | array | - | 到期月配置 (含 per-expiry underlyingCode/hedgeCode) |
-| riskLimits | object | - | 扩展风控参数 (RiskLimitsEx) |
-| signals | object | - | Alpha + Risk 信号 |
-| scanners | array | - | 扫描器列表；每项支持 `type`/`name`/`enable`/`priority`、`min_edge`/`delta_min`/`delta_max`/`max_spread`/`min_size`、GARCH `garch_*`/`warmup_returns`/`annualization_factor` |
-| optionValueWriter | object | - | 值记录器配置 |
-
-### Scanner 验收（2026-10-18）
-
-9 类 scanner 均通过 `ScannerFactory` 注册，生命周期为 `setEnabled(config) → onStart() → onOptionUpdate() → onStop()/onPanic()`。
-`onOptionUpdate` 调用各自的 `scanOption`，分数 > `min_edge` 时通过 `publishHit` 向 `ControllableTradingGrid` 发 `ScannerHitEvent`；
-数值参数从 `scanners[]` 读取（此前工厂桥接忽略所有参数）；`expiryOverrides[].enabled` 由 `OptionScanCoordinator` 在派发前按 expiry 过滤。GARCH 需 `warmup_returns` 个 underlying 更新后才出信号。
-验收程序：`test_scanners`（工厂/生命周期/信号/参数/GARCH/协调器/到期生命周期）。
-
-### 阶段二组件（2026-10-18）
-
-- `OptionScanCoordinator`：scanner 生命周期与派发的单一归属；
-- `OptionHedgeCoordinator`：delta 对冲决策、冷却、在途订单；
-- `OptionExpiryLifecycle`：session begin 的 refresh/purge/roll、session end 的 cancelAll/持仓告警；
-- `StressAnalyzer`：spot/vol/theta 情景压力，每 60s 输出 `STRESS worst=...`。
-- 仍未做：完整 SPAN/多 underlying 组合压力、到期强平/结算/移仓、GVV 数据化、回测 harness。Composite/Gamma 是独立策略 pricer，不做合并；Grid 三层状态归属见下表。
 
 ### Grid 三层状态归属
 
 | 层 | 拥有的状态 | 写入者 | 读取者 |
 |---|---|---|---|
-| `OptionGrid` | 合约发现、expiry/strike、盘口快照、定价输出 | async worker（pricer/tick） | pricer、scanner、strategy |
-| `OptionTradingGrid` | 每 option/underlying 的 OTD、OQM（订单、持仓、QuoteMode） | worker（回调入队后） | CTG、strategy |
-| `ControllableTradingGrid` | desired quote/执行、scanner 注册、TPS/状态机 | worker | CTG 自身、strategy |
+| `OptionGrid` | 合约发现、expiry/strike、盘口快照、定价输出 | async worker | pricer、scanner、strategy |
+| `OptionTradingGrid` (OTD/UTD) | 每 option/underlying 的 OQM（订单、持仓、QuoteMode） | worker | CTG、strategy |
+| `ControllableTradingGrid` (CTG) | desired quote/执行、scanner 注册、TPS/状态机 | worker | CTG 自身、strategy |
 
-约束：MD/交易回调只入队，不在回调线程直写上述状态；`HftOptionStrategy` 作为 Shell 只做装配/生命周期/回调路由。
+约束：MD/交易回调只入队；`HftOptionStrategy` 作为 Shell 只做装配/生命周期/回调路由。
 
 ### 策略 pricer 边界
 
-- `pricerType=composite_mm` → `CompositeOptionPricer`，做市报价/alpha/风控调整；
-- `pricerType=gammascalp` → `GammaScalpOptionPricer`，gamma scalping + 动态对冲；
-- 两者共享 `OptionPricer2` 的 Black/GVV/vol 计算，但策略状态、报价/对冲逻辑独立，禁止合并为单一 pricer。
+- `pricerType=composite_mm` → `CompositeOptionPricer`：做市报价 + alpha + 风控调整
+- `pricerType=gammascalp` → `GammaScalpOptionPricer`：gamma scalping + 动态对冲
+- 两者共享 `OptionPricer2` 的 Black/GVV/vol 内核，策略状态与报价逻辑各自独立，禁止合并
 
-### Vol Curve Fitter 配置 (`pricer.blackCalc.volCurve.fitter`)
+---
 
-控制波动率曲面拟合的时机和参数：
+## 核心模块
 
-```json
-"blackCalc": {
-    "volCurve": {
-        "fitter": {
-            "start_time": 0,
-            "end_time": 86400,
-            "period": 60,
-            "decay_window": 300,
-            "threshold": 0,
-            "fit_all_expiries": false,
-            "good_points_thresh": [
-                {"days": 0, "thresh": 3}
-            ]
-        }
-    }
-}
-```
+### 1. 引擎入口层
 
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| start_time | 0 | 拟合窗口起始 (秒, 0=全天开始, 支持夜盘) |
-| end_time | 86400 | 拟合窗口结束 (秒, 86400=全天结束) |
-| period | 60 | 拟合周期 (秒) |
-| decay_window | 300 | 衰减窗口 (秒, 旧数据权重衰减) |
-| threshold | 0 | 最低期权中间价阈值 (低于此价不参与拟合) |
-| fit_all_expiries | false | 是否拟合所有到期月 (false=仅可拟合的) |
-| good_points_thresh | [{days:0, thresh:3}] | 有效点数阈值 (按天数插值) |
-
-### OrderManager 配置 (`orderManager`)
-
-```json
-"orderManager": {
-    "riskFilters": {
-        "option": { ... },
-        "future": { ... }
-    },
-    "option": { ... },
-    "future": { ... }
-}
-```
-
-#### RiskFilterChain 配置 (`orderManager.riskFilters`)
-
-按品种 (option/future) 独立配置 5 个可组合过滤器。`enabled=false` 时该品种过滤器不激活。
-
-```json
-"riskFilters": {
-    "option": {
-        "enabled": true,
-        "max_order_size": 100,
-        "max_order_size_reject": false,
-        "min_sell_price": 0.0001,
-        "max_position": 50,
-        "max_position_mode": 0,
-        "max_cancel_soft": 100,
-        "max_cancel_hard": 200,
-        "max_new_orders_hard_flat": 100,
-        "max_new_orders_reject": 200
-    },
-    "future": {
-        "enabled": true,
-        "max_order_size": 100,
-        "max_order_size_reject": false,
-        "min_sell_price": 0.0001,
-        "max_position": 10,
-        "max_position_mode": 0,
-        "max_cancel_soft": 100,
-        "max_cancel_hard": 200,
-        "max_new_orders_hard_flat": 100,
-        "max_new_orders_reject": 200
-    }
-}
-```
-
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| enabled | false | 是否启用该品种的过滤器链 |
-| max_order_size | 100 | 单笔最大下单量 |
-| max_order_size_reject | false | 超限时 true=拒绝, false=截断到限制 |
-| min_sell_price | 0.0001 | 最低卖价 (防止零价或负价) |
-| max_position | 0 | 最大持仓限制 (0=不启用此过滤器, 用 OQM 自身的 check_potential_position) |
-| max_position_mode | 0 | 0=REJECT(拒绝), 1=ALLOW(允许), 2=MODIFY(截断到最大) |
-| max_cancel_soft | 100 | 撤单软限制 (超过时告警但不阻止) |
-| max_cancel_hard | 200 | 撤单硬限制 (超过时阻止撤单) |
-| max_new_orders_hard_flat | 100 | 新单数达此限后进入硬平仓模式 |
-| max_new_orders_reject | 200 | 新单数达此限后拒绝新单 |
-
-**过滤器执行顺序**: MaxOrderSize -> MinSellPrice -> MaxPosition -> MaxCancel -> MaxNewOrders
-
-#### OQM 参数 (`orderManager.option` / `orderManager.future`)
-
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| enable_quote_api | true | 使用双边报价 API (false=拆分为买单+卖单) |
-| avoid_trade | true | 避免成交 (desired=current 时跳过) |
-| check_potential_position | false | 检查潜在持仓 (OQM 自身的仓位限制) |
-| leave_outer_orders | true | 保留外层订单 (不撤非最优价位) |
-| hard_flat_after_n_fills | -1 | N 次成交后硬平仓 (-1=不启用) |
-| reject_max_new_orders | -1 | 新单拒绝阈值 (-1=不启用) |
-| cancel_timeout_ms | 3000 | 撤单超时 (毫秒) |
-| max_orders_per_code | 10 | 每合约最大订单数 |
-| stp_enabled | true | 自成交保护 (STP) |
-| ttl_ms | 5000 | 订单存活时间 (毫秒, 超时自动撤单) |
-
-### 到期月配置 (`expiries`)
-
-每个到期月可独立配置定价标的和对冲标的：
-
-```json
-"expiries": [
-    {
-        "expiry": 202608,
-        "enable": true,
-        "underlyingCode": "SHFE.ag.2608",
-        "hedgeCode": "SHFE.ag.2608",
-        "secondaryHedgeCodes": [],
-        "delta_min": 0.05,
-        "delta_max": 0.95,
-        "sprd_fwd": 0.01,
-        "sprd_atmvol": 0.1,
-        "sprd_corr": 0.0,
-        "max_pos_fut": 10,
-        "max_pos_stk": 50,
-        "max_pos_opt": 50,
-        "max_qsize": 5,
-        "enable_auto_close": false,
-        "close_pos_thresh": 0
-    }
-]
-```
-
-| 字段 | 说明 |
-|------|------|
-| expiry | 到期月 YYYYMM |
-| enable | 是否启用该到期月 |
-| underlyingCode | 该到期月的定价标的 (空=用全局 underlyingCode) |
-| hedgeCode | 该到期月的对冲标的 (空=同 underlyingCode) |
-| secondaryHedgeCodes | 次要对冲标的列表 |
-| delta_min/max | delta 报价范围 (QM_AUTO 模式下生效) |
-| sprd_fwd | forward 价差参数 |
-| sprd_atmvol | ATM vol 价差参数 |
-| sprd_corr | 相关系数 |
-| max_pos_fut/stk/opt | 期货/行权价/期权持仓限制 |
-| max_qsize | 最大报价手数 |
-| enable_auto_close | 是否启用自动平仓 |
-| close_pos_thresh | 平仓阈值 |
-
-### Hot-param 运行时控制
-
-通过 ShareManager 共享内存热更新:
-
-| 参数 | 类型 | 说明 |
+| 组件 | 文件 | 职责 |
 |------|------|------|
-| wgt_vegaflow | double | Vega 流权重 |
-| wgt_frontfut_skew | double | 前月偏度权重 |
-| wgt_deltaflow | double | Delta 流权重 |
-| wgt_atmsig | double | ATM 信号权重 |
-| wgt_rollema | double | 展仓 EMA 权重 |
-| sticky_base | double | 粘性基准 |
-| improve_retreat_ratio | double | 改进/撤退比 |
-| max_tps | int32 | 最大 TPS |
-| command | int32 | 0=正常, 1=停止, 2=恐慌, 3=恢复 |
-| qmode_override | int32 | 0=无, 1=ON, -1=OFF, 2=CLOSE |
-| manual_order | string | 手动下单: "B,code,price,qty" / "S,..." / "C,code" |
+| HftOptionStrategy | HftOptionStrategy.h/.cpp | HFT 策略入口（Shell）：装配所有组件、生命周期、回调路由、executeQuote/Order/Cancel 桥接到 IHftStraCtx |
+| HftOptionStraFact | HftOptionStraFact.cpp | DLL 工厂，供 WtRunner `strategies.hft[]` 动态加载 |
 
-### 期权品种自动推导
+### 2. 异步事件处理
 
-根据交易所和期货品种自动推导期权品种，无需手动配置 `optionProduct`：
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| OptionAsyncEventProcessor | OptionAsyncEventProcessor.h/.cpp | 双队列（MD SPSC + Trader mutex）、优先级桶排序、tick 按合约去重、overflow 有界背压、`on_batch_complete` 始终执行、worker 异常兜底 |
+| SingleFlightTaskRunner | SingleFlightTaskRunner.h | 昂贵任务（曲线拟合）单飞执行，过期快照直接丢弃 |
+| LatencyHistogram | LatencyHistogram.h | tick→quote 延迟直方图，batch 日志输出 p50/p95/p99/p99.9 |
+| OptionTimeService | OptionTimeService.h | 连续时钟（跨午夜回绕检测）、FAST/SLOW 计算调度、timer 100ms 源头合并 |
+| TradingState | TradingState.h | 统一交易状态机（Normal/Recovering/Disabled + panicked），enabled/panicked 唯一写者 |
 
-| 交易所 | 期货品种 | 期权品种 | 规则 |
-|--------|---------|---------|------|
-| SHFE/INE/DCE | ag, cu, m | ag_o, cu_o, m_o | 期货品种 + "_o" |
-| CZCE | SR | SRC, SRP | 期货品种 + "C"/"P" (双品种发现) |
-| CFFEX | IF, IC, IH | IO, MO, HO | 固定映射表 |
+### 3. 数据网格（3 级：Expiry → Strike → Call/Put）
 
-### 三种业务场景配置示例
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| OptionGrid | OptionGrid.h/.cpp | 3 级网格、tick 驱动合约自动发现、per-expiry 标的路由、平价合成 ATM forward（`__getBestSyntheticPrice`）、`refreshExpiryDays` |
+| OptionData | OptionData.h/.cpp | 单合约：盘口/last、计算值双缓冲（atomic swap）、`getMid()`（双边缺失回退 last） |
+| ExpiryData | ExpiryData.h/.cpp | 日历（节假日/周末感知交易日计数）、forward、maturity（下限 1/252）、discount factor、利率曲线 |
+| StrikeData | StrikeData.h/.cpp | 行权价层 call/put 对（scanner 与 parity 策略依赖 sibling 腿） |
+| OptionTradingData / UnderlyingTradingData | OptionTradingData.* / UnderlyingTradingData.* | 交易域状态：OQM、持仓、QuoteMode、multiMarket |
 
-**商品期权 (SHFE.ag, 1:1)**:
-```json
-{
-    "exchange": "SHFE",
-    "futuresProduct": "ag",
-    "underlyingCode": "SHFE.ag.2608",
-    "underlyingType": "future",
-    "expiries": [{"expiry": 202608, "enable": true}]
-}
+### 4. 定价与波动率
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| BlackCalc | BlackCalc.h/.cpp | 统一 BS/Black76 计算：d1=ln(F/K)/σ√T+½σ√T，value/delta/gamma/vega/vanna/theta/volga/rho |
+| BlackImpliedCalculator | BlackImpliedCalculator.h/.cpp | Black76 隐含波动率 Brent 求解（PriceError 残差函数） |
+| OptionPricer2 | OptionPricer2.h/.cpp | 定价内核：forward/maturity/discount 装配、理论价 + Greeks、**per-strike 平价合成远期反推 IV**（`computeImpliedValues`）、支持 OpenMP |
+| GvvVolCurve | GvvVolCurve.h/.cpp | GVV 波动率曲面：WLS3 栈上回归 + Brent α 搜索、α=1 闭式快路径、log-moneyness 约定 x=ln(K/F)、归一化输出 iv/atmVol、判别式负值防护 |
+| LinearVolCurve / ConstantVolCurve / PowerVolCurve | 同名文件 | 备用曲线：线性 / 常数 / 幂律双曲线 |
+| PeriodicCurveFitter | PeriodicCurveFitter.* | 拟合调度（period/decay_window/start/end、good-points 阈值、ups+downs 象限检查） |
+| AsyncVolFitter | AsyncVolFitter.h | 快照收集 → SingleFlightTaskRunner 异步拟合 → 完成后发布曲线版本 |
+| IVolCurve | IVolCurve.h | 曲线接口（dataset_t / fit / eval） |
+
+### 5. 执行与订单
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| ControllableTradingGrid | ControllableTradingGrid.* | 执行调度：refresh → check_markets → 排序（isBest+5/+1、crossing+10、delta、spread、expiry、类型权重）→ TPS 限流（panic 增强）→ dropped-quote 保留重试 |
+| OptionQuoteManager | OptionQuoteManager.* | 单合约订单生命周期：增量价位 diffing、撤单三层节流、STP 自成交保护、late-fill 检测、cancel ack 看门狗（`cancel_ack_timeout_ms`+重试）、wait-for-cancels、谨慎翻面、TPS 实返计数 |
+| OrderGateway | OrderGateway.h | 下单/撤单统一出口（实盘→IHftStraCtx，回测→HftMocker） |
+| OptionTradingGrid | OptionTradingGrid.* | OTD/UTD 容器、QuoteExecutor 桥 |
+| BaseOrder / OptionOrder | BaseOrder.* / OptionOrder.* | 订单状态机、ValuesAtIssue、腿级 PnL |
+| OptionOrderInfo / FutureOrderInfo | 同名文件 | 订单快照 |
+| ComboOrders | ComboOrders.* | 多腿组合单：SpreadCombo（两腿）/ SynCombo（三腿）；**同时多腿发出**，任一腿撤/拒→撤其余腿并置 FAILED，终态要求 filledQty≥desiredQty 或残量匹配，杜绝裸腿 |
+| check_markets | check_markets.* | desired vs current 市场比较（UT_NONE/NEW/MODIFY/CANCEL） |
+
+### 6. 风控
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| OptionRisk | OptionRisk.* | 组合 Greeks 聚合、hedge 仓位维护、风险限额 |
+| OptionRiskData | OptionRiskData.* | 单合约仓位 Greeks（dirty flag 增量更新） |
+| OptionExpiryGreeks | OptionExpiryGreeks.* | 到期月 Greeks 聚合 |
+| RiskFilterChain | RiskFilterChain.* | 5 个可组合过滤器（MaxOrderSize/MinSellPrice/MaxPosition/MaxCancel/MaxNewOrders），配置驱动、REJECT 短路 |
+| RiskLimitsEx | RiskLimitsEx.* | 预交易风控：单笔/金额限制、clearly-erroneous 价格检查、Greeks 限额（Delta/Gamma/Vega/DailyLoss）、涨跌停护栏 |
+| PositionGuard | PositionGuard.* | internal fill 累计 vs broker 持仓对比，偏差超容忍→禁用+告警（tolerance 默认 5 手，覆盖回报延迟窗口） |
+| PositionOffsetMgr | PositionOffsetMgr.* | 策略侧可平量跟踪（平今/平昨/开仓拆分）、冻结量管理 |
+| FillPriceChecker | FillPriceChecker.* | 成交价偏离监控（warning/panic 阈值、latch 直至清除） |
+| OrderAnomalyGuard | OrderAnomalyGuard.h | 异常订单模式检测 |
+| StressAnalyzer | StressAnalyzer.* | spot/vol/theta 情景压力（周期输出 STRESS worst） |
+
+### 7. 扫描器（Scanners/，9 类）
+
+统一经 `OptionScanCoordinator` 生命周期管理（`setEnabled → onStart → onOptionUpdate/onUnderlyingUpdate → onStop/onPanic`），分数 > `min_edge` 时 `publishHit` 发 `ScannerHitEvent` 到 CTG 执行；支持 `delta_min/max`、`max_spread`、`min_size`、GARCH `warmup_returns` 等数值参数；`expiryOverrides` 按 expiry 过滤。
+
+| Scanner | 说明 |
+|---------|------|
+| MMScanner | 做市机会 |
+| StrikeSpreadScanner | 同行权价 C/P 价差 |
+| VolSpreadScanner | 波动率价差（两腿同时执行） |
+| ButterflyScanner | 蝶式（三腿同时执行） |
+| SyntheticFutureScanner | 合成期货 vs 期货 |
+| SimplexScanner | 单纯套利 |
+| OpenScanner | 开盘机会 |
+| LowBidsScanner | 低价买盘异常 |
+| GarchScanner | GARCH 波动率预测信号 |
+
+### 8. 信号（Signals/）
+
+- **Alpha 信号**（AlphaSignals.*）：VegaFlow / DeltaFlow / ATM 信号 / ForwardSpread / RollEMA — 驱动报价偏移
+- **Risk 信号**（RiskSignals.*）：ToxicitySignal（逆向成交毒性→自动 widen/panic）、PnlLimitSignal（日内 PnL 限额→auto panic）
+- **SignalFactory**：信号工厂与数值参数接线
+
+### 9. 协调器与命令
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| OptionScanCoordinator | OptionScanCoordinator.* | scanner 生命周期/派发单一归属 |
+| OptionHedgeCoordinator | OptionHedgeCoordinator.* | delta 对冲决策、冷却、在途抑制（上一批未终态不重复发单） |
+| OptionExpiryLifecycle | OptionExpiryLifecycle.* | session begin refresh/purge/roll、过期合约 deactivate 停止报价、session end cancelAll+持仓告警 |
+| OptionCommandHandlers | OptionCommandHandlers.* | STOP/RESUME/PANIC/QMODE/ORDER/CANCEL 热指令 |
+| CommandBus | CommandBus.h | 热指令总线（异常兜底） |
+| ConfigValidator | ConfigValidator.h | 启动配置校验，未知键 WARN |
+
+### 10. 辅助
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| PnlTracker | PnlTracker.* | 单合约 tick-by-tick mark-to-mid PnL（FIFO + 加权入场价） |
+| QuoteStatistics | QuoteStatistics.* | 回调驱动报单统计：双边时长、加权价差、fill/cancel/reject 率、报价延迟（µs）、会话级报告 |
+| ExpirationSimulator | ExpirationSimulator.* | 到期 PnL 模拟 |
+| OptionValueWriter | OptionValueWriter.* | 定时 CSV 记录理论价/Greeks |
+| AttributePublisher | AttributePublisher.* | 结构化属性发布 |
+| PredictionEvaluator / Predictor | PredictionEvaluator.h / Predictor.h | 价格预测闭环（IPredictor + TriggerEngine，hitRate/MAE 评估） |
+| StrikeFinders | StrikeFinders.cpp + CffexIOStrikeFinder.h / DceMOStrikeFinder.h / IStrikeFinder.h | 各交易所行权价/合约查找 |
+
+---
+
+## IV 定价链路
+
+期权 IV 与波动率曲面的完整计算链（**平价合成远期 → Black76 反推 → GVV 拟合**）：
+
+### ① 平价合成远期（Put-Call Parity）
+
+两个层面，公式均为 `F_syn = K + (C_mid − P_mid) / discount`（discount = e^(−rT)）：
+
+| 层面 | 位置 | 过滤条件 |
+|------|------|---------|
+| expiry 级 ATM forward | `OptionGrid::__getBestSyntheticPrice` | **双边四价齐全**（call/put bid+ask > 0）；ask/bid < 10 异常剔除；1/spread 加权；与期货 mid 加权合并 |
+| per-strike forward（IV 反算用） | `OptionPricer2::computeImpliedValues` | 同 strike 的 call/put **双边齐全**（单边时 `getMid()` 会回退陈旧 last 价污染合成远期，故要求四价） |
+
+### ② Black76 反推 IV
+
+`BlackImpliedCalculator::volatility(price)`：PriceError 残差 `Black76(K, F_syn, σ√T) − marketPrice`，Brent 求解。per-strike 合成远期消除了行权价层面的盘口偏置。`bid/ask/mid` 三价各反推一次，价差超 `bid_offer_vol_spread_cap` 时置 -2（该合约不进拟合）。
+
+### ③ GVV 拟合
+
+- `submitAsyncVolFit` 收集拟合点：每 strike 取 **OTM 腿**（C/P 中 mid 较小者）的 `iv/atmVol`，x = K − F
+- `GvvVolCurve::fit`：WLS3 加权最小二乘（栈上零分配）+ BrentMinimize 搜索 α；good-points 阈值按到期天数插值
+- `eval`：x = ln(K/F_atm)（log-moneyness），解 GVV 隐式方程求 σ(K)，输出归一化 σ/σ_ATM；α=1 时走闭式快路径
+- 失败防护：解 bracket 失败回退 ATM（告警节流）；maturity≤0 返回 1.0；拟合点 <4 或 ATM vol 越界拒绝拟合
+
+### Forward 防崩保护（P0）
+
+- 平价点不足 5 个 strike → `forwardReady=false`，定价跳过，**不回退标的价格**
+- `ExpiryData::getMaturity()` 下限 1/252；`updateDaysToExpiration()` bdays=0 且 calendarDays>0 时取 1
+- `computeImpliedValues()` forward/maturity/discount 非正或 NaN 时跳过 IV
+- `refreshExpiryDays()` 每 session begin 刷新全部 expiry 的剩余天数（防近月 maturity 冻结）
+- 回测模式（bdMgr=null）holidays.json 按候选路径加载，且周末感知（与实盘 `IBaseDataMgr::isHoliday` 语义对齐）
+
+---
+
+## 线程模型与状态归属
+
+```
+TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程        Async Worker 线程（唯一状态写者）
+    │                                           │                             │
+    ├─ on_tick (enqueue MD)                     ├─ on_params_updated          ├─ 事件桶排序 + tick 去重
+    ├─ on_trade/on_order (enqueue Trader)       │  (atomic 参数)              ├─ Session/Channel/Position
+    ├─ on_position (enqueue)                                                  ├─ Trade/Order/Timer
+    └─ on_session_begin/end (enqueue)                                         ├─ grid 快照更新
+                                                                              ├─ vol fit 调度/发布
+                                                                              ├─ computeValues (防抖)
+                                                                              ├─ risk update + panic
+                                                                              ├─ scanner dispatch
+                                                                              └─ CTG refresh + drain + 下单
 ```
 
-**商品期权 (CZCE.SR, 多系列)**:
-```json
-{
-    "exchange": "CZCE",
-    "futuresProduct": "SR",
-    "underlyingCode": "",
-    "underlyingType": "future",
-    "expiries": [
-        {"expiry": 202609, "underlyingCode": "CZCE.SR309", "hedgeCode": "CZCE.SR309"},
-        {"expiry": 202701, "underlyingCode": "CZCE.SR701", "hedgeCode": "CZCE.SR701"}
-    ]
-}
-```
+**线程安全保证**：
 
-**股指期权 (CFFEX.IO, 指数定价+期货对冲)**:
-```json
-{
-    "exchange": "CFFEX",
-    "futuresProduct": "IF",
-    "underlyingCode": "CFFEX.000300",
-    "underlyingType": "index",
-    "expiries": [
-        {"expiry": 202607, "hedgeCode": "CFFEX.IF2607"},
-        {"expiry": 202608, "hedgeCode": "CFFEX.IF2608"}
-    ]
-}
-```
+- `_positions` / `_pnlPendingInit`：仅 worker 访问（回调已改为 enqueue）
+- `_traderCtx->enabled` / `panicked` / `_channelReady` / `_initialized` / `_tickCount`：`std::atomic`
+- `OptionGrid` 容器：`std::shared_mutex`
+- 热参数：`on_params_updated` 只置位，命令/TPS/QMode 在 async worker 应用，避免跨线程直写 grid/CTG
+- worker_loop：`try/catch` 包裹，单 batch 异常只跳过该 batch
 
-## 事件处理流程
-
-### Worker 线程批处理顺序
-
-每个 batch 内事件按固定顺序处理：
+### Worker batch 处理顺序
 
 ```
-1. on_session (session begin/end)
-2. on_channel (channel ready/lost)
-3. on_position (broker position update)
-4. on_trade (fill)
-5. on_order (order status)
-6. on_timer (triggerDoFit + session scheduling + timeout recompute)
-7. on_tick_batch (set pricer time)
-   per-tick: on_tick (market snapshot update)
-8. on_batch_complete (always runs, even without ticks)
-   ├─ position sync (OptionData + OQM setPosition)
-   ├─ PnlTracker update
-   ├─ computeValues (debounced: _underlyingChanged || _needsRefresh)
-   │   ├─ OptionRisk::update() (refresh position greeks)
-   │   ├─ initValuesCompute (forward + maturity)
-   │   ├─ computeValue per strike (BlackCalc)
-   │   ├─ computeOurMarkets per option (desired bid/ask)
-   │   └─ __notifyComputeCompleted -> CTG::refresh() (auto via listener)
-   ├─ drainPendingQuotes (send orders)
-   └─ attribute publish
+1. on_session (begin/end)                    5. on_order
+2. on_channel (ready/lost)                   6. on_timer (fit 调度/盘中停复/超时重算)
+3. on_position (broker 持仓)                 7. on_tick_batch → per-tick 快照更新
+4. on_trade (fill)                           8. on_batch_complete（始终执行）
+                                                ├─ position sync / PnlTracker
+                                                ├─ computeValues（_underlyingChanged || _needsRefresh）
+                                                ├─ CTG refresh → OQM updateOrders → 下单
+                                                └─ attribute publish / scanner
 ```
 
 ### 关键设计决策
 
-1. **on_batch_complete 始终执行** - 即使无 tick 也能处理 trade/position/order 事件
-2. **eager computeValues 已移除** - 不在 per-tick 中计算，统一由 on_batch_complete 的 debounce 控制
-3. **onFitCompleted 经 OptionGrid::computeValues** - 确保 listener refresh 自动触发，ourMarket 被收集
-4. **tradingStopMidDay 无条件 drain** - CANCEL quotes 立即发送，不受 enabled 门控
-5. **dropped-quote 重试** - TPS 限流丢弃的报价保留到下一周期，不被 refresh clear 销毁
-6. **channel_ready 延迟启用** - 无标的价格时不启用交易，首个 underlying tick 到达时启用
-7. **_needsRefresh 标志** - on_trade/on_position/on_order 标记后，下一 on_batch_complete 强制重新计算
+1. **回调只入队** — MD/交易回调绝不在回调线程直写 grid/CTG 状态
+2. **on_batch_complete 始终执行** — 无 tick 也能处理 trade/position/order 事件
+3. **eager compute 已移除** — 定价统一由 batch 防抖控制（minComputeInterval）
+4. **tradingStopMidDay 无条件 drain** — CANCEL 立即发出，不受 enabled 门控
+5. **dropped-quote 保留重试** — TPS 丢弃的报价不清除，下周期重发
+6. **channel_ready 延迟启用** — 等首个标的 tick 到达才真正激活交易（恢复门）
+7. **session_end 清场** — 显式 cancelAll 并告警非零 gross 持仓；OQM 计数器 session 复位
+8. **多腿组合原子性** — SpreadCombo/SynCombo 同时发出，残腿自动撤销，终态严格校验
 
-### Delta 对冲（`delta_hedge`）
+---
 
-- `enable` / `threshold_delta` / `target_delta` / `max_order_size` / `cooldown_sec`：原有开关与阈值。
-- **`delta_per_lot`**：一手对冲合约的 delta（期货≈合约乘数）。不配置时由对冲合约的 `contractSize/VolScale` 解析；
-  解析失败则**禁用对冲并告警**，不再回退到 1.0（旧行为会把 IO 的 150 delta 发成 150 手）。
-- **在途抑制**：上一批对冲单未到终态（全成/撤单/拒单）前不再发新批，避免 mid 限价挂单反复叠单。
+## 配置参考
 
-## 标的/对冲模型
+完整配置参见 `config/option_strategy_full.json` / `config/option_strategy_advanced.json`。启动时 `ConfigValidator` 校验，未知键 WARN。
 
-### 设计原则
-- **定价标的必须是该系列期权对应的标的**，不能用 HOT 或其他月份替代
-- **股指期权的定价标的是指数**（不可交易），对冲只能用股指期货
-- **不同到期月的股指期权对应不同月份的股指期货对冲**
+### 顶层键
 
-### Per-expiry 标的价格路由
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| exchange | string | - | 交易所 (SHFE/CFFEX/CZCE/DCE/INE) |
+| futuresProduct | string | - | 期货品种 (cu/IF/SR…) |
+| optionProduct | string | 自动推导 | 期权品种；不配则按交易所规则推导（见下表） |
+| underlyingCode | string | - | 全局定价标的 |
+| underlyingType | string | "future" | "future" 或 "index" |
+| riskFreeRate / riskFreeRateCurve | double / array | 0.03 / [] | flat 利率 / 期限结构 [{days, rate}] |
+| maxTPS | int | 50 | 每秒最大交易数 |
+| minComputeInterval | double | 0.02 | 最小计算间隔（秒） |
+| marketFreshTimeoutMs | int | 3000 | 行情新鲜度门限（超时停止报价刷新） |
+| use_parallel | bool | false | OpenMP 并行定价 |
+| sessionSchedule | object | - | 盘中停止调度（stopLeadSeconds/resumeLagSeconds） |
+| pricer | object | - | 定价器参数（含 volCurve.fitter，见下） |
+| orderManager | object | - | OQM 参数 + riskFilters |
+| margin / pnl / delta_hedge | object | - | 保证金 / FIFO PnL / delta 对冲 |
+| expiries | **array** | - | 到期月配置（**必须数组格式**，见下） |
+| riskLimits | object | - | RiskLimitsEx 参数（含 maxShortCall/PutPerSymbol） |
+| signals / scanners | object / array | - | 信号与扫描器 |
+| optionValueWriter | object | - | 理论值记录器 |
+
+### 期权品种自动推导
+
+| 交易所 | 期货品种 | 期权品种 | 规则 |
+|--------|---------|---------|------|
+| SHFE/INE/DCE | ag, cu, m … | ag_o, cu_o, m_o | 期货品种 + "_o" |
+| CZCE | SR … | SRC, SRP | 期货品种 + "C"/"P"（双品种发现） |
+| CFFEX | IF/IC/IH | IO/MO/HO | 固定映射 |
+
+> ⚠️ **SHFE 商品期权必须挂独立的 `{prod}_o` 品种**（commodity `category=2`）：框架 `CodeHelper::extractStdChnFutOptCode` 将标准代码 `SHFE.cu2607.C.104000` 的 product 解析为 `cu_o`，合约 metadata 与发现均按 `cu_o` 查找。
+
+### expiries（数组格式，键为 YYYYMM）
+
+```json
+"expiries": [
+    {
+        "expiry": 202607, "enable": true,
+        "underlyingCode": "SHFE.cu.2607", "hedgeCode": "SHFE.cu.2607",
+        "secondaryHedgeCodes": [],
+        "delta_min": 0.05, "delta_max": 0.95,
+        "sprd_fwd": 0.01, "sprd_atmvol": 0.1, "sprd_corr": 0.0,
+        "max_pos_fut": 10, "max_pos_stk": 50, "max_pos_opt": 50,
+        "max_qsize": 5, "enable_auto_close": false, "close_pos_thresh": 0
+    }
+]
 ```
-on_tick(code):
-    if code in m_expiryUnderlyingMap:
-        -> 更新对应 ExpiryData 的 per-expiry 标的价
-        -> 更新全局标的价格
-        -> _underlyingChanged = true
-    elif code == m_underlyingCode (全局标的, 如指数):
-        -> 更新全局标的价格
-        -> _underlyingChanged = true
-    elif code is option:
-        -> 更新期权市场快照
+
+### volCurve.fitter
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| start_time / end_time | 0 / 86400 | 拟合窗口（秒，支持夜盘） |
+| period | 60 | 拟合周期（秒） |
+| decay_window | 300 | 衰减窗口 |
+| threshold | 0 | 中间价下限 |
+| fit_all_expiries | false | 是否拟合全部到期月 |
+| good_points_thresh | [{days:0, thresh:3}] | 有效点数阈值（按天数插值） |
+
+### orderManager.riskFilters.{option,future}
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| enabled | false | 过滤器链开关 |
+| max_order_size / _reject | 100 / false | 单笔上限；超限 reject 或截断 |
+| min_sell_price | 0.0001 | 最低卖价保护 |
+| max_position / _mode | 0 / 0(REJECT) | 持仓限制（0=关）；1=ALLOW 2=MODIFY |
+| max_cancel_soft / hard | 100 / 200 | 撤单软告警 / 硬阻止 |
+| max_new_orders_hard_flat / reject | 100 / 200 | 新单数硬平仓 / 拒绝阈值 |
+
+执行顺序：MaxOrderSize → MinSellPrice → MaxPosition → MaxCancel → MaxNewOrders，REJECT 短路。
+
+### OQM 参数（orderManager.option / orderManager.future）
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| enable_quote_api | true | 双边报价 API（false=拆 buy+sell） |
+| avoid_trade | true | desired=current 时跳过 |
+| leave_outer_orders | true | 保留外层订单 |
+| quote_style | - | 报价风格 |
+| enable_offset_guard | - | 偏移守卫 |
+| wait_for_cancels | - | 撤单未确认不发新单 |
+| cancel_ack_timeout_ms / cancel_max_retries | 3000 / - | 撤单 ack 看门狗：超时重发，耗尽 cancelAll 并冻结 |
+| time_in_force_ms | - | 订单存活时间 |
+| max_side_orders | - | 每合约每方向最大订单数 |
+| stp_enabled | true | 自成交保护 |
+
+### 热参数（ShareManager 运行时更新）
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| wgt_vegaflow / wgt_frontfut_skew / wgt_deltaflow / wgt_atmsig / wgt_rollema | double | alpha 信号权重 |
+| sticky_base / improve_retreat_ratio | double | 报价粘性 |
+| max_tps / command / qmode_override | int32 | TPS / 0=正常 1=停 2=panic 3=恢复 / 报价模式 |
+| manual_order | string | "B,code,price,qty" / "S,…" / "C,code" |
+
+### 三种业务场景配置示例
+
+**商品期权（SHFE，1:1）**：
+```json
+{ "exchange": "SHFE", "futuresProduct": "cu",
+  "underlyingCode": "SHFE.cu.2607", "underlyingType": "future",
+  "expiries": [{"expiry": 202607, "enable": true}] }
 ```
 
-### Forward 计算 (Put-Call Parity 优先)
+**CZCE 多系列**：
+```json
+{ "exchange": "CZCE", "futuresProduct": "SR", "underlyingCode": "",
+  "expiries": [
+      {"expiry": 202609, "underlyingCode": "CZCE.SR309", "hedgeCode": "CZCE.SR309"},
+      {"expiry": 202701, "underlyingCode": "CZCE.SR701", "hedgeCode": "CZCE.SR701"}] }
+```
 
-1. **Put-call parity 合成** (PRIMARY) - 需要 >=5 个 strike 的 call bid/ask + put bid/ask 全部 > 0
-2. 不足时 `forwardReady=false`，定价跳过，不回退到标的价格
-3. `ema_sprd_vs_atmfwd` 在合成 forward 时按 strike 更新 spread (而非绝对值)
-4. `ForwardSpreadSignal` 基于 forward spread - EMA(forward spread) 生成 alpha 调整
+**股指期权（指数定价 + 期货分月对冲）**：
+```json
+{ "exchange": "CFFEX", "futuresProduct": "IF",
+  "underlyingCode": "CFFEX.000300", "underlyingType": "index",
+  "expiries": [
+      {"expiry": 202607, "hedgeCode": "CFFEX.IF2607"},
+      {"expiry": 202608, "hedgeCode": "CFFEX.IF2608"}] }
+```
 
-### 防崩保护 (P0)
-- `GvvVolCurve::eval()`: maturity<=0 时返回 1.0，防止除零
-- `GvvVolCurve::fitWithAlpha()`: maturity<=0 时用 1.0 替代
-- `ExpiryData::getMaturity()`: 最小值 1/252（1个交易日）
-- `ExpiryData::updateDaysToExpiration()`: bdays=0 且 calendarDays>0 时 fallback 为 1
-- `OptionPricer2::computeImpliedValues()`: forward/maturity/discount 为 NAN 或 <=0 时跳过 IV 计算
-- `PeriodicCurveFitter::doFit()`: 无 forward-ready expiry 时返回 false
-- `PeriodicCurveFitter::fitToExpiry()`: forward not ready / 无 vol points / 不足 upside+downside 时返回 false
-- `refreshExpiryDays()`: 每个 session begin 刷新所有 expiry 的 days-to-expiration (防止冻结)
+### delta 对冲（delta_hedge）
 
-### Maturity 每日刷新
+- `enable / threshold_delta / target_delta / max_order_size / cooldown_sec`
+- `delta_per_lot`：一手对冲合约的 delta（不配置则从合约乘数解析，解析失败禁用对冲并告警）
+- 在途抑制：上一批对冲单未终态前不发新批
 
-`ExpiryData::updateDaysToExpiration()` 仅在合约创建时调用。`OptionGrid::refreshExpiryDays()` 在每个 session begin 时为所有 expiry 重新计算，防止近月 maturity 冻结导致定价偏差。
+---
 
-## 构建与部署
+## 回测与 Replay 验证
+
+`replay/` 提供真实 tick 数据的端到端回测工具链（2026-11 验收通过）：
+
+| 文件 | 职责 |
+|------|------|
+| `run_option_replay.sh` | 一键回放：取数（缺数据时）→ DSB 校验 → 注入 basefiles → WtBtRunner → 延迟指标提取 |
+| `fetch_option_ticks.sh` | 服务器侧取数管道（KS/MinIO tar → 服务器环回拉取+转换 → 分块拉回），含外网数据面故障绕行 |
+| `gen_basefiles.py` | 生成 replay basefiles：SHFE 期权挂 `{prod}_o` 独立品种（category=2）+ 标的期货 + 期权链合约条目 |
+| `configbt_option_replay.yaml` | 回放配置模板 |
+| `replay_common/` | 生成的 basefiles（commodities/contracts/fess/sessions/holidays/hots） |
+
+**回放要点**：
+
+- replayer 只回放已订阅合约：commodities 中 SHFE 期权品种须 `category=2`（`CC_FutOption`），contracts 须含期权链全部代码
+- tick DSB 为 raw V2（0x03）时文件头必须是 **12 字节 BlockHeader**（`BLK_FLAG(8含NUL)+type(u16)+version(u16)`），C++ `proc_block_data` 按 12 字节去头
+- 回测双边报价依赖 `HftMocker::stra_quote`（buy+sell 模拟，第二腿失败回撤第一腿）
+- 建议 `use_newpx: false`（按对手价撮合；KS 期权 last 价可能陈旧，用 last 撮合会产生虚假滑点）
+- 取数方法已固化为 opencode skill：`ks-data-fetch`（数据布局、stat 探测、故障绕行、服务器侧转换）
+
+**验收结果（SHFE cu2607 期权链 56 期权 + 标的 × 20260602-0605，共 318.5 万 tick）**：
+
+- 完整交易闭环：187 笔成交（开+平），双边报价 14-16 合约，rejects=0，无崩溃
+- IV 质量：拟合 IV 11-14%，与市场独立 BS 反推（12-15%）吻合；GVV solve failed 0 次
+- 定价链路：平价合成远期 + Black76 + GVV 全链路符合设计（详见上文「IV 定价链路」）
+- 延迟（Debug 构建）：p50=11µs / p95=57µs / p99=100µs / p99.9=204µs
+
+合成延迟基线：`tests/test_replay_benchmark.cpp`。
+
+---
+
+## 构建与测试
 
 ### 构建
+
 ```bash
-cd /path/to/wondertrader/src
-mkdir -p build && cd build
-cmake -G "Unix Makefiles" ..
-make WtOptionCore -j4
+cd src/build_all && cmake .. && make -j$(nproc) WtOptionCore     # 共享库
+make -j$(nproc) WtBtRunner                                        # 回测 runner
 ```
+
+发行构建使用 `-march=x86-64-v3`（避免 `-march=native` 换机 SIGILL），`-O3 -flto`。
 
 ### 部署
-```bash
-cp build/WtOptionCore/libWtOptionCore.so /path/to/run/strategies/
-cp src/WtOptionCore/config/option_strategy_full.json /path/to/run/config/option_strategy.json
+
+```
+hft/libWtOptionCore.so        ← WtRunner/WtBtRunner 的 strategies.hft[] 加载
 ```
 
-### 单元测试
+插件边界：公共头文件只依赖 `Includes/*`；`libWtOptionCore.so` 无 `Wt*` 未定义符号、不 link WtCore。
+
+### 单元测试（CTest 7/7）
+
 ```bash
-cd build
-make test_ctg_ranking test_enhancements
-./WtOptionCore/test_ctg_ranking      # CTG 排序 + 风控测试
-./WtOptionCore/test_enhancements    # 增强模块测试 (过滤器/持仓/偏离/风控/OQM)
+ctest --test-dir src/build_all/WtOptionCore --output-on-failure
 ```
+
+| 测试 | 覆盖 |
+|------|------|
+| test_ctg_ranking | CTG 排序 + 风控 |
+| test_enhancements | 过滤器/持仓/偏离/风控/OQM |
+| test_scanners | 工厂/生命周期/9 类信号/参数/GARCH/协调器 |
+| test_async_event_processor | 双队列/背压/去重/异常兜底 |
+| test_hedge_coordinator | delta 对冲决策/冷却/在途 |
+| test_stress | StressAnalyzer 情景压力 |
+| test_command_handlers | STOP/PANIC/QMODE/ORDER/CANCEL |
+| test_replay_benchmark | 合成延迟基线（手工运行，未注册 CTest） |
+
+### 端到端回测
+
+```bash
+bash src/WtOptionCore/replay/run_option_replay.sh [YYYYMMDD,...]
+```
+
+---
+
+## 文件清单
+
+```
+src/WtOptionCore/
+├── HftOptionStrategy.h/.cpp            # 策略入口（Shell：装配/生命周期/回调路由）
+├── HftOptionStraFact.cpp               # DLL 工厂
+├── OptionAsyncEventProcessor.h/.cpp    # 异步事件处理（双队列/优先级/去重/背压）
+├── SingleFlightTaskRunner.h            # 拟合单飞执行
+├── LatencyHistogram.h                  # tick→quote 延迟直方图
+├── OptionTimeService.h                 # 连续时钟/FAST-SLOW 调度
+├── TradingState.h                      # 交易状态机
+│
+├── OptionGrid.h/.cpp                   # 3级网格/合约发现/平价合成ATM forward
+├── OptionData.h/.cpp                   # 单合约数据（双缓冲计算值）
+├── ExpiryData.h/.cpp                   # 到期月（日历/maturity/discount）
+├── StrikeData.h/.cpp                   # 行权价层
+├── OptionTradingGrid.h/.cpp            # OTD/UTD 容器
+├── OptionTradingData.h/.cpp            # 期权交易域状态
+├── UnderlyingTradingData.h/.cpp        # 标的交易域状态
+│
+├── BlackCalc.h/.cpp                    # BS/Black76 计算
+├── BlackImpliedCalculator.h/.cpp       # IV Brent 求解
+├── OptionPricer2.h/.cpp                # 定价内核（forward装配/理论价/IV反推）
+├── CompositeOptionPricer.h/.cpp        # 做市定价器（alpha+风控调整）
+├── GammaScalpOptionPricer.h/.cpp       # gamma scalping 策略 pricer
+├── GvvVolCurve.h/.cpp                  # GVV 曲面（WLS3+Brent α）
+├── LinearVolCurve / ConstantVolCurve / PowerVolCurve   # 备用曲线
+├── PeriodicCurveFitter.h/.cpp          # 拟合调度
+├── AsyncVolFitter.h                    # 异步拟合快照/发布
+├── IVolCurve.h                         # 曲线接口
+│
+├── ControllableTradingGrid.h/.cpp      # 执行调度（排序/TPS/panic/drop重试）
+├── OptionQuoteManager.h/.cpp           # 订单生命周期（diffing/节流/STP/看门狗）
+├── OrderGateway.h                      # 下单统一出口
+├── check_markets.h/.cpp                # desired vs current 比较
+├── BaseOrder / OptionOrder             # 订单状态机/腿PnL
+├── OptionOrderInfo / FutureOrderInfo   # 订单快照
+├── ComboOrders.h/.cpp                  # SpreadCombo/SynCombo 多腿原子执行
+│
+├── OptionRisk.h/.cpp                   # 组合Greeks聚合
+├── OptionRiskData.h/.cpp               # 单合约仓位Greeks
+├── OptionExpiryGreeks.h/.cpp           # 到期月Greeks
+├── RiskFilterChain.h/.cpp              # 5过滤器链
+├── RiskLimitsEx.h/.cpp                 # 预交易风控/Greeks限额/涨跌停护栏
+├── PositionGuard.h/.cpp                # 持仓不一致护栏
+├── PositionOffsetMgr.h/.cpp            # 可平量跟踪
+├── FillPriceChecker.h/.cpp             # 成交价偏离监控
+├── OrderAnomalyGuard.h                 # 异常订单检测
+├── StressAnalyzer.h/.cpp               # 情景压力
+│
+├── OptionScanCoordinator.h/.cpp        # scanner 生命周期/派发
+├── OptionHedgeCoordinator.h/.cpp       # delta 对冲决策
+├── OptionExpiryLifecycle.h/.cpp        # 到期刷新/purge/session清场
+├── OptionCommandHandlers.h/.cpp        # 热指令
+├── CommandBus.h                        # 指令总线
+├── ConfigValidator.h                   # 启动配置校验
+│
+├── Scanners/                           # 9 类扫描器
+├── Signals/                            # Alpha + Risk 信号 + 工厂
+├── config/                             # option_strategy_full/advanced.json
+├── replay/                             # 端到端回测工具链（取数/basefiles/配置）
+├── tests/                              # 8 个 GoogleTest 测试
+└── analysis/                           # 诊断报告与分阶段修复记录
+```
+
+---
 
 ## 迁移历史
 
-从 quantbox/optiontrader (基于 longbeach 框架) 迁移到 WonderTrader (HFT 框架):
+从 quantbox/optiontrader（longbeach 框架）迁移到 WonderTrader HFT 框架：
 
 | 迁移项 | 原始 | 迁移后 |
 |--------|------|--------|
@@ -585,127 +577,6 @@ make test_ctg_ranking test_enhancements
 | 数学 | QuantLib + GSL | BlackCalc + WLS3 |
 | 脚本 | luabind | 移除 |
 | UFT | 双框架 | 仅保留 HFT |
-| 诊断 | std::cout | WTSLogger (结构化日志) |
+| 诊断 | std::cout | WTSLogger（结构化日志） |
 
-## 文件清单
-
-```
-src/WtOptionCore/
-├── CMakeLists.txt
-├── HftOptionStrategy.h/.cpp          # HFT 策略入口
-├── HftOptionStraFact.cpp              # DLL 工厂
-├── OptionAsyncEventProcessor.h/.cpp  # 异步事件处理器 (lock-free SPSC队列)
-├── OptionGrid.h/.cpp                  # 3级数据网格 + per-expiry标的路由
-├── OptionData.h/.cpp                  # 单合约数据
-├── ExpiryData.h/.cpp                 # 到期月数据 (per-expiry标的价 + maturity防护)
-├── StrikeData.h/.cpp                 # 行权价数据
-├── CompositeOptionPricer.h/.cpp      # 做市定价器 (FAST/SLOW + onFitCompleted)
-├── OptionPricer.h/.cpp               # 理论定价器 v1
-├── OptionPricer2.h/.cpp              # Black76/GVV 定价器
-├── BlackCalc.h/.cpp                  # BS/Black76 计算
-├── BlackImpliedCalculator.h/.cpp     # 隐含波动率求解
-├── GvvVolCurve.h/.cpp                # GVV 波动率曲面 (maturity除零保护)
-├── LinearVolCurve.h/.cpp            # 线性波动率曲面
-├── PeriodicCurveFitter.h/.cpp       # 定时曲面拟合 (period间隔 + WTSLogger诊断)
-├── VolCurve.h/.cpp                   # 波动率曲面基类 + GVV实现
-├── OptionRisk.h/.cpp                 # 组合风险
-├── OptionRiskData.h/.cpp             # 单合约仓位 Greeks
-├── OptionExpiryGreeks.h/.cpp        # 到期月 Greeks
-├── ControllableTradingGrid.h/.cpp    # 执行调度 (Drop重试 + 无条件drain)
-├── OptionQuoteManager.h/.cpp        # 订单管理 (增量diffing + 撤单节流 + 谨慎翻面)
-├── check_markets.h/.cpp              # 市场比较
-├── PnlTracker.h/.cpp                 # PnL 跟踪
-├── QuoteStatistics.h/.cpp            # 报单统计 (回调驱动, 借鉴BilateralQuoteStats)
-├── AttributePublisher.h/.cpp         # 属性发布
-├── ExpirationSimulator.h/.cpp       # 到期模拟
-├── OptionValueWriter.h/.cpp         # 值记录器
-├── Predictor.h                       # 预测器
-├── RiskFilterChain.h/.cpp            # 可组合订单过滤器链 (5个过滤器, 配置驱动)
-├── PositionOffsetMgr.h/.cpp          # 策略侧可平量跟踪 (平今/平昨/开仓)
-├── PositionGuard.h/.cpp              # 持仓不一致检测 (安全护栏)
-├── FillPriceChecker.h/.cpp           # 成交价偏离监控 (Warning/Panic)
-├── RiskLimitsEx.h/.cpp               # 扩展预交易风控检查
-├── ComboOrders.h/.cpp                # 多腿组合订单 (Spread/SynFuture)
-├── OptionOrder.h/.cpp               # 期权订单 (ValuesAtIssue + PnL)
-├── BaseOrder.h/.cpp                  # 订单基类 (状态机)
-├── OptionOrderInfo.h/.cpp           # 期权订单快照
-├── FutureOrderInfo.h/.cpp           # 期货订单快照
-├── ScannerInfo.h                      # 扫描器信息
-├── WtOptEngine.h/.cpp                # 引擎 (legacy)
-├── WtOptContext.h/.cpp               # 上下文 (legacy)
-├── WtOptTicker.h/.cpp                # 定时器
-├── Scanners/                         # 扫描器 (9种)
-├── Signals/                          # 信号 (Alpha + Risk, 含 ForwardSpreadSignal)
-├── config/                           # 配置文件
-└── tests/                            # 单元测试 (test_ctg_ranking + test_enhancements)
-```
-
-## 增强模块详情
-
-### RiskFilterChain - 可组合订单过滤器链 (配置驱动)
-
-通过 `orderManager.riskFilters.{option,future}` 配置，按品种独立激活：
-
-- **MaxOrderSizeFilter**: 单笔最大下单量，超限时 reject 或 modify
-- **MinSellPriceFilter**: 最低卖价保护，防止零价或负价
-- **MaxPositionFilter**: 持仓限制，3 种模式 (REJECT / ALLOW / MODIFY_TO_MAX)
-- **MaxCancelFilter**: 撤单限制，软限制告警 + 硬限制阻止
-- **MaxNewOrdersFilter**: 新单数限制，达 hard_flat 后进入硬平仓，达 reject 后拒绝
-
-**执行顺序**: MaxOrderSize -> MinSellPrice -> MaxPosition -> MaxCancel -> MaxNewOrders
-**短路**: 遇 REJECT 立即返回，后续过滤器不执行
-
-### PositionOffsetMgr - 策略侧可平量跟踪
-- 从 WT `on_position` 回调提取 today/prev 可平量
-- 跟踪挂单冻结量（平仓单挂出但未成交时冻结可平量）
-- `getOrderBreakdown(isBuy, qty)` 将订单拆分为 (平今, 平昨, 开仓) 三段
-- 持仓不一致检测（内部 fill 累计 vs broker 回调）
-
-### PositionGuard - 持仓不一致检测
-- 内部 fill 累计 vs broker `on_position` 回调对比
-- 偏差超阈值 -> 禁用交易 + 告警
-- 支持冷却时间防止告警刷屏
-- `reconcile()` 手动解决不一致
-
-### FillPriceChecker - 成交价偏离监控
-- 记录发单价，成交时检查偏离百分比
-- Warning (0.25%) -> 告警回调
-- Panic (0.5%) -> 可触发 Panic 模式
-- 与 ToxicitySignal 互补（价格维度 vs 方向维度）
-
-### RiskLimitsEx - 扩展预交易风控检查
-- 单笔手数/金额限制
-- 价格偏离参考价检查 (clearly_erroneous)
-- 最低卖价保护
-- Greeks 限制检查 (Delta/Gamma/Vega/DailyLoss)
-- 事后持仓复查
-
-### OptionQuoteManager 增强 (借鉴 DefaultOrderManager)
-- **增量订单 diffing**：`getMissingPriceLevelSize()` 按价位比较 desired vs current，避免全量撤单重发
-- **撤单节流（三层）**：hard limit + buffer + soft warn
-- **谨慎翻面**：`cautious_flipping` 阻止头寸翻面方向订单
-- **Scale factor**：运行时动态缩放订单大小
-- **最小更新间隔**：`min_intra_update_period_ms` 限制 updateOrders 频率
-- **Wait-for-cancels**：撤单未确认时不发新单
-- **PositionGuard 集成**：交易前检查持仓一致性
-- **PositionOffsetMgr 集成**：平仓方向路由到 `stra_exit_long/short(isToday)`
-- **拒绝重试**：全量拒绝后延迟重试，成交后重置计数器
-- **OQM 仓位同步**：on_batch_complete 中从 broker 仓位同步 OQM m_position
-
-### QuoteStatistics - 报单统计 (借鉴 BilateralQuoteStats)
-- **回调驱动**：所有统计在 `onOrderStatusChange`/`onFill` 回调中完成，不影响热路径
-- **双边有效报价时长**：基于 SessionInfo 的 timeToMinutes 计算，非交易时段不统计
-- **做市义务判断**：min_valid_qty 深度 + max_obligation_spread 双重检查
-- **状态切换计数**：记录进入/退出双边状态的次数
-- **加权价差统计**：以 tick 为单位
-- **报价延迟**：tick -> 订单确认的微秒级延迟
-- **成交/撤单/拒绝率**：fills/cancels/rejects / ordersSent
-- **会话级报告**：onSessionEnd 自动输出汇总日志
-
-## 插件边界（2026-10-18）
-
-`WtOptionCore` 是 HFT 引擎上的策略插件，公共头文件只依赖 `Includes/*`。本轮构建收敛：
-
-- `CMakeLists.txt` 不再 include/link `WtCore`；`libWtOptionCore.so` 的 `nm -D -u` 无任何 `Wt*` 符号，`ldd` 无 `WtCore`。
-- 部署位置仍为 `./hft/libWtOptionCore.so`，由 `WtRunner` 的 `HftStrategyMgr` 加载（`strategies.hft[]`）。
-- 验证：`dlopen(RTLD_NOW)`（宿主导出 `WTSCfgLoader`，与真实 Runner 一致）通过；`test_ctg_ranking` 全过。
+诊断与修复历程见 `analysis/`（diagnostic-report/fix-plan 2026-08-24，phase0-11 2026-10-30，code-review-and-optimization-plan 2026-10-30）。
