@@ -975,7 +975,7 @@
   "cu": {
    "covermode": 1,
    "pricemode": 1,
-   "category": 2,
+   "category": 1,
    "trademode": 0,
    "precision": 0,
    "pricetick": 10.0,
@@ -1137,6 +1137,19 @@
    "pricetick": 5.0,
    "volscale": 5,
    "name": "沪锌",
+   "exchg": "SHFE",
+   "session": "FN0100",
+   "holiday": "CHINA"
+  },
+  "cu_o": {
+   "covermode": 1,
+   "pricemode": 1,
+   "category": 2,
+   "trademode": 0,
+   "precision": 0,
+   "pricetick": 10.0,
+   "volscale": 5,
+   "name": "沪铜期权",
    "exchg": "SHFE",
    "session": "FN0100",
    "holiday": "CHINA"

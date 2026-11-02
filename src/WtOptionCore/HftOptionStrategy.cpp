@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <regex>
 #include <set>
 #include "../WTSTools/WTSLogger.h"
 #include "../Share/fmtlib.h"
@@ -481,14 +482,27 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
             WTSCommodityInfo* commInfo = _ctx->stra_get_comminfo(commKey.c_str());
             if (commInfo && commInfo->isOption()) {
                 const CodeSet& codes = commInfo->getCodes();
+                size_t skipped = 0;
                 for (const auto& rawCode : codes) {
+                    // getCodes() returns ALL contracts of the commodity,
+                    // including underlying futures (e.g. cu2607). Passing a
+                    // pure-digit code to rawFutOptCodeToStdCode underflows
+                    // its index scan and throws std::length_error — filter
+                    // to real option codes first.
+                    static const std::regex optCodeRe(
+                        "^[A-Za-z]{1,3}\\d{4}[-]?(C|P)[-]?\\d+$");
+                    if (!std::regex_match(rawCode, optCodeRe)) {
+                        skipped++;
+                        continue;
+                    }
                     std::string stdCode = CodeHelper::rawFutOptCodeToStdCode(rawCode.c_str(), _exchange.c_str());
                     _optionCodes.emplace_back(stdCode);
                     _positionGuards[stdCode] = std::make_shared<wt_option::PositionGuard>();
                     _positionOffsets[stdCode] = std::make_shared<wt_option::PositionOffsetMgr>();
                 }
                 WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "Auto-discovered {} option contracts for {}", codes.size(), commKey);
+                    "Auto-discovered {} option contracts for {}{}", codes.size() - skipped, commKey,
+                    skipped ? fmt::format(" (skipped {} non-option codes)", skipped).c_str() : "");
             } else {
                 WTSLogger::log_by_cat("strategy", LL_WARN,
                     "Option product {} not found", commKey);

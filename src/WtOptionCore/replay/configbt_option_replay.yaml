@@ -6,10 +6,10 @@ replayer:
         hot: replay_common/hots.json
         session: replay_common/sessions.json
     fees: replay_common/fees.json
-    hft_stime: 202606020900
-    hft_etime: 202606051500
+    stime: 202606020900
+    etime: 202606051500
     mode: bin
-    path: ../WtBtFutu/storage/his/
+    path: ../WtBtFutu/storage/
     tick: true
 
 env:
@@ -27,7 +27,7 @@ hft:
         params:
             exchange: SHFE
             futuresProduct: cu
-            optionProduct: cu
+            optionProduct: cu_o
             underlyingCode: SHFE.cu.2607
             riskFreeRate: 0.03
             maxTPS: 50
