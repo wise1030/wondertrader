@@ -84,8 +84,8 @@ python3 main.py --tick --s3 \
 **SSH 绕行管道**（本机 `~/.ssh/id_rsa` 可登录 `root@172.16.36.3`，MinIO 宿主机 hyzb-3）：
 1. MinIO 对象盘在 `/nvme/minio/data/{bucket}/...`，xl 格式：`{obj}/xl.meta` + `{obj}/{uuid}/part.N`（仅 part.1 带 32 字节头，**不要手工拼接**，CRC 会错）
 2. **环回拉取**：presign 指定 `region='us-east-1'`（跳过 region 查询）且 host=127.0.0.1:6900，scp 脚本到服务器后 `curl` 环回 GET —— 服务器自读 NVMe 满速且数据面正常
-3. **服务器侧转换**：`convert_local.py`（纯 stdlib，无 minio/zstd 依赖）解析 tar CSV → `write_tick_dsb(use_compression=False)` 写 **raw V2(0x03)** DSB（注意：zstd 缺失时的 0x01 fallback 是"老结构体"标记，C++ 读不了）
-4. **分块拉回**：外网 SSH/S3 大数据流间歇性 0 字节，用 `pull_chunks.py`（1MB `dd skip=N` 分块 + 逐块重试 + 断点续传）；gzip 打包后再传（tick DSB 压 5-10 倍）
+3. **服务器侧转换**：`convert_local.py`（纯 stdlib，无 minio/zstd 依赖）解析 tar CSV → 写 **raw V2(0x03)** DSB。**header 必须是 12 字节 BlockHeader**（`BLK_FLAG(8字节含NUL) + type(u16) + version(u16)`）——WT C++ `proc_block_data` 对 raw-V2 用 `BLOCK_HEADER_SIZE(12)` 去头，若写成 20 字节 BlockHeaderV2 全部 tick 错位 8 字节（静默 0 tick）；`BLK_FLAG="&^%$#@!\x00"` 注意是 7 符号+NUL，且 bash 双引号内 `$#` 会被展开，python 脚本用单引号/heredoc 保护。dsb_writer 的 `use_compression=False` 分支写 20 字节头，不能用它写未压缩 V2 tick
+4. **分块拉回**：外网 SSH/S3 大数据流间歇性 0 字节（>10KB 即被掐），用 `pull_small.py`（每连接 8×1024B `dd skip=N` + 单块降级重试 + 断点续传，约 14KB/s）；gzip 打包后再传（tick DSB 压 5-10 倍）。**同名文件重跑前必须删除或校验 md5**——续传逻辑对"旧文件大小≥新文件"会直接误判完成
 5. 一键封装：`src/WtOptionCore/replay/fetch_option_ticks.sh`（product/链前缀/日期参数化）
 
 后台重试模板（数据面恢复后自动完成下载）见 `scripts/retry_pull.py`：
@@ -116,7 +116,7 @@ WtOptionCore 回放最低要求：commodities 含 SHFE.cu（category 为期货/�
 一键脚本（推荐）：`src/WtOptionCore/replay/run_option_replay.sh`（缺数据时自动调用 `fetch_option_ticks.sh` 取数 → DSB校验 → WtBtRunner → p99/p99.9提取）。手动步骤如下：
 
 1. 拉 tick（外网正常时）：`main.py --tick --products SHFE.cu --include-option --tick-dates <D>` → `dist/WtBtFutu/storage/his/ticks/SHFE/<D>/*.dsb`；外网故障时走 `fetch_option_ticks.sh`（服务器侧转换 + 分块拉回）
-2. **basefiles 是硬要求**（hft 回测 replayer 只回放已订阅合约，而期权代码来自 comminfo 发现）：commodities 中 SHFE.cu `category=2`（CC_FutOption，`isOption()` 判定），contracts 含标的期货+期权链全部代码（含 expiredate）。用 `src/WtOptionCore/replay/gen_basefiles.py` 生成（输出在 `replay_common/`）
+2. **basefiles 是硬要求**（hft 回测 replayer 只回放已订阅合约，而期权代码来自 comminfo 发现）：commodities 中 **SHFE 期权须挂独立 `{prod}_o` 品种**（category=2/CC_FutOption）——框架 `CodeHelper::extractStdChnFutOptCode` 把 `SHFE.cu2607.C.104000` 的 product 解析为 `cu_o`，挂错会导致 replayer 查 session 返回 NULL 崩溃；contracts 含标的期货（product=cu）+期权链（product=cu_o）全部代码（含 expiredate）。用 `src/WtOptionCore/replay/gen_basefiles.py` 生成（输出在 `replay_common/`）
 3. 运行：`LD_LIBRARY_PATH=<repo>/src/build_all/build_x64/Debug/bin ./WtBtRunner.fresh -c configbt_option_replay.yaml -l logcfgbt_option.yaml`（fresh 二进制/模块为当日构建，dist 自带旧 .so 已备份 libWtOptionCore.so.bak_20260708）
 4. 延迟指标：HftOptionStrategy batch 日志输出 `p99/p99.9`（OptionTimeService+LatencyHistogram）；replay 脚本 `src/WtOptionCore/tests/test_replay_benchmark.cpp` 输出合成基线 p50/p95/p99/p999
 
