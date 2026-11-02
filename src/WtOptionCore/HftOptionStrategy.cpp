@@ -1411,9 +1411,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
         ++_batchCount;
         if (_batchCount <= 5 || _batchCount % 100 == 0) {
             WTSLogger::log_by_cat("strategy", LL_INFO,
-                "HftOptionStrategy batch #{} enabled={} options={} strikes={} underlying={} p99={:.1f}us p99.9={:.1f}us",
+                "HftOptionStrategy batch #{} enabled={} options={} strikes={} underlying={} p50={:.1f}us p95={:.1f}us p99={:.1f}us p99.9={:.1f}us",
                 _batchCount, _traderCtx ? _traderCtx->enabled.load() : false,
                 _grid->numOptions(), _grid->numStrikes(), _grid->getUnderlyingPrice(),
+                _batchLatencyUs.p50(), _batchLatencyUs.p95(),
                 _batchLatencyUs.p99(), _batchLatencyUs.p999());
         }
 
