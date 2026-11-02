@@ -705,12 +705,17 @@ void OptionPricer2::computeImpliedValues(OptionData* option,
             // forward induced by put-call parity if both sides present
             double forward_option = bci.m_forward;
             // StrikeData siblings
+            // Put-call parity synthetic forward. Require BOTH bid and ask on
+            // both legs: getMid() falls back to last-trade price when a side
+            // is missing, and a stale last price would bias F_syn and every
+            // IV inverted from it (consistent with __getBestSyntheticPrice,
+            // which also requires the full four-price set).
             StrikeDataPtr sd = option->getStrikeData();
             if (sd) {
                 const OptionDataPtr& c = sd->call();
                 const OptionDataPtr& p = sd->put();
-                if (c && p && (c->getMarket().bid > 0 || c->getMarket().ask > 0)
-                          && (p->getMarket().bid > 0 || p->getMarket().ask > 0)) {
+                if (c && p && c->getMarket().bid > 0 && c->getMarket().ask > 0
+                          && p->getMarket().bid > 0 && p->getMarket().ask > 0) {
                     forward_option = bci.m_strike + (c->getMid() - p->getMid()) / bci.m_discount;
                 }
             }
