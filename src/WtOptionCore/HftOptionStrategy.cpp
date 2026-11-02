@@ -692,10 +692,18 @@ void HftOptionStrategy::setupGrid()
     _grid->setMarketStaleTimeoutMs(_marketStaleTimeoutMs);
 
     // Load holidays from holidays.json (same as longbeach ExchangeCalendar)
-    // This is used by ExpiryData::countTradingDays when m_bdMgr is null
-    std::string holidayFile = "common/holidays.json";
+    // This is used by ExpiryData::countTradingDays when m_bdMgr is null.
+    // Path candidates: live deployment uses common/, replay uses
+    // replay_common/ (dist/WtBtRunner has no common/ dir).
     std::set<uint32_t> holidays;
-    std::ifstream ifs(holidayFile);
+    const char* holidayCandidates[] = {
+        "common/holidays.json", "../common/holidays.json", "replay_common/holidays.json",
+    };
+    std::ifstream ifs;
+    for (const char* cand : holidayCandidates) {
+        ifs.open(cand);
+        if (ifs.is_open()) break;
+    }
     if (ifs.is_open()) {
         std::string content((std::istreambuf_iterator<char>(ifs)),
                             std::istreambuf_iterator<char>());
@@ -2698,7 +2706,7 @@ void HftOptionStrategy::applyTradingState()
     const bool pn = _tstate.panickedFlag();
     if (en != _traderCtx->enabled.load() || pn != _traderCtx->panicked.load()) {
         WTSLogger::log_by_cat("strategy", pn ? LL_WARN : LL_INFO,
-            "TradingState: {} -> {} ({})  enabled={} panicked={}",
+            "TradingState: {} -> {} ({})  panicked={}",
             wt_option::toString(_tstate.type), _tstate.reason,
             en ? "ON" : "OFF", pn ? "Y" : "N");
     }

@@ -55,7 +55,11 @@ uint32_t ExpiryData::countTradingDays(uint32_t fromDate, uint32_t toDate) const 
         if (m_bdMgr) {
             isHol = m_bdMgr->isHoliday(m_stdPID.c_str(), d, false);
         } else if (m_holidays) {
-            isHol = (m_holidays->find(d) != m_holidays->end());
+            // mirror IBaseDataMgr::isHoliday: weekends are non-trading even
+            // when they are not listed in holidays.json
+            uint32_t wd = TimeUtils::getWeekDay(d);
+            isHol = (wd == 0 || wd == 6) ||
+                    (m_holidays->find(d) != m_holidays->end());
         }
         if (!isHol) count++;
     }

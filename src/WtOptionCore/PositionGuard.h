@@ -12,7 +12,11 @@ namespace wt_option {
 class PositionGuard {
 public:
     struct Config {
-        int32_t tolerance = 0;
+        // Default 5 lots: covers the fill-report latency window (backtest:
+        // one async batch; live: exchange/broker ack latency) during which
+        // internal position is already adjusted but the broker snapshot is
+        // not. |diff| beyond this still triggers the fail-safe path.
+        int32_t tolerance = 5;
         double alertCooldownSec = 10.0;
         bool disableOnBreach = true;
         // C1: broker staleness — freeze new-opening trades when the broker
