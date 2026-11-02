@@ -101,6 +101,13 @@ public:
 
 	virtual OrderIDs stra_sell(const char* stdCode, double price, double qty, const char* userTag, int flag = 0, bool bForceClose = false) override;
 
+	// 回测报价：以 stra_buy + stra_sell 模拟双边报价（同 UftMocker 语义），
+	// 仅用于撮合与持仓核对；第二腿失败则回撤第一腿
+	virtual std::pair<uint32_t, uint32_t> stra_quote(const char* stdCode, double bidPrice, double bidQty,
+														double askPrice, double askQty, const char* userTag = "") override;
+
+	virtual bool stra_cancel_quote(uint32_t localid) override;
+
 	virtual WTSCommodityInfo* stra_get_comminfo(const char* stdCode) override;
 
 	virtual WTSKlineSlice* stra_get_bars(const char* stdCode, const char* period, uint32_t count) override;
@@ -254,7 +261,10 @@ private:
 
 	} OrderInfo;
 	typedef std::shared_ptr<OrderInfo> OrderInfoPtr;
-	typedef wt_hashmap<uint32_t, OrderInfoPtr> Orders;
+	// std::unordered_map (node-based): references/iterators stay valid across
+	// rehash, unlike wt_hashmap (ankerl flat map) whose storage moves on every
+	// insert-driven rehash. Order callbacks may insert new orders reentrantly.
+	typedef std::unordered_map<uint32_t, OrderInfoPtr> Orders;
 	StdRecurMutex	_mtx_ords;
 	Orders			_orders;
 

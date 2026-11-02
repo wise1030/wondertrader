@@ -350,8 +350,14 @@ void HftMocker::on_tick(const char* stdCode, WTSTickData* newTick)
 	update_dyn_profit(stdCode, newTick);
 
 	OrderIDs all_ids;
-	for (auto it = _orders.begin(); it != _orders.end(); it++)
-		all_ids.push_back(it->first);
+	{
+		// _orders is shared with the strategy worker thread (stra_buy/sell
+		// insert under the same mutex); the flat wt_hashmap can rehash on
+		// insert, so iterating it unlocked is a use-after-free hazard.
+		StdLocker<StdRecurMutex> lock(_mtx_ords);
+		for (auto it = _orders.begin(); it != _orders.end(); it++)
+			all_ids.push_back(it->first);
+	}
 	//如果开启了同tick撮合，则先触发策略的ontick，再处理订单
 	//如果没开启同tick撮合，则先处理订单，再触发策略的ontick
 	if (_match_this_tick)
@@ -625,7 +631,17 @@ OrderIDs HftMocker::stra_buy(const char* stdCode, double price, double qty, cons
 	}
 
 	postTask([this, localid](){
-		const OrderInfoPtr& ordInfo = _orders[localid];
+		// find + copy: operator[] would insert an EMPTY OrderInfo if the
+		// order was already erased (filled/cancelled) before this task runs,
+		// polluting _orders with a null shared_ptr and crashing procOrder.
+		OrderInfoPtr ordInfo;
+		{
+			StdLocker<StdRecurMutex> lock(_mtx_ords);
+			auto it = _orders.find(localid);
+			if (it == _orders.end())
+				return;
+			ordInfo = it->second;
+		}
 		on_entrust(localid, ordInfo->_code, true, "下单成功", ordInfo->_usertag);
 	});
 
@@ -825,13 +841,62 @@ OrderIDs HftMocker::stra_sell(const char* stdCode, double price, double qty, con
 	}
 
 	postTask([this, localid]() {
-		const OrderInfoPtr& ordInfo = _orders[localid];
+		// find + copy (same rationale as stra_buy: never operator[] here)
+		OrderInfoPtr ordInfo;
+		{
+			StdLocker<StdRecurMutex> lock(_mtx_ords);
+			auto it = _orders.find(localid);
+			if (it == _orders.end())
+				return;
+			ordInfo = it->second;
+		}
 		on_entrust(localid, ordInfo->_code, true, "下单成功", ordInfo->_usertag);
 	});
 
 	OrderIDs ids;
 	ids.emplace_back(localid);
 	return ids;
+}
+
+std::pair<uint32_t, uint32_t> HftMocker::stra_quote(const char* stdCode, double bidPrice, double bidQty,
+								double askPrice, double askQty, const char* userTag)
+{
+	// 回测占位：以 stra_buy + stra_sell 模拟双边报价，仅用于撮合与持仓核对
+	// 优先获取一支 localID，若第二腿失败则回撤第一腿
+	uint32_t bidId = 0, askId = 0;
+
+	if (decimal::gt(bidQty, 0))
+	{
+		OrderIDs bidIds = stra_buy(stdCode, bidPrice, bidQty, userTag);
+		if (bidIds.empty())
+		{
+			log_error("[HftMocker] Quote bid leg failed: {} @ {} x {}", stdCode, bidPrice, bidQty);
+			return {0, 0};
+		}
+		bidId = bidIds.back();
+	}
+
+	if (decimal::gt(askQty, 0))
+	{
+		OrderIDs askIds = stra_sell(stdCode, askPrice, askQty, userTag);
+		if (askIds.empty())
+		{
+			log_error("[HftMocker] Quote ask leg failed: {} @ {} x {}", stdCode, askPrice, askQty);
+			// 卖单失败回撤买单
+			if (bidId != 0)
+				stra_cancel(bidId);
+			return {0, 0};
+		}
+		askId = askIds.back();
+	}
+
+	return {bidId, askId};
+}
+
+bool HftMocker::stra_cancel_quote(uint32_t localid)
+{
+	// 回测占位：撤单走通用 stra_cancel
+	return stra_cancel(localid);
 }
 
 WTSCommodityInfo* HftMocker::stra_get_comminfo(const char* stdCode)
