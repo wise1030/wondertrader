@@ -415,19 +415,7 @@ OptionPricer2::__setupBlackCalculatorInfo(OptionData* option)
     }
     const ExpiryDataPtr& ed = option->getExpiryData();
     const ExpiryInfo& ei = *(bci->ei);
-    bci->m_forward = ei.m_atmforward;
-    if (config().use_sprd_vs_atmfwd) {
-        IVolCurvePtr fwdcurve = getFwdCurve(option->getExpiry());
-        if (fwdcurve && fwdcurve->isInitialized()) {
-            double sprd_vs_atmfwd = (*fwdcurve)(option->getStrike());
-            bci->m_forward = ei.m_atmforward + sprd_vs_atmfwd;
-        } else {
-            EMAFilter& filter = option->values().ema_sprd_vs_atmfwd();
-            if (filter.isOK()) {
-                bci->m_forward = ei.m_atmforward + filter.getMean();
-            }
-        }
-    }
+    bci->m_forward = ei.m_atmforward + __forwardSpreadFor(option, ei.m_atmforward);
     bci->m_discount   = ed ? ed->getDiscountFactor() : 1.0;
     bci->m_maturity   = ei.m_maturity;
     bci->m_settleFrac = ei.m_settleFrac;
@@ -435,6 +423,47 @@ OptionPricer2::__setupBlackCalculatorInfo(OptionData* option)
 }
 
 // implied-vol helpers ---------------------------------------------------------
+// P1-c: single implementation of the per-strike forward-spread resolution
+// (previously duplicated near-verbatim in __setupBlackCalculatorInfo and the
+// FAST incremental path).
+double OptionPricer2::__forwardSpreadFor(OptionData* option, double atmForward) const
+{
+    if (!config().use_sprd_vs_atmfwd)
+        return 0.0;
+
+    // 1) externally fitted forward-spread curve (primary path, previously a
+    //    dead branch — kept for override/debug purposes)
+    IVolCurvePtr fwdcurve = getFwdCurve(option->getExpiry());
+    if (fwdcurve && fwdcurve->isInitialized())
+        return (*fwdcurve)(option->getStrike());
+
+    // 2) per-strike parity synthetic forwards captured by the grid
+    const ExpiryDataPtr& ed = option->getExpiryData();
+    if (ed) {
+        const auto& pts = ed->synForwardPoints();
+        if (pts.size() >= 2) {
+            const double K = option->getStrike();
+            // sorted by strike: flat extrapolation outside the range
+            if (K <= pts.front().first) return pts.front().second - atmForward;
+            if (K >= pts.back().first)  return pts.back().second - atmForward;
+            auto hi = std::upper_bound(pts.begin(), pts.end(), K,
+                [](double k, const std::pair<double, double>& p) { return k < p.first; });
+            auto lo = std::prev(hi);
+            const double x0 = lo->first, y0 = lo->second;
+            const double x1 = hi->first, y1 = hi->second;
+            const double w = (x1 - x0) > 1e-12 ? (K - x0) / (x1 - x0) : 0.0;
+            return (y0 + (y1 - y0) * w) - atmForward;
+        }
+    }
+
+    // 3) fallback: this option's own EMA of forward spread
+    EMAFilter& filter = option->values().ema_sprd_vs_atmfwd();
+    if (filter.isOK())
+        return filter.getMean();
+
+    return 0.0;
+}
+
 void OptionPricer2::__doImplied_imp(OptionData* od) {
     const std::shared_ptr<BlackCalculatorInfo>& bci = __setupBlackCalculatorInfo(od);
     computeImpliedValues(od, *bci);
@@ -646,17 +675,8 @@ bool OptionPricer2::updateTheoreticalValues(OptionData* option)
     OptionValues& values = option->values(getValuesIndex());
     if (!values.isPriced()) return false;
 
-    double F = ei->m_atmforward;
+    double F = ei->m_atmforward + __forwardSpreadFor(option, ei->m_atmforward);
     if (std::isnan(F) || EQ(F, 0)) return false;
-    if (config().use_sprd_vs_atmfwd) {
-        IVolCurvePtr fwdcurve = getFwdCurve(option->getExpiry());
-        if (fwdcurve && fwdcurve->isInitialized()) {
-            F = ei->m_atmforward + (*fwdcurve)(option->getStrike());
-        } else {
-            EMAFilter& filter = option->values().ema_sprd_vs_atmfwd();
-            if (filter.isOK()) F = ei->m_atmforward + filter.getMean();
-        }
-    }
     const double dF = F - values.forward();
     if (config().fast_full_reprice_forward_step > 0 &&
         std::fabs(dF) > config().fast_full_reprice_forward_step) {

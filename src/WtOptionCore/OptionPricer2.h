@@ -263,6 +263,11 @@ private:
     void computeImpliedValues(OptionData* option, const BlackCalculatorInfo& bci);
 
     const BlackCalculatorInfoPtr& __setupBlackCalculatorInfo(OptionData* option);
+    /// P1-c: per-strike forward spread vs the expiry ATM forward.  Resolution
+    /// order: externally fitted fwd-spread curve (m_spFwdCurve) → per-strike
+    /// parity synthetic forwards from the grid → this option's own EMA.
+    /// Returns 0 when use_sprd_vs_atmfwd is disabled or nothing is available.
+    double __forwardSpreadFor(OptionData* option, double atmForward) const;
     void __doImplied_imp(OptionData* od);
     void __doImplied(const OptionDataPtr& od);
     void __doImpliedStrikes(const StrikeDataPtr& sd);

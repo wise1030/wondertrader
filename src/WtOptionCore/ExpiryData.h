@@ -14,6 +14,8 @@
 #include <memory>
 #include <string>
 #include <set>
+#include <utility>
+#include <vector>
 #include <cmath>
 #include <cstdint>
 
@@ -68,6 +70,15 @@ public:
     void setSyntheticForward(double synFwd, double underlyingPrice, double time);
     double getForwardSpread() const { return m_forwardSpread; }
     EMAFilter& emaForwardSpread() { return m_emaForwardSpread; }
+
+    // P1-c: per-strike parity synthetic forwards {strike, synForward}, sorted
+    // by strike, refreshed each __getBestSyntheticPrice pass.  OptionPricer2
+    // interpolates them for a per-strike forward instead of the single-point
+    // ATM-forward approximation (use_sprd_vs_atmfwd primary path).
+    void setSynForwardPoints(std::vector<std::pair<double, double>> pts)
+    { m_synFwdPoints = std::move(pts); }
+    const std::vector<std::pair<double, double>>& synForwardPoints() const
+    { return m_synFwdPoints; }
 
     // Min strikes for put-call parity (configurable, default 1 to match quantbox:
     // only needs 1 valid contributor (option pair OR future) to compute forward)
@@ -198,6 +209,9 @@ private:
 
     // Synthetic forward spread (from put-call parity)
     double m_forwardSpread = 0;       // syntheticForward - underlyingPrice
+
+    // P1-c: per-strike parity synthetic forwards {strike, synForward}
+    std::vector<std::pair<double, double>> m_synFwdPoints;
     EMAFilter m_emaForwardSpread;    // forward spread EMA (signal)
     int m_minStrikesForSynthetic = 1; // min valid contributors (1 = any single source, matches quantbox)
 

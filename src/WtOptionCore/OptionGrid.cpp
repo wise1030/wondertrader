@@ -764,11 +764,23 @@ double OptionGrid::__getBestSyntheticPrice(const ExpiryDataPtr& ed) {
 
         // Second pass: update per-strike ema_sprd_vs_atmfwd with the SPREAD
         // (strikeForward - synFwd), NOT the absolute strikeForward.
+        // P1-c: also capture {strike, strikeForward} for the per-strike
+        // forward interpolation in OptionPricer2 (__forwardSpreadFor).
+        std::vector<std::pair<double, double>> synPts;
+        synPts.reserve(validStrikes.size());
         for (const auto& vs : validStrikes) {
             double strikeForward = vs.sd->getStrikePrice() + (vs.callMid - vs.putMid) / vs.discount;
             double spread = strikeForward - synFwd;
             vs.sd->call()->values().ema_sprd_vs_atmfwd().update(time, spread);
             vs.sd->put()->values().ema_sprd_vs_atmfwd().update(time, spread);
+            synPts.emplace_back(vs.sd->getStrikePrice(), strikeForward);
+        }
+        if (synPts.size() >= 3) {
+            std::sort(synPts.begin(), synPts.end(),
+                      [](const std::pair<double, double>& a, const std::pair<double, double>& b) {
+                          return a.first < b.first;
+                      });
+            ed->setSynForwardPoints(std::move(synPts));
         }
 
         return synFwd;
