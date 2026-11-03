@@ -117,7 +117,17 @@ public:
     /// "power" restores the ORIGINAL quantbox dual-curve design
     /// (GVV parametric smile × PowerVolCurve empirical wings), making
     /// volcurve_weight meaningful. Recommended: "power".
+    /// Also selectable: "linear" | "constant" (P1-b wiring).
     std::string curve2_type          = "gvv";
+    /// P1-b: main vol-curve type. "gvv" (default) | "linear" | "constant".
+    /// linear fits σ-multiplier linearly in K−F (robust for illiquid
+    /// expiries where GVV's >=4-point fit fails); constant pins the
+    /// σ-multiplier to 1 (cold-start for newly listed expiries).
+    std::string volcurve_type        = "gvv";
+    /// P1-b: when the main curve fit fails, walk the fallback chain
+    /// power → linear → constant(1.0) so pricing never dies on a bad
+    /// snapshot.  Previous (good) curve still wins by curve versioning.
+    bool    volcurve_fallback        = true;
     bool    use_sprd_vs_atmfwd       = true;
     double  slow_compute_interval    = 0.1;   // seconds
     // FAST incremental update: second-order gamma correction is enabled by
@@ -132,6 +142,11 @@ public:
     static const char* name() { return "BlackPricer"; }
 };
 using OptionPricer2ConfigPtr = std::shared_ptr<OptionPricer2Config>;
+
+/// P1-b: curve factory shared by OptionPricer2 (initial curves) and
+/// AsyncVolFitter (fitted curves).  Unknown type falls back to GVV.
+/// powerParams selects the PowerVolCurve parameter set (SPOTVOL/RHO/...).
+IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams = 0);
 
 // ----------------------------------------------------------------------------
 // OptionPricer2
@@ -233,13 +248,12 @@ public:
     // 暴露 doFit 给定时器调用 (路径1: 独立定时 doFit)
     bool hasFitter() const { return m_spFitter != nullptr; }
     bool triggerDoFit();  // 实现在 .cpp 中 (需要 PeriodicCurveFitter 完整类型)
+    const OptionPricer2Config& config() const { return m_config; }
 
 private:
     friend class CompositeOptionPricer;
     friend class CompositeSpreadPricer;
     friend class CompositeOtcPricer;
-
-    const OptionPricer2Config& config() const { return m_config; }
 
     void setGvvWeight(uint32_t exp, double wgt) { m_gvv_weight[exp] = wgt; }
     void updateGvvParams(uint32_t exp, IVolCurvePtr curve) const;

@@ -866,8 +866,11 @@ void HftOptionStrategy::setupPricer()
 
     // Create shared theoretical pricer (OptionPricer2) — used by both strategies
     wt_option::OptionPricer2Config p2cfg;
-    // AsyncVolFitter replaces the legacy synchronous PeriodicCurveFitter.
-    // Keeping both enabled would mutate the same curves from two paths.
+    // P1-a: fitter mode. "async" (default) drives AsyncVolFitter; "sync"
+    // re-enables the legacy PeriodicCurveFitter inside OptionPricer2 (used
+    // for backtest determinism / fit debugging). The two chains are mutually
+    // exclusive — only one path may mutate the curves.
+    _volFitMode = "async";
     p2cfg.enable_fitter = false;
     p2cfg.use_parallel_for = cfgPtr_->has("use_parallel")
         ? cfgPtr_->getBoolean("use_parallel") : false;
@@ -882,6 +885,18 @@ void HftOptionStrategy::setupPricer()
             if (vcCfg0) {
                 WTSVariant* fitterCfg = vcCfg0->get("fitter");
                 if (fitterCfg) {
+                    // P1-a: mode switch (async default / sync legacy)
+                    if (fitterCfg->has("mode")) {
+                        std::string m = fitterCfg->getCString("mode");
+                        if (m == "async" || m == "sync") {
+                            _volFitMode = m;
+                            p2cfg.enable_fitter = (m == "sync");
+                        } else {
+                            WTSLogger::log_by_cat("strategy", LL_WARN,
+                                "pricer.blackCalc.volCurve.fitter.mode '{}' invalid (use async|sync), defaulting to async",
+                                m);
+                        }
+                    }
                     p2cfg.vol_fitting_start_time = fitterCfg->has("start_time")
                         ? fitterCfg->getDouble("start_time") : 0.0;
                     p2cfg.vol_fitting_end_time = fitterCfg->has("end_time")
@@ -916,23 +931,39 @@ void HftOptionStrategy::setupPricer()
 
         // R2: curve2 type — "power" restores the original GVV×Power dual-curve
         // design and makes volcurve_weight effective; "gvv" keeps legacy behavior
+        // P1-b: both type and curve2_type accept gvv|power|linear|constant.
         {
             WTSVariant* bc = pCfg0->get("blackCalc");
             WTSVariant* vc = bc ? bc->get("volCurve") : nullptr;
-            if (vc && vc->has("curve2_type")) {
-                std::string t = vc->getCString("curve2_type");
-                if (t == "power" || t == "gvv")
-                    p2cfg.curve2_type = t;
-                else
-                    WTSLogger::log_by_cat("strategy", LL_WARN,
-                        "pricer.blackCalc.volCurve.curve2_type '{}' invalid (use gvv|power)", t);
+            if (vc) {
+                if (vc->has("type")) {
+                    std::string t = vc->getCString("type");
+                    if (t == "gvv" || t == "linear" || t == "constant")
+                        p2cfg.volcurve_type = t;
+                    else
+                        WTSLogger::log_by_cat("strategy", LL_WARN,
+                            "pricer.blackCalc.volCurve.type '{}' invalid (use gvv|linear|constant)", t);
+                }
+                if (vc->has("curve2_type")) {
+                    std::string t = vc->getCString("curve2_type");
+                    if (t == "power" || t == "gvv" || t == "linear" || t == "constant")
+                        p2cfg.curve2_type = t;
+                    else
+                        WTSLogger::log_by_cat("strategy", LL_WARN,
+                            "pricer.blackCalc.volCurve.curve2_type '{}' invalid (use gvv|power|linear|constant)", t);
+                }
+                if (vc->has("fallback"))
+                    p2cfg.volcurve_fallback = vc->getBoolean("fallback");
             }
         }
     }
 
     auto pricer2 = std::make_shared<wt_option::OptionPricer2>(p2cfg, _grid.get(), _risk.get());
     _blackPricer = pricer2;
+    _asyncVolFitter.setCurveType(p2cfg.volcurve_type);
     _asyncVolFitter.setCurve2Type(p2cfg.curve2_type);
+    _asyncVolFitter.setFallbackEnabled(p2cfg.volcurve_fallback);
+    _asyncVolFitter.setDecayWindow(p2cfg.vol_fitting_decay_window);
 
     // Read pricer config from nested section
     WTSVariant* pCfg = cfgPtr_->get("pricer");
@@ -1931,11 +1962,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
         }
 
-        // Path 1: periodic async vol-fit snapshot.  The expensive curve fit runs
-        // on SingleFlightTaskRunner; worker publishes completed curves later.
+        // Path 1: periodic vol-fit. async mode (default): build snapshots and
+        // let SingleFlightTaskRunner fit off-thread; sync mode (fitter.mode:
+        // "sync"): drive the legacy PeriodicCurveFitter on the worker thread
+        // (backtest determinism / fit debugging).
         if (_traderCtx && _traderCtx->enabled) {
-            if (submitAsyncVolFit())
+            if (_volFitMode == "sync") {
+                if (_blackPricer && _blackPricer->triggerDoFit())
+                    WTSLogger::log_by_cat("strategy", LL_DEBUG, "PeriodicCurveFitter fit completed");
+            } else if (submitAsyncVolFit()) {
                 WTSLogger::log_by_cat("strategy", LL_DEBUG, "AsyncVolFitter snapshot submitted");
+            }
         }
 
         // Pricer timeout retry (equivalent to onComputeValuesTimeout):
@@ -2576,9 +2613,38 @@ void HftOptionStrategy::checkRiskLimitsEx()
 // AsyncVolFitter: worker builds an immutable snapshot from the last IV pass;
 // background thread fits fresh curves; worker publishes them at a later batch.
 // ============================================================================
+// ----------------------------------------------------------------------------
+// P1-a: good-points threshold lookup, ported from
+// PeriodicCurveFitter::evalThresh (linear interpolation over the
+// {days -> min points} table; defaults to 15 when unconfigured).
+// ----------------------------------------------------------------------------
+static size_t volFitGoodPointsNeeded(int32_t days, const std::map<int32_t, double>& table)
+{
+    if (table.empty()) return 15;
+    auto it = table.lower_bound(days);
+    if (it == table.end())   return static_cast<size_t>(table.rbegin()->second);
+    if (it == table.begin()) return static_cast<size_t>(it->second);
+    auto lo = std::prev(it);
+    const double x0 = lo->first, x1 = it->first;
+    const double y0 = lo->second, y1 = it->second;
+    if (x1 == x0) return static_cast<size_t>(y1);
+    return static_cast<size_t>(y0 + (y1 - y0) * (days - x0) / (x1 - x0));
+}
+
 bool HftOptionStrategy::submitAsyncVolFit()
 {
     if (!_grid || !_blackPricer) return false;
+
+    // P1-a: fit window + period throttle (ports of PeriodicCurveFitter
+    // doFit/onTimer semantics so fitter.period regains its meaning).
+    const auto& fcfg = _blackPricer->config();
+    const double now = _timeService.nowSeconds(_ctx);
+    if (now < fcfg.vol_fitting_start_time || now > fcfg.vol_fitting_end_time)
+        return false;
+    if (now - _lastVolFitSubmitTime < fcfg.vol_fitting_period)
+        return false;
+
+    const double thr = fcfg.vol_fitting_threshold;   // min option mid to qualify
 
     std::vector<wt_option::VolFitExpirySnapshot> snapshots;
     for (const auto& [exp, ed] : _grid->expiries()) {
@@ -2594,7 +2660,11 @@ bool HftOptionStrategy::submitAsyncVolFit()
         s.maturity = maturity;
         s.atmVol = atmVol;
         s.version = _blackPricer->getCurveVersion(exp) + 1;
+        s.timestamp = now;
 
+        // Quality gates ported from PeriodicCurveFitter::fitToExpiry:
+        // threshold (min mid), and per-side coverage is validated below.
+        bool hasUpside = false, hasDownside = false;
         for (const auto& sd : _grid->getStrikesByExpiry(exp)) {
             if (!sd) continue;
             const wt_option::OptionData* pricing = nullptr;
@@ -2604,13 +2674,30 @@ bool HftOptionStrategy::submitAsyncVolFit()
                 (!pricing || sd->put()->getMid() < pricing->getMid()))
                 pricing = sd->put().get();
             if (!pricing) continue;
+            if (pricing->getMid() <= thr) continue;      // threshold gate
             const double iv = pricing->values(0).impliedVol();
-            if (iv > 0)
+            if (iv > 0) {
                 s.points.push_back({sd->getStrikePrice() - fwd, iv / atmVol});
+                if (sd->getStrikePrice() > fwd) hasUpside = true;
+                else hasDownside = true;
+            }
         }
-        if (!s.points.empty()) snapshots.push_back(std::move(s));
+        // good-points gate (days-aware) + ups/downs quadrant gate: a
+        // single-sided smile must not be fitted — it converges to a fake wing.
+        const size_t need = std::max<size_t>(4,
+            volFitGoodPointsNeeded(ed->daysToExpiry(), fcfg.vol_fitting_good_points_thresh));
+        if (s.points.size() < need || !hasUpside || !hasDownside) {
+            WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                "AsyncVolFitter exp={} skipped: pts={} need={} up={} down={}",
+                exp, s.points.size(), need, hasUpside, hasDownside);
+            continue;
+        }
+        snapshots.push_back(std::move(s));
     }
-    return _asyncVolFitter.submit(std::move(snapshots));
+    if (snapshots.empty()) return false;
+    if (!_asyncVolFitter.submit(std::move(snapshots))) return false;
+    _lastVolFitSubmitTime = now;
+    return true;
 }
 
 void HftOptionStrategy::publishAsyncVolFit()

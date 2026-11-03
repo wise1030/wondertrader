@@ -31,6 +31,8 @@
 #include "OptionValues.h"
 #include "OptionGreeks.h"
 #include "GvvVolCurve.h"
+#include "LinearVolCurve.h"
+#include "ConstantVolCurve.h"
 #include "PeriodicCurveFitter.h"
 
 #include <limits>
@@ -89,6 +91,20 @@ namespace wt_option {
 // Config ctor
 // ----------------------------------------------------------------------------
 OptionPricer2Config::OptionPricer2Config() = default;
+
+// ----------------------------------------------------------------------------
+// P1-b: shared curve factory (also used by AsyncVolFitter for fitted curves)
+// ----------------------------------------------------------------------------
+IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams)
+{
+    if (type == "linear")
+        return std::make_shared<LinearVolCurve>();
+    if (type == "constant")
+        return std::make_shared<ConstantVolCurve>(1.0);  // flat ATM multiplier
+    if (type == "power")
+        return std::make_shared<PowerVolCurve>(static_cast<GvvVolCurve::Parameter>(powerParams));
+    return std::make_shared<GvvVolCurve>();
+}
 
 // ----------------------------------------------------------------------------
 // ExpiryInfo
@@ -215,14 +231,13 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
         ei->m_atmforward = NAN;
         ei->m_atmvol = m_defaultVolatility;
         // 创建波动率曲线 (与 quantbox 一致, 但不依赖 Lua config)
-        ei->m_spVolCurve  = std::make_shared<GvvVolCurve>();
+        // P1-b: honor volcurve_type for the initial main curve (fitted
+        // replacement comes from AsyncVolFitter / PeriodicCurveFitter).
+        ei->m_spVolCurve  = createVolCurveByType(m_config.volcurve_type);
         // R2: restore the original GVV×Power dual-curve design. With the
         // migration-era default ("gvv") both curves are identical and
         // volcurve_weight degenerates to a no-op.
-        if (m_config.curve2_type == "power")
-            ei->m_spVolCurve2 = std::make_shared<PowerVolCurve>(GvvVolCurve::RHO);
-        else
-            ei->m_spVolCurve2 = std::make_shared<GvvVolCurve>();
+        ei->m_spVolCurve2 = createVolCurveByType(m_config.curve2_type, GvvVolCurve::RHO);
         // hardcode defaults (preserve original)
         ei->m_futsprd = 1.0;
         ei->m_atmvolsprd = 0.2;

@@ -120,6 +120,9 @@ private:
     wt_option::IOptionPricerPtr _pricer;          // generic pricer interface
     std::shared_ptr<wt_option::OptionPricer2> _blackPricer;
     wt_option::AsyncVolFitter _asyncVolFitter;
+    /// P1-a: "async" (default, AsyncVolFitter) | "sync" (PeriodicCurveFitter)
+    std::string _volFitMode{"async"};
+    double _lastVolFitSubmitTime = -1e9;   // P1-a: fitter.period throttle
     wt_option::CompositeOptionPricerPtr _compositePricer;  // MM pricer (null when gammascalp)
     wt_option::GammaScalpOptionPricerPtr _gammaPricer;    // gamma scalp pricer (null when composite_mm)
     wt_option::ControllableTradingGridPtr _ctg;

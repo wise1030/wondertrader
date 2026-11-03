@@ -234,17 +234,27 @@ void test_position_guard() {
     ASSERT_EQ(guard.getBrokerPos(), 10);
     ASSERT_TRUE(guard.isOK());
 
-    // Internal fills: buy 5 -> internal = 15 (matches broker+5)
-    // But broker hasn't updated yet -> discrepancy
+    // Internal fill while broker snapshot lags: diff=5 equals the default
+    // tolerance (5) -> still OK by design (covers the fill-report latency
+    // window; see PositionGuard.h).
     guard.onFill(true, 5);
-    // internal=15, broker=10, diff=5 > tolerance(0) -> disabled
-    ASSERT_TRUE(!guard.isOK());
+    ASSERT_TRUE(guard.isOK());
     ASSERT_EQ(guard.getDiff(), 5);
 
+    // Breach path: same sequence with tolerance pinned to 0 (legacy fail-fast)
+    PositionGuard::Config breachCfg;
+    breachCfg.tolerance = 0;
+    PositionGuard guard0(breachCfg);
+    guard0.onBrokerPosition(true, 10.0);
+    guard0.onFill(true, 5);
+    // internal=15, broker=10, diff=5 > tolerance(0) -> disabled
+    ASSERT_TRUE(!guard0.isOK());
+    ASSERT_EQ(guard0.getDiff(), 5);
+
     // Reconcile
-    guard.reconcile();
-    ASSERT_TRUE(guard.isOK());
-    ASSERT_EQ(guard.getInternalPos(), 10);
+    guard0.reconcile();
+    ASSERT_TRUE(guard0.isOK());
+    ASSERT_EQ(guard0.getInternalPos(), 10);
 
     std::cout << "  PASS" << std::endl;
 }
