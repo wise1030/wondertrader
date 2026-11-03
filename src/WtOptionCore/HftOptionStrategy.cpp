@@ -1101,10 +1101,14 @@ void HftOptionStrategy::setupPricer()
     };
 
     for (const auto& [exp, ec] : _expiryConfigs) {
-        // Per-expiry underlying code registration
-        std::string ulCode = ec.underlyingCode.empty() ? _underlyingCode : ec.underlyingCode;
-        if (!ulCode.empty()) {
-            _grid->setExpiryUnderlying(exp, ulCode);
+        // Per-expiry underlying code registration.
+        // P2/G3: an EXPLICIT expiries[].underlyingCode is exclusive — the
+        // global underlying tick no longer overwrites this expiry's price.
+        // An empty per-expiry code falls back to the global underlying.
+        if (!ec.underlyingCode.empty()) {
+            _grid->setExpiryOwnUnderlying(exp, ec.underlyingCode);
+        } else if (!_underlyingCode.empty()) {
+            _grid->setExpiryUnderlying(exp, _underlyingCode);
         }
         // P0-4: register forward-calculation config; ExpiryData is created
         // lazily on the first tick, so direct application at on_init time
@@ -1112,7 +1116,9 @@ void HftOptionStrategy::setupPricer()
         _grid->setExpiryForwardConfig(exp, ec.include_future,
                                       ec.min_strikes_for_synthetic);
         // Hedge override
-        std::string hedgeCode = ec.hedgeCode.empty() ? ulCode : ec.hedgeCode;
+        std::string hedgeCode = ec.hedgeCode.empty()
+            ? (ec.underlyingCode.empty() ? _underlyingCode : ec.underlyingCode)
+            : ec.hedgeCode;
         if (!hedgeCode.empty()) {
             _otg->setHedgeOverride(exp, hedgeCode);
             // B18 primary hedge: register with the real multiplier before

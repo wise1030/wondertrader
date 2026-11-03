@@ -406,8 +406,27 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
     ed->setBaseDataMgr(m_bdMgr);
     ed->setSessionInfo(m_sessInfo);
     ed->setStdPID(m_exchange + "." + m_optionProduct);
-    ed->setUnderlyingCode(m_underlyingCode);
-    ed->setHedgeCode(m_underlyingCode);
+
+    // P2/G3: with an exclusive per-expiry underlying, bind THAT code and do
+    // NOT route the global underlying into this expiry (previously both were
+    // registered and a global tick overwrote the per-expiry price,
+    // last-tick-won).  Otherwise bind the global underlying and register its
+    // tick routing as before.  The strategy registers per-expiry underlyings
+    // at on_init — before any ExpiryData exists — so the map is authoritative
+    // by creation time.
+    {
+        auto ownIt = m_expiryOwnUnderlying.find(expiry);
+        if (ownIt != m_expiryOwnUnderlying.end()) {
+            ed->setUnderlyingCode(ownIt->second);
+            ed->setHedgeCode(ownIt->second);   // default hedge; OTG override may refine
+        } else {
+            ed->setUnderlyingCode(m_underlyingCode);
+            ed->setHedgeCode(m_underlyingCode);
+            if (!m_underlyingCode.empty()) {
+                setExpiryUnderlying(expiry, m_underlyingCode);
+            }
+        }
+    }
 
     // P0-4: apply forward-calculation config the strategy registered before
     // this ExpiryData existed (ExpiryData is created lazily on the first
@@ -418,10 +437,6 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
             ed->setIncludeFuture(cfgIt->second.first);
             ed->setMinStrikesForSynthetic(cfgIt->second.second);
         }
-    }
-    // Register this expiry's underlying code for tick routing
-    if (!m_underlyingCode.empty()) {
-        setExpiryUnderlying(expiry, m_underlyingCode);
     }
 
     // B2: Set risk-free rate from flat or curve
@@ -641,7 +656,15 @@ StrikeDataPtr OptionGrid::getAtmStrike(uint32_t expiry) {
     // R3: snap the reference price onto the listed strike grid first so the
     // nearest-search cannot land on a "virtual" midpoint between two listed
     // intervals (CFFEX IO 50/100, DCE MO 25/50/100 tiers).
-    double refPrice = getUnderlyingPrice();
+    // P2/G4: prefer the per-expiry underlying price — multi-series setups
+    // (CZCE SR309/SR701, per-month hedges) used to select the ATM strike off
+    // the GLOBAL underlying, which can belong to another series.
+    double refPrice = 0;
+    ExpiryDataPtr ed = getExpiryData(expiry);
+    if (ed && ed->isUnderlyingPriceValid())
+        refPrice = ed->getUnderlyingPrice();
+    if (refPrice <= 0)
+        refPrice = getUnderlyingPrice();
     {
         std::shared_lock<std::shared_mutex> lock(m_gridMutex);
         auto fit = m_strikeFinders.find(expiry);
