@@ -103,8 +103,10 @@ void ControllableTradingGrid::tradingStopMidDay() {
         // P1-e/R8: enabled is owned by the unified state machine.  Fire the
         // callback FIRST so applyTradingState() has written enabled=false
         // before refresh() relies on it to stage CANCEL quotes (same thread,
-        // synchronous).
+        // synchronous).  Defensive fallback for contexts without the
+        // callback wired (unit tests).
         if (m_sessionStopCb) m_sessionStopCb(true);
+        else m_ctx->enabled = false;
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "CTG::tradingStopMidDay - trading disabled");
         refresh();
@@ -121,6 +123,7 @@ void ControllableTradingGrid::resumeTrading() {
         // P1-e/R8: no direct write — the sessionStopCb routes through
         // setState()/applyTradingState(), the single writer of enabled.
         if (m_sessionStopCb) m_sessionStopCb(false);
+        else m_ctx->enabled = true;
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "CTG::resumeTrading — trading enabled");
     }
