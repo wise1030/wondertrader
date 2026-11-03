@@ -100,7 +100,11 @@ void ControllableTradingGrid::onScannerHit(const ScannerHitEvent& event) {
 // Phase 8: tradingStopMidDay — pause trading mid-day
 void ControllableTradingGrid::tradingStopMidDay() {
     if (m_ctx) {
-        m_ctx->enabled = false;
+        // P1-e/R8: enabled is owned by the unified state machine.  Fire the
+        // callback FIRST so applyTradingState() has written enabled=false
+        // before refresh() relies on it to stage CANCEL quotes (same thread,
+        // synchronous).
+        if (m_sessionStopCb) m_sessionStopCb(true);
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "CTG::tradingStopMidDay - trading disabled");
         refresh();
@@ -108,18 +112,17 @@ void ControllableTradingGrid::tradingStopMidDay() {
         // orders to the exchange. Without this, CANCEL quotes are staged in
         // m_pendingQuotes but never sent (all callers gate drain on enabled==true).
         drainPendingQuotes();
-        // R8: notify the unified state machine (strategy owns the writer now)
-        if (m_sessionStopCb) m_sessionStopCb(true);
     }
 }
 
 // Phase 8: resumeTrading — resume after mid-day pause
 void ControllableTradingGrid::resumeTrading() {
     if (m_ctx) {
-        m_ctx->enabled = true;
+        // P1-e/R8: no direct write — the sessionStopCb routes through
+        // setState()/applyTradingState(), the single writer of enabled.
+        if (m_sessionStopCb) m_sessionStopCb(false);
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "CTG::resumeTrading — trading enabled");
-        if (m_sessionStopCb) m_sessionStopCb(false);
     }
 }
 

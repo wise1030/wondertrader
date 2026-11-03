@@ -431,7 +431,9 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     _fillPriceChecker->setPanicCallback([this](const std::string& code, double, double, double) {
         WTSLogger::log_by_cat("strategy", LL_ERROR,
             "FillPriceChecker PANIC callback: {} -> triggering risk check", code);
-        if (_traderCtx) _traderCtx->panicked = true;
+        // P1-e: route through the unified state machine (single writer of
+        // panicked) instead of poking the atomic directly.
+        setState(wt_option::TradingStateType::Panic, "fill_price_deviation");
     });
 
     WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -1184,9 +1186,17 @@ void HftOptionStrategy::setupCTG()
 
     // R8: mid-day stop/resume flows through the unified state machine
     _ctg->setSessionStopCallback([this](bool stopped) {
-        setState(stopped ? wt_option::TradingStateType::SessionStopped
-                         : wt_option::TradingStateType::Normal,
-                 stopped ? "session_stop" : "session_resume");
+        if (stopped) {
+            setState(wt_option::TradingStateType::SessionStopped, "session_stop");
+        } else if (_tstate.type != wt_option::TradingStateType::Panic
+                   && _tstate.type != wt_option::TradingStateType::Disabled) {
+            // P1-e: session resume must neither downgrade Recovering to
+            // Normal before the underlying gate clears, nor clear a risk
+            // panic.
+            setState(_tstate.underlyingReady ? wt_option::TradingStateType::Normal
+                                             : wt_option::TradingStateType::Recovering,
+                     "session_resume");
+        }
     });
 
     // Wire PositionGuard/PositionOffsetMgr/RiskFilterChain to each OQM.
