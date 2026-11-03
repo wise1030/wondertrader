@@ -324,6 +324,22 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 ### expiries（数组格式，键为 YYYYMM）
 
+> ⚠️ **格式强校验**：`expiry` 必须是 6 位 `YYYYMM` 且 ∈ [202001, 209912]（loader 启动报错）。
+> 写成 `2607` 会被拒绝——网格所有容器都以 6 位到期键索引。
+
+**标的（underlyingCode）优先级规则**（P2/G3 修复后）：
+
+| 场景 | 定价标的 | 说明 |
+|------|---------|------|
+| `expiries[].underlyingCode` 非空 | 该代码（**专属**） | 全局 `underlyingCode` 的 tick **不会**再路由进该 expiry |
+| `expiries[].underlyingCode` 为空 | 全局 `underlyingCode` | 标准单标的模式 |
+| 对冲标的 | `expiries[].hedgeCode`，空则同定价标的 | 由 `OptionTradingGrid::setHedgeOverride` 在 ExpiryData 创建时生效 |
+
+> **单品种边界**：一个策略实例 = 一个期权品种（`_optionProduct` 单值，所有容器以纯 expiry 键索引）。
+> 唯一例外是 CZCE 的 C/P 双品种（SRC+SRP）——它们共享同一 strike 空间，设计上就应合并进同一网格。
+> 两个不同品种（如 CFFEX IO+MO）**不能**共用一个策略实例，否则同到期月会串数据
+> （同一 ExpiryData/strike 桶互覆 call/put 槽）。多品种请部署多个策略实例（WtRunner 支持）。
+
 ```json
 "expiries": [
     {
@@ -337,6 +353,17 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
     }
 ]
 ```
+
+### 持仓限制的执行顺序（4 套，P2 文档化）
+
+从外到内依次生效，任一层拒绝即不下单：
+
+| 顺序 | 机制 | 配置位置 | 粒度 | 行为 |
+|------|------|---------|------|------|
+| 1 | RiskLimitsEx 预交易 | `riskLimits.maxPositionPerOption/maxTotalPosition`、Greeks/DailyLoss | 合约/组合 | REJECT（含保证金估算） |
+| 2 | RiskFilterChain | `orderManager.riskFilters.{option,future}.max_position` | 合约 | REJECT / ALLOW / MODIFY |
+| 3 | ExpiryRiskConfig 报价尺寸 | `expiries[].max_pos_{fut,stk,opt}` + `max_qsize` | 报价尺寸计算 | 限制报价手数（`__computeQuoteSize`） |
+| 4 | OQM 内部 | `orderManager.option.max_position`（默认 50）、check_potential_position | 合约 | 开平仓路由约束 |
 
 ### volCurve.fitter
 
