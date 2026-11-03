@@ -408,6 +408,17 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
     ed->setStdPID(m_exchange + "." + m_optionProduct);
     ed->setUnderlyingCode(m_underlyingCode);
     ed->setHedgeCode(m_underlyingCode);
+
+    // P0-4: apply forward-calculation config the strategy registered before
+    // this ExpiryData existed (ExpiryData is created lazily on the first
+    // tick, so on_init-time direct application silently dropped it).
+    {
+        auto cfgIt = m_expiryFwdCfg.find(expiry);
+        if (cfgIt != m_expiryFwdCfg.end()) {
+            ed->setIncludeFuture(cfgIt->second.first);
+            ed->setMinStrikesForSynthetic(cfgIt->second.second);
+        }
+    }
     // Register this expiry's underlying code for tick routing
     if (!m_underlyingCode.empty()) {
         setExpiryUnderlying(expiry, m_underlyingCode);

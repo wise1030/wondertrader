@@ -108,6 +108,11 @@ public:
     // When that contract's tick arrives, the corresponding ExpiryData gets its
     // own underlying price (separate from the global m_underlyingPrice).
     void setExpiryUnderlying(uint32_t expiry, const std::string& code);
+    /// P0-4: register forward-calculation config for an expiry that may not
+    /// exist yet; applied when the ExpiryData is lazily created.
+    void setExpiryForwardConfig(uint32_t expiry, bool includeFuture, int minStrikes) {
+        m_expiryFwdCfg[expiry] = {includeFuture, minStrikes};
+    }
     bool isExpiryUnderlying(const std::string& code) const {
         return m_expiryUnderlyingMap.find(code) != m_expiryUnderlyingMap.end();
     }
@@ -222,6 +227,8 @@ private:
 
     // Per-expiry underlying: contract code -> list of expiries that use it as pricing underlying
     std::unordered_map<std::string, std::vector<uint32_t>> m_expiryUnderlyingMap;
+    // P0-4: pending per-expiry forward config {includeFuture, minStrikes}
+    std::map<uint32_t, std::pair<bool, int>> m_expiryFwdCfg;
 
     // Compute time for EMA updates
     double m_computeTime = 0;

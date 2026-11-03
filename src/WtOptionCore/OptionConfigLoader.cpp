@@ -111,8 +111,14 @@ OptionConfigLoader::Result OptionConfigLoader::load(wtp::WTSVariant* cfg) {
             const uint32_t expiry = e->getUInt32("expiry");
             const double dmin = e->has("delta_min") ? e->getDouble("delta_min") : 0.05;
             const double dmax = e->has("delta_max") ? e->getDouble("delta_max") : 0.95;
-            if (expiry == 0)
-                r.errors.push_back("expiries[].expiry must be non-zero");
+            // P0-3: the grid keys everything by 6-digit YYYYMM parsed from the
+            // option code (e.g. 202607).  A 4-digit YYMM (2607) used to load
+            // silently and match nothing — the expiry never got enabled and
+            // quoting stayed off with no warning.
+            if (expiry < 202001 || expiry > 209912)
+                r.errors.push_back(fmt::format(
+                    "expiries[].expiry must be YYYYMM in [202001, 209912], got {} "
+                    "(grid expiry keys are 6-digit, e.g. 202607)", expiry));
             if (!(dmin >= 0.0 && dmin < dmax && dmax <= 1.0))
                 r.errors.push_back(fmt::format("expiry {} delta range invalid: [{}, {}]", expiry, dmin, dmax));
             setEff(r, fmt::format("expiries[{}].delta_min", expiry), num(dmin));

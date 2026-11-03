@@ -315,14 +315,34 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
 {
     auto etd = std::make_shared<ExpiryTradingData>();
 
-    // Create primary UTD for this expiry's hedge code
+    // Create primary UTD for this expiry's hedge code.
+    // P0-2: when several expiries share the same hedgeCode, reuse ONE UTD.
+    // The previous unconditional overwrite orphaned the earlier expiry's UTD
+    // (its mid/quote-manager stopped receiving ticks) and would have built a
+    // second quote manager for the same contract.
     const std::string& hedgeCode = ed->getHedgeCode();
-    auto utd = std::make_shared<UnderlyingTradingData>(hedgeCode, ed, shared_from_this());
+    bool freshUtd = false;
+    UnderlyingTradingDataPtr utd;
+    auto existing = m_tblUnderlyingTradingData.find(hedgeCode);
+    if (existing != m_tblUnderlyingTradingData.end()) {
+        utd = existing->second;
+    } else {
+        utd = std::make_shared<UnderlyingTradingData>(hedgeCode, ed, shared_from_this());
+        m_tblUnderlyingTradingData[hedgeCode] = utd;
+        freshUtd = true;
+    }
     etd->setPrimaryUnderlier(utd);
-    m_tblUnderlyingTradingData[hedgeCode] = utd;
+
+    // P0-1: give the UTD a live position source.  Without it fut_pos was
+    // permanently 0 (CompositeOptionPricer sized future quotes as if flat).
+    // Same provider contract as the OTD one (strategy _positions projection).
+    if (freshUtd && m_positionSource)
+        utd->setPositionProvider([src = m_positionSource, hedgeCode]() -> int32_t {
+            return src(hedgeCode);
+        });
 
     // Set tick size + contract size + fee from contract info
-    if (m_hftCtx) {
+    if (freshUtd && m_hftCtx) {
         CodeHelper::CodeInfo ci = CodeHelper::extractStdCode(hedgeCode.c_str(), nullptr);
         std::string prodKey = fmt::format("{}.{}", ci._exchg, ci._product);
         WTSCommodityInfo* commInfo = m_hftCtx->stra_get_comminfo(prodKey.c_str());
@@ -393,12 +413,16 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
         if (m_timeFn) return m_timeFn();
         return ctx ? wt_option::ctxTimeSeconds(ctx) : 0.0;
     });
-    utd->setQuoteManager(futOm);
-    // B5: FIFO PnL mode for the hedge tracker too
-    if (m_fifoPnl)
-        utd->getPnlTracker()->setFifoMode(true);
-    utd->enable();
-    utd->setActive(false);
+    if (freshUtd) {
+        // P0-2: a shared UTD keeps its original OQM — replacing it here would
+        // silently swap the quote manager the other expiry is already using.
+        utd->setQuoteManager(futOm);
+        // B5: FIFO PnL mode for the hedge tracker too
+        if (m_fifoPnl)
+            utd->getPnlTracker()->setFifoMode(true);
+        utd->enable();
+        utd->setActive(false);
+    }
 
     // Bind UTD → ExpiryData (so pricer can access hedge trading data)
     ed->setHedgeUTD(utd.get());

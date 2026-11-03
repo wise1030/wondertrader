@@ -1106,12 +1106,11 @@ void HftOptionStrategy::setupPricer()
         if (!ulCode.empty()) {
             _grid->setExpiryUnderlying(exp, ulCode);
         }
-        // Apply forward calculation config to ExpiryData
-        auto ed = _grid->getExpiryData(exp);
-        if (ed) {
-            ed->setIncludeFuture(ec.include_future);
-            ed->setMinStrikesForSynthetic(ec.min_strikes_for_synthetic);
-        }
+        // P0-4: register forward-calculation config; ExpiryData is created
+        // lazily on the first tick, so direct application at on_init time
+        // used to be silently dropped.  The grid applies it on creation.
+        _grid->setExpiryForwardConfig(exp, ec.include_future,
+                                      ec.min_strikes_for_synthetic);
         // Hedge override
         std::string hedgeCode = ec.hedgeCode.empty() ? ulCode : ec.hedgeCode;
         if (!hedgeCode.empty()) {

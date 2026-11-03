@@ -1,6 +1,6 @@
 {
     "underlyingCode": "SHFE.cu2506",
-    "optionProduct": "cu",
+    "optionProduct": "cu_o",
     "exchange": "SHFE",
     "riskFreeRate": 0.02,
     "maxTPS": 50,
