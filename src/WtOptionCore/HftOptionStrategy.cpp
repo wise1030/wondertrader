@@ -1824,13 +1824,24 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // leg2/hedge leg was never sent, leaving naked directional exposure)
         if (!_activeCombos.empty()) {
             uint32_t fq = static_cast<uint32_t>(vol);
+            uint64_t tsMs = static_cast<uint64_t>(
+                (_ctx ? _timeService.nowSeconds(_ctx) : 0.0) * 1000);
             for (auto& combo : _activeCombos) {
                 auto spread = std::dynamic_pointer_cast<wt_option::SpreadComboOrder>(combo);
-                if (spread && spread->onLegFill(localid, fq)) continue;
+                if (spread && spread->onLegFill(localid, fq)) {
+                    spread->legOrderFilled(localid, price, fq, tsMs);   // P1-d/W5 audit record
+                    continue;
+                }
                 auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
-                if (syn && syn->onLegFill(localid, fq)) continue;
+                if (syn && syn->onLegFill(localid, fq)) {
+                    syn->legOrderFilled(localid, price, fq, tsMs);
+                    continue;
+                }
                 auto sim = std::dynamic_pointer_cast<wt_option::SimulComboOrder>(combo);
-                if (sim && sim->onLegFill(localid, fq)) continue;
+                if (sim && sim->onLegFill(localid, fq)) {
+                    sim->legOrderFilled(localid, price, fq, tsMs);
+                    continue;
+                }
             }
         }
 
@@ -1865,11 +1876,20 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (isCanceled && !_activeCombos.empty()) {
             for (auto& combo : _activeCombos) {
                 auto spread = std::dynamic_pointer_cast<wt_option::SpreadComboOrder>(combo);
-                if (spread) spread->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                if (spread) {
+                    spread->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                    spread->legOrderTerminal(localid, false);   // P1-d/W5 audit record
+                }
                 auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
-                if (syn) syn->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                if (syn) {
+                    syn->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                    syn->legOrderTerminal(localid, false);
+                }
                 auto sim = std::dynamic_pointer_cast<wt_option::SimulComboOrder>(combo);
-                if (sim) sim->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                if (sim) {
+                    sim->onLegTerminal(localid, true, static_cast<uint32_t>(leftQty));
+                    sim->legOrderTerminal(localid, false);
+                }
             }
         }
         if (isCanceled) {
@@ -2087,8 +2107,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 });
             // A6: Stop scanners
             _scanCoord.stopAll();
-            // B9: Print expiration simulator summary at session end
-            if (_expSim) _expSim->printSummary();
+            // B9: ExpirationSimulator — run the daily settlement before the
+            // summary so it has data (was permanently "0 day results"):
+            // settlement PnL for contracts that expired today, mark-to-mid
+            // for still-open ones; trading PnL comes from recorded fills.
+            if (_expSim) {
+                _expSim->checkExpiration(tdate,
+                    _grid ? _grid->getUnderlyingPrice() : 0.0);
+                _expSim->printSummary();
+            }
             // B10: Close value writer at session end
             if (_valWriter) _valWriter->close();
             // QuoteStatistics: print session summary
@@ -2458,6 +2485,9 @@ void HftOptionStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
         _hedgeCoord.onTerminal(localid);
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "HftOptionStrategy entrust failed: id={} msg={}", localid, message);
+        // P1-d/W5: rejected combo legs go terminal in the audit records too.
+        for (auto& combo : _activeCombos)
+            combo->legOrderTerminal(localid, true);
     }
 }
 

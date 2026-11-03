@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <map>
 #include <vector>
 #include "BaseOrder.h"
 
@@ -110,7 +111,21 @@ public:
     
     const std::string& getName() const { return m_name; }
     size_t getLegCount() const { return m_legs.size(); }
-    
+
+    // ------------------------------------------------------------------
+    // P1-d/W5: per-leg order records (BaseOrder/OptionOrder state machine).
+    // The concrete combos keep their fast localid-based routing untouched;
+    // these records mirror every send/fill/terminal transition so the
+    // previously-uninstantiated order state machine carries a real audit
+    // trail (avg fill price, per-leg state history) for post-trade analysis.
+    // ------------------------------------------------------------------
+    void trackLegOrder(uint32_t localid, const std::string& code,
+                       bool isBuy, double price, uint32_t qty);
+    void legOrderFilled(uint32_t localid, double price, uint32_t qty, uint64_t timeMs);
+    void legOrderTerminal(uint32_t localid, bool rejected);
+    OptionOrderPtr getLegOrder(uint32_t localid) const;
+    const std::map<uint32_t, OptionOrderPtr>& getLegOrders() const { return m_legOrderRecords; }
+
 protected:
     struct Leg {
         OptionOrderPtr order;
@@ -122,6 +137,9 @@ protected:
     std::vector<Leg> m_legs;
     int32_t m_totalSize;
     double m_unitProfit;
+
+    // P1-d/W5: localid -> order record (audit mirror of the fast routing)
+    std::map<uint32_t, OptionOrderPtr> m_legOrderRecords;
 };
 
 using ComboOrderPtr = std::shared_ptr<ComboOrder>;

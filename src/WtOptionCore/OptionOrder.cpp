@@ -7,6 +7,7 @@
 #include "OptionData.h"
 #include "StrikeData.h"
 #include "ExpiryData.h"
+#include "../WTSTools/WTSLogger.h"
 #include <chrono>
 #include <cmath>
 
@@ -94,6 +95,52 @@ ComboOrder::ComboOrder(const std::string& name)
     , m_totalSize(0)
     , m_unitProfit(0)
 {
+}
+
+// ----------------------------------------------------------------------------
+// P1-d/W5: per-leg order records (audit mirror of the fast localid routing)
+// ----------------------------------------------------------------------------
+void ComboOrder::trackLegOrder(uint32_t localid, const std::string& code,
+                               bool isBuy, double price, uint32_t qty)
+{
+    auto order = std::make_shared<OptionOrder>(
+        localid, code, isBuy ? OrderDir::Buy : OrderDir::Sell, price, qty);
+    order->setState(OrderState::Sent);
+    order->setSendTime(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()));
+    m_legOrderRecords[localid] = std::move(order);
+}
+
+void ComboOrder::legOrderFilled(uint32_t localid, double price, uint32_t qty, uint64_t timeMs)
+{
+    auto it = m_legOrderRecords.find(localid);
+    if (it == m_legOrderRecords.end() || !it->second) return;
+    it->second->addFill(price, qty, timeMs);
+    if (it->second->isFilled()) {
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "ComboOrder[{}] leg {} FILLED {}x{} avg={:.2f}",
+            m_name, localid, it->second->getFilledQty(),
+            it->second->getCode(), it->second->getAvgFillPrice());
+    }
+}
+
+void ComboOrder::legOrderTerminal(uint32_t localid, bool rejected)
+{
+    auto it = m_legOrderRecords.find(localid);
+    if (it == m_legOrderRecords.end() || !it->second) return;
+    it->second->setState(rejected ? OrderState::Rejected : OrderState::Cancelled);
+    WTSLogger::log_by_cat("strategy", LL_DEBUG,
+        "ComboOrder[{}] leg {} TERMINAL state={} filled={}/{} avg={:.2f}",
+        m_name, localid, rejected ? "Rejected" : "Cancelled",
+        it->second->getFilledQty(), it->second->getQuantity(),
+        it->second->getAvgFillPrice());
+}
+
+OptionOrderPtr ComboOrder::getLegOrder(uint32_t localid) const
+{
+    auto it = m_legOrderRecords.find(localid);
+    return it == m_legOrderRecords.end() ? nullptr : it->second;
 }
 
 void ComboOrder::addLeg(OptionOrderPtr order, int32_t ratio) {

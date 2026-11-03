@@ -51,6 +51,7 @@ ComboOrder::SendResult SpreadComboOrder::sendOrders()
 
     m_leg1Sent = true;
     m_active = true;
+    trackLegOrder(m_leg1LocalId, m_leg1Code, m_leg1IsBuy, m_leg1Price, m_totalSize);
     m_sendTime = m_execCtx->getTime ? m_execCtx->getTime() : 0;
 
     WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -82,6 +83,7 @@ void SpreadComboOrder::hedge(uint32_t qty)
     if (id > 0) {
         m_leg2Sent = true;
         m_leg2LocalId = id;
+        trackLegOrder(id, m_leg2Code, m_leg2IsBuy, improvedPrice, qty);
         m_leg2Ids.push_back(id);
         m_leg2Open.insert(id);
         m_leg2Committed += qty;  // B27: track cumulative hedge commitment
@@ -284,6 +286,7 @@ void SynComboOrder::unwindResidual()
         if (leg.filledQty == 0) continue;
         uint32_t id = m_execCtx->sendOrder(leg.code, !leg.isBuy, leg.price, leg.filledQty);
         if (id != 0) {
+            trackLegOrder(id, leg.code, !leg.isBuy, leg.price, leg.filledQty);
             m_unwindIds.push_back(id);
             m_unwindOpen.insert(id);
             WTSLogger::log_by_cat("strategy", LL_WARN,
@@ -359,6 +362,7 @@ void SynComboOrder::sendNextLeg()
 
     const uint32_t id = m_execCtx->sendOrder(leg.code, leg.isBuy, price, leg.desiredQty);
     if (id > 0) {
+        trackLegOrder(id, leg.code, leg.isBuy, price, leg.desiredQty);
         recordLegId(leg, id);
         leg.committedQty = leg.desiredQty;  // B27: track actual commitment
         WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -416,6 +420,7 @@ bool SynComboOrder::onLegFill(uint32_t localid, uint32_t fillQty)
                     double price = nxt.price + (nxt.isBuy ? 1 : -1) * m_tickSize;
                     uint32_t id = m_execCtx->sendOrder(nxt.code, nxt.isBuy, price, extra);
                     if (id > 0) {
+                        trackLegOrder(id, nxt.code, nxt.isBuy, price, extra);
                         recordLegId(nxt, id);
                         nxt.committedQty += extra;
                         WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -555,6 +560,7 @@ ComboOrder::SendResult SimulComboOrder::sendOrders()
     for (auto& leg : m_execLegs) {
         uint32_t id = m_execCtx->sendOrder(leg.code, leg.isBuy, leg.price, leg.qty);
         if (id != 0) {
+            trackLegOrder(id, leg.code, leg.isBuy, leg.price, leg.qty);
             leg.localId = id;
             anySent = true;
         } else {
