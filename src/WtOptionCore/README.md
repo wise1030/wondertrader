@@ -342,12 +342,21 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
+| mode | "async" | 拟合执行模式："async"=SingleFlightTaskRunner 后台拟合（默认，不阻塞 worker）；"sync"=PeriodicCurveFitter 同步链（回测确定性/拟合调试）。两链互斥 |
 | start_time / end_time | 0 / 86400 | 拟合窗口（秒，支持夜盘） |
-| period | 60 | 拟合周期（秒） |
-| decay_window | 300 | 衰减窗口 |
-| threshold | 0 | 中间价下限 |
+| period | 60 | 拟合周期（秒，async 模式同样生效，提交节流） |
+| decay_window | 300 | 跨快照 wing 点 carry 老化界（秒，0=关闭） |
+| threshold | 0 | 中间价下限（低于此价的合约不进拟合） |
 | fit_all_expiries | false | 是否拟合全部到期月 |
-| good_points_thresh | [{days:0, thresh:3}] | 有效点数阈值（按天数插值） |
+| good_points_thresh | [{days:0, thresh:3}] | 有效点数阈值（按剩余天数插值，下限 4 点，且须 up/down 双象限齐备） |
+
+### volCurve 曲线选择（P1-b）
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| type | "gvv" | 主曲线类型："gvv" \| "linear"（K−F 线性 σ，流动性差远月的稳健降级）\| "constant"（钉住 ATM，新挂 expiry 冷启动） |
+| curve2_type | "gvv" | 第二曲线（volcurve_weight 混合用）："gvv" \| "power" \| "linear" \| "constant" |
+| fallback | true | 主曲线拟合失败时 fallback 链 power→linear→constant(1.0)，保证定价不中断（旧曲线仍按版本号优先） |
 
 ### orderManager.riskFilters.{option,future}
 
