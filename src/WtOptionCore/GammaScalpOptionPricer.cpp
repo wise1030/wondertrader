@@ -18,11 +18,6 @@
 
 namespace wt_option {
 
-static double round_to_tick(double px, double tick_size) {
-    if (tick_size <= 1e-9) return px;
-    return std::round(px / tick_size) * tick_size;
-}
-
 static double apply_sticky(double current_px, double new_px, double tick_size) {
     double threshold = tick_size * 0.5;
     if (std::abs(new_px - current_px) < threshold) {

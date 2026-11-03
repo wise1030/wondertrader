@@ -72,4 +72,12 @@ using OptionDataWeakPtr = std::weak_ptr<OptionData>;
 using OptionGridPtr = std::shared_ptr<OptionGrid>;
 using OptionGridWeakPtr = std::weak_ptr<OptionGrid>;
 
+/// P1-f: single shared tick-rounding helper (previously three file-local
+/// copies in OptionPricer2/GammaScalpOptionPricer/CompositeOptionPricer with
+/// equivalent semantics).
+inline double round_to_tick(double px, double tick) {
+    if (tick <= 0) return px;
+    return std::round(px / tick) * tick;
+}
+
 } // namespace wt_option

@@ -60,6 +60,10 @@ public:
     ExpiryDataPtr getExpiryData() const;
     OptionDataPtr getOptionData() const { return m_parent.lock(); }
     OptionRiskDataPtr getOptionRiskData() const { return m_spOptionRiskData.lock(); }
+    /// P1-f: bind the risk-side per-option data.  Once bound, getPosition()
+    /// reads the risk-data position (maintained from broker snapshots and
+    /// fills) instead of the external provider.
+    void setOptionRiskData(const OptionRiskDataPtr& rd) { m_spOptionRiskData = rd; }
 
     /// get position with offsets (provided externally)
     int32_t getPosition() const;

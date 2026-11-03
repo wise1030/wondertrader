@@ -18,6 +18,7 @@
 #include "ExpiryData.h"
 #include "OptionExpiryGreeks.h"
 #include "OptionRiskData.h"
+#include "OptionTradingData.h"
 #include "OptionGrid.h"
 #include "../WTSTools/WTSLogger.h"
 
@@ -74,6 +75,12 @@ OptionRiskDataPtr OptionRisk::createOptionRiskData(const OptionDataPtr& od)
 
     const OptionExpiryGreeksPtr& egreeks = getExpiryGreeks(od->getExpiry());
     egreeks->registerOptionRiskData(rd);
+
+    // P1-f: activate the OTD risk-data position source (previously a dead
+    // branch — m_spOptionRiskData was never assigned).  Falls back to the
+    // external position provider when the trading data does not exist yet.
+    if (auto otd = od->getTradingData())
+        otd->setOptionRiskData(rd);
 
     return rd;
 }

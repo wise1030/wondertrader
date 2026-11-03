@@ -75,10 +75,6 @@ inline double round_to_precision(double v, double prec) {
     return std::round(v / prec) * prec;
 }
 inline int32_t round_to_nearest_integer(double v) { return (int32_t)std::lround(v); }
-inline double round_to_tick(double px, double tick) {
-    if (tick <= 0) return px;
-    return std::round(px / tick) * tick;
-}
 // timeval_diff in seconds (longbeach duration_t.total_seconds())
 inline double timeval_diff(double a, double b) { return a - b; }
 

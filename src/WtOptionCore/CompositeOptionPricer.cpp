@@ -53,11 +53,6 @@ static inline bool GE(double a, double b) { return a >= b - 1e-12; }
 static inline bool NE(double a, double b) { return !EQ(a, b); }
 static inline bool NEZ(double a) { return !EQZ(a); }
 
-static inline double round_to_tick(double px, double tick_size) {
-    if (tick_size <= 0) return px;
-    return std::round(px / tick_size) * tick_size;
-}
-
 static inline int32_t round_to_nearest_integer(double x) {
     return static_cast<int32_t>(std::round(x));
 }

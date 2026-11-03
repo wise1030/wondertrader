@@ -162,6 +162,11 @@ void OptionTradingGrid::onAddOption(const OptionDataPtr& od)
         otd->setPositionProvider([src = m_positionSource, code]() -> int32_t {
             return src(code);
         });
+    // P1-f: bind risk-side per-option data when it already exists (rd created
+    // before this OTD); the reverse direction is bound in
+    // OptionRisk::createOptionRiskData.  get() lazily creates the rd.
+    if (m_spPositionRisk)
+        otd->setOptionRiskData(m_spPositionRisk->get(code));
     otd->setQuoteManager(om);
     // B5: FIFO PnL mode for this contract's tracker
     if (m_fifoPnl)
