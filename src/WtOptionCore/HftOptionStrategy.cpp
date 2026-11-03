@@ -2682,9 +2682,14 @@ bool HftOptionStrategy::submitAsyncVolFit()
 
     // P1-a: fit window + period throttle (ports of PeriodicCurveFitter
     // doFit/onTimer semantics so fitter.period regains its meaning).
+    // NOTE: nowSeconds carries a cumulative day offset across midnight
+    // (night sessions) — the window is a time-of-day range, so compare
+    // seconds-of-day, not the raw clock.  Without fmod the whole day
+    // session (now > 86400) was silently excluded from fitting.
     const auto& fcfg = _blackPricer->config();
     const double now = _timeService.nowSeconds(_ctx);
-    if (now < fcfg.vol_fitting_start_time || now > fcfg.vol_fitting_end_time)
+    const double sod = std::fmod(now, 86400.0);
+    if (sod < fcfg.vol_fitting_start_time || sod > fcfg.vol_fitting_end_time)
         return false;
     if (now - _lastVolFitSubmitTime < fcfg.vol_fitting_period)
         return false;
