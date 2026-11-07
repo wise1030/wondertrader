@@ -299,10 +299,23 @@ void ControllableTradingGrid::refresh() {
     if (m_otg) {
         for (const auto& pair : m_otg->getAllUnderlyingTradingData()) {
             auto utd = pair.second;
-            if (!utd || !utd->isActive()) continue;
-
-            MultiMarket& our_mkt = utd->multiMarket();
-            our_mkt = utd->ourMarket();
+            if (!utd) continue;
+            // P0-1: when disabled (mid-day stop / hotcmd STOP / channel lost),
+            // hedge-leg orders must be CANCELLED too.  Previously the
+            // isActive() skip plus the unconditional our_mkt re-fill below
+            // left hedge quotes live on the exchange while the strategy
+            // believed it was stopped — unmonitored naked delta.  In
+            // disabled (non-panic) mode keep desired empty for EVERY UTD so
+            // check_markets stages UT_CANCEL against remaining current
+            // markets; OQM::updateOrders(cancel_only=true) still cancels even
+            // when inactive.  panicClear keeps hedges live by design (B12).
+            if (!m_ctx->enabled && !panicClear) {
+                utd->multiMarket().clear();
+            } else {
+                if (!utd->isActive()) continue;
+                MultiMarket& our_mkt = utd->multiMarket();
+                our_mkt = utd->ourMarket();
+            }
 
             const MultiMarket& desired = utd->multiMarket();
             const MultiMarket& current = utd->getCurrentMarket();
@@ -596,6 +609,10 @@ void ControllableTradingGrid::drainPendingQuotes() {
             m_pendingQuotes.push_back(std::move(pq));
         }
         m_droppedQuotes.clear();
+        // P2-2: reset the per-batch counter — it was never cleared, so after
+        // the first TPS drop every later batch re-entered the retry branch
+        // and re-logged the cumulative count.
+        m_txDrop = 0;
     }
 }
 
