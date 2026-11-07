@@ -491,8 +491,14 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
                     // pure-digit code to rawFutOptCodeToStdCode underflows
                     // its index scan and throws std::length_error — filter
                     // to real option codes first.
+                    // C6: accept BOTH 4-digit-month codes (CFFEX/SHFE/INE/
+                    // GFEX, e.g. IO2301-P-4000) and CZCE's 3-digit-month
+                    // convention (e.g. TA308P4000 — the very reason
+                    // rawFutOptCodeToStdCode inserts "2" for CZCE, see
+                    // Share/CodeHelper.hpp).  The previous \\d{4} required
+                    // 4 digits and silently dropped EVERY CZCE option.
                     static const std::regex optCodeRe(
-                        "^[A-Za-z]{1,3}\\d{4}[-]?(C|P)[-]?\\d+$");
+                        "^[A-Za-z]{1,3}\\d{3,4}[-]?(C|P)[-]?\\d+$");
                     if (!std::regex_match(rawCode, optCodeRe)) {
                         skipped++;
                         continue;
