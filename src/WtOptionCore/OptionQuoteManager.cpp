@@ -88,7 +88,27 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
     bool askSame = (curAsk.empty() == newAsk.empty()) &&
                    (curAsk.empty() || (curAsk.px() == newAsk.px() && curAsk.sz() == newAsk.sz()));
 
-    if (m_cfg.avoid_trade && bidSame && askSame) return 0;
+    // P1-2: TTL expiry must run BEFORE the avoid_trade early return —
+    // otherwise time_in_force_ms is silently disabled whenever the book is
+    // unchanged (a TTL cancel does not change any price, so it is not a
+    // trade and must not be skipped by the avoid-trade short-circuit).
+    int32_t ttlTxns = 0;
+    if (m_cfg.time_in_force_ms > 0 && m_getTime) {
+        double nowTtl = m_getTime();
+        double ttl = m_cfg.time_in_force_ms / 1000.0;
+        for (int i = 0; i < 2; ++i) {
+            auto& orders = i == 0 ? m_bidOrders : m_askOrders;
+            for (auto& o : orders) {
+                if (o.active && !o.cancelPending && (nowTtl - o.issueTime) > ttl) {
+                    sendCancelById(o.localid);
+                    o.cancelPending = true;
+                    ++ttlTxns;
+                }
+            }
+        }
+    }
+
+    if (m_cfg.avoid_trade && bidSame && askSame) return ttlTxns;
 
     // STP: prevent self-crossing
     if (!newBid.empty() && !newAsk.empty() && is_crossed(newBid.px(), newAsk.px())) {
@@ -233,7 +253,9 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
 
     // === Incremental per-side update ===
     // Instead of cancel-all-then-resend, only cancel/send what changed.
-    int32_t txns = 0;
+    // TTL cancels were already issued above the avoid-trade short-circuit
+    // (P1-2); carry their txn count so the TPS budget sees them.
+    int32_t txns = ttlTxns;
 
     // Bid side
     if (blockBid) {
@@ -249,26 +271,6 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
     } else if (!askSame) {
         PriceSize scaledAsk(newAsk.px(), static_cast<int32_t>(askQty));
         txns += updateSide(false, scaledAsk);
-    }
-
-    // TTL - cancel expired orders
-    if (m_cfg.time_in_force_ms > 0 && m_getTime) {
-        double now = m_getTime();
-        double ttl = m_cfg.time_in_force_ms / 1000.0;
-        for (auto& o : m_bidOrders) {
-            if (o.active && !o.cancelPending && (now - o.issueTime) > ttl) {
-                sendCancelById(o.localid);
-                o.cancelPending = true;
-                ++txns;
-            }
-        }
-        for (auto& o : m_askOrders) {
-            if (o.active && !o.cancelPending && (now - o.issueTime) > ttl) {
-                sendCancelById(o.localid);
-                o.cancelPending = true;
-                ++txns;
-            }
-        }
     }
 
     m_lastDesired = desired;
@@ -515,6 +517,58 @@ void OptionQuoteManager::onOrderStatusChange(uint32_t localid, bool isLong,
         // Push actual posted market to QuoteStatistics
         pushQuoteStats();
     }
+}
+
+// ============================================================================
+// onOrderRejected - P1-1: WT on_entrust(bSuccess=false) has NO subsequent
+// on_order terminal report.  Without this the OrderState stays active forever:
+// getMissingPriceLevelSize counts it as live size at the level (missing==0,
+// never re-sent), the reject-retry trigger never fires, and cancel-timeout
+// scans ignore it.  Mirrors the terminal branch of onOrderStatusChange.
+// Returns true when this OQM owned the localid.
+// ============================================================================
+bool OptionQuoteManager::onOrderRejected(uint32_t localid)
+{
+    bool found = false;
+    for (int i = 0; i < 2; ++i) {
+        auto& orders = i == 0 ? m_bidOrders : m_askOrders;
+        for (auto& o : orders) {
+            if (o.localid == localid && o.active) {
+                o.active = false;
+                o.cancelPending = false;
+                o.cancelRetry = 0;
+                o.cancelSentTime = 0;
+                o.phase = OrderState::Phase::Dead;
+                found = true;
+            }
+        }
+    }
+    if (!found) return false;
+
+    for (int i = 0; i < 2; ++i) {
+        auto& orders = i == 0 ? m_bidOrders : m_askOrders;
+        orders.erase(std::remove_if(orders.begin(), orders.end(),
+            [](const OrderState& o) { return !o.active; }), orders.end());
+    }
+    m_cancelStuck = false;
+    rebuildOrderMarketTracker();
+
+    if (m_quoteStats)
+        m_quoteStats->onReject(m_code);
+    m_numReject++;   // P2-3: previously never incremented anywhere
+
+    // Same retry policy as a zero-fill cancel: the level must come back.
+    if (m_rejectRetryCount < m_rejectMaxRetries) {
+        m_rejectRetryCount++;
+        m_lastRejectTime = m_getTime ? m_getTime() : 0;
+        m_retryPending = true;
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "OQM reject retry (entrust): {} attempt {}/{} pending",
+            m_code, m_rejectRetryCount, m_rejectMaxRetries);
+    }
+
+    pushQuoteStats();
+    return true;
 }
 
 // ============================================================================

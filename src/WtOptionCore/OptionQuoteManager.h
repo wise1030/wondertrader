@@ -86,6 +86,10 @@ public:
     void onOrderStatusChange(uint32_t localid, bool isLong,
                               double totalQty, double leftQty,
                               double price, bool isCanceled);
+    // P1-1: entrust failure (WT sends NO terminal on_order afterwards) —
+    // clears the phantom OrderState and arms the reject retry, otherwise the
+    // price level stops quoting forever.  Returns true if this OQM owned it.
+    bool onOrderRejected(uint32_t localid);
     void onFill(uint32_t localid, bool isLong, double fill_px, uint32_t fill_qty);
 
     // --- Position ---

@@ -106,6 +106,14 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     return ev;
 }
 
+OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_entrust(uint32_t localid, bool success) {
+    AsyncEvent ev;
+    ev.type = Entrust;
+    ev.entrust.localid = localid;
+    ev.entrust.success = success;
+    return ev;
+}
+
 OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::make_control() {
     AsyncEvent ev;
     ev.type = Custom;
@@ -287,10 +295,14 @@ void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLon
     enqueue_trader_event(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
 }
 
+void OptionAsyncEventProcessor::enqueue_entrust(uint32_t localid, bool success)
+{
+    enqueue_trader_event(AsyncEvent::make_entrust(localid, success));
+}
+
 void OptionAsyncEventProcessor::enqueue_channel(bool isReady)
 {
-    enqueue_trader_event(AsyncEvent::make_channel(isReady));
-}
+    enqueue_trader_event(AsyncEvent::make_channel(isReady));}
 
 void OptionAsyncEventProcessor::enqueue_control()
 {
@@ -402,6 +414,7 @@ void OptionAsyncEventProcessor::worker_loop()
                     case AsyncEvent::Position:
                     case AsyncEvent::Trade:
                     case AsyncEvent::Order:
+                    case AsyncEvent::Entrust:
                         bk_trader.push_back(&ev);
                         break;
                     case AsyncEvent::Timer:
@@ -433,6 +446,9 @@ void OptionAsyncEventProcessor::worker_loop()
                         if (_cbs.on_order) _cbs.on_order(ev->getCode(), ev->order.localid, ev->order.isBuy,
                                                          ev->order.totalQty, ev->order.leftQty, ev->order.price,
                                                          ev->order.isCanceled);
+                        break;
+                    case AsyncEvent::Entrust:
+                        if (_cbs.on_entrust) _cbs.on_entrust(ev->entrust.localid, ev->entrust.success);
                         break;
                     default: break;
                 }

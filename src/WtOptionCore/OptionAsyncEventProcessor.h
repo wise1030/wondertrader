@@ -64,6 +64,9 @@ struct AsyncCallbacks {
                        double prevol, double preavail,
                        double newvol, double newavail)> on_position;
     std::function<void(bool isReady)> on_channel;
+    // P1-1: entrust failure has no terminal on_order — worker must clear the
+    // OQM order state (and hedge/combo latches) on its own thread.
+    std::function<void(uint32_t localid, bool success)> on_entrust;
     std::function<void()> on_batch_complete;
 };
 
@@ -90,6 +93,8 @@ public:
                           double prevol, double preavail,
                           double newvol, double newavail);
     void enqueue_channel(bool isReady);
+    // P1-1: entrust failure (trader thread) — worker clears OQM phantom order.
+    void enqueue_entrust(uint32_t localid, bool success);
     /// Reliable worker wakeup for hot control commands.  Unlike MD ticks this
     /// event must not be coalesced or dropped; it only drives on_batch_complete.
     void enqueue_control();
@@ -100,7 +105,7 @@ public:
 public:
     // AsyncEvent is public so factory methods can be defined in .cpp
     struct AsyncEvent {
-        enum Type { Tick, Timer, Trade, Order, Session, Position, Channel, Custom } type;
+        enum Type { Tick, Timer, Trade, Order, Session, Position, Channel, Entrust, Custom } type;
         uint32_t optId;
 
         TickData tick;
@@ -110,6 +115,7 @@ public:
         struct { bool isBegin; uint32_t tdate; } session;
         struct { bool isLong; double prevol; double preavail; double newvol; double newavail; } position;
         struct { bool isReady; } channel;
+        struct { uint32_t localid; bool success; } entrust;
         char code[32];
 
         AsyncEvent() : type(Custom), optId(UINT32_MAX) { code[0] = '\0'; }
@@ -130,6 +136,7 @@ public:
                                     double prevol, double preavail,
                                     double newvol, double newavail);
     static AsyncEvent make_channel(bool isReady);
+        static AsyncEvent make_entrust(uint32_t localid, bool success);
         static AsyncEvent make_control();
     };
 
