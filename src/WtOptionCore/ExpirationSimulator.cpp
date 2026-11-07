@@ -3,6 +3,7 @@
 #include "ExpiryData.h"
 #include "OptionRisk.h"
 #include "OptionGrid.h"
+#include "IOptionGrid.h"
 #include "../WTSTools/WTSLogger.h"
 
 #include <cmath>
@@ -28,7 +29,8 @@ void ExpirationSimulator::onFill(const std::string& code, bool isBuy,
     m_fills.push_back(rec);
 }
 
-DayResult ExpirationSimulator::checkExpiration(uint32_t curDate, double spotPrice)
+DayResult ExpirationSimulator::checkExpiration(uint32_t curDate, double spotPrice,
+                                                const ExpiryTable* expiries)
 {
     DayResult result;
     result.date = curDate;
@@ -55,6 +57,16 @@ DayResult ExpirationSimulator::checkExpiration(uint32_t curDate, double spotPric
             auto ed = od->getExpiryData();
             if (!ed) continue;
 
+            // P2-4: per-expiry underlying price takes precedence over the
+            // global one (multi-series setups: SR309 vs SR701 etc.).
+            double ulPx = spotPrice;
+            if (expiries) {
+                auto eit = expiries->find(ed->getExpiry());
+                if (eit != expiries->end() && eit->second &&
+                    eit->second->isUnderlyingPriceValid())
+                    ulPx = eit->second->getUnderlyingPrice();
+            }
+
             // Check if option expired today
             int32_t dte = ed->daysToExpiry();
             if (dte <= 0) {
@@ -62,9 +74,9 @@ DayResult ExpirationSimulator::checkExpiration(uint32_t curDate, double spotPric
                 // B06 fix: sign was inverted (-pos → +pos)
                 double intrinsic = 0;
                 if (od->getRight() == OR_Call) {
-                    intrinsic = std::max(0.0, spotPrice - od->getStrike());
+                    intrinsic = std::max(0.0, ulPx - od->getStrike());
                 } else {
-                    intrinsic = std::max(0.0, od->getStrike() - spotPrice);
+                    intrinsic = std::max(0.0, od->getStrike() - ulPx);
                 }
                 settlementPnl += pos * intrinsic * m_multiplier;
             } else {

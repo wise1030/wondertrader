@@ -20,6 +20,8 @@
 #include "../ComboOrders.h"
 #include "../OptionData.h"
 #include "../OptionTradingGrid.h"
+#include "../ControllableTradingGrid.h"
+#include "../OrderGateway.h"
 #include "../OptionRisk.h"
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
@@ -861,6 +863,116 @@ void test_simul_combo_order() {
     ASSERT_TRUE(fail.onLegTerminal(4, true, 0));  // leg B cancel before fill
     ASSERT_TRUE(fail.isFailed());
     ASSERT_EQ(canceled.size(), 2u);               // remaining open legs canceled
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// P0-1 regression: disabling trading must CANCEL hedge-leg (future) quotes too
+// ============================================================================
+void test_p0_1_disabled_cancels_hedge() {
+    std::cout << "=== test_p0_1_disabled_cancels_hedge ===" << std::endl;
+    using namespace wt_option;
+
+    auto grid = std::make_shared<OptionGrid>("TEST", "TEST.UNDER", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+    auto otg = std::make_shared<OptionTradingGrid>(grid);
+    otg->setPositionRisk(risk);
+
+    // Recording gateway: quote submission allocates ids, cancels are counted.
+    uint32_t nextId = 1000;
+    uint32_t cancels = 0;
+    OrderGateway::Handlers handlers;
+    handlers.submitQuote = [&](const std::string&, double, uint32_t, double, uint32_t) {
+        return std::make_pair(nextId++, nextId++);
+    };
+    handlers.submitOrder = [&](const std::string&, bool, double, uint32_t) {
+        return std::vector<uint32_t>{nextId++};
+    };
+    handlers.cancelOrder = [&](uint32_t) { ++cancels; return true; };
+    handlers.cancelAll = [](const std::string&) {};
+    otg->setOrderGateway(std::make_shared<OrderGateway>(handlers));
+
+    auto ed = std::make_shared<ExpiryData>(202612, "TEST");
+    ed->setHedgeCode("TEST.HEDGE");
+    otg->onAddExpiry(ed);
+    auto utd = otg->getUnderlyingTradingData("TEST.HEDGE");
+    ASSERT_TRUE(utd != nullptr);
+    ASSERT_TRUE(utd->getQuoteManager() != nullptr);
+
+    auto ctx = std::make_shared<OptionTraderContext>();
+    ctx->enabled = true;
+    ControllableTradingGrid ctg(grid, ctx);
+    ctg.setOTG(otg.get());
+
+    // Active UTD with a desired hedge market -> refresh places the quotes.
+    utd->setActive(true);
+    utd->ourMarket().setBid(99.0, 1);
+    utd->ourMarket().setAsk(101.0, 1);
+    ctg.refresh();
+    ctg.drainPendingQuotes();
+    ASSERT_TRUE(cancels == 0);
+    ASSERT_TRUE(utd->getCurrentMarket().getBestBid().px() == 99.0);
+
+    // Case A: mid-day stop with the UTD still active.  Before the P0-1 fix
+    // refresh() re-filled the desired market and staged nothing, leaving the
+    // hedge quotes live on the exchange.
+    ctx->enabled = false;
+    ctg.tradingStopMidDay();          // refresh + drain
+    ASSERT_EQ(cancels, 2u);           // bid + ask cancelled
+    ASSERT_TRUE(utd->getCurrentMarket().getBestBid().empty());
+
+    // Case B: channel-lost path — UTD already inactive.  The old isActive()
+    // skip meant even the pending-cancel quotes were never generated.
+    ctx->enabled = true;
+    utd->setActive(true);
+    ctg.refresh();
+    ctg.drainPendingQuotes();         // re-quote: 2 more resting orders
+    uint32_t base = cancels;
+    utd->setActive(false);            // disableAll() equivalent
+    ctx->enabled = false;
+    ctg.refresh();
+    ctg.drainPendingQuotes();
+    ASSERT_EQ(cancels, base + 2u);    // inactive UTD still cancelled
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// P1-1 regression: an entrust rejection must clear the OQM order state so the
+// price level comes back (WT sends no terminal on_order for failed entrusts).
+// ============================================================================
+void test_p1_1_entrust_reject_clears_order() {
+    std::cout << "=== test_p1_1_entrust_reject_clears_order ===" << std::endl;
+    using namespace wt_option;
+
+    OptionQuoteManager::Config cfg;
+    cfg.max_side_orders = 5;
+    cfg.enable_quote_api = false;                 // buy/sell single-order path
+    cfg.quote_style = OptionQuoteManager::Config::QS_BUYSELL;
+    cfg.time_in_force_ms = 0;
+    OptionQuoteManager qm("TEST.OPT", cfg);
+
+    uint32_t nextId = 5000;
+    uint32_t sends = 0, cancels = 0;
+    qm.setSendSingleFn([&](bool, double, uint32_t) { ++sends; return nextId++; });
+    qm.setCancelOrderFn([&](uint32_t) { ++cancels; return true; });
+    qm.setGetTimeFn([] { return 0.0; });
+    qm.setActive(true);
+
+    MultiMarket desired;
+    desired.setBid(10.0, 1);
+    qm.updateOrders(desired, false);
+    ASSERT_EQ(sends, 1u);
+    uint32_t liveId = nextId - 1;
+
+    // Entrust rejected by the gateway: no terminal on_order will ever arrive.
+    ASSERT_TRUE(qm.onOrderRejected(liveId));
+    ASSERT_TRUE(!qm.onOrderRejected(liveId));   // already cleared
+
+    // The level must be re-sendable afterwards (phantom order is gone).
+    qm.updateOrders(desired, false);
+    ASSERT_EQ(sends, 2u);
+    ASSERT_EQ(cancels, 0u);
     std::cout << "  PASS" << std::endl;
 }
 
@@ -1806,6 +1918,8 @@ int main() {
     test_spread_combo_state();
     test_syn_combo_unwind_lifecycle();
     test_simul_combo_order();
+    test_p0_1_disabled_cancels_hedge();
+    test_p1_1_entrust_reject_clears_order();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

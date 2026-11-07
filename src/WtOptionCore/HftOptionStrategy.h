@@ -191,6 +191,10 @@ private:
     std::map<uint32_t, ExpiryConfig> _expiryConfigs;
     std::set<std::string> _hedgeCodes;  // distinct hedge codes (excluding underlying)
     std::set<std::string> _pnlPendingInit;  // codes awaiting PnL init (position known, waiting for preClose)
+    // P1-5: last seen preClose per code (worker thread).  Lets session-begin
+    // seed carried positions immediately instead of leaving the trackers
+    // flat until the first tick of the day (fills in that window realized 0).
+    std::map<std::string, double> _preCloseCache;
 
     // State
     IHftStraCtx* _ctx = nullptr;

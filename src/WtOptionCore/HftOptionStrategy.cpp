@@ -207,6 +207,24 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             // A1: SHFE/INE close-side offset guard
             optionOqmCfg.enable_offset_guard = optOm->has("enable_offset_guard")
                 ? optOm->getBoolean("enable_offset_guard") : false;
+            // P1-3: keys the schema validates but init() never read — wiring
+            // them in so configuration is not silently dropped.
+            optionOqmCfg.scale_factor = optOm->has("scale_factor") ? optOm->getDouble("scale_factor") : 1.0;
+            optionOqmCfg.min_intra_update_period_ms = optOm->has("min_intra_update_period_ms") ? optOm->getDouble("min_intra_update_period_ms") : 0.0;
+            optionOqmCfg.cautious_flipping = optOm->has("cautious_flipping") ? optOm->getBoolean("cautious_flipping") : false;
+            optionOqmCfg.cancel_buffer = optOm->has("cancel_buffer") ? optOm->getInt32("cancel_buffer") : 0;
+            optionOqmCfg.cancel_soft_max = optOm->has("cancel_soft_max") ? optOm->getInt32("cancel_soft_max") : 0;
+            optionOqmCfg.reject_max_new_orders = optOm->has("reject_max_new_orders") ? optOm->getInt32("reject_max_new_orders") : -1;
+            optionOqmCfg.enable_ioc = optOm->has("enable_ioc") ? optOm->getBoolean("enable_ioc") : false;
+            // order_delay_ms is validated but has no OQM consumer yet — carry
+            // the value and warn once instead of dropping it silently.
+            optionOqmCfg.order_delay_ms = optOm->has("order_delay_ms") ? optOm->getDouble("order_delay_ms") : 0.0;
+            if (optionOqmCfg.order_delay_ms > 0) {
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "orderManager.option.order_delay_ms={} set but order delay is not implemented yet — value ignored",
+                    optionOqmCfg.order_delay_ms);
+                optionOqmCfg.order_delay_ms = 0.0;
+            }
         }
         WTSVariant* futOm = omCfg->get("future");
         if (futOm) {
@@ -225,6 +243,21 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
                 : wt_option::OptionQuoteManager::Config::QS_PAIRED;
             futureOqmCfg.enable_offset_guard = futOm->has("enable_offset_guard")
                 ? futOm->getBoolean("enable_offset_guard") : false;
+            // P1-3: schema-validated keys previously dropped (see option block)
+            futureOqmCfg.scale_factor = futOm->has("scale_factor") ? futOm->getDouble("scale_factor") : 1.0;
+            futureOqmCfg.min_intra_update_period_ms = futOm->has("min_intra_update_period_ms") ? futOm->getDouble("min_intra_update_period_ms") : 0.0;
+            futureOqmCfg.cautious_flipping = futOm->has("cautious_flipping") ? futOm->getBoolean("cautious_flipping") : false;
+            futureOqmCfg.cancel_buffer = futOm->has("cancel_buffer") ? futOm->getInt32("cancel_buffer") : 0;
+            futureOqmCfg.cancel_soft_max = futOm->has("cancel_soft_max") ? futOm->getInt32("cancel_soft_max") : 0;
+            futureOqmCfg.reject_max_new_orders = futOm->has("reject_max_new_orders") ? futOm->getInt32("reject_max_new_orders") : -1;
+            futureOqmCfg.enable_ioc = futOm->has("enable_ioc") ? futOm->getBoolean("enable_ioc") : false;
+            futureOqmCfg.order_delay_ms = futOm->has("order_delay_ms") ? futOm->getDouble("order_delay_ms") : 0.0;
+            if (futureOqmCfg.order_delay_ms > 0) {
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "orderManager.future.order_delay_ms={} set but order delay is not implemented yet — value ignored",
+                    futureOqmCfg.order_delay_ms);
+                futureOqmCfg.order_delay_ms = 0.0;
+            }
         }
     }
     _optionOqmCfg = optionOqmCfg;
@@ -1411,18 +1444,21 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
         }
         // First tick with preClose -> initialize PnlTracker for overnight positions
-        if (tick.preClose > 0 && _pnlPendingInit.count(code)) {
-            _pnlPendingInit.erase(code);
-            double pos = _positions[code];
-            if (_otg) {
-                auto utd = _otg->getUnderlyingTradingData(code);
-                if (utd) utd->getPnlTracker()->initPosition(pos, tick.preClose);
-                auto otd = _otg->getTradingData(code);
-                if (otd) otd->getPnlTracker()->initPosition(pos, tick.preClose);
-            }
-            if (pos != 0) {
-                WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "PnlTracker init {} pos={} preClose={}", code, pos, tick.preClose);
+        if (tick.preClose > 0) {
+            _preCloseCache[code] = tick.preClose;   // P1-5: seed for next session begin
+            if (_pnlPendingInit.count(code)) {
+                _pnlPendingInit.erase(code);
+                double pos = _positions[code];
+                if (_otg) {
+                    auto utd = _otg->getUnderlyingTradingData(code);
+                    if (utd) utd->getPnlTracker()->initPosition(pos, tick.preClose);
+                    auto otd = _otg->getTradingData(code);
+                    if (otd) otd->getPnlTracker()->initPosition(pos, tick.preClose);
+                }
+                if (pos != 0) {
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "PnlTracker init {} pos={} preClose={}", code, pos, tick.preClose);
+                }
             }
         }
     };
@@ -1762,10 +1798,13 @@ void HftOptionStrategy::setupAsyncCallbacks()
             auto otd = _otg->getTradingData(code);
             if (otd && otd->getQuoteManager()) {
                 // Set current time for QuoteStatistics
+                // P2-1: stra_get_secs() returns SSmmm (sec*1000+msec);
+                // sec_in_min needs (secs/1000)%60 — raw %60 mis-buckets
+                // (e.g. 45123%60=3 instead of 45).
                 if (_ctx) {
                     uint32_t curTime = _ctx->stra_get_time();
                     uint32_t secs = _ctx->stra_get_secs();
-                    otd->getQuoteManager()->setCurrentTime(curTime, secs % 60);
+                    otd->getQuoteManager()->setCurrentTime(curTime, (secs / 1000) % 60);
                 }
                 otd->getQuoteManager()->onFill(localid, isBuy, price, fq);
             } else {
@@ -1774,7 +1813,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     if (_ctx) {
                         uint32_t curTime = _ctx->stra_get_time();
                         uint32_t secs = _ctx->stra_get_secs();
-                        utd->getQuoteManager()->setCurrentTime(curTime, secs % 60);
+                        // P2-1: SSmmm format — see on_trade routing above
+                        utd->getQuoteManager()->setCurrentTime(curTime, (secs / 1000) % 60);
                     }
                     utd->getQuoteManager()->onFill(localid, isBuy, price, fq);
                 }
@@ -1926,7 +1966,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 if (_ctx) {
                     uint32_t curTime = _ctx->stra_get_time();
                     uint32_t secs = _ctx->stra_get_secs();
-                    qm->setCurrentTime(curTime, secs % 60);
+                    qm->setCurrentTime(curTime, (secs / 1000) % 60);   // P2-1: SSmmm
                 }
                 qm->onOrderStatusChange(localid, isBuy, totalQty, leftQty, price, isCanceled);
             }
@@ -1938,14 +1978,20 @@ void HftOptionStrategy::setupAsyncCallbacks()
             auto oit = _positionOffsets.find(code);
             if (oit != _positionOffsets.end()) {
                 if (isCanceled) {
-                    // Order was cancelled - free the frozen position
+                    // Order was cancelled - free the REMAINING frozen qty.
+                    // P1-4: totalQty-leftQty is the FILLED portion (already
+                    // unfrozen by onFill); freezing happened for the full
+                    // qty at send.  Passing the filled count would leave
+                    // (leftQty) permanently frozen once sent-tracking is
+                    // wired into the executor path.
                     oit->second->onOrderCancelled(isBuy,
-                        static_cast<uint32_t>(totalQty - leftQty), false);
+                        static_cast<uint32_t>(leftQty), false);
                 }
-                // Note: onOrderSent is called when the order is first placed,
-                // not when acknowledged. This happens in the quote/order executor.
-                // For now, we track cancellations here; sent tracking is done
-                // in the executor path (executeQuote/executeOrder).
+                // Note: onOrderSent (freeze at send) is only reachable with
+                // open/close intent, which the engine callback chain does not
+                // carry — the frozen counters stay 0 until that plumbing
+                // exists, so today/prev buckets are driven by broker position
+                // snapshots only.
             }
         }
 
@@ -1959,6 +2005,48 @@ void HftOptionStrategy::setupAsyncCallbacks()
         }
 
         // Mark for refresh: order status change affects OQM state
+        _needsRefresh = true;
+    };
+
+    // P1-1: entrust failure (worker thread).  WT sends NO terminal on_order
+    // after on_entrust(bSuccess=false), so the OQM OrderState must be cleared
+    // here — otherwise the phantom order blocks its price level forever
+    // (getMissingPriceLevelSize sees live size => missing==0 => never re-sent)
+    // and the reject-retry mechanism never triggers.
+    cbs.on_entrust = [this](uint32_t localid, bool success) {
+        if (success) return;
+        // A rejected hedge order must not leave the in-flight latch stuck.
+        _hedgeCoord.onTerminal(localid);
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "HftOptionStrategy entrust failed: id={}", localid);
+        // P1-d/W5: rejected combo legs go terminal in the audit records too.
+        for (auto& combo : _activeCombos)
+            combo->legOrderTerminal(localid, true);
+        // Clear the phantom order in whichever OQM owns it (option or future).
+        bool cleared = false;
+        if (_grid) {
+            for (const auto& od : _grid->getAllOptions()) {
+                if (!od) continue;
+                auto otd = od->getTradingData();
+                if (otd && otd->getQuoteManager() &&
+                    otd->getQuoteManager()->onOrderRejected(localid)) {
+                    cleared = true; break;
+                }
+            }
+        }
+        if (!cleared && _otg) {
+            for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
+                auto utd = pair.second;
+                if (utd && utd->getQuoteManager() &&
+                    utd->getQuoteManager()->onOrderRejected(localid)) {
+                    cleared = true; break;
+                }
+            }
+        }
+        if (!cleared) {
+            WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                "entrust failure for unowned localid={} (manual/hot order?)", localid);
+        }
         _needsRefresh = true;
     };
 
@@ -2071,16 +2159,29 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // B20b: reset per-instrument PnL ledgers at the session boundary.
             // Signal latches alone are not enough; otherwise a long-running
             // process carries yesterday's realized PnL into today's limit.
+            // P1-5: seed the carried position + last known preClose so fills
+            // that arrive BEFORE the first tick of the day realize against
+            // the overnight basis instead of 0.
             if (_otg) {
                 for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
-                    if (pair.second)
-                        pair.second->getPnlTracker()->resetSession();
+                    if (pair.second) {
+                        int32_t carried = _positions[pair.first];
+                        double basis = 0.0;
+                        auto pcIt = _preCloseCache.find(pair.first);
+                        if (pcIt != _preCloseCache.end()) basis = pcIt->second;
+                        pair.second->getPnlTracker()->resetSession(carried, basis);
+                    }
                 }
             }
             if (_grid) {
                 for (const auto& od : _grid->getAllOptions()) {
-                    if (od && od->getTradingData())
-                        od->getTradingData()->getPnlTracker()->resetSession();
+                    if (od && od->getTradingData()) {
+                        int32_t carried = _positions[od->getCode()];
+                        double basis = 0.0;
+                        auto pcIt = _preCloseCache.find(od->getCode());
+                        if (pcIt != _preCloseCache.end()) basis = pcIt->second;
+                        od->getTradingData()->getPnlTracker()->resetSession(carried, basis);
+                    }
                 }
             }
             // Re-arm cost-basis initialization for carried positions.  The next
@@ -2122,9 +2223,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // summary so it has data (was permanently "0 day results"):
             // settlement PnL for contracts that expired today, mark-to-mid
             // for still-open ones; trading PnL comes from recorded fills.
+            // P2-4: pass per-expiry underlying prices (multi-series setups
+            // settled non-front expiries off the GLOBAL underlying before).
             if (_expSim) {
                 _expSim->checkExpiration(tdate,
-                    _grid ? _grid->getUnderlyingPrice() : 0.0);
+                    _grid ? _grid->getUnderlyingPrice() : 0.0,
+                    _grid ? &_grid->expiries() : nullptr);
                 _expSim->printSummary();
             }
             // B10: Close value writer at session end
@@ -2491,14 +2595,16 @@ void HftOptionStrategy::on_channel_lost(IHftStraCtx* ctx)
 
 void HftOptionStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* message, const char* userTag)
 {
+    // P1-1: route the failure to the worker thread.  OQM order state (and
+    // hedge/combo latches) are worker-owned; WT guarantees NO terminal
+    // on_order after a failed entrust, so the worker must clear the phantom
+    // order itself.  Success needs no action (same as before).
     if (!bSuccess) {
-        // A rejected hedge order must not leave the in-flight latch stuck.
-        _hedgeCoord.onTerminal(localid);
+        if (!_initialized) return;
         WTSLogger::log_by_cat("strategy", LL_WARN,
-            "HftOptionStrategy entrust failed: id={} msg={}", localid, message);
-        // P1-d/W5: rejected combo legs go terminal in the audit records too.
-        for (auto& combo : _activeCombos)
-            combo->legOrderTerminal(localid, true);
+            "HftOptionStrategy entrust rejected: id={} msg={}", localid, message);
+        if (_async)
+            _async->enqueue_entrust(localid, false);
     }
 }
 

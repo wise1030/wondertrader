@@ -3,6 +3,7 @@
 #include "optioncoretypes.h"
 #include "OptionGreeks.h"
 #include "PnlTracker.h"
+#include "IOptionGrid.h"   // ExpiryTable (P2-4 per-expiry settlement prices)
 
 #include <string>
 #include <vector>
@@ -47,7 +48,11 @@ public:
 
     // Compute settlement PnL for expired contracts + close PnL for open positions
     // Returns the DayResult for the given date.
-    DayResult checkExpiration(uint32_t curDate, double spotPrice);
+    // P2-4: `expiries` (may be nullptr) supplies per-expiry underlying prices;
+    // when present they take precedence over the global spotPrice so
+    // multi-series setups settle each expiry against its own underlying.
+    DayResult checkExpiration(uint32_t curDate, double spotPrice,
+                              const ExpiryTable* expiries = nullptr);
 
     // Get all historical day results
     const std::vector<DayResult>& getDayResults() const { return m_dayResults; }

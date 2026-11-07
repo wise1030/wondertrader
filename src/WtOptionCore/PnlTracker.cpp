@@ -112,9 +112,22 @@ size_t PnlTracker::dumpLedgerCsv(const std::string& path) const {
 }
 
 void PnlTracker::initPosition(int32_t position, double costBasis) {
+    // P1-5: adopt the FULL overnight basis, not just lastpos/lastfillpx.
+    // Previously the weighted/FIFO bases stayed empty, so closing a carried
+    // position in FIFO mode opened a phantom opposite lot and every later
+    // FIFO realized PnL for the contract was wrong.  Session aggregates are
+    // NOT touched here — resetSession() already zeroed them.
     m_lastpos = position;
     m_lastfillpx = costBasis;
     m_curpnl = m_lastpnl;
+    m_wavgEntryQty = static_cast<double>(position);
+    m_wavgEntryPx = position != 0 ? costBasis : 0.0;
+    m_fifoBid.clear();
+    m_fifoAsk.clear();
+    if (position > 0)
+        m_fifoBid.push_back({costBasis, static_cast<uint32_t>(position)});
+    else if (position < 0)
+        m_fifoAsk.push_back({costBasis, static_cast<uint32_t>(-position)});
 }
 
 void PnlTracker::resetSession(int32_t carriedPosition, double costBasis) {
