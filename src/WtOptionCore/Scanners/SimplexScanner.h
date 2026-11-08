@@ -1,48 +1,17 @@
 #pragma once
-#include "IScanModule.h"
-#include "../OptionData.h"
-#include "../optioncoretypes.h"
-#include <string>
-#include <memory>
+/*!
+ * \file SimplexScanner.h
+ * \brief Thin alias over EdgeScannerBase (convergence 2.1) — identical edge
+ * logic, only the default ident and hit-reason differ.
+ */
+#include "EdgeScannerBase.h"
 
 namespace wt_option {
 
-class SimplexScanner : public IScanModule {
+class SimplexScanner : public EdgeScannerBase {
 public:
-    struct Config {
-        std::string ident = "SimplexScanner";
-        bool enable = true;
-        double min_edge = 0.5;
-        double delta_min = 0.1;
-        double delta_max = 0.9;
-    };
-
-    SimplexScanner(const Config& cfg, OptionTraderContextPtr ctx) : m_config(cfg), m_ctx(ctx) {}
-    // Factory bridge (R6): unified creation path from ScannerConfig.
-    // Per-scanner numeric params stay at code defaults until the
-    // ScannerConfig schema grows per-type fields.
-    explicit SimplexScanner(const ScannerConfig& sc) : SimplexScanner(Config{}, nullptr)
-    {
-        if (!sc.name.empty()) m_config.ident = sc.name;
-        m_config.enable = sc.enabled;
-        m_config.min_edge = sc.min_edge;
-        m_config.delta_min = sc.delta_min;
-        m_config.delta_max = sc.delta_max;
-    }
-    virtual ~SimplexScanner() {}
-
-    std::string getName() const override { return m_config.ident; }
-    void onStart() override { m_active = true; }
-    void onStop() override { m_active = false; }
-    void onPanic() override { m_active = false; }
-    void onOptionHit(OptionData* od, int32_t index) override { (void)index; onOptionUpdate(od); }
-    void onOptionUpdate(OptionData* od) override;
-
-    double scanOption(OptionData* opt);
-
-private:
-    Config m_config;
-    OptionTraderContextPtr m_ctx;
+    explicit SimplexScanner(const ScannerConfig& sc)
+        : EdgeScannerBase(sc, "SimplexScanner", "simplex_edge") {}
 };
 
 } // namespace wt_option

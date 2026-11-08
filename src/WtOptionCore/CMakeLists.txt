@@ -160,6 +160,7 @@ set(OPTION_CORE_HEADERS
     ControllableTradingGrid.h
     check_markets.h
     Scanners/IScanModule.h
+    Scanners/EdgeScannerBase.h
     ComboOrders.h
     Scanners/MMScanner.h
     Scanners/ButterflyScanner.h

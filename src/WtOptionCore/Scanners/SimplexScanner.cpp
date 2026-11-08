@@ -1,27 +1,6 @@
 #include "SimplexScanner.h"
-#include <cmath>
 
 namespace wt_option {
-
-double SimplexScanner::scanOption(OptionData* opt) {
-    if (!m_active || !opt) return 0.0;
-    if (opt->getBid() <= 0 || opt->getAsk() <= 0) return 0.0;
-    double delta = std::abs(opt->greeks().delta());
-    if (delta < m_config.delta_min || delta > m_config.delta_max) return 0.0;
-    double theo = opt->getTheoPrice();
-    if (theo <= 0) return 0.0;
-    double mid = (opt->getBid() + opt->getAsk()) * 0.5;
-    double edge = std::abs(theo - mid);
-    if (edge < m_config.min_edge) return 0.0;
-    return edge;
-}
-
-void SimplexScanner::onOptionUpdate(OptionData* od) {
-    if (!od || !m_active || !isEnabled()) return;
-    const double score = scanOption(od);
-    if (score > 0)
-        publishHit(od, score, "simplex_edge");
-}
 
 // R6: factory registration — closes the "factory map empty" defect
 REGISTER_SCANNER("SimplexScanner", SimplexScanner);
