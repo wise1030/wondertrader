@@ -34,8 +34,22 @@ done
 
 echo "=== [3/3] WtBtRunner replay ==="
 cd "$RUNNER_DIR"
-cp "$SCRIPT_DIR/configbt_option_replay.yaml" .
-rm -rf replay_common && cp -r "$SCRIPT_DIR/replay_common" .
+# Sync the working copies under version control in src/ — refuse to run on
+# drift so a stale dist copy can never silently shadow the real config.
+for f in configbt_option_replay.yaml; do
+  if ! cmp -s "$SCRIPT_DIR/$f" "$f"; then
+    echo "NOTE: $f differs from src/ copy — refreshing"
+    cp "$SCRIPT_DIR/$f" .
+  fi
+done
+if [ -d replay_common ]; then
+  diff -r -q "$SCRIPT_DIR/replay_common" replay_common >/dev/null 2>&1 || {
+    echo "NOTE: replay_common differs from src/ copy — refreshing"
+    rm -rf replay_common && cp -r "$SCRIPT_DIR/replay_common" .
+  }
+else
+  cp -r "$SCRIPT_DIR/replay_common" .
+fi
 env LD_LIBRARY_PATH="$REPO/src/build_all/build_x64/Debug/bin" \
   ./WtBtRunner.fresh -c configbt_option_replay.yaml -l logcfgbt_option.yaml
 
