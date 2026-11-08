@@ -21,11 +21,12 @@
 #pragma once
 
 #include "optioncoretypes.h"
-#include "OptionValues.h"      // MultiMarket, EMAFilter, PriceSize
-#include "OptionTradingData.h" // OTDOrderExecutor / OTDCancelExecutor / OTDQuoteExecutor / PositionProvider
+#include "OptionValues.h"                 // MultiMarket, EMAFilter, PriceSize
+#include "InstrumentTradingDataBase.h"    // executor hooks, markets, OQM, counters
 #include "PnlTracker.h"
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <functional>
 #include <memory>
@@ -107,7 +108,7 @@ private:
     EMAFilter m_ema_rollema;
 };
 
-class UnderlyingTradingData
+class UnderlyingTradingData : public InstrumentTradingDataBase
 {
 public:
     static const int32_t MAX_VALUES = 5;
@@ -117,30 +118,8 @@ public:
                           const ExpiryDataPtr& ed,
                           const OptionTradingGridPtr& otg);
 
-    const std::string& getCode() const { return m_instr; }
     uint32_t getExpiry() const;
     int32_t getPosition() const;
-
-    MultiMarket& multiMarket() { return m_multiMarket; }
-    const MultiMarket& getLastDesiredMarket() const { return m_lastDesiredMarket; }
-    const MultiMarket& getCurrentMarket() const     { return m_currentMarket; }
-    void setCurrentMarket(const MultiMarket& mkt) { m_currentMarket = mkt; }
-    int32_t updateOrders(bool cancel_only = false);
-
-    // Per-contract QuoteManager (same pattern as OptionTradingData)
-    void setQuoteManager(std::shared_ptr<class OptionQuoteManager> om) { m_quoteOM = std::move(om); }
-    std::shared_ptr<class OptionQuoteManager> getQuoteManager() const { return m_quoteOM; }
-
-    // Executor hooks (replaces IOrderManager / ITrader) — same semantics as OptionTradingData.
-    void setOrderExecutor(OTDOrderExecutor oe)   { m_orderExecutor  = std::move(oe); }
-    void setCancelExecutor(OTDCancelExecutor ce) { m_cancelExecutor = std::move(ce); }
-    void setQuoteExecutor(OTDQuoteExecutor qe)   { m_quoteExecutor  = std::move(qe); }
-    void setPositionProvider(PositionProvider pp) { m_positionProvider = std::move(pp); }
-
-    bool isActive() const;
-    void setActive(bool b);
-    void enable();
-    void disable();
 
     // Market access (replaces InstrumentMDContext / IBook)
     double getBid() const { return m_bid; }
@@ -170,22 +149,13 @@ public:
     const MultiMarket& ourMarket() const { return values(0).ourMarket(); }
     MultiMarket& ourMarket() { return values(0).ourMarket(); }
 
-    int32_t getNumCancel() const { return m_numCancel; }
-    int32_t getNumReject() const { return m_numReject; }
-    int32_t getNumFill() const   { return m_numFill; }
-
     void setFwd(double v) { m_fwd = v; }
     double getFwd() const { return m_fwd; }
 
-    void setUpdateRank(double r) { m_updateRank = r; }
-    double getUpdateRank() const { return m_updateRank; }
     double getDelta() const { return 1; }
 
     UnderlyingValues& values(int32_t i = 0) { return m_values[i]; }
     const UnderlyingValues& values(int32_t i = 0) const { return m_values[i]; }
-
-    void setQuoteMode(QuoteMode m) { m_quoteMode = m; }
-    QuoteMode getQuoteMode() const { return m_quoteMode; }
 
     void setDisplayShark(bool b) { m_bDisplayShark = b; }
     bool isDisplayShark() const { return m_bDisplayShark; }
@@ -195,23 +165,12 @@ public:
     /// creates an unloadable ownership cycle.
     OptionTradingGridPtr getOptionTradingGrid() const { return m_wpOptionTradingGrid.lock(); }
 
+    // Divergence from the base: the hedge tracker's multiplier is the
+    // contract size (base uses the 1.0 default).
     PnlTrackerPtr getPnlTracker();
 
 protected:
     UnderlyingValues m_values[MAX_VALUES];
-    MultiMarket m_multiMarket;
-    MultiMarket m_lastDesiredMarket;
-    MultiMarket m_currentMarket;
-
-    // Executor callbacks (replace IOrderManager / ITrader)
-    OTDOrderExecutor   m_orderExecutor;
-    OTDCancelExecutor  m_cancelExecutor;
-    OTDQuoteExecutor   m_quoteExecutor;
-    PositionProvider m_positionProvider;
-
-    bool m_bActive;
-
-    std::shared_ptr<class OptionQuoteManager> m_quoteOM;
 
     // Market (replaces InstrumentMDContext / IBook)
     double m_bid = 0;
@@ -221,21 +180,11 @@ protected:
     double m_tickSize = 1.0;
     double m_feePct = 0;
 
-    double m_fwd;
-    double m_updateRank;
+    double m_fwd = 0;
 
-    QuoteMode m_quoteMode;
-    bool m_bDisplayShark;
-    std::string m_instr;
+    bool m_bDisplayShark = false;
     ExpiryDataPtr m_spExpiryData;
     OptionTradingGridWeakPtr m_wpOptionTradingGrid;
-
-    PnlTrackerPtr m_pnlTracker;
-
-    // Counters
-    int32_t m_numCancel = 0;
-    int32_t m_numReject = 0;
-    int32_t m_numFill   = 0;
 };
 
 using UnderlyingTradingDataPtr     = std::shared_ptr<UnderlyingTradingData>;

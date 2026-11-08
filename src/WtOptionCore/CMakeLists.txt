@@ -150,6 +150,7 @@ set(OPTION_CORE_HEADERS
     OptionRisk.h
     StressAnalyzer.h
     OptionTradingData.h
+    InstrumentTradingDataBase.h
     UnderlyingTradingData.h
     ExpiryTradingData.h
     PnlTracker.h
