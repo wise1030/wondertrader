@@ -979,7 +979,7 @@ void HftOptionStrategy::setupPricer()
             if (vc) {
                 if (vc->has("type")) {
                     std::string t = vc->getCString("type");
-                    if (t == "gvv" || t == "linear" || t == "constant")
+                    if (wt_option::isValidMainCurveType(t))
                         p2cfg.volcurve_type = t;
                     else
                         WTSLogger::log_by_cat("strategy", LL_WARN,
@@ -987,7 +987,7 @@ void HftOptionStrategy::setupPricer()
                 }
                 if (vc->has("curve2_type")) {
                     std::string t = vc->getCString("curve2_type");
-                    if (t == "power" || t == "gvv" || t == "linear" || t == "constant")
+                    if (wt_option::isValidCurve2Type(t))
                         p2cfg.curve2_type = t;
                     else
                         WTSLogger::log_by_cat("strategy", LL_WARN,

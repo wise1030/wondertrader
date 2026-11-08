@@ -41,12 +41,12 @@ public:
 
     /// P1-b: main-curve type. "gvv" (default) | "linear" | "constant".
     void setCurveType(const std::string& t) {
-        if (t == "gvv" || t == "linear" || t == "constant") m_curveType = t;
+        if (isValidMainCurveType(t)) m_curveType = t;
     }
 
     /// P1-b: curve2 type, extended beyond the R2 gvv|power pair.
     void setCurve2Type(const std::string& t) {
-        if (t == "power" || t == "gvv" || t == "linear" || t == "constant") m_curve2Type = t;
+        if (isValidCurve2Type(t)) m_curve2Type = t;
     }
 
     /// P1-a: walk power→linear→constant when the main-curve fit fails.

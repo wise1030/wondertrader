@@ -45,7 +45,7 @@ public:
                           "rp_quote","rp_future","reduce_large_size","slow_compute_interval",
                           "min_compute_interval" } },
             { "pricer.blackCalc", { "volCurve","risk_free","dividend" } },
-            { "pricer.blackCalc.volCurve", { "fitter","volcurve_weight","curve2_type" } },
+            { "pricer.blackCalc.volCurve", { "type","fitter","volcurve_weight","curve2_type","fallback" } },
             { "pricer.blackCalc.volCurve.fitter", { "start_time","end_time","period",
                           "decay_window","threshold","fit_all_expiries","good_points_thresh" } },
             { "orderManager", { "option","future","riskFilters" } },

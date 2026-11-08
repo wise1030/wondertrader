@@ -94,4 +94,17 @@ protected:
     };
 };
 
+// B2-2.2 convergence: canonical curve-type whitelists (single source).
+// Previously three copies of these rules drifted apart — the OptionPricer2
+// factory accepted "power" for the main curve while the AsyncVolFitter and
+// strategy-init whitelists rejected it.  All validation now goes through
+// these helpers; createVolCurveByType (OptionPricer2) remains the sole
+// creator, defaulting to gvv for any unrecognised string.
+inline bool isValidMainCurveType(const std::string& t) {
+    return t == "gvv" || t == "linear" || t == "constant";
+}
+inline bool isValidCurve2Type(const std::string& t) {
+    return t == "gvv" || t == "power" || t == "linear" || t == "constant";
+}
+
 } // namespace wt_option
