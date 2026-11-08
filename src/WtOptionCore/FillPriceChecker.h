@@ -1,8 +1,19 @@
 #pragma once
+/*!
+ * \file FillPriceChecker.h
+ * \brief Fill-vs-issue price deviation policy (plan 3.3).
+ *
+ * Formerly a standalone per-order table fed in parallel with
+ * OrderAnomalyGuard from the same callbacks.  It is now a pure policy over
+ * the single IssuedOrderRegistry: the strategy calls onFill() only for
+ * live-order fills, passing the issue price read from the registry record.
+ * The B13 panic latch (survives until explicitly cleared) is unchanged.
+ */
+
+#include "IssuedOrderRegistry.h"
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <functional>
 #include <memory>
 
@@ -24,12 +35,10 @@ public:
     FillPriceChecker() : m_cfg() {}
     explicit FillPriceChecker(const Config& cfg) : m_cfg(cfg) {}
 
-    void onOrderSent(const std::string& code, uint32_t localid, double price);
-    void onFill(const std::string& code, uint32_t localid, double fillPx);
-    void onOrderCancelled(uint32_t localid);
-    /// Clear tracking entry when an order is fully filled or otherwise done
-    /// (prevents unbounded growth of m_issuePrices — B14)
-    void onOrderCompleted(uint32_t localid) { m_issuePrices.erase(localid); }
+    /// Deviation check for one fill of a LIVE order.  Callers obtain
+    /// issuePx from IssuedOrderRegistry::get(localid) and must skip fills
+    /// classified LateAfterDone/Unknown (the old erase-on-done semantics).
+    void onFill(const std::string& code, double fillPx, double issuePx);
 
     void setWarningCallback(WarningCallback cb) { m_warnCb = std::move(cb); }
     void setPanicCallback(PanicCallback cb) { m_panicCb = std::move(cb); }
@@ -41,11 +50,6 @@ public:
 
 private:
     Config m_cfg;
-    struct IssueInfo {
-        std::string code;
-        double price = 0;
-    };
-    std::unordered_map<uint32_t, IssueInfo> m_issuePrices;
     WarningCallback m_warnCb;
     PanicCallback m_panicCb;
     bool m_panicked = false;

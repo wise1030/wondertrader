@@ -4,19 +4,8 @@
 
 namespace wt_option {
 
-void FillPriceChecker::onOrderSent(const std::string& code, uint32_t localid, double price) {
-    m_issuePrices[localid] = {code, price};
-}
-
-void FillPriceChecker::onFill(const std::string& code, uint32_t localid, double fillPx) {
-    auto it = m_issuePrices.find(localid);
-    if (it == m_issuePrices.end()) return;
-
-    double issuePx = it->second.price;
-    if (issuePx <= 0) {
-        m_issuePrices.erase(it);
-        return;
-    }
+void FillPriceChecker::onFill(const std::string& code, double fillPx, double issuePx) {
+    if (issuePx <= 0) return;
 
     double pct = std::abs(fillPx - issuePx) / issuePx;
 
@@ -32,10 +21,6 @@ void FillPriceChecker::onFill(const std::string& code, uint32_t localid, double 
             code, fillPx, issuePx, pct, m_cfg.warningThreshold);
         if (m_warnCb) m_warnCb(code, fillPx, issuePx, pct);
     }
-}
-
-void FillPriceChecker::onOrderCancelled(uint32_t localid) {
-    m_issuePrices.erase(localid);
 }
 
 } // namespace wt_option

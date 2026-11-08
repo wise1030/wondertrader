@@ -7,6 +7,7 @@
 #include "../PositionOffsetMgr.h"
 #include "../PositionGuard.h"
 #include "../FillPriceChecker.h"
+#include "../IssuedOrderRegistry.h"
 #include "../RiskLimitsEx.h"
 #include "../OptionQuoteManager.h"
 #include "../PnlTracker.h"
@@ -267,6 +268,10 @@ void test_position_guard() {
 void test_fill_price_checker() {
     std::cout << "=== test_fill_price_checker ===" << std::endl;
 
+    // 3.3: the checker is now a pure policy over the IssuedOrderRegistry —
+    // the strategy only calls it for LIVE-order fills with the registry's
+    // issue price.  The lifecycle gating is the registry's job (tested in
+    // test_issued_order_registry below); here we exercise the thresholds.
     FillPriceChecker checker;
     bool warningCalled = false;
     bool panicCalled = false;
@@ -278,35 +283,86 @@ void test_fill_price_checker() {
         panicCalled = true;
     });
 
-    // Send order at 100
-    checker.onOrderSent("test", 1001, 100.0);
-
-    // Fill at 100.1 -> 0.1% deviation, below warning
-    checker.onFill("test", 1001, 100.1);
+    // Fill at 100.1 vs issue 100.0 -> 0.1% deviation, below warning
+    checker.onFill("test", 100.1, 100.0);
     ASSERT_TRUE(!warningCalled);
     ASSERT_TRUE(!panicCalled);
 
     // Fill at 100.3 -> 0.3% deviation, warning
     warningCalled = false;
-    checker.onOrderSent("test", 1002, 100.0);
-    checker.onFill("test", 1002, 100.3);
+    checker.onFill("test", 100.3, 100.0);
     ASSERT_TRUE(warningCalled);
     ASSERT_TRUE(!panicCalled);
 
     // Fill at 100.6 -> 0.6% deviation, panic
     panicCalled = false;
-    checker.onOrderSent("test", 1003, 100.0);
-    checker.onFill("test", 1003, 100.6);
+    checker.onFill("test", 100.6, 100.0);
     ASSERT_TRUE(panicCalled);
 
-    // Cancel removes tracking
-    checker.onOrderSent("test", 1004, 100.0);
-    checker.onOrderCancelled(1004);
-    // Fill after cancel should not trigger
+    // Invalid issue price is ignored
     warningCalled = false;
-    checker.onFill("test", 1004, 101.0);
+    checker.onFill("test", 101.0, 0.0);
     ASSERT_TRUE(!warningCalled);
 
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// 3.3/3.6: unified per-order registry — lifecycle, classification, attribution
+// ============================================================================
+void test_issued_order_registry() {
+    std::cout << "=== test_issued_order_registry ===" << std::endl;
+    namespace wto = wt_option;
+
+    wto::IssuedOrderRegistry reg;
+    uint64_t fakeUs = 1000000;
+    reg.setGetTimeFn([] { return 42.0; });
+    reg.setGetTimeUsFn([&fakeUs] { return fakeUs; });
+
+    // issue -> fill -> done lifecycle with ctx snapshot
+    auto& rec = reg.onIssued(1, "TEST.A", 10);
+    rec.isBuy = false;
+    rec.issuePx = 100.0;
+    rec.ctx.theo = 100.5; rec.ctx.mid = 100.2; rec.ctx.spot = 50000.0;
+    rec.ctx.issueTimeUs = fakeUs; rec.ctx.valid = true;
+
+    ASSERT_TRUE(reg.onFill(1, 4, 100.4, 50010.0) == wto::IssuedOrderRegistry::FillClass::Normal);
+    ASSERT_TRUE(reg.onFill(1, 6, 100.6, 50020.0) == wto::IssuedOrderRegistry::FillClass::Normal);
+    ASSERT_TRUE(reg.get(1)->filledQty == 10);
+    ASSERT_TRUE(reg.get(1)->fills.size() == 2);
+
+    // live deviation gating source: record still live here
+    ASSERT_TRUE(!reg.get(1)->done);
+    // fill beyond total -> overfill
+    ASSERT_TRUE(reg.onFill(1, 1, 100.0) == wto::IssuedOrderRegistry::FillClass::Overfill);
+    ASSERT_TRUE(reg.overfillCount() == 1);
+
+    // done -> late fill classification
+    ASSERT_TRUE(reg.onOrderDone(1, true, 10.0));
+    ASSERT_TRUE(reg.get(1)->done);
+    ASSERT_TRUE(reg.onFill(1, 1, 100.0) == wto::IssuedOrderRegistry::FillClass::LateAfterDone);
+    ASSERT_TRUE(reg.lateAfterDoneCount() == 1);
+
+    // rejected order: fill is genuinely anomalous
+    reg.onIssued(2, "TEST.B", 5);
+    reg.onOrderRejected(2);
+    ASSERT_TRUE(reg.get(2)->rejected);
+    ASSERT_TRUE(reg.onFill(2, 1, 99.0) == wto::IssuedOrderRegistry::FillClass::Unknown);
+
+    // unknown localid
+    ASSERT_TRUE(reg.onFill(999, 1, 1.0) == wto::IssuedOrderRegistry::FillClass::Unknown);
+    ASSERT_TRUE(reg.unknownFillCount() >= 2);
+
+    // size-bound purge: cap 3 -> oldest done record dropped, live kept
+    reg.onIssued(3, "TEST.C", 1);
+    ASSERT_TRUE(reg.get(3) != nullptr);
+    reg.purgeDone(3);
+    ASSERT_TRUE(reg.get(3) != nullptr);          // live record never dropped
+    ASSERT_TRUE(reg.orders().size() == 3);
+
+    reg.reset();
+    ASSERT_TRUE(reg.orders().empty());
+    ASSERT_TRUE(reg.unknownFillCount() == 0);
     std::cout << "  PASS" << std::endl;
 }
 
@@ -1887,6 +1943,7 @@ int main() {
     test_position_offset_mgr();
     test_position_guard();
     test_fill_price_checker();
+    test_issued_order_registry();
     test_risk_limits_ex();
     test_oqm_enhancements();
     test_options_short_limit_filter();

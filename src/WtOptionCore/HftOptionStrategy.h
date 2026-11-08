@@ -37,7 +37,7 @@
 #include "RiskLimitsEx.h"
 #include "QuoteStatistics.h"
 #include "GammaScalpOptionPricer.h"
-#include "OrderAnomalyGuard.h"
+#include "IssuedOrderRegistry.h"
 #include "TradingState.h"
 #include "CommandBus.h"
 #include "DeltaHedgeExecutor.h"
@@ -259,8 +259,16 @@ private:
     wt_option::QuoteStatistics _quoteStats;                          // Quote statistics (session-level)
     uint64_t _tickTimestampUs = 0;                                   // Last tick arrival time (for latency measurement)
 
-    // B2: exchange-report anomaly protection (IssuedOrderTracker absorption)
-    wt_option::OrderAnomalyGuard _anomalyGuard;
+    // B2/3.3: single per-order registry — exchange-report anomaly protection
+    // (IssuedOrderTracker absorption) + fill-deviation inputs + 3.6
+    // fill-quality attribution source.  Replaces the former parallel
+    // OrderAnomalyGuard::Rec / FillPriceChecker::IssueInfo tables.
+    wt_option::IssuedOrderRegistry _orderRegistry;
+
+    // 3.6 fill-quality attribution configuration
+    bool _attrEnable = false;
+    std::string _attrOutDir = "outputs_bt";
+    uint32_t _attrKeepMaxRecs = 20000;  // size-bound registry purge (live+backtest safe)
 
     // R1: latest exchange price limits per code (from tick feed)
     struct PriceLimit { double upper = 0; double lower = 0; };
@@ -388,7 +396,9 @@ private:
     OrderIDs executeOrderIds(const std::string& code, bool isBuy,
                              double price, uint32_t qty);
     void registerIssuedOrderIds(const std::string& code, const OrderIDs& ids,
-                                double price, uint32_t qty);
+                                double price, uint32_t qty, bool isBuy);
+    /// 3.6: session-end export of fill_attribution.csv + aggregate log.
+    void exportFillAttribution(uint32_t tdate);
     bool executeCancel(uint32_t localid);
     int32_t executeCancel(const std::string& code);
 };
