@@ -20,6 +20,7 @@
 
 #include "optioncoretypes.h"
 #include "OptionValues.h"      // MultiMarket
+#include "OptionQuoteManager.h"
 #include "PnlTracker.h"
 
 #include <cstdint>

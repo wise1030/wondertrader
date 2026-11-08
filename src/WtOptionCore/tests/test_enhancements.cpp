@@ -11,7 +11,6 @@
 #include "../RiskLimitsEx.h"
 #include "../OptionQuoteManager.h"
 #include "../PnlTracker.h"
-#include "../OrderAnomalyGuard.h"
 #include "../PowerVolCurve.h"
 #include "../GvvVolCurve.h"
 #include "../TradingState.h"
@@ -1128,43 +1127,6 @@ void test_position_guard_staleness() {
 }
 
 // ============================================================================
-// B2: OrderAnomalyGuard — unknown fills, late-after-done, overfill
-// ============================================================================
-void test_order_anomaly_guard() {
-    std::cout << "=== test_order_anomaly_guard ===" << std::endl;
-
-    OrderAnomalyGuard guard;
-    guard.setGetTimeFn([]{ static double t = 100; return t += 0.001; });
-
-    using FC = OrderAnomalyGuard::FillClass;
-
-    // Unknown fill
-    ASSERT_TRUE(guard.onFill(999, 5) == FC::Unknown);
-    ASSERT_EQ(guard.unknownFillCount(), (size_t)1);
-
-    // Normal lifecycle
-    guard.onIssued(1, "A", 10);
-    ASSERT_TRUE(guard.onFill(1, 4) == FC::Normal);
-    guard.onOrderDone(1, true, 0);            // fully canceled/done
-    ASSERT_TRUE(guard.onFill(1, 6) == FC::LateAfterDone);
-    ASSERT_EQ(guard.lateAfterDoneCount(), (size_t)1);
-
-    // Overfill
-    guard.onIssued(2, "B", 5);
-    ASSERT_TRUE(guard.onFill(2, 4) == FC::Normal);
-    ASSERT_TRUE(guard.onFill(2, 3) == FC::Overfill);   // cumulative 7 > 5
-    ASSERT_EQ(guard.overfillCount(), (size_t)1);
-
-    // Reset clears everything
-    guard.reset();
-    ASSERT_EQ(guard.unknownFillCount(), (size_t)0);
-    ASSERT_EQ(guard.lateAfterDoneCount(), (size_t)0);
-    ASSERT_EQ(guard.overfillCount(), (size_t)0);
-
-    std::cout << "  PASS" << std::endl;
-}
-
-// ============================================================================
 // R2: PowerVolCurve — domain-fixed power-law fit/eval
 // ============================================================================
 void test_power_vol_curve() {
@@ -1952,7 +1914,6 @@ int main() {
     test_oqm_cancel_timeout();
     test_pnl_tracker_fifo();
     test_position_guard_staleness();
-    test_order_anomaly_guard();
     test_power_vol_curve();
     test_strike_finders();
     test_price_limit_checker();

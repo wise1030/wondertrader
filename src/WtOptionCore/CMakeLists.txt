@@ -136,7 +136,6 @@ set(OPTION_CORE_HEADERS
     OptionQuoteManager.h
     IOptionGrid.h
     IOptionGridListener.h
-    IOptionDataListener.h
     IOptionPricer.h
     OptionPricer2.h
     IVolCurve.h
