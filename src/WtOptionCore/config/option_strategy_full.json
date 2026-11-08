@@ -290,6 +290,12 @@
         }
     ],
 
+    "fillAttribution": {
+        "enable": false,
+        "outputDir": "outputs_bt/opt_mm_cu",
+        "keepMaxRecords": 20000
+    },
+
     "optionValueWriter": {
         "enable": false,
         "outputDir": ".",

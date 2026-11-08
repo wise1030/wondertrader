@@ -468,6 +468,46 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 - `delta_per_lot`：一手对冲合约的 delta（不配置则从合约乘数解析，解析失败禁用对冲并告警）
 - 在途抑制：上一批对冲单未终态前不发新批
 
+### fillAttribution（成交质量归因，3.6）
+
+默认关闭，开启后零热路径成本（一条分支判断；快照为发单时在手边的 `values(0)` 直接拷贝）：
+
+```json
+"fillAttribution": { "enable": true, "outputDir": "outputs_bt/opt_mm_cu",
+                     "keepMaxRecords": 20000 }
+```
+
+- 每个成交订单在 session end 导出一行到 `<outputDir>/fill_attribution.csv`：
+  发单价/量、`theo0/mid0/iv0/delta0/spot0/fwd0`（发单时刻快照，spot 为 per-expiry 标的价）、
+  量加权成交价、报价寿命 `timeLagMs`、`edgeBps`（卖：(成-理)/理，买取反——做市 edge）、
+  `captureBps`（相对 mid 的捕获/让渡）、`spotDriftBps`（现货漂移，用于分离"标动"与"真 edge 衰减"）、拒单标志
+- 聚合日志：按合约与全体的 edgeBps / |captureBps| / lagMs 均值
+- 数据真源为 `IssuedOrderRegistry`（3.3 合并后的单一 per-order 登记表）；
+  `keepMaxRecords` 为**容量边界**淘汰（非时钟 TTL——模拟时钟 TTL 在快速回放下会饿死导出）
+- 注意：回测最后一天 session end 位于进程收尾路径，聚合**日志**可能因 logger 关闭竞争丢失，
+  CSV 写入为直接 IO 不受影响
+
+---
+
+## 性能模型（计算链路）
+
+单个 tick **不触发全量重算**，链路为五层防护：
+
+1. **攒批**：worker 每批统一处理一次（同批 N tick 合并）
+2. **来源门控**：仅标的 tick 置重定价标志；期权自身 tick 只更新快照（`HftOptionStrategy` tick 路由）
+3. **防抖**：`minComputeInterval`（默认 0.02s = 50Hz 上限）+ 同秒去重
+4. **FAST/SLOW 分档**（`CompositeOptionPricer`）：
+   - FAST（默认）：不重算 BS/IV——理论价用 **delta+gamma 泰勒修正**平移缓存值（每期权几次乘法），
+     仅补算未定价者；全量 BS 仅在 forward 跳变超 `fast_full_reprice_forward_step`、临到期、SLOW 周期到时
+   - SLOW（`slow_compute_interval`）：全量重定价 + 每期权 IV 反推（Brent）
+5. **重活外移**：曲线 WLS 拟合在独立线程（默认 60s 周期），worker 只交快照；
+   scanner/PnL 按 `_dirtyOptions` 门控
+
+**容量规划**：SLOW 档全量 IV 反推的成本为 `期权数 × (1/slow_compute_interval)` 次 Brent/秒。
+56 期权 × 10Hz（interval=0.1）≈ 560 次/秒，实测 batch p50≈51-64µs 可控；
+链式品种（数百期权）上线时应调大 `slow_compute_interval` 至 0.5-1s 或评估 IV 反推增量化
+（BS 全量 + IV 仅对 dirty 期权）。
+
 ---
 
 ## 回测与 Replay 验证
