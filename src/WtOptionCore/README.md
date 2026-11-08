@@ -170,11 +170,25 @@ Worker 线程 (唯一状态写者)
 | LowBidsScanner | 低价买盘异常 |
 | GarchScanner | GARCH 波动率预测信号 |
 
+> **已注册未默认启用**：9 个 Scanner 全部完成工厂注册与加载链接线，shipped 配置默认只启用 MMScanner。
+> 其余（VolSpread/Butterfly/SyntheticFuture/Simplex/Open/LowBids/Garch/StrikeSpread）在
+> `config/option_strategy_full.json` 中给出了 `enable:false` 的现成配置段——改为 `true` 即接线，
+> 无需改代码。其中 Open/Simplex/StrikeSpread/LowBids 四个 scanner 共享 `EdgeScannerBase` 实现
+> （仅 ident 与 hit-reason 不同）。
+
 ### 8. 信号（Signals/）
 
 - **Alpha 信号**（AlphaSignals.*）：VegaFlow / DeltaFlow / ATM 信号 / ForwardSpread / RollEMA — 驱动报价偏移
 - **Risk 信号**（RiskSignals.*）：ToxicitySignal（逆向成交毒性→自动 widen/panic）、PnlLimitSignal（日内 PnL 限额→auto panic）
 - **SignalFactory**：信号工厂与数值参数接线
+
+> **已注册未默认启用**：Alpha 信号共 7 个（VegaFlow/DeltaFlow/AtmSig/RollEma/FrontFutSkew/
+> FrontAtmvFlow/ForwardSpread），默认配置只启用前两个；其余 5 个在 full.json 中有
+> `enable:false` 现成配置段。Risk 信号（Toxicity/PnlLimit）默认启用。
+>
+> **可选模式**：`pricerType: "gammascalp"` 激活 GammaScalpOptionPricer（默认 composite_mm）；
+> `pricer.blackCalc.volCurve.fitter.mode: "sync"` 走同步拟合链 PeriodicCurveFitter
+> （默认 async，异步拟合在独立线程）。两者均完整接线，仅默认休眠。
 
 ### 9. 协调器与命令
 

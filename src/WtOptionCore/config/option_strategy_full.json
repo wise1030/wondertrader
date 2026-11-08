@@ -178,6 +178,36 @@
                     "window_sec": 120,
                     "threshold": 0.5
                 }
+            },
+            {
+                "enable": false,
+                "type": "AtmSig",
+                "weight": 0.0,
+                "params": {}
+            },
+            {
+                "enable": false,
+                "type": "RollEma",
+                "weight": 0.0,
+                "params": {}
+            },
+            {
+                "enable": false,
+                "type": "FrontFutSkew",
+                "weight": 0.0,
+                "params": {}
+            },
+            {
+                "enable": false,
+                "type": "FrontAtmvFlow",
+                "weight": 0.0,
+                "params": {}
+            },
+            {
+                "enable": false,
+                "type": "ForwardSpread",
+                "weight": 0.0,
+                "params": {}
             }
         ],
         "risk": [
@@ -221,6 +251,42 @@
             "name": "butterfly_1",
             "enable": false,
             "priority": 2
+        },
+        {
+            "type": "VolSpreadScanner",
+            "name": "volspread_1",
+            "enable": false,
+            "priority": 3
+        },
+        {
+            "type": "OpenScanner",
+            "name": "open_1",
+            "enable": false,
+            "priority": 4
+        },
+        {
+            "type": "SimplexScanner",
+            "name": "simplex_1",
+            "enable": false,
+            "priority": 5
+        },
+        {
+            "type": "GarchScanner",
+            "name": "garch_1",
+            "enable": false,
+            "priority": 6
+        },
+        {
+            "type": "LowBidsScanner",
+            "name": "lowbids_1",
+            "enable": false,
+            "priority": 7
+        },
+        {
+            "type": "SyntheticFutureScanner",
+            "name": "synfut_1",
+            "enable": false,
+            "priority": 8
         }
     ],
 
