@@ -40,14 +40,6 @@ ExpiryDataPtr OptionTradingData::getExpiryData() const
     return od ? od->getExpiryData() : nullptr;
 }
 
-void OptionTradingData::onMarketsPriced(const OptionData& od, size_t index)
-{
-    (void)od;
-    (void)index;
-    // Original no-op'd the OrderManager update here; with executors there is
-    // nothing to do either — updateOrders() is called explicitly by the grid.
-}
-
 int32_t OptionTradingData::updateOrders(bool cancel_only)
 {
     if (!m_quoteOM) return 0;

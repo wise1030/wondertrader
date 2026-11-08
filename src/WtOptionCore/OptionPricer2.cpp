@@ -771,10 +771,8 @@ void OptionPricer2::computeImpliedValues(OptionData* option,
 void OptionPricer2::finalizeCompute(OptionGrid* grid)
 {
     if (!grid) return;
-    const size_t idx = getValuesIndex();
-    for (const auto& od : grid->getAllOptions()) {
-        if (od) od->notifyMarketsPriced(idx);
-    }
+    // Per-option IOptionDataListener notification removed (dead facility) —
+    // see CompositeOptionPricer::finalizeCompute for the rationale.
 }
 
 } // namespace wt_option

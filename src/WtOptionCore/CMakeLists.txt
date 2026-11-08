@@ -51,8 +51,6 @@ set(OPTION_CORE_SOURCES
     StressAnalyzer.cpp
     OptionTradingData.cpp
     UnderlyingTradingData.cpp
-    OptionOrderInfo.cpp
-    FutureOrderInfo.cpp
 
     # PnL
     PnlTracker.cpp
@@ -154,8 +152,6 @@ set(OPTION_CORE_HEADERS
     OptionTradingData.h
     UnderlyingTradingData.h
     ExpiryTradingData.h
-    OptionOrderInfo.h
-    FutureOrderInfo.h
     PnlTracker.h
     QuoteStatistics.h
     OptionList.h

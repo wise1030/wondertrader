@@ -4,7 +4,7 @@
  *
  * Migrated from quantbox optioncore/OptionTradingData.h + .cc (129 + 201 lines).
  * Business logic preserved: quote mode (AUTO/ON/OFF/CLOSE/FLAT), updateRank,
- * willBeActive delta/size gating, str2qmode, onMarketsPriced no-op hook,
+ * willBeActive delta/size gating, str2qmode,
  * setActive clears multiMarket, enable/disable, updateOrders.
  *
  * Dependency replacements:
@@ -133,7 +133,9 @@ public:
 
 protected:
     friend class OptionTradingGrid;
-    virtual void onMarketsPriced(const OptionData& od, size_t index);
+    // NOTE: the quantbox onMarketsPriced no-op hook was removed together with
+    // the IOptionDataListener facility — updateOrders() is driven explicitly
+    // by the grid's batch refresh, not by pricing callbacks.
 
 protected:
     bool m_bActive;

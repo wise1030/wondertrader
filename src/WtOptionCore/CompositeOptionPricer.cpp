@@ -1755,10 +1755,11 @@ void CompositeOptionPricer::onAddOption(const OptionDataPtr& od) {
 // ============================================================================
 void CompositeOptionPricer::finalizeCompute(OptionGrid* grid) {
     if (!grid) return;
-    // Notify all options that markets are (re)priced (index 0 = primary values).
-    for (const auto& od : grid->getAllOptions()) {
-        if (od) od->notifyMarketsPriced(0);
-    }
+    // finalizeCompute is part of the IOptionPricer interface contract (called
+    // at the end of every FAST/SLOW pass).  The quantbox per-option
+    // IOptionDataListener notification was removed as a dead facility — its
+    // consumers are served by IOptionGridListener::onComputeValuesCompleted
+    // (coarse) and the strategy _dirtyOptions change-set (fine).
 }
 
 // ============================================================================

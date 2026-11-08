@@ -11,14 +11,11 @@
 #include "optioncoretypes.h"
 #include "OptionGreeks.h"
 #include "OptionValues.h"
-#include "IOptionDataListener.h"
 
 #include <memory>
 #include <string>
 #include <atomic>
 #include <array>
-#include <vector>
-#include <cstdint>
 
 namespace wt_option {
 
@@ -146,26 +143,6 @@ public:
     const MultiMarket& currentMarket() const { return m_currentMarket; }
     void setCurrentMarket(const MultiMarket& mkt) { m_currentMarket = mkt; }
 
-    // --- Data listeners (IOptionDataListener) ---
-    // The pricer calls notifyMarketsPriced(index) after (re)pricing this option
-    // so downstream consumers (OptionTradingData, scanners) can react.
-    void addDataListener(IOptionDataListener* l) {
-        if (!l) return;
-        for (auto* e : m_dataListeners) if (e == l) return;
-        m_dataListeners.push_back(l);
-    }
-    void removeDataListener(IOptionDataListener* l) {
-        for (size_t i = 0; i < m_dataListeners.size(); ++i) {
-            if (m_dataListeners[i] == l) { m_dataListeners.erase(m_dataListeners.begin() + i); return; }
-        }
-    }
-    void notifyMarketsPriced(size_t index) {
-        // Index-based iteration is safe against add/remove during dispatch.
-        for (size_t i = 0; i < m_dataListeners.size(); ++i) {
-            if (m_dataListeners[i]) m_dataListeners[i]->onMarketsPriced(*this, index);
-        }
-    }
-
     // Fast array indexing
     uint32_t getInternalId() const { return m_internalId; }
     void setInternalId(uint32_t id) { m_internalId = id; }
@@ -182,7 +159,10 @@ private:
     bool m_active = false;
     MultiMarket m_currentMarket;  // last quote sent (for diff)
     uint32_t m_internalId = 0;
-    std::vector<IOptionDataListener*> m_dataListeners;
+    // NOTE: the quantbox IOptionDataListener per-option notification was
+    // removed (dead facility): coarse consumers use IOptionGridListener::
+    // onComputeValuesCompleted, fine-grained ones the strategy _dirtyOptions
+    // change-set, which covers more event sources than repricing alone.
 };
 
 using OptionDataPtr = std::shared_ptr<OptionData>;
