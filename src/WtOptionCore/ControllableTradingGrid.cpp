@@ -373,29 +373,17 @@ void ControllableTradingGrid::refresh() {
 }
 
 // ============================================================================
-// rankOption — priority ranking for order updates
-// Faithful port of the original longbeach rankOption (7 factors + type weight).
-// Crossing check uses the LIVE MARKET mid (not the theoretical value).
-// Type weight: CANCEL=+1000, UPDATE=+500, NEW=499-rank (NEW deprioritised).
+// Common ranking factors shared by rankOption/rankFuture (convergence 3.5).
+// Factors 1-4 (cross check, best-in-market, present-not-best) and factor 6
+// (spread tightness) plus the type-weight scheme were byte-identical in the
+// two rankers; they live here once.  Callers add their own factor 5
+// (delta urgency) and factor 7 (context-specific bonus).
 // ============================================================================
-int32_t ControllableTradingGrid::rankOption(
-    const std::shared_ptr<OptionTradingData>& otd, UPDATE_TYPE utype) {
-    if (!otd) return 0;
-
-    auto od = otd->getOptionData();
-    if (!od) return 0;
-
+static int32_t rankCrossAndBest(const MultiMarket& our_mkt, double midpx,
+                                double mktBid, double mktAsk, double tick) {
     int32_t rank = 0;
-
-    // Live market best bid/ask and mid (from the exchange book, not our theo)
-    const OptionMarket& mkt = od->getMarket();
-    bool mktHasBid = mkt.bid > 0;
-    bool mktHasAsk = mkt.ask > 0;
-    double midpx = od->getMid();
-
-    const MultiMarket& our_mkt = otd->multiMarket();
-    double delta = od->values(0).greeks().delta();
-    double tick = od->getTickSize();
+    const bool mktHasBid = mktBid > 0;
+    const bool mktHasAsk = mktAsk > 0;
 
     // Factor 1: our bid crosses market mid
     if (our_mkt.hasBids() && midpx > 0 && (midpx < our_mkt.getBestBid().px()))
@@ -405,42 +393,37 @@ int32_t ControllableTradingGrid::rankOption(
         rank += 10;
 
     // Factor 3: our quote is best in the market (1-tick relaxation)
-    bool best_bid = isBestSide(0, our_mkt.getBestBid(), mkt.bid, mktHasBid, tick);
-    bool best_ask = isBestSide(1, our_mkt.getBestAsk(), mkt.ask, mktHasAsk, tick);
+    bool best_bid = isBestSide(0, our_mkt.getBestBid(), mktBid, mktHasBid, tick);
+    bool best_ask = isBestSide(1, our_mkt.getBestAsk(), mktAsk, mktHasAsk, tick);
     if (best_bid || best_ask)
         rank += 5;
     // Factor 4: our quote present but NOT best
     if ((our_mkt.hasBids() && !best_bid) || (our_mkt.hasAsks() && !best_ask))
         rank += 1;
 
-    // Factor 5: delta-based urgency (+1 per 0.1 delta, +1 extra per 0.1 above 0.5)
-    rank += static_cast<int32_t>(std::ceil(10.0 * std::fabs(delta)));
-    rank += static_cast<int32_t>(std::ceil(10.0 * std::max(std::fabs(delta) - 0.5, 0.0)));
+    return rank;
+}
 
-    // Factor 6: spread tightness relative to theoretical value
-    double theo = od->values(0).theo();
+static int32_t rankTightness(const MultiMarket& our_mkt, double theo, double delta) {
+    if (!our_mkt.hasBids() && !our_mkt.hasAsks()) return 0;
+
     double our_bid_spread = 1e6;
     double our_ask_spread = 1e6;
     if (our_mkt.hasBids())
         our_bid_spread = theo - our_mkt.getBestBid().px();
     if (our_mkt.hasAsks())
         our_ask_spread = our_mkt.getBestAsk().px() - theo;
-    if (our_mkt.hasBids() || our_mkt.hasAsks()) {
-        // B25 fix: our_bid_spread can be NEGATIVE when our bid is above theo
-        // (aggressive MM quoting) — fabs() the spread and clamp the quotient,
-        // otherwise delta/1e-10 overflows int32 (UB).
-        double our_spread = std::min(our_bid_spread, our_ask_spread);
-        double tightness = std::fabs(delta) / std::max(FP_EPSILON, std::fabs(our_spread));
-        rank += static_cast<int32_t>(std::min(tightness, 1000.0));
-    }
+    // B25 fix: our_bid_spread can be NEGATIVE when our bid is above theo
+    // (aggressive MM quoting) — fabs() the spread and clamp the quotient,
+    // otherwise delta/1e-10 overflows int32 (UB).
+    double our_spread = std::min(our_bid_spread, our_ask_spread);
+    double tightness = std::fabs(delta) / std::max(FP_EPSILON, std::fabs(our_spread));
+    return static_cast<int32_t>(std::min(tightness, 1000.0));
+}
 
-    // Factor 7: near-expiry urgency
-    auto ed = od->getExpiryData();
-    if (ed && ed->daysToExpiry() < 30 && ed->daysToExpiry() >= 0)
-        rank += 5;
-
-    // Type weight — original scheme:
-    //   CANCEL → +1000 (highest), UPDATE → +500, NEW → 499-rank (deprioritised)
+static int32_t applyTypeWeight(int32_t rank, UPDATE_TYPE utype) {
+    // Original scheme: CANCEL → +1000 (highest), UPDATE → +500,
+    // NEW → 499-rank (deprioritised)
     switch (utype) {
         case UT_CANCEL:  rank += 1000; break;
         case UT_UPDATE:  rank += 500;  break;
@@ -448,8 +431,43 @@ int32_t ControllableTradingGrid::rankOption(
         case UT_NONE:    return 0;
         default:         break;
     }
-
     return rank;
+}
+
+// ============================================================================
+// rankOption — priority ranking for order updates
+// Faithful port of the original longbeach rankOption (7 factors + type weight).
+// Crossing check uses the LIVE MARKET mid (not the theoretical value).
+// ============================================================================
+int32_t ControllableTradingGrid::rankOption(
+    const std::shared_ptr<OptionTradingData>& otd, UPDATE_TYPE utype) {
+    if (!otd) return 0;
+
+    auto od = otd->getOptionData();
+    if (!od) return 0;
+
+    const MultiMarket& our_mkt = otd->multiMarket();
+    const OptionMarket& mkt = od->getMarket();
+    double midpx = od->getMid();
+    double delta = od->values(0).greeks().delta();
+    double tick = od->getTickSize();
+    double theo = od->values(0).theo();
+
+    int32_t rank = rankCrossAndBest(our_mkt, midpx, mkt.bid, mkt.ask, tick);
+
+    // Factor 5: delta-based urgency (+1 per 0.1 delta, +1 extra per 0.1 above 0.5)
+    rank += static_cast<int32_t>(std::ceil(10.0 * std::fabs(delta)));
+    rank += static_cast<int32_t>(std::ceil(10.0 * std::max(std::fabs(delta) - 0.5, 0.0)));
+
+    // Factor 6: spread tightness relative to theoretical value
+    rank += rankTightness(our_mkt, theo, delta);
+
+    // Factor 7: near-expiry urgency
+    auto ed = od->getExpiryData();
+    if (ed && ed->daysToExpiry() < 30 && ed->daysToExpiry() >= 0)
+        rank += 5;
+
+    return applyTypeWeight(rank, utype);
 }
 
 // ============================================================================
@@ -460,64 +478,21 @@ int32_t ControllableTradingGrid::rankFuture(
     const std::shared_ptr<UnderlyingTradingData>& utd, UPDATE_TYPE utype) {
     if (!utd) return 0;
 
-    int32_t rank = 0;
-
     const MultiMarket& our_mkt = utd->multiMarket();
-    double midpx = utd->getMid();
-    double bid = utd->getBid();
-    double ask = utd->getAsk();
-    bool mktHasBid = bid > 0;
-    bool mktHasAsk = ask > 0;
-    double tick = utd->getTickSize();
 
-    // Factor 1: our bid crosses market mid
-    if (our_mkt.hasBids() && midpx > 0 && (midpx < our_mkt.getBestBid().px()))
-        rank += 10;
-    // Factor 2: our ask crosses market mid
-    if (our_mkt.hasAsks() && midpx > 0 && (midpx > our_mkt.getBestAsk().px()))
-        rank += 10;
-
-    // Factor 3: our quote is best in the market (1-tick relaxation)
-    bool best_bid = isBestSide(0, our_mkt.getBestBid(), bid, mktHasBid, tick);
-    bool best_ask = isBestSide(1, our_mkt.getBestAsk(), ask, mktHasAsk, tick);
-    if (best_bid || best_ask)
-        rank += 5;
-    // Factor 4: our quote present but NOT best
-    if ((our_mkt.hasBids() && !best_bid) || (our_mkt.hasAsks() && !best_ask))
-        rank += 1;
+    int32_t rank = rankCrossAndBest(our_mkt, utd->getMid(),
+                                    utd->getBid(), utd->getAsk(), utd->getTickSize());
 
     // Factor 5: futures carry one delta equivalent
     rank += 15;
 
     // Factor 6: spread tightness (delta=1 for futures) relative to theo mid
-    double delta = 1.0;
-    double theoMid = utd->values(0).theoPrices().mid;
-    double our_bid_spread = 1e6;
-    double our_ask_spread = 1e6;
-    if (our_mkt.hasBids())
-        our_bid_spread = theoMid - our_mkt.getBestBid().px();
-    if (our_mkt.hasAsks())
-        our_ask_spread = our_mkt.getBestAsk().px() - theoMid;
-    if (our_mkt.hasBids() || our_mkt.hasAsks()) {
-        // B25 fix: same overflow guard as rankOption (delta=1 for futures)
-        double our_spread = std::min(our_bid_spread, our_ask_spread);
-        double tightness = std::fabs(delta) / std::max(FP_EPSILON, std::fabs(our_spread));
-        rank += static_cast<int32_t>(std::min(tightness, 1000.0));
-    }
+    rank += rankTightness(our_mkt, utd->values(0).theoPrices().mid, 1.0);
 
     // Factor 7: make all futures important
     rank += 5;
 
-    // Type weight — original scheme (same as rankOption)
-    switch (utype) {
-        case UT_CANCEL:  rank += 1000; break;
-        case UT_UPDATE:  rank += 500;  break;
-        case UT_NEW:     rank = 499 - rank; break;
-        case UT_NONE:    return 0;
-        default:         break;
-    }
-
-    return rank;
+    return applyTypeWeight(rank, utype);
 }
 
 void ControllableTradingGrid::onRefresh() {
