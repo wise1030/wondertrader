@@ -199,7 +199,9 @@ private:
     // State
     IHftStraCtx* _ctx = nullptr;
     std::atomic<bool> _initialized{false};
-    std::atomic<bool> _channelReady{false};
+    // B2-2.4: channel readiness lives solely in _tstate.channelReady (worker
+    // single-writer via the async channel callback); the former engine-thread
+    // atomic mirror was a double-write hazard.
 
     // Position tracking (strategy local)
     std::unordered_map<std::string, double> _positions;

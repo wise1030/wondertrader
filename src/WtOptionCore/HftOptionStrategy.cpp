@@ -1434,7 +1434,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 // Recovery gate: after channel ready/restart we stay in
                 // Recovering until broker snapshots have been processed and a
                 // fresh underlying tick arrives.  Only then may quoting start.
-                if (_channelReady && _tstate.type == wt_option::TradingStateType::Recovering) {
+                if (_tstate.channelReady && _tstate.type == wt_option::TradingStateType::Recovering) {
                     if (_otg) _otg->enableAll();
                     setState(wt_option::TradingStateType::Normal,
                              "recovery_first_underlying_tick");
@@ -2143,7 +2143,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // OptionTimeService is responsible for the actual midnight jump.
             _timeService.reset();
             _tstate.underlyingReady = false;
-            setState(_channelReady.load() ? wt_option::TradingStateType::Recovering
+            setState(_tstate.channelReady ? wt_option::TradingStateType::Recovering
                                           : wt_option::TradingStateType::Disabled,
                      "session_begin");
             if (_grid) {
@@ -2579,8 +2579,8 @@ void HftOptionStrategy::on_position(IHftStraCtx* ctx, const char* stdCode, bool 
 // ============================================================================
 void HftOptionStrategy::on_channel_ready(IHftStraCtx* ctx)
 {
-    // A3: _channelReady is atomic<bool> - safe to set from callback thread.
-    _channelReady = true;
+    // B2-2.4: no direct state write here (single-writer discipline) — the
+    // worker's channel callback owns _tstate.channelReady via enqueue below.
     // A1: Enqueue channel event to async processor for worker-thread processing.
     if (_async)
         _async->enqueue_channel(true);
@@ -2588,7 +2588,7 @@ void HftOptionStrategy::on_channel_ready(IHftStraCtx* ctx)
 
 void HftOptionStrategy::on_channel_lost(IHftStraCtx* ctx)
 {
-    _channelReady = false;
+    // B2-2.4: state write removed — see on_channel_ready.
     if (_async)
         _async->enqueue_channel(false);
 }
@@ -2674,7 +2674,7 @@ std::pair<uint32_t, uint32_t> HftOptionStrategy::executeQuoteIds(
     const std::string& code, double bidP, uint32_t bidQ,
     double askP, uint32_t askQ)
 {
-    if (!_ctx || !_channelReady) return {0, 0};
+    if (!_ctx || !_tstate.channelReady) return {0, 0};
     // R1: reject out-of-limit quotes before hitting the wire
     if (!withinPriceLimits(code, bidP) || !withinPriceLimits(code, askP)) return {0, 0};
 
@@ -2700,7 +2700,7 @@ int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, ui
 OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
                                              double price, uint32_t qty)
 {
-    if (!_ctx || !_channelReady) return {};
+    if (!_ctx || !_tstate.channelReady) return {};
     // R1
     if (!withinPriceLimits(code, price)) return {};
 
@@ -2722,13 +2722,13 @@ int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
 
 bool HftOptionStrategy::executeCancel(uint32_t localid)
 {
-    if (!_ctx || !_channelReady) return false;
+    if (!_ctx || !_tstate.channelReady) return false;
     return _ctx->stra_cancel(localid);
 }
 
 int32_t HftOptionStrategy::executeCancel(const std::string& code)
 {
-    if (!_ctx || !_channelReady) return 0;
+    if (!_ctx || !_tstate.channelReady) return 0;
 
     auto ids = _ctx->stra_cancel_all(code.c_str());
     return static_cast<int32_t>(ids.size());
@@ -2981,7 +2981,7 @@ void HftOptionStrategy::setState(wt_option::TradingStateType t, const std::strin
     if (t == wt_option::TradingStateType::Disabled
         && prev != wt_option::TradingStateType::Disabled
         && reason == "hotcmd_stop"
-        && _ctg && _channelReady.load()) {
+        && _ctg && _tstate.channelReady) {
         _ctg->refresh();
         _ctg->drainPendingQuotes();
     }
@@ -2996,7 +2996,7 @@ void HftOptionStrategy::registerCommands()
     hooks.setState = [this](wt_option::TradingStateType t, const std::string& reason) {
         setState(t, reason);
     };
-    hooks.channelReady = [this]() { return _channelReady.load(); };
+    hooks.channelReady = [this]() { return _tstate.channelReady; };
     hooks.setQModeAll = [this](const std::string& mode, std::string& err) -> bool {
         if (!_otg || !_ctg || !_grid) { err = "not initialized"; return false; }
         if (mode != "on" && mode != "off" && mode != "close") {
@@ -3117,7 +3117,7 @@ void HftOptionStrategy::applyHotParams()
                 setState(wt_option::TradingStateType::Panic, "hotcmd_panic");
                 break;
             case 3: // Resume
-                setState(_channelReady.load() ? wt_option::TradingStateType::Normal
+                setState(_tstate.channelReady ? wt_option::TradingStateType::Normal
                                               : wt_option::TradingStateType::Disabled,
                          "hotcmd_resume");
                 // B13: manual resume also clears the latched fill-price panic
