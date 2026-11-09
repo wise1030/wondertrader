@@ -235,27 +235,37 @@ void OptionAsyncEventProcessor::push_md_overflow(AsyncEvent&& ev)
 
 bool OptionAsyncEventProcessor::push_trader(AsyncEvent&& ev)
 {
+    // D: control facts must survive a full queue — dropping a channel_lost
+    // keeps quoting on a dead channel; dropping an entrust-reject leaves a
+    // phantom order that blocks its price level forever.  They bypass the
+    // capacity gate entirely (they are rare and tiny, so the queue only
+    // exceeds the cap by their count).
+    const bool isControl = ev.type == AsyncEvent::Session || ev.type == AsyncEvent::Channel
+                           || ev.type == AsyncEvent::Entrust  || ev.type == AsyncEvent::Custom;
+
     std::unique_lock<std::mutex> lock(_trader_mtx);
 
-    // Trade/order/position/session/channel events are control facts.  Block
-    // briefly instead of silently dropping them; the queue is normally tiny
-    // and the worker drains it every batch.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-    while (_trader_queue.size() >= kMaxTraderQueue
-           && _worker_running.load(std::memory_order_acquire)) {
-        if (!_trader_cv.wait_until(lock, deadline, [this]() {
-                return _trader_queue.size() < kMaxTraderQueue
-                    || !_worker_running.load(std::memory_order_acquire);
-            })) {
-            break;
+    if (!isControl) {
+        // Trade/order/position events are high-volume.  Block briefly instead
+        // of silently dropping them; the queue is normally tiny and the
+        // worker drains it every batch.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+        while (_trader_queue.size() >= kMaxTraderQueue
+               && _worker_running.load(std::memory_order_acquire)) {
+            if (!_trader_cv.wait_until(lock, deadline, [this]() {
+                    return _trader_queue.size() < kMaxTraderQueue
+                        || !_worker_running.load(std::memory_order_acquire);
+                })) {
+                break;
+            }
         }
-    }
 
-    if (_trader_queue.size() >= kMaxTraderQueue) {
-        _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        WTSLogger::log_by_cat("strategy", LL_ERROR,
-            "AEP trader queue full after backpressure wait; control event dropped");
-        return false;
+        if (_trader_queue.size() >= kMaxTraderQueue) {
+            _queue_drops.fetch_add(1, std::memory_order_relaxed);
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "AEP trader queue full after backpressure wait; trader event dropped");
+            return false;
+        }
     }
 
     _trader_queue.push_back(std::move(ev));
@@ -283,9 +293,9 @@ void OptionAsyncEventProcessor::enqueue_order(uint32_t localid, const char* stdC
     enqueue_trader_event(AsyncEvent::make_order(stdCode, localid, isBuy, totalQty, leftQty, price, isCanceled));
 }
 
-void OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
+bool OptionAsyncEventProcessor::enqueue_session(uint32_t tdate, bool isBegin)
 {
-    enqueue_trader_event(AsyncEvent::make_session(tdate, isBegin));
+    return enqueue_trader_event(AsyncEvent::make_session(tdate, isBegin));
 }
 
 void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLong,
@@ -295,14 +305,15 @@ void OptionAsyncEventProcessor::enqueue_position(const char* stdCode, bool isLon
     enqueue_trader_event(AsyncEvent::make_position(stdCode, isLong, prevol, preavail, newvol, newavail));
 }
 
-void OptionAsyncEventProcessor::enqueue_entrust(uint32_t localid, bool success)
+bool OptionAsyncEventProcessor::enqueue_entrust(uint32_t localid, bool success)
 {
-    enqueue_trader_event(AsyncEvent::make_entrust(localid, success));
+    return enqueue_trader_event(AsyncEvent::make_entrust(localid, success));
 }
 
-void OptionAsyncEventProcessor::enqueue_channel(bool isReady)
+bool OptionAsyncEventProcessor::enqueue_channel(bool isReady)
 {
-    enqueue_trader_event(AsyncEvent::make_channel(isReady));}
+    return enqueue_trader_event(AsyncEvent::make_channel(isReady));
+}
 
 void OptionAsyncEventProcessor::enqueue_control()
 {

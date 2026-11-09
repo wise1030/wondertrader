@@ -159,6 +159,45 @@ void test_control_event_wakes_quiet_worker() {
     std::cout << "  PASS" << std::endl;
 }
 
+// D: control events (session/channel/entrust) must NEVER be dropped on a
+// full trader queue — push_trader bypasses the capacity gate for them.
+// Regression: before the fix a channel_lost could be discarded at 65536+
+// depth, leaving the strategy quoting on a dead channel.
+void test_control_events_survive_full_queue() {
+    std::cout << "=== test_control_events_survive_full_queue ===" << std::endl;
+
+    OptionAsyncEventProcessor proc;
+    std::atomic<uint32_t> channelCount{0}, entrustCount{0};
+    AsyncCallbacks cbs;
+    cbs.on_channel = [&](bool) { channelCount.fetch_add(1); };
+    cbs.on_entrust = [&](uint32_t, bool) { entrustCount.fetch_add(1); };
+    proc.setCallbacks(cbs);
+
+    // Fill the bounded trader queue with the worker STOPPED: trade events
+    // saturate the 65536 cap and start failing, control events must not.
+    for (size_t i = 0; i < OptionAsyncEventProcessor::kMaxTraderQueue; ++i)
+        ASSERT_TRUE(proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_trade(
+            "SHFE.cu2607", 1000 + i, true, 1, 50000.0)));
+    ASSERT_TRUE(!proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_trade(
+        "SHFE.cu2607", 9999, true, 1, 50000.0)));   // cap reached: trader event refused
+
+    // Control events still accepted at max depth (worker not running yet).
+    ASSERT_TRUE(proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_channel(false)));
+    ASSERT_TRUE(proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_entrust(77, false)));
+    ASSERT_TRUE(proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_session(20260605, true)));
+
+    // Now drain: worker processes everything FIFO.
+    proc.start();
+    for (int i = 0; i < 500; ++i) {
+        if (channelCount.load() >= 1 && entrustCount.load() >= 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(channelCount.load(), 1u);
+    ASSERT_EQ(entrustCount.load(), 1u);
+    proc.stop();
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Async Event Processor Tests" << std::endl;
@@ -168,6 +207,7 @@ int main() {
     test_md_overflow_coalesces_ticks_by_code();
     test_trader_events_preserve_fifo_order();
     test_control_event_wakes_quiet_worker();
+    test_control_events_survive_full_queue();
 
     std::cout << "\nALL TESTS PASSED" << std::endl;
     return 0;

@@ -88,13 +88,19 @@ public:
     void enqueue_trade(uint32_t localid, const char* stdCode, bool isBuy, double vol, double price);
     void enqueue_order(uint32_t localid, const char* stdCode, bool isBuy,
                        double totalQty, double leftQty, double price, bool isCanceled);
-    void enqueue_session(uint32_t tdate, bool isBegin);
+    /// Control events (D): return false ONLY when the worker is not running.
+    /// Unlike trade/order/position they are NEVER dropped on a full queue —
+    /// a lost channel_lost / entrust-reject silently corrupts trading state.
+    bool enqueue_session(uint32_t tdate, bool isBegin);
     void enqueue_position(const char* stdCode, bool isLong,
                           double prevol, double preavail,
                           double newvol, double newavail);
-    void enqueue_channel(bool isReady);
+    /// Control events (D): return false ONLY when the worker is not running.
+    /// Unlike trade/order/position they are NEVER dropped on a full queue —
+    /// a lost channel_lost / entrust-reject silently corrupts trading state.
+    bool enqueue_channel(bool isReady);
     // P1-1: entrust failure (trader thread) — worker clears OQM phantom order.
-    void enqueue_entrust(uint32_t localid, bool success);
+    bool enqueue_entrust(uint32_t localid, bool success);
     /// Reliable worker wakeup for hot control commands.  Unlike MD ticks this
     /// event must not be coalesced or dropped; it only drives on_batch_complete.
     void enqueue_control();
