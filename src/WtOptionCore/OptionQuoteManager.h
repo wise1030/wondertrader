@@ -131,8 +131,8 @@ public:
     void setCancelAllFn(CancelAllFn fn) { m_cancelAll = std::move(fn); }
 
     /// Called for every localid that enters OQM tracking.  The strategy uses
-    /// this to keep OrderAnomalyGuard / FillPriceChecker in sync with production
-    /// OQM orders submitted through OrderGateway.
+    /// this to mirror production OQM orders into the single
+    /// IssuedOrderRegistry (anomaly protection + fill-deviation inputs).
     using OrderIssuedFn = std::function<void(bool isBuy, double price,
                                              uint32_t qty, uint32_t localid)>;
     void setOrderIssuedFn(OrderIssuedFn fn) { m_orderIssued = std::move(fn); }

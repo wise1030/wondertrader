@@ -33,18 +33,15 @@
  *  - LpSolver::str2greek kept as a static helper (GreekType mapping)
  *  - PeriodicCurveFitter forward-declared; onFitCompleted takes const ref
  *
- * NOT-YET-MIGRATED siblings referenced via forward declarations:
- *  - OptionTradingData / OptionTradingDataPtr
- *  - UnderlyingTradingData / UnderlyingTradingDataPtr
- *  - ExpiryTradingData / ExpiryTradingDataPtr
- *  - OptionRiskData / OptionRiskDataPtr
- *  - OptionExpiryGreeks / OptionExpiryGreeksPtr
- *  - InstrumentMDContext / InstrumentMDContextPtr
- *  - OptionOrderInfo / FutureOrderInfo
- *  - MarketLevel / Market / PriceSize (Partial: PriceSize in OptionValues.h)
- *  - LpSolver
- *  These are stubbed where touched by computeOurMarkets; the host will
- *  provide concrete implementations.
+ * Migrated siblings (full implementations now live in this module):
+ *  - OptionTradingData / OptionTradingDataPtr        (OptionTradingData.h)
+ *  - UnderlyingTradingData / UnderlyingTradingDataPtr (UnderlyingTradingData.h)
+ *  - ExpiryTradingData / ExpiryTradingDataPtr         (ExpiryTradingData.h)
+ *  - OptionRiskData / OptionRiskDataPtr               (OptionRiskData.h)
+ *  - OptionExpiryGreeks / OptionExpiryGreeksPtr       (OptionExpiryGreeks.h)
+ *  - MarketLevel / Market / PriceSize                 (OptionValues.h)
+ *  (migration-era stubs and the deleted OptionOrderInfo / FutureOrderInfo /
+ *  InstrumentMDContext / LpSolver references removed)
  *
  * All computeOurMarkets sub-logic preserved:
  *  - computeValues FAST/SLOW scheduling

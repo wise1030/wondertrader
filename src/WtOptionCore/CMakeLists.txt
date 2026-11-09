@@ -184,6 +184,8 @@ set(OPTION_CORE_HEADERS
     PositionGuard.h
     FillPriceChecker.h
     RiskLimitsEx.h
+    IssuedOrderRegistry.h
+    CommandBus.h
 )
 
 add_library(WtOptionCore SHARED ${OPTION_CORE_SOURCES} ${OPTION_CORE_HEADERS})

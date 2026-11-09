@@ -4,10 +4,11 @@
  * \brief Fill-vs-issue price deviation policy (plan 3.3).
  *
  * Formerly a standalone per-order table fed in parallel with
- * OrderAnomalyGuard from the same callbacks.  It is now a pure policy over
- * the single IssuedOrderRegistry: the strategy calls onFill() only for
- * live-order fills, passing the issue price read from the registry record.
- * The B13 panic latch (survives until explicitly cleared) is unchanged.
+ * OrderAnomalyGuard (now absorbed into IssuedOrderRegistry) from the same
+ * callbacks.  It is now a pure policy over the single IssuedOrderRegistry:
+ * the strategy calls onFill() only for live-order fills, passing the issue
+ * price read from the registry record.  The B13 panic latch (survives until
+ * explicitly cleared) is unchanged.
  */
 
 #include "IssuedOrderRegistry.h"

@@ -105,7 +105,7 @@ public:
         m_positionOffsetLookup = std::move(fn);
     }
     /// Called whenever an OQM tracks a newly issued localid.  The strategy
-    /// registers it with FillPriceChecker / OrderAnomalyGuard.
+    /// mirrors it into the single IssuedOrderRegistry.
     using OrderIssuedFn = std::function<void(const std::string& code, bool isBuy,
                                              double price, uint32_t qty,
                                              uint32_t localid)>;

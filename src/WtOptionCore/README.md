@@ -151,7 +151,7 @@ Worker 线程 (唯一状态写者)
 | PositionGuard | PositionGuard.* | internal fill 累计 vs broker 持仓对比，偏差超容忍→禁用+告警（tolerance 默认 5 手，覆盖回报延迟窗口） |
 | PositionOffsetMgr | PositionOffsetMgr.* | 策略侧可平量跟踪（平今/平昨/开仓拆分）、冻结量管理 |
 | FillPriceChecker | FillPriceChecker.* | 成交价偏离监控（warning/panic 阈值、latch 直至清除） |
-| OrderAnomalyGuard | OrderAnomalyGuard.h | 异常订单模式检测 |
+| IssuedOrderRegistry | IssuedOrderRegistry.h | 单一 per-order 登记表：unknown-fill 计数告警/升级、done-before-fill 迟到分类、overfill 检测、成交质量归因数据源 |
 | StressAnalyzer | StressAnalyzer.* | spot/vol/theta 情景压力（周期输出 STRESS worst） |
 
 ### 7. 扫描器（Scanners/，9 类）
@@ -470,22 +470,39 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 ### fillAttribution（成交质量归因，3.6）
 
-默认关闭，开启后零热路径成本（一条分支判断；快照为发单时在手边的 `values(0)` 直接拷贝）：
+默认关闭。关闭时热路径仅保留异常检测必需的成交记录（一条 push + 时间戳）；
+开启时额外在**发单时**拷贝 `values(0)` 上下文快照、在**成交时**取 per-expiry 标的价
+（均为在手边数据直拷，无锁无查找链；成本可忽略但非字面"零"）：
 
 ```json
 "fillAttribution": { "enable": true, "outputDir": "outputs_bt/opt_mm_cu",
-                     "keepMaxRecords": 20000 }
+                     "keepMaxRecords": 20000, "graceSeconds": 300 }
 ```
 
-- 每个成交订单在 session end 导出一行到 `<outputDir>/fill_attribution.csv`：
-  发单价/量、`theo0/mid0/iv0/delta0/spot0/fwd0`（发单时刻快照，spot 为 per-expiry 标的价）、
-  量加权成交价、报价寿命 `timeLagMs`、`edgeBps`（卖：(成-理)/理，买取反——做市 edge）、
-  `captureBps`（相对 mid 的捕获/让渡）、`spotDriftBps`（现货漂移，用于分离"标动"与"真 edge 衰减"）、拒单标志
-- 聚合日志：按合约与全体的 edgeBps / |captureBps| / lagMs 均值
+- 每个成交订单导出一行到 `<outputDir>/fill_attribution.csv`（append-only
+  **增量行**：每行覆盖该订单自上次导出以来的成交；迟到成交因此带原 session 归属，
+  不会丢也不会重复）：
+  `date`（导出行所属 session）/ `sessionDate`（订单所属 session）/ `code`/`side`/
+  发单价/量（`issueQty`，拆分单此列留空并置 `splitFlag` 语义——见 registry）/
+  `filledQty`（live 成交合计）/ `fillQty`（本行成交量，含迟到/拒单部分）/
+  `theo0/mid0/iv0/delta0/spot0/fwd0`（发单时刻快照，spot 为 per-expiry 标的价）/
+  量加权成交价 `vwFillPx`（按本行成交量加权；spot 缺失的成交不参与 `spotDriftBps` 加权）/
+  `wallLagMs`（steady_clock 处理耗时）与 `simLagMs`（**模拟时钟**报价寿命，回放/live 同语义）/
+  `edgeBps`（卖：(成-理)/理，买取反——做市 edge）/ `captureBps`（相对 mid 的捕获/让渡）/
+  `spotDriftBps`（现货漂移，用于分离"标动"与"真 edge 衰减"）/
+  `fillClass`（normal/late/mixed/rejected）/ `rejectFlag`
+- 无法归类的交易所回报（unknown localid、拒单后成交）不进主 CSV，追加到
+  `<outputDir>/fill_anomaly.csv`（localid/code/count/首末时间），不再只留在日志里
+- 聚合日志：按合约与全体的 edgeBps / |captureBps| / lagMs 均值（rejected 行不参与聚合）
 - 数据真源为 `IssuedOrderRegistry`（3.3 合并后的单一 per-order 登记表）；
-  `keepMaxRecords` 为**容量边界**淘汰（非时钟 TTL——模拟时钟 TTL 在快速回放下会饿死导出）
-- 注意：回测最后一天 session end 位于进程收尾路径，聚合**日志**可能因 logger 关闭竞争丢失，
-  CSV 写入为直接 IO 不受影响
+  `keepMaxRecords` 为**容量边界**淘汰，`graceSeconds` 为**年龄下界**——done 未满 grace
+  的记录永不淘汰（跨 session 迟到成交归因窗口）；`keepMaxRecords=0` 表示仅按时间淘汰。
+  登记表在 session begin **不再整表清空**，由容量+年龄双约束兜底内存
+- 表头只在文件不存在或为空时写出（修复了 app 模式先建文件再判断导致表头恒缺失的问题）
+- 回测末日：进程退出路径（worker 停止后）有一次最终 flush，覆盖最后一个 session end
+  之后到达的成交；聚合日志若因 logger 关闭丢失，以 CSV 为准
+
+回放复现：`YAML=configbt_option_replay_attr.yaml bash replay/run_option_replay.sh`。
 
 ---
 
@@ -516,11 +533,20 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 | 文件 | 职责 |
 |------|------|
-| `run_option_replay.sh` | 一键回放：取数（缺数据时）→ DSB 校验 → 注入 basefiles → WtBtRunner → 延迟指标提取 |
+| `run_option_replay.sh` | 一键回放：取数（缺数据时）→ DSB 校验 → 注入 basefiles → WtBtRunner → **运行时 error 分类门禁** → 延迟指标提取 |
+| `configbt_option_replay.yaml` | 默认回放配置（归因关闭） |
+| `configbt_option_replay_attr.yaml` | 归因开启变体（`YAML=configbt_option_replay_attr.yaml` 选用） |
 | `fetch_option_ticks.sh` | 服务器侧取数管道（KS/MinIO tar → 服务器环回拉取+转换 → 分块拉回），含外网数据面故障绕行 |
 | `gen_basefiles.py` | 生成 replay basefiles：SHFE 期权挂 `{prod}_o` 独立品种（category=2）+ 标的期货 + 期权链合约条目 |
-| `configbt_option_replay.yaml` | 回放配置模板 |
 | `replay_common/` | 生成的 basefiles（commodities/contracts/fess/sessions/holidays/hots） |
+
+**error 门禁**（2026-11-09 复核整改后加入）：`exit=0` 只证明进程没崩，不代表无运行时错误。
+脚本在回放后统计 ` - error]/ - fatal]`（注意该格式无尾部空格），分两类：
+
+- **HARD**（归因/异常完整性）：`order-not-found fill`、`OVERFILL`、`fill for REJECTED order`、
+  `ORDER ANOMALY ESCALATION` —— 出现即 exit 1（可用 `STRICT=0` 覆盖）；
+- **SOFT**（风险路径事件）：FillPriceChecker PANIC / Auto-panic / PositionGuard / market stale /
+  Greeks 限额 / `session_end 非零持仓` —— 打印分类计数供人工 triage，不自动失败。
 
 **回放要点**：
 
@@ -530,14 +556,22 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 - 建议 `use_newpx: false`（按对手价撮合；KS 期权 last 价可能陈旧，用 last 撮合会产生虚假滑点）
 - 取数方法已固化为 opencode skill：`ks-data-fetch`（数据布局、stat 探测、故障绕行、服务器侧转换）
 
-**验收结果（SHFE cu2607 期权链 56 期权 + 标的 × 20260602-0605，共 318.5 万 tick）**：
+**验收基线（SHFE cu2607 期权链 56 期权 + 标的 × 20260602-0605，共 318.5 万 tick，2026-11-09 整改后复测）**：
 
-- 完整交易闭环：187 笔成交（开+平），双边报价 14-16 合约，rejects=0，无崩溃
+- 回放 exit=0，**error 门禁 HARD=0**（unknown fill / overfill / reject-fill 全为 0，
+  20260604→05 session 边界的迟到成交全部正确归类并进入归因，修复前为 34 条 unknown fill）
+- SOFT 类为风险路径预期噪声：FillPriceChecker PANIC（回放按对手价撮合，期权偏离 >0.5% 常见，
+  触发 panic latch 与 auto-panic）、PositionGuard discrepancy（回放持仓快照口径）、
+  末日非零持仓（换日不平仓设计）；以上见日志 triage，不视为代码缺陷
+- 归因回放（attr yaml）：`fill_attribution.csv` 表头恰好一行、按 session 分组无重复行、
+  31 行成交订单增量行；`fill_anomaly.csv` 无记录（0 unknown）
 - IV 质量：拟合 IV 11-14%，与市场独立 BS 反推（12-15%）吻合；GVV solve failed 0 次
 - 定价链路：平价合成远期 + Black76 + GVV 全链路符合设计（详见上文「IV 定价链路」）
-- 延迟（Debug 构建）：p50=11µs / p95=57µs / p99=100µs / p99.9=204µs
+- 延迟（Debug 构建，worker 批处理直方图）：batch p50≈56-63µs / 尾部受批内 tick 数影响
+  （同量级复测见 `LatencyHistogram` 批日志；早期 11µs 口径为单 tick 计算路径，非批处理）
 
 合成延迟基线：`tests/test_replay_benchmark.cpp`。
+验收以**当前机器复跑 + 门禁输出**为准；上表数字随回放配置/机器波动，不作为绝对基线。
 
 ---
 
@@ -632,7 +666,7 @@ src/WtOptionCore/
 ├── PositionGuard.h/.cpp                # 持仓不一致护栏
 ├── PositionOffsetMgr.h/.cpp            # 可平量跟踪
 ├── FillPriceChecker.h/.cpp             # 成交价偏离监控
-├── OrderAnomalyGuard.h                 # 异常订单检测
+├── IssuedOrderRegistry.h               # 单一 per-order 登记表（异常检测+归因数据源）
 ├── StressAnalyzer.h/.cpp               # 情景压力
 │
 ├── OptionScanCoordinator.h/.cpp        # scanner 生命周期/派发
