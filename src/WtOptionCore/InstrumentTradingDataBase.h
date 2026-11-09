@@ -44,6 +44,10 @@ using PositionProvider = std::function<int32_t()>;
 class InstrumentTradingDataBase
 {
 public:
+    // Virtual hook below => polymorphic base; a virtual dtor is required so
+    // deletion through a base pointer is well-defined.
+    virtual ~InstrumentTradingDataBase() = default;
+
     const std::string& getCode() const { return m_instr; }
 
     /// active flag indicates whether this instrument is trading.
@@ -97,9 +101,14 @@ public:
     int32_t getNumReject() const { return m_numReject; }
     int32_t getNumFill() const   { return m_numFill; }
 
-    PnlTrackerPtr getPnlTracker() {
+    /// Virtual so UnderlyingTradingData can supply its contract size through
+    /// the base interface (its old override HID this method — a call via a
+    /// base pointer silently built a multiplier-1 tracker).  The multiplier
+    /// is captured lazily at tracker creation; setPnlMultiplier() must run
+    /// before the first getPnlTracker() call.
+    virtual PnlTrackerPtr getPnlTracker() {
         if (!m_pnlTracker)
-            m_pnlTracker = std::make_shared<PnlTracker>();
+            m_pnlTracker = std::make_shared<PnlTracker>(m_pnlMultiplier);
         return m_pnlTracker;
     }
 
@@ -111,6 +120,10 @@ public:
 
 protected:
     friend class OptionTradingGrid;
+
+    /// Contract multiplier for the lazy PnlTracker (UTD sets its contract
+    /// size here; options keep the 1.0 default).
+    void setPnlMultiplier(double m) { m_pnlMultiplier = m; }
 
     /// Single divergence hook after updateOrders(): OptionTradingData syncs
     /// its OptionData::currentMarket mirror; UnderlyingTradingData needs
@@ -142,6 +155,7 @@ protected:
     QuoteMode m_quoteMode = static_cast<QuoteMode>(0);
 
     PnlTrackerPtr m_pnlTracker;
+    double m_pnlMultiplier = 1.0;
 };
 
 } // namespace wt_option

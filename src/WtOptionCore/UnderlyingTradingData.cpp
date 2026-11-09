@@ -37,14 +37,4 @@ int32_t UnderlyingTradingData::getPosition() const
     return 0;
 }
 
-PnlTrackerPtr UnderlyingTradingData::getPnlTracker()
-{
-    if (!m_pnlTracker)
-    {
-        PnlTrackerPtr pt(new PnlTracker(m_contractSize));
-        m_pnlTracker = pt;
-    }
-    return m_pnlTracker;
-}
-
 } // namespace wt_option

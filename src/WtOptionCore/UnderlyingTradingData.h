@@ -139,7 +139,12 @@ public:
     }
 
     double getContractSize() const { return m_contractSize; }
-    void setContractSize(double cs) { m_contractSize = cs; }
+    void setContractSize(double cs) {
+        m_contractSize = cs;
+        // Keep the lazy base-class PnlTracker in sync (it captures the
+        // multiplier at creation — call before the first getPnlTracker()).
+        setPnlMultiplier(cs);
+    }
     void setFeePct(double feepct) { m_feePct = feepct; }
     double getFees(double price) const;
 
@@ -165,9 +170,8 @@ public:
     /// creates an unloadable ownership cycle.
     OptionTradingGridPtr getOptionTradingGrid() const { return m_wpOptionTradingGrid.lock(); }
 
-    // Divergence from the base: the hedge tracker's multiplier is the
-    // contract size (base uses the 1.0 default).
-    PnlTrackerPtr getPnlTracker();
+    // PnlTracker: inherited virtual from InstrumentTradingDataBase; the
+    // contract-size multiplier is fed via setContractSize/setPnlMultiplier.
 
 protected:
     UnderlyingValues m_values[MAX_VALUES];
