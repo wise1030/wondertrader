@@ -33,6 +33,7 @@
 #include "../PredictionEvaluator.h"
 #include "../CffexIOStrikeFinder.h"
 #include "../DceMOStrikeFinder.h"
+#include "../HftOptionStrategy.h"
 #include <iostream>
 #include <cassert>
 #include <chrono>
@@ -307,6 +308,36 @@ void test_fill_price_checker() {
 }
 
 // ============================================================================
+// C6: option-code discovery filter — SHFE-style 4-digit AND CZCE 3-digit months
+// (regression: a \d{4}-only regex silently dropped every CZCE option)
+// ============================================================================
+void test_option_code_regex() {
+    std::cout << "=== test_option_code_regex ===" << std::endl;
+
+    // CFFEX dashed convention
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("IO2301-P-4000"));
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("IO2301-C-4000"));
+    // SHFE compact convention (4-digit month)
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("cu2607C112000"));
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("cu2607P78000"));
+    // CZCE convention (3-digit month) — the C6 fix
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("TA308P4000"));
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("SR411C5000"));
+    ASSERT_TRUE(HftOptionStrategy::isRawOptionCode("MA2409C2800"));  // 4-digit also ok
+
+    // underlying futures must NOT match
+    ASSERT_TRUE(!HftOptionStrategy::isRawOptionCode("cu2607"));
+    ASSERT_TRUE(!HftOptionStrategy::isRawOptionCode("TA308"));
+    ASSERT_TRUE(!HftOptionStrategy::isRawOptionCode("a2509"));
+    // malformed options
+    ASSERT_TRUE(!HftOptionStrategy::isRawOptionCode("cu2607X112000"));  // bad right flag
+    ASSERT_TRUE(!HftOptionStrategy::isRawOptionCode("IO23015-P-4000")); // 5-digit month
+    ASSERT_TRUE(!HftOptionStrategy::isRawOptionCode(""));
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
 // 3.3/3.6: unified per-order registry — lifecycle, classification, attribution
 // ============================================================================
 void test_issued_order_registry() {
@@ -328,7 +359,9 @@ void test_issued_order_registry() {
     ASSERT_TRUE(reg.onFill(1, 4, 100.4, 50010.0) == wto::IssuedOrderRegistry::FillClass::Normal);
     ASSERT_TRUE(reg.onFill(1, 6, 100.6, 50020.0) == wto::IssuedOrderRegistry::FillClass::Normal);
     ASSERT_TRUE(reg.get(1)->filledQty == 10);
+    ASSERT_TRUE(reg.get(1)->fillQty == 10);   // all fills (none late/rejected)
     ASSERT_TRUE(reg.get(1)->fills.size() == 2);
+    ASSERT_TRUE(!reg.get(1)->fills[0].late);
 
     // live deviation gating source: record still live here
     ASSERT_TRUE(!reg.get(1)->done);
@@ -336,32 +369,84 @@ void test_issued_order_registry() {
     ASSERT_TRUE(reg.onFill(1, 1, 100.0) == wto::IssuedOrderRegistry::FillClass::Overfill);
     ASSERT_TRUE(reg.overfillCount() == 1);
 
-    // done -> late fill classification
+    // done -> late fill classification (recorded in fills/fillQty, NOT filledQty)
     ASSERT_TRUE(reg.onOrderDone(1, true, 10.0));
     ASSERT_TRUE(reg.get(1)->done);
     ASSERT_TRUE(reg.onFill(1, 1, 100.0) == wto::IssuedOrderRegistry::FillClass::LateAfterDone);
     ASSERT_TRUE(reg.lateAfterDoneCount() == 1);
+    ASSERT_TRUE(reg.get(1)->filledQty == 11);   // 4+6+overfill(1); late excluded
+    ASSERT_TRUE(reg.get(1)->fillQty == 12);     // all fills incl. late
+    ASSERT_TRUE(reg.get(1)->fills.back().late);
 
     // rejected order: fill is genuinely anomalous
     reg.onIssued(2, "TEST.B", 5);
     reg.onOrderRejected(2);
     ASSERT_TRUE(reg.get(2)->rejected);
     ASSERT_TRUE(reg.onFill(2, 1, 99.0) == wto::IssuedOrderRegistry::FillClass::Unknown);
+    ASSERT_TRUE(reg.get(2)->fillQty == 1);      // recorded but not in filledQty
+    ASSERT_TRUE(reg.get(2)->filledQty == 0);
+    ASSERT_TRUE(reg.unknownEvents().count(2) == 1);   // anomaly CSV source
 
     // unknown localid
     ASSERT_TRUE(reg.onFill(999, 1, 1.0) == wto::IssuedOrderRegistry::FillClass::Unknown);
     ASSERT_TRUE(reg.unknownFillCount() >= 2);
+    ASSERT_TRUE(reg.unknownEvents().count(999) == 1);
 
-    // size-bound purge: cap 3 -> oldest done record dropped, live kept
-    reg.onIssued(3, "TEST.C", 1);
-    ASSERT_TRUE(reg.get(3) != nullptr);
-    reg.purgeDone(3);
-    ASSERT_TRUE(reg.get(3) != nullptr);          // live record never dropped
-    ASSERT_TRUE(reg.orders().size() == 3);
+    // ---- ensureIssued idempotence (3.3 convergence fix) -------------------
+    // Production registers the same localid twice (executor + OTG mirror);
+    // the second registration must NOT wipe fills/ctx/filledQty.
+    {
+        auto& r1 = reg.ensureIssued(1, "TEST.A", 10, 20260604);
+        r1.ctx.theo = 100.5; r1.ctx.valid = true;   // pretend a snapshot exists
+        auto& r2 = reg.ensureIssued(1, "TEST.A", 10, 20260604);   // mirror re-register
+        ASSERT_TRUE(&r1 == &r2);
+        ASSERT_TRUE(r2.fills.size() == 4);          // incl. the late fill
+        ASSERT_TRUE(r2.filledQty == 11);
+        ASSERT_TRUE(r2.ctx.valid);                  // snapshot NOT reset
+        ASSERT_TRUE(r2.sessionDate == 20260604);
+    }
+
+    // ---- split-order qty degradation --------------------------------------
+    // A split action policy returns several ids for ONE order; totalQty is
+    // then the whole-order qty, so per-id overfill comparison is skipped.
+    {
+        auto& sa = reg.ensureIssued(10, "TEST.D", 10, 20260604);
+        sa.qtySplitUnknown = true;
+        // 6 + 6 = 12 > 10 would be OVERFILL for a normal record
+        ASSERT_TRUE(reg.onFill(10, 6, 100.0) == wto::IssuedOrderRegistry::FillClass::Normal);
+        ASSERT_TRUE(reg.onFill(10, 6, 100.0) == wto::IssuedOrderRegistry::FillClass::Normal);
+        ASSERT_TRUE(reg.overfillCount() == 1);      // still only the id-1 overfill
+    }
+
+    // ---- capacity+age purge (real eviction this time) ---------------------
+    // Records: 1 (done@42), 2 (rejected done@42), 10 (live), plus two aged
+    // done records 20/21 (done at t=41, i.e. older than the grace window).
+    {
+        double simT = 42.0;
+        reg.setGetTimeFn([&simT] { return simT; });
+        simT = 41.0;
+        reg.onIssued(20, "TEST.E", 1); reg.onOrderDone(20, true, 1.0);
+        reg.onIssued(21, "TEST.F", 1); reg.onOrderDone(21, true, 1.0);
+        simT = 42.0;
+        // cap 4, grace 1s: 20/21 are purge candidates; live #10 never dropped
+        reg.purgeDone(4, 1.0);
+        ASSERT_TRUE(reg.get(10) != nullptr);        // live record never dropped
+        ASSERT_TRUE(reg.get(1) != nullptr);         // inside grace window (done@42)
+        ASSERT_TRUE(reg.orders().size() == 4);      // 20/21 evicted, one slot freed
+        // age floor: with a huge grace window nothing is evictable
+        reg.purgeDone(1, 1000.0);
+        ASSERT_TRUE(reg.orders().size() == 4);
+        // time-only mode: maxRecords == 0 purges every aged done record
+        simT = 5000.0;                              // age everything far beyond grace
+        reg.purgeDone(0, 60.0);
+        ASSERT_TRUE(reg.get(10) != nullptr);        // live survives
+        ASSERT_TRUE(reg.orders().size() == 1);
+    }
 
     reg.reset();
     ASSERT_TRUE(reg.orders().empty());
     ASSERT_TRUE(reg.unknownFillCount() == 0);
+    ASSERT_TRUE(reg.unknownEvents().empty());
     std::cout << "  PASS" << std::endl;
 }
 
@@ -1906,6 +1991,7 @@ int main() {
     test_position_guard();
     test_fill_price_checker();
     test_issued_order_registry();
+    test_option_code_regex();
     test_risk_limits_ex();
     test_oqm_enhancements();
     test_options_short_limit_filter();
