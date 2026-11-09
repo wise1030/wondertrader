@@ -34,9 +34,14 @@ done
 
 echo "=== [3/3] WtBtRunner replay ==="
 cd "$RUNNER_DIR"
-# Sync the working copies under version control in src/ — refuse to run on
-# drift so a stale dist copy can never silently shadow the real config.
-for f in configbt_option_replay.yaml; do
+# Sync the working copies under version control in src/ — on drift the dist
+# copy is REFRESHED from src/ (it is a disposable working copy, not a source
+# of truth) and the run continues with a warning.
+YAML="${YAML:-configbt_option_replay.yaml}"   # e.g. YAML=configbt_option_replay_attr.yaml
+# Fresh logs for a fresh run: the gate below must analyze THIS run only, so
+# clear previous Runner logs (they are reproducible from the replay).
+rm -f Logs/Runner_*.log
+for f in "$YAML"; do
   if ! cmp -s "$SCRIPT_DIR/$f" "$f"; then
     echo "NOTE: $f differs from src/ copy — refreshing"
     cp "$SCRIPT_DIR/$f" .
@@ -51,7 +56,37 @@ else
   cp -r "$SCRIPT_DIR/replay_common" .
 fi
 env LD_LIBRARY_PATH="$REPO/src/build_all/build_x64/Debug/bin" \
-  ./WtBtRunner.fresh -c configbt_option_replay.yaml -l logcfgbt_option.yaml
+  ./WtBtRunner.fresh -c "$YAML" -l logcfgbt_option.yaml
 
 echo "=== batch latency (p99/p99.9 us) ==="
 grep -h -o 'p99=[0-9.]*us p99.9=[0-9.]*us' Logs/Strategy/*.log | sort | uniq -c | tail -20 || true
+
+# === [4/4] runtime error gate ============================================
+# exit=0 only proves the runner did not crash — it says NOTHING about runtime
+# errors.  Count them with a regex that matches the actual log format
+# ("[ts - error]"; note NO trailing space after the level).  Categories:
+#   HARD  — attribution/anomaly integrity: fail the script (unless --no-strict)
+#   SOFT  — risk-path events: listed for triage, allowed via ALLOW_PATTERNS
+LOG_F=$(ls -t Logs/Runner_*.log 2>/dev/null | head -1)
+if [ -n "$LOG_F" ]; then
+  # NOTE: refresh-on-drift (below) is intentional — the dist copy is a
+  # disposable working copy, src/ stays the single source of truth.
+  TOTAL_ERR=$(grep -cE ' - (error|fatal)\]' "$LOG_F" || true)
+  hard() { grep -E ' - (error|fatal)\]' "$LOG_F" | grep -E 'order-not-found fill|OVERFILL|fill for REJECTED order|ORDER ANOMALY ESCALATION' || true; }
+  HARD_N=$(hard | grep -c . || true)
+  echo "=== runtime error gate: $LOG_F (total=$TOTAL_ERR hard=$HARD_N) ==="
+  if [ "$HARD_N" -gt 0 ]; then
+    echo "HARD failures (attribution/anomaly integrity):"
+    hard | sed 's/^/  /' | head -20
+    [ "${STRICT:-1}" = "1" ] && { echo "GATE FAILED (set STRICT=0 to override)"; exit 1; }
+  fi
+  # SOFT triage summary (risk-path events — review, don't auto-fail)
+  grep -E ' - (error|fatal)\]' "$LOG_F" \
+    | grep -vE 'order-not-found fill|OVERFILL|fill for REJECTED order|ORDER ANOMALY ESCALATION' \
+    | sed -E 's/^\[[^]]*\] //' \
+    | sed -E 's/[0-9]+\.?[0-9]*//g' \
+    | sort | uniq -c | sort -rn | head -15 \
+    | sed 's/^/  SOFT /' || true
+else
+  echo "WARNING: no runner log found — gate skipped"
+fi
