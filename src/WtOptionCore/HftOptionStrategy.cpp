@@ -64,6 +64,17 @@ HftOptionStrategy::HftOptionStrategy(const char* name)
 void HftOptionStrategy::shutdown()
 {
     if (_async) _async->stop();
+    // 3.6: final attribution flush.  The worker is stopped and joined above,
+    // so the registry is single-threaded again; this covers fills recorded
+    // after the LAST session-end export (append-only delta rows, no loss).
+    if (_attrEnable && _initialized) {
+        try {
+            exportFillAttribution(_curSessionDate);
+        } catch (const std::exception& e) {
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "final exportFillAttribution failed: {}", e.what());
+        }
+    }
     // Explicit listener deregistration to prevent dangling raw pointers
     if (_grid) {
         if (_risk)  _grid->removeListener(_risk.get());
@@ -76,6 +87,16 @@ void HftOptionStrategy::shutdown()
 HftOptionStrategy::~HftOptionStrategy()
 {
     shutdown();
+}
+
+// ============================================================================
+// C6: raw option-code filter (see header for the two accepted conventions)
+// ============================================================================
+bool HftOptionStrategy::isRawOptionCode(const std::string& rawCode)
+{
+    static const std::regex optCodeRe(
+        "^[A-Za-z]{1,3}\\d{3,4}[-]?(C|P)[-]?\\d+$");
+    return std::regex_match(rawCode, optCodeRe);
 }
 
 // ============================================================================
@@ -524,16 +545,9 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
                     // including underlying futures (e.g. cu2607). Passing a
                     // pure-digit code to rawFutOptCodeToStdCode underflows
                     // its index scan and throws std::length_error — filter
-                    // to real option codes first.
-                    // C6: accept BOTH 4-digit-month codes (CFFEX/SHFE/INE/
-                    // GFEX, e.g. IO2301-P-4000) and CZCE's 3-digit-month
-                    // convention (e.g. TA308P4000 — the very reason
-                    // rawFutOptCodeToStdCode inserts "2" for CZCE, see
-                    // Share/CodeHelper.hpp).  The previous \\d{4} required
-                    // 4 digits and silently dropped EVERY CZCE option.
-                    static const std::regex optCodeRe(
-                        "^[A-Za-z]{1,3}\\d{3,4}[-]?(C|P)[-]?\\d+$");
-                    if (!std::regex_match(rawCode, optCodeRe)) {
+                    // to real option codes first (C6: both SHFE-style 4-digit
+                    // and CZCE 3-digit month codes, see isRawOptionCode).
+                    if (!isRawOptionCode(rawCode)) {
                         skipped++;
                         continue;
                     }
@@ -609,10 +623,11 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
         if (atCfg->has("outputDir"))
             _attrOutDir = atCfg->getCString("outputDir");
         _attrKeepMaxRecs = atCfg->has("keepMaxRecords") ? atCfg->getUInt32("keepMaxRecords") : 20000;
+        _attrGraceSec = atCfg->has("graceSeconds") ? atCfg->getUInt32("graceSeconds") : 300;
         if (_attrEnable)
             WTSLogger::log_by_cat("strategy", LL_INFO,
-                "Fill attribution enabled: outputDir={} keepMaxRecords={}",
-                _attrOutDir, _attrKeepMaxRecs);
+                "Fill attribution enabled: outputDir={} keepMaxRecords={} graceSeconds={}",
+                _attrOutDir, _attrKeepMaxRecs, _attrGraceSec);
     }
 
     // B10: Initialize option value writer (if configured)
@@ -2034,9 +2049,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
         }
 
-        // B14/3.3: record retirement lives in the registry (done flag + TTL
-        // purge); the deviation policy skips done records at fill time, so
-        // no separate per-checker cleanup is needed here.
+        // B14/3.3: record retirement lives in the registry (done flag +
+        // capacity/age purge in the timer callback).  The deviation policy
+        // skips done records at fill time, so no separate per-checker
+        // cleanup is needed here.
 
         // Mark for refresh: order status change affects OQM state
         _needsRefresh = true;
@@ -2089,9 +2105,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
     // Timer callback - trigger SLOW compute + session scheduling
     cbs.on_timer = [this](uint32_t curDate, uint32_t curTime) {
-        // 3.3/3.6: TTL-purge finished order records (bound memory; late-fill
-        // classification window is keepDoneSeconds).
-        _orderRegistry.purgeDone(_attrKeepMaxRecs);
+        // 3.3/3.6: capacity+age purge of finished order records (bound
+        // memory).  The age floor (graceSeconds) keeps the late-fill
+        // attribution window open across session boundaries.
+        _orderRegistry.purgeDone(_attrKeepMaxRecs, static_cast<double>(_attrGraceSec));
 
         // B4: Session-based mid-day stop/resume scheduling.
         // Uses the underlying commodity WTSSessionInfo sections to detect
@@ -2230,8 +2247,24 @@ void HftOptionStrategy::setupAsyncCallbacks()
             for (const auto& [posCode, posVal] : _positions)
                 _pnlPendingInit.insert(posCode);
 
-            // B2: clear anomaly-guard registries for the new session
-            _orderRegistry.reset();
+            // B2: archive the anomaly counters of the session that just
+            // ended, then clear them.  ORDER RECORDS ARE NOT RESET at the
+            // boundary anymore — exportFillAttribution marks them exported
+            // and the grace-window purge (session begin + timer) reclaims
+            // them later, so late fills keep their attribution instead of
+            // degrading to "unknown".
+            if (_curSessionDate != 0) {
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "OrderAnomaly: session {} closed with unknown={} lateAfterDone={} overfill={}",
+                    _curSessionDate, _orderRegistry.unknownFillCount(),
+                    _orderRegistry.lateAfterDoneCount(), _orderRegistry.overfillCount());
+            }
+            _orderRegistry.resetCounters();
+            _orderRegistry.purgeDone(_attrKeepMaxRecs, static_cast<double>(_attrGraceSec));
+            // From here on, new order records belong to the new session
+            // (late fills arriving before this point stay attributed to the
+            // session that just ended).
+            _curSessionDate = tdate;
             // B20 fix: clear risk-signal latches (PnlLimit panic used to
             // survive across sessions until process restart)
             if (_compositePricer) {
@@ -2250,6 +2283,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
         } else {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy session end: {}", tdate);
+            _curSessionDate = tdate;   // records issued between here and the
+                                       // next begin still belong to this session
             setState(wt_option::TradingStateType::Disabled, "session_end");
             // Phase 2: ExpiryLifecycle owns the session-end hard stop.
             wt_option::OptionExpiryLifecycle::onSessionEnd(_ctx, _positions,
@@ -2272,7 +2307,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     _grid ? &_grid->expiries() : nullptr);
                 _expSim->printSummary();
             }
-            // 3.6: export fill-quality attribution before the registry resets
+            // 3.6: export fill-quality attribution (append-only delta rows;
+            // records survive the boundary and are reclaimed by the
+            // grace-window purge at the next session begin).
             if (_attrEnable)
                 exportFillAttribution(tdate);
             // B10: Close value writer at session end
@@ -2342,6 +2379,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 WTSLogger::log_by_cat("strategy", LL_WARN,
                     "Recovery: exchange order sweep issued; waiting for broker snapshots and first underlying tick");
             }
+            // D: recovery sweep issued — lift the fail-safe fence so quoting
+            // may resume once the state machine returns to Normal.
+            _channelDown = false;
         } else {
             WTSLogger::log_by_cat("strategy", LL_WARN, "channel_lost (worker)");
             _tstate.channelReady = false;
@@ -2625,16 +2665,23 @@ void HftOptionStrategy::on_channel_ready(IHftStraCtx* ctx)
 {
     // B2-2.4: no direct state write here (single-writer discipline) — the
     // worker's channel callback owns _tstate.channelReady via enqueue below.
-    // A1: Enqueue channel event to async processor for worker-thread processing.
-    if (_async)
-        _async->enqueue_channel(true);
+    // D: _channelDown is NOT cleared here; the worker clears it only after
+    // the recovery sweep completes (cbs.on_channel), so a ready event that
+    // never reaches the worker keeps the strategy safely stopped.
+    if (_async && !_async->enqueue_channel(true))
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "channel_ready event LOST (async processor not running)");
 }
 
 void HftOptionStrategy::on_channel_lost(IHftStraCtx* ctx)
 {
-    // B2-2.4: state write removed — see on_channel_ready.
-    if (_async)
-        _async->enqueue_channel(false);
+    // D: fail-safe fence — set IMMEDIATELY on the callback thread so every
+    // send path stops touching the wire at once, regardless of worker-queue
+    // latency or drop (the queued callback below still does the cleanup).
+    _channelDown = true;
+    if (_async && !_async->enqueue_channel(false))
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "channel_lost event LOST (async processor not running)");
 }
 
 void HftOptionStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* message, const char* userTag)
@@ -2647,8 +2694,12 @@ void HftOptionStrategy::on_entrust(uint32_t localid, bool bSuccess, const char* 
         if (!_initialized) return;
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "HftOptionStrategy entrust rejected: id={} msg={}", localid, message);
-        if (_async)
-            _async->enqueue_entrust(localid, false);
+        // D: a lost reject cleanup leaves a phantom order in the OQM (its
+        // price level never re-quotes) — log at error; the registry record is
+        // still marked rejected below only when the event is delivered.
+        if (_async && !_async->enqueue_entrust(localid, false))
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "entrust-reject event LOST (async processor not running): id={}", localid);
     }
 }
 
@@ -2702,16 +2753,26 @@ void HftOptionStrategy::registerIssuedOrderIds(const std::string& code,
     // B2/3.3: register EVERY framework localid into the single per-order
     // registry.  A split action policy can return multiple ids; tracking
     // only ids[0] made the remaining fills "Unknown".
+    // 3.3 convergence fix: ensureIssued is IDEMPOTENT — the same localid is
+    // registered both here and via the OTG OrderIssuedFn mirror (OQM
+    // trackOrder), and a resetting registration would wipe fills/ctx.
+    // WT split one order into several ids and does not report the per-id
+    // quantity — totalQty is then the whole-order qty and the overfill
+    // comparison is skipped for these records (see onFill).
+    const bool splitUnknown = ids.size() > 1;
     for (uint32_t id : ids) {
         if (id == 0) continue;
-        auto& rec = _orderRegistry.onIssued(id, code, qty);
+        auto& rec = _orderRegistry.ensureIssued(id, code, qty, _curSessionDate);
         rec.isBuy = isBuy;
         rec.issuePx = price;
+        if (splitUnknown) rec.qtySplitUnknown = true;
 
         // 3.6 fill-quality attribution: snapshot the pricing context at
         // issue time.  Values live on OptionData, owned by this worker
         // thread — a plain copy, no extra locking or lookup chains.
-        if (_attrEnable) {
+        // Only when not already captured: the mirror registration re-enters
+        // for the same localid within microseconds of the first one.
+        if (_attrEnable && !rec.ctx.valid) {
             if (auto otd = _otg ? _otg->getTradingData(code) : nullptr) {
                 if (auto od = otd->getOptionData()) {
                     const auto& v = od->values(0);
@@ -2740,7 +2801,7 @@ std::pair<uint32_t, uint32_t> HftOptionStrategy::executeQuoteIds(
     const std::string& code, double bidP, uint32_t bidQ,
     double askP, uint32_t askQ)
 {
-    if (!_ctx || !_tstate.channelReady) return {0, 0};
+    if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) return {0, 0};
     // R1: reject out-of-limit quotes before hitting the wire
     if (!withinPriceLimits(code, bidP) || !withinPriceLimits(code, askP)) return {0, 0};
 
@@ -2766,7 +2827,7 @@ int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, ui
 OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
                                              double price, uint32_t qty)
 {
-    if (!_ctx || !_tstate.channelReady) return {};
+    if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) return {};
     // R1
     if (!withinPriceLimits(code, price)) return {};
 
@@ -2780,44 +2841,69 @@ OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
 
 // ============================================================================
 // 3.6 fill-quality attribution export
+//
+// Append-only CSV.  Each call writes ONE ROW PER ORDER covering the fills
+// recorded since the previous export (delta = fills[exportedFills..]) —
+// late fills that arrive after a session boundary are therefore attributed
+// to the ORDER'S ORIGIN SESSION (sessionDate column) instead of being lost.
+// `date` is the exporting run's session; `sessionDate` is the order's own.
+// Rows with totQ == 0 (quantity-less reports) are skipped and consumed.
 // ============================================================================
 void HftOptionStrategy::exportFillAttribution(uint32_t tdate)
 {
     namespace wto = wt_option;
-    struct Agg { int n=0; double edge=0, edge2=0, cap=0, lag=0; };
+    struct Agg { int n=0; double edge=0, cap=0, lag=0; };
     std::unordered_map<std::string, Agg> perCode;
 
     auto bps = [](double diff, double base) {
         return (base > 0 && std::isfinite(base)) ? diff / base * 1e4
                                                  : std::numeric_limits<double>::quiet_NaN();
     };
+    auto nan = [](double v) { return std::isfinite(v) ? fmt::format("{}", v) : ""; };
 
     std::string path = _attrOutDir + "/fill_attribution.csv";
     // Session end runs mid-replay — the runner's output dir may not exist yet.
     std::error_code ec;
     std::filesystem::create_directories(_attrOutDir, ec);
+    // Header fix: the ofstream(app) below CREATES the file, so checking
+    // ifstream.good() after opening always reported "exists" and the header
+    // was never written.  Judge existence/size BEFORE opening.
+    const bool needHeader = !std::filesystem::exists(path, ec)
+                            || std::filesystem::file_size(path, ec) == 0;
     std::ofstream out(path, std::ios::app);
-    bool needHeader = !std::ifstream(path).good();
     if (out && needHeader) {
-        out << "date,code,side,issuePx,issueQty,filledQty,theo0,mid0,iv0,delta0,"
-               "spot0,fwd0,issueTimeUs,vwFillPx,lastFillTimeUs,timeLagMs,"
-               "edgeBps,captureBps,spotDriftBps,rejectFlag\n";
+        out << "date,sessionDate,code,side,issuePx,issueQty,filledQty,fillQty,"
+               "theo0,mid0,iv0,delta0,spot0,fwd0,"
+               "issueTimeUs,issueTimeSim,vwFillPx,lastFillTimeUs,"
+               "wallLagMs,simLagMs,edgeBps,captureBps,spotDriftBps,"
+               "fillClass,rejectFlag\n";
     }
 
-    for (const auto& [localid, rec] : _orderRegistry.orders()) {
-        if (rec.fills.empty()) continue;
+    for (auto& [localid, rec] : _orderRegistry.orders()) {
+        if (rec.fills.empty() || rec.exportedFills >= rec.fills.size()) continue;
 
-        double vwPx = 0; uint32_t totQ = 0; double vwSpot = 0; bool anySpot = false;
-        for (const auto& f : rec.fills) { vwPx += f.px * f.qty; totQ += f.qty;
-            if (std::isfinite(f.spot)) { vwSpot += f.spot * f.qty; anySpot = true; } }
+        // ---- delta rows: fills[exportedFills .. end) -----------------------
+        const size_t begin = rec.exportedFills;
+        double vwPx = 0, vwSpot = 0; uint32_t totQ = 0, spotQ = 0, dFillQty = 0;
+        bool anySpot = false, anyNormal = false, anyLate = false;
+        for (size_t i = begin; i < rec.fills.size(); ++i) {
+            const auto& f = rec.fills[i];
+            vwPx += f.px * f.qty; totQ += f.qty; dFillQty += f.qty;
+            if (std::isfinite(f.spot)) { vwSpot += f.spot * f.qty; spotQ += f.qty; anySpot = true; }
+            if (f.late) anyLate = true; else anyNormal = true;
+        }
+        rec.exportedFills = rec.fills.size();
+        if (totQ == 0) continue;   // quantity-less report: consume, don't divide
         vwPx /= totQ;
-        if (anySpot) vwSpot /= totQ;
+        if (anySpot && spotQ > 0) vwSpot /= spotQ;   // spot-weighted by spot-bearing qty
         const auto& lastF = rec.fills.back();
+
+        const char* fillClass = rec.rejected  ? "rejected"
+                              : (anyNormal ? (anyLate ? "mixed" : "normal") : "late");
 
         double edgeBps = std::numeric_limits<double>::quiet_NaN();
         double capBps  = std::numeric_limits<double>::quiet_NaN();
         double driftBps = std::numeric_limits<double>::quiet_NaN();
-        double lagMs   = std::numeric_limits<double>::quiet_NaN();
         if (rec.ctx.valid) {
             // maker edge: sell above theo / buy below theo, in bps of theo
             double sgn = rec.isBuy ? -1.0 : 1.0;
@@ -2825,26 +2911,41 @@ void HftOptionStrategy::exportFillAttribution(uint32_t tdate)
             capBps  = sgn * bps(vwPx - rec.ctx.mid, rec.ctx.mid);
             if (anySpot && std::isfinite(rec.ctx.spot))
                 driftBps = bps(vwSpot - rec.ctx.spot, rec.ctx.spot);
-            if (rec.ctx.issueTimeUs > 0 && lastF.timeUs >= rec.ctx.issueTimeUs)
-                lagMs = (lastF.timeUs - rec.ctx.issueTimeUs) / 1000.0;
         }
+        // Wall lag needs only the issue timestamp (works for futures/hedge
+        // orders too, where ctx.valid is false); sim lag uses the strategy
+        // clock so it means "quote lifetime" in BOTH live and backtest.
+        double wallLagMs = std::numeric_limits<double>::quiet_NaN();
+        if (rec.ctx.issueTimeUs > 0 && lastF.timeUs >= rec.ctx.issueTimeUs)
+            wallLagMs = (lastF.timeUs - rec.ctx.issueTimeUs) / 1000.0;
+        double simLagMs = std::numeric_limits<double>::quiet_NaN();
+        if (rec.issueTimeSim > 0 && lastF.timeSim >= rec.issueTimeSim)
+            simLagMs = (lastF.timeSim - rec.issueTimeSim) * 1000.0;
 
         if (out) {
-            auto nan = [](double v) { return std::isfinite(v) ? fmt::format("{}", v) : ""; };
-            out << tdate << ',' << rec.code << ',' << (rec.isBuy ? "B" : "S") << ','
-                << rec.issuePx << ',' << rec.totalQty << ',' << rec.filledQty << ','
+            out << tdate << ',' << (rec.sessionDate ? rec.sessionDate : tdate) << ','
+                << rec.code << ',' << (rec.isBuy ? "B" : "S") << ','
+                << rec.issuePx << ','
+                << (rec.qtySplitUnknown ? "" : std::to_string(rec.totalQty)) << ','
+                << rec.filledQty << ',' << dFillQty << ','
                 << nan(rec.ctx.theo) << ',' << nan(rec.ctx.mid) << ',' << nan(rec.ctx.iv) << ','
                 << nan(rec.ctx.delta) << ',' << nan(rec.ctx.spot) << ',' << nan(rec.ctx.fwd) << ','
-                << rec.ctx.issueTimeUs << ',' << vwPx << ',' << lastF.timeUs << ','
-                << nan(lagMs) << ',' << nan(edgeBps) << ',' << nan(capBps) << ','
-                << nan(driftBps) << ',' << (rec.rejected ? 1 : 0) << '\n';
+                << rec.ctx.issueTimeUs << ',' << rec.issueTimeSim << ','
+                << vwPx << ',' << lastF.timeUs << ','
+                << nan(wallLagMs) << ',' << nan(simLagMs) << ','
+                << nan(edgeBps) << ',' << nan(capBps) << ','
+                << nan(driftBps) << ','
+                << fillClass << ',' << (rec.rejected ? 1 : 0) << '\n';
         }
 
-        if (std::isfinite(edgeBps)) {
+        // Aggregates exclude rejected rows (a fill on a rejected order is an
+        // anomaly signal, not a quality sample).
+        if (std::isfinite(edgeBps) && !rec.rejected) {
             auto& a = perCode[rec.code];
-            a.n++; a.edge += edgeBps; a.edge2 += edgeBps * edgeBps;
+            a.n++; a.edge += edgeBps;
             if (std::isfinite(capBps)) a.cap += std::abs(capBps);
-            if (std::isfinite(lagMs)) a.lag += lagMs;
+            const double lag = std::isfinite(simLagMs) ? simLagMs : wallLagMs;
+            if (std::isfinite(lag)) a.lag += lag;
         }
     }
     if (out) out.close();
@@ -2860,6 +2961,24 @@ void HftOptionStrategy::exportFillAttribution(uint32_t tdate)
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "ATTR TOTAL date={} n={} edgeBps={:.2f} |captureBps|={:.2f} lagMs={:.1f} -> {}",
             tdate, totN, totEdge / totN, totCap / totN, totLag / totN, path);
+
+    // ---- fill_anomaly.csv: exchange reports we could not attribute --------
+    // Unknown fills never enter a Rec, so they can never appear in the main
+    // CSV — archive them here instead of letting them vanish into the log.
+    const auto& unk = _orderRegistry.unknownEvents();
+    if (!unk.empty()) {
+        std::string apath = _attrOutDir + "/fill_anomaly.csv";
+        const bool needHdr = !std::filesystem::exists(apath, ec)
+                             || std::filesystem::file_size(apath, ec) == 0;
+        std::ofstream aout(apath, std::ios::app);
+        if (aout && needHdr)
+            aout << "localid,code,count,firstTime,lastTime\n";
+        if (aout) {
+            for (const auto& [lid, ev] : unk)
+                aout << lid << ',' << ev.code << ',' << ev.count << ','
+                     << ev.firstTime << ',' << ev.lastTime << '\n';
+        }
+    }
 }
 
 int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
@@ -2872,13 +2991,13 @@ int32_t HftOptionStrategy::executeOrder(const std::string& code, bool isBuy,
 
 bool HftOptionStrategy::executeCancel(uint32_t localid)
 {
-    if (!_ctx || !_tstate.channelReady) return false;
+    if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) return false;
     return _ctx->stra_cancel(localid);
 }
 
 int32_t HftOptionStrategy::executeCancel(const std::string& code)
 {
-    if (!_ctx || !_tstate.channelReady) return 0;
+    if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) return 0;
 
     auto ids = _ctx->stra_cancel_all(code.c_str());
     return static_cast<int32_t>(ids.size());

@@ -293,7 +293,8 @@
     "fillAttribution": {
         "enable": false,
         "outputDir": "outputs_bt/opt_mm_cu",
-        "keepMaxRecords": 20000
+        "keepMaxRecords": 20000,
+        "graceSeconds": 300
     },
 
     "optionValueWriter": {

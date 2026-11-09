@@ -102,6 +102,13 @@ public:
     virtual void on_session_begin(IHftStraCtx* ctx, uint32_t uTDate) override;
     virtual void on_session_end(IHftStraCtx* ctx, uint32_t uTDate) override;
 
+    /// C6: raw exchange option-code filter — accepts BOTH 4-digit-month codes
+    /// (CFFEX/SHFE/INE/GFEX, e.g. IO2301-P-4000) and CZCE's 3-digit-month
+    /// convention (e.g. TA308P4000).  Static + self-contained so unit tests
+    /// can pin both conventions (previously a \\d{4} regex silently dropped
+    /// EVERY CZCE option).
+    static bool isRawOptionCode(const std::string& rawCode);
+
 private:
     // Async event processor
     wt_option::OptionAsyncEventProcessorPtr _async;
@@ -269,6 +276,8 @@ private:
     bool _attrEnable = false;
     std::string _attrOutDir = "outputs_bt";
     uint32_t _attrKeepMaxRecs = 20000;  // size-bound registry purge (live+backtest safe)
+    uint32_t _attrGraceSec = 300;       // done records younger than this are never purged
+    uint32_t _curSessionDate = 0;       // owning session for new registry records
 
     // R1: latest exchange price limits per code (from tick feed)
     struct PriceLimit { double upper = 0; double lower = 0; };
@@ -294,6 +303,12 @@ private:
 
     // R8: unified trading state — single writer for enabled/panicked
     wt_option::TradingState _tstate;
+    // Fail-safe fence (plan D): set IMMEDIATELY on the engine callback thread
+    // when the channel is lost; cleared by the worker only after the recovery
+    // sweep completes.  All send paths check it before touching the wire, so
+    // a lost channel stops quoting instantly instead of waiting for the
+    // queued worker callback (which may lag or, pre-fix, could be dropped).
+    std::atomic<bool> _channelDown{false};
     void setState(wt_option::TradingStateType t, const std::string& reason);
     bool _tradingStateEnabled() const;
     void applyTradingState();
