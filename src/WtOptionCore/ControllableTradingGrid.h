@@ -75,6 +75,16 @@ public:
     using ScannerExecuteFn = std::function<void(const ScannerHitEvent& event)>;
     void setScannerExecuteFn(ScannerExecuteFn fn) { m_scannerExec = std::move(fn); }
 
+    /// Scanner-hit throttle (D): per-code cooldown — the same edge refires on
+    /// every tick otherwise (measured 568 hits/s on one contract), which
+    /// floods the combo executor and the async event queues.  A hit passes
+    /// when the cooldown elapsed OR the signal grew by >= refireGrowth.
+    void setScannerThrottle(double cooldownSec, double refireGrowth) {
+        m_scanCooldownSec = cooldownSec > 0 ? cooldownSec : 0.0;
+        m_scanRefireGrowth = refireGrowth > 0 ? refireGrowth : 0.0;
+    }
+    uint64_t throttledScannerHits() const { return m_throttledHits; }
+
     /// R8: session stop/resume notifications route through the strategy's
     /// unified state machine (single writer for enabled/panicked).
     void setSessionStopCallback(std::function<void(bool stopped)> cb) {
@@ -129,6 +139,13 @@ public:
     QuoteExecutor m_quoteExec;
     ScannerExecuteFn m_scannerExec;
     std::function<void(bool stopped)> m_sessionStopCb;   // R8
+
+    // Scanner-hit throttle state (worker thread only)
+    double   m_scanCooldownSec = 5.0;
+    double   m_scanRefireGrowth = 0.25;
+    uint64_t m_throttledHits = 0;
+    std::unordered_map<std::string, double> m_lastHitTime;
+    std::unordered_map<std::string, double> m_lastHitSignal;
 
     // TPS control
     int32_t m_maxTransactionsPerSec = 50;

@@ -112,6 +112,12 @@ public:
     const std::string& getName() const { return m_name; }
     size_t getLegCount() const { return m_legs.size(); }
 
+    /// P2: who initiated the cancel — set by the owner before cancelAll() on
+    /// the timeout path so the FAILED log can distinguish "our own timeout
+    /// (leg never traded)" from "external cancel (risk/session stop, entrust
+    /// reject, or the replay's random-cancel simulation)".
+    const char* cancelReason = nullptr;
+
     // ------------------------------------------------------------------
     // P1-d/W5: per-leg order records (BaseOrder/OptionOrder state machine).
     // The concrete combos keep their fast localid-based routing untouched;

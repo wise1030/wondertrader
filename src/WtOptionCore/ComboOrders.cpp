@@ -152,7 +152,14 @@ bool SpreadComboOrder::onLegTerminal(uint32_t localid, bool canceled, uint32_t l
         } else if (is_leg1 && !m_leg2Sent && m_leg1Filled > 0) {
             markFailed("leg1 terminal without hedge");
         } else if (is_leg1 && !m_leg2Sent && m_leg1Filled == 0) {
-            markFailed("leg1 terminal before hedge");
+            // P2: leg1 died with zero fills — say WHY.  An untraded marketable
+            // leg at own-timeout means the price never traded / was randomly
+            // cancelled (replay error_rate); an external cancel means a risk
+            // or session stop killed it.
+            std::string why = cancelReason
+                ? std::string(cancelReason)
+                : std::string("external cancel (risk/session stop, entrust reject, or replay random-cancel)");
+            markFailed(("leg1 terminal before hedge [" + why + "]").c_str());
         }
     }
 

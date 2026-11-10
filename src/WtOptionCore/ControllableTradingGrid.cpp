@@ -84,9 +84,37 @@ void ControllableTradingGrid::removeScanner(std::shared_ptr<IScanModule> scanner
 // ============================================================================
 void ControllableTradingGrid::onScannerHit(const ScannerHitEvent& event) {
     if (!event.option || !m_ctx->enabled) return;
+
+    // D: per-code throttle.  Without it every tick refires the same edge
+    // (568 hits/s measured) and the combo executor drowns.  Refire is
+    // allowed early only when the edge GREW materially — a genuinely new
+    // opportunity, not the same one re-published.
+    const std::string code = event.option->getCode();
+    const double now = m_ctx->getTime();
+    auto it = m_lastHitTime.find(code);
+    if (it != m_lastHitTime.end() && m_scanCooldownSec > 0
+        && now - it->second < m_scanCooldownSec) {
+        const double last = m_lastHitSignal.count(code) ? m_lastHitSignal[code] : 0.0;
+        if (m_scanRefireGrowth <= 0 || last <= 0
+            || event.signal < last * (1.0 + m_scanRefireGrowth)) {
+            m_throttledHits++;
+            if (m_throttledHits <= 5 || m_throttledHits % 1000 == 0)
+                WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                    "CTG::onScannerHit THROTTLED {} signal={:.2f} last={:.2f} dt={:.2f}s cooldown={:.1f}",
+                    code, event.signal, last, now - it->second, m_scanCooldownSec);
+            return;
+        }
+    }
+    m_lastHitTime[code] = now;
+    m_lastHitSignal[code] = event.signal;
+    if (m_throttledHits == 0 && m_lastHitTime.size() == 1)
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "CTG::onScannerHit throttle armed: cooldown={:.1f}s growth={:.2f} now={:.2f}",
+            m_scanCooldownSec, m_scanRefireGrowth, now);
+
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "CTG::onScannerHit {} signal={:.4f} reason={}",
-        event.option->getCode(), event.signal, event.reason);
+        code, event.signal, event.reason);
 
     // Trigger scanner order execution if callback is set
     if (m_scannerExec && event.signal > 0) {

@@ -328,6 +328,14 @@ void test_scan_coordinator()
     coord.dispatchOption(opt.get());
     ASSERT_EQ(mock->option_updates, 0);   // per-expiry override honored
     mock->setExpiryEnabled(202612, true);
+
+    // Market-readiness: unpriced options are not dispatched (the pricer
+    // marks values priced=false while an expiry has no accepted fit).
+    opt->values(0).setPriced(false);
+    coord.dispatchOption(opt.get());
+    ASSERT_EQ(mock->option_updates, 0);
+    opt->values(0).setPriced(true);
+
     coord.dispatchOption(opt.get());
     coord.dispatchUnderlying(100.0);
     ASSERT_EQ(mock->option_updates, 1);
