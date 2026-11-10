@@ -361,6 +361,23 @@ private:
     /// Resolve delta-per-lot from the hedge contract multiplier; <=0 means unknown.
     double resolveDeltaPerLot();
 
+    /// Close-phase delta flatten (user-approved design): close times are
+    /// derived from the FRAMEWORK session info (WTSSessionInfo trading
+    /// sections) — a section end that starts an inter-section gap >= the
+    /// median gap is a daily close (SHFE: day 15:00 / night 01:00; lunch
+    /// breaks are below the median and never qualify).  The strategy layer
+    /// configures only how long before the close to start
+    /// (delta_hedge.flatten_lead_seconds).  While active, the hedge channel
+    /// drives portfolio delta to ~0 (half-lot deadband); option legs
+    /// (vega/theta) stay.  Disarmed on resume / session begin.
+    std::set<uint32_t> _closeSectionEnds;          // seconds-of-day closes
+    bool   _closeSectionEndsComputed = false;
+    double _closeFlattenLead = 60.0;               // start this many sec before the close
+    bool   _closeFlattenActive = false;
+    double _flattenAggrTicks = 2.0;   // close-flatten price aggression (ticks beyond touch)
+    void disarmCloseFlatten();        // cancel in-flight hedge orders + disarm
+    void computeCloseSectionEnds();   // median-gap rule over framework session sections
+
     // R-P1: prediction accuracy loop closure
     wt_option::PredictionEvaluator _predEvaluator;
 

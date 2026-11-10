@@ -28,18 +28,25 @@ void OptionHedgeCoordinator::setDeltaPerLot(double v)
 
 bool OptionHedgeCoordinator::check(double nowSec, double portfolioDelta)
 {
+    return check(m_cfg, nowSec, portfolioDelta, 0);
+}
+
+bool OptionHedgeCoordinator::check(const DeltaHedgeExecutor::Config& cfg,
+                                   double nowSec, double portfolioDelta,
+                                   double priceOverride)
+{
     if (!m_send || !m_price || m_code.empty()) return false;
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         if (!m_inflight.empty()) return false;   // one batch at a time
     }
-    if (!(m_cfg.deltaPerLot > 0)) return false;
+    if (!(cfg.deltaPerLot > 0)) return false;
 
-    HedgeDecision d = DeltaHedgeExecutor::decide(m_cfg, portfolioDelta,
+    HedgeDecision d = DeltaHedgeExecutor::decide(cfg, portfolioDelta,
                                                  nowSec, m_lastFire);
     if (!d.fire) return false;
 
-    const double px = m_price(m_code);
+    const double px = (priceOverride > 0) ? priceOverride : m_price(m_code);
     if (!(px > 0)) return false;
 
     const std::vector<uint32_t> ids = m_send(m_code, d.isBuy, px, d.qty);
@@ -76,6 +83,12 @@ bool OptionHedgeCoordinator::hasInflight() const
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     return !m_inflight.empty();
+}
+
+std::vector<uint32_t> OptionHedgeCoordinator::inflightIds() const
+{
+    std::lock_guard<std::mutex> lk(m_mtx);
+    return std::vector<uint32_t>(m_inflight.begin(), m_inflight.end());
 }
 
 } // namespace wt_option

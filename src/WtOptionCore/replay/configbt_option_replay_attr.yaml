@@ -66,6 +66,18 @@ hft:
                   delta_min: 0.05
                   delta_max: 0.95
 
+            # 三层风险控制：主控=pricer持仓风险调节报单；delta_hedge宽阈值=
+            # 极端兜底；收盘停报价后对配置的section end做delta flatten（期权腿保留）
+            delta_hedge:
+                enable: true
+                threshold_delta: 200      # 组合|delta|(吨)超200才触发盘中兜底
+                target_delta: 0
+                max_order_size: 5
+                cooldown_sec: 3
+                delta_per_lot: 5          # SHFE cu 乘数
+                # 收盘时刻由框架 session 配置派生（中位间隔规则），策略层只配提前量
+                flatten_lead_seconds: 60
+                flatten_aggr_ticks: 2
             pricer:
                 quoting:
                     numLevels: 1

@@ -40,6 +40,15 @@ public:
     /// Returns true iff a hedge order was sent. `portfolioDelta` is the
     /// multiplier-scaled portfolio delta.
     bool check(double nowSec, double portfolioDelta);
+    /// check with an explicit config override (close-flatten mode passes a
+    /// tight target-0 config while the coordinator keeps the backstop one).
+    /// priceOverride > 0 replaces the quote-fn price for this round (the
+    /// close-flatten path crosses the spread to fill in the close window).
+    bool check(const DeltaHedgeExecutor::Config& cfg, double nowSec,
+               double portfolioDelta, double priceOverride = 0);
+    /// Snapshot of currently in-flight hedge order ids (the strategy cancels
+    /// them when disarming close-flatten so nothing rests through the break).
+    std::vector<uint32_t> inflightIds() const;
 
     /// Terminal callback for any order id (cancel/reject/full fill).
     void onTerminal(uint32_t localid);

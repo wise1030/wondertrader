@@ -62,6 +62,16 @@
                         {"days": 0, "thresh": 15}
                     ]
                 }
+            },
+            "delta_hedge": {
+                "enable": true,
+                "threshold_delta": 200,
+                "target_delta": 0,
+                "max_order_size": 5,
+                "cooldown_sec": 3,
+                "delta_per_lot": 5,
+                "flatten_lead_seconds": 60,
+                "flatten_aggr_ticks": 2
             }
         }
     },

@@ -464,9 +464,14 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             } else {
                 _hedgeCfg.deltaPerLot = 0.0;
             }
+            if (dh->has("flatten_aggr_ticks"))
+                _flattenAggrTicks = dh->getDouble("flatten_aggr_ticks");
+            if (dh->has("flatten_lead_seconds"))
+                _closeFlattenLead = dh->getDouble("flatten_lead_seconds");
             WTSLogger::log_by_cat("strategy", LL_INFO,
-                "DeltaHedger: enable={} threshold={} delta_per_lot={}",
-                _deltaHedgeEnable, _hedgeCfg.thresholdDelta, _hedgeCfg.deltaPerLot);
+                "DeltaHedger: enable={} threshold={} delta_per_lot={} flatten_lead={}s",
+                _deltaHedgeEnable, _hedgeCfg.thresholdDelta, _hedgeCfg.deltaPerLot,
+                (uint32_t)_closeFlattenLead);
         }
     }
 
@@ -2158,9 +2163,45 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     && curSec < (endSec - _stopLeadSeconds)) {
                     _ctg->resumeTrading();
                     _sessionStopped = false;
+                    disarmCloseFlatten();
                     WTSLogger::log_by_cat("strategy", LL_INFO,
                         "Session resume: section {}-{}, curSec={} lag={}s",
                         sec.first_raw, sec.second_raw, curSec, _resumeLagSeconds);
+                }
+            }
+
+            // Close-flatten arming (user requirement): the close times come
+            // from the FRAMEWORK session info via the median-gap rule (see
+            // computeCloseSectionEnds) — no strategy-layer close times.  The
+            // strategy only configures how long before the close to start
+            // (delta_hedge.flatten_lead_seconds).  This is independent of the
+            // B4 quoting stop: quoting stops on its own schedule, the hedge
+            // channel keeps working regardless (checkDeltaHedge is not gated
+            // on _traderCtx->enabled).
+            if (_deltaHedgeEnable && _closeFlattenLead > 0) {
+                if (!_closeSectionEndsComputed)
+                    computeCloseSectionEnds();
+                if (_closeFlattenActive) {
+                    // The close has passed: pull any unfilled flatten order
+                    // NOW — before the reopening tick can match it at a stale
+                    // level (disarm-on-resume alone fires too late).
+                    for (uint32_t closeEnd : _closeSectionEnds) {
+                        if (curSec >= closeEnd && curSec < closeEnd + 120) {
+                            disarmCloseFlatten();
+                            break;
+                        }
+                    }
+                } else {
+                    for (uint32_t closeEnd : _closeSectionEnds) {
+                        const uint32_t leadSec = static_cast<uint32_t>(_closeFlattenLead);
+                        if (curSec + leadSec >= closeEnd && curSec < closeEnd) {
+                            _closeFlattenActive = true;
+                            WTSLogger::log_by_cat("strategy", LL_INFO,
+                                "Close flatten armed: {}s before daily close (section end {}s), hedging portfolio delta to 0",
+                                leadSec, closeEnd);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2290,6 +2331,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // stale/default curves at the open.
             if (_grid) {
                 _expFitPublishT.clear();   // yesterday's publish times are irrelevant
+                disarmCloseFlatten();      // defensive: disarm across the boundary
                 size_t n = 0;
                 for (const auto& [exp, ed] : _grid->expiries())
                     if (ed) { setExpiryFitReady(exp, false, "session open — awaiting first fit"); ++n; }
@@ -3456,6 +3498,64 @@ double HftOptionStrategy::resolveDeltaPerLot()
     return 0.0;
 }
 
+void HftOptionStrategy::disarmCloseFlatten()
+{
+    _closeFlattenActive = false;
+    // Cancel any hedge order that did not fill in the close window — an
+    // unfilled flatten order resting through the break would fill later at a
+    // stale level, becoming an unintended directional position.
+    for (uint32_t id : _hedgeCoord.inflightIds())
+        executeCancel(id);
+}
+
+// ============================================================================
+// Close-section detection (user requirement): no strategy-layer close times.
+// A section end that starts an inter-section gap >= the median gap is a daily
+// close — SHFE: 15:00 (6h gap to the night session) and 01:00 (8h gap to the
+// next day); the 2h lunch break is below the median and never qualifies.
+// CFFEX (no night session): only 15:00 qualifies.  A single-section market
+// treats its only end as the close.
+// ============================================================================
+void HftOptionStrategy::computeCloseSectionEnds()
+{
+    _closeSectionEndsComputed = true;
+    _closeSectionEnds.clear();
+    if (!_sessionInfo) return;
+
+    std::vector<std::pair<uint32_t, uint32_t>> secs;   // (startSec, endSecNorm)
+    for (const auto& sec : _sessionInfo->getTradingSections()) {
+        uint32_t s = (sec.first_raw / 100) * 3600 + (sec.first_raw % 100) * 60;
+        uint32_t e = (sec.second_raw / 100) * 3600 + (sec.second_raw % 100) * 60;
+        if (e <= s) e += 86400;      // cross-midnight section (e.g. 2100-0100)
+        secs.emplace_back(s, e);
+    }
+    if (secs.empty()) return;
+    std::sort(secs.begin(), secs.end());
+
+    if (secs.size() == 1) {
+        _closeSectionEnds.insert(secs[0].second % 86400);
+        return;
+    }
+
+    std::vector<uint32_t> gaps;
+    gaps.reserve(secs.size());
+    for (size_t i = 0; i + 1 < secs.size(); ++i)
+        gaps.push_back(secs[i + 1].first - secs[i].second);
+    gaps.push_back(secs.front().first + 86400 - secs.back().second);   // wrap
+
+    std::vector<uint32_t> sorted = gaps;
+    std::sort(sorted.begin(), sorted.end());
+    const uint32_t median = sorted[sorted.size() / 2];
+
+    for (size_t i = 0; i < secs.size(); ++i) {
+        if (gaps[i] >= median)
+            _closeSectionEnds.insert(secs[i].second % 86400);
+    }
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "Close flatten: {} daily close(s) from session sections (median gap {}s)",
+        _closeSectionEnds.size(), median);
+}
+
 void HftOptionStrategy::checkDeltaHedge(double nowSec)
 {
     if (!_deltaHedgeEnable || !_risk) return;
@@ -3466,6 +3566,37 @@ void HftOptionStrategy::checkDeltaHedge(double nowSec)
     }
     _hedgeCoord.setHedgeCode(_primaryHedgeCode);
     _hedgeCoord.setDeltaPerLot(_hedgeCfg.deltaPerLot);
+    if (_closeFlattenActive) {        // Close-phase flatten: half-lot deadband (excess >= 0.5 lot rounds up
+        // to one lot), target 0, fast cooldown. Self-terminating because
+        // getPortfolioDelta() includes the futures hedge leg (m_pfuDelta).
+        // Pricing CROSSES the spread with flatten_aggr_ticks of aggression:
+        // the HftMocker fills a limit only when the opposite quote stays at
+        // or better than it on a later tick (zero queue priority), and the
+        // close-window tape runs away within one tick — passive mid limits
+        // were filled 0/8 in replay, leaving stale orders resting through the
+        // break. +N ticks fills on the very next tick; the slippage is the
+        // honest cost of an aggressive flatten (same idea as WtFutuCore
+        // closeout paying the spread).
+        wt_option::DeltaHedgeExecutor::Config fcfg = _hedgeCfg;
+        fcfg.thresholdDelta = 0.5 * _hedgeCfg.deltaPerLot;
+        fcfg.targetDelta = 0;
+        fcfg.cooldownSec = std::min(_hedgeCfg.cooldownSec, 1.0);
+        const double pd = _risk->getPortfolioDelta();
+        const double excess = pd - fcfg.targetDelta;
+        double px = 0;
+        if (std::fabs(excess) >= fcfg.thresholdDelta && _otg) {
+            auto utd = _otg->getUnderlyingTradingData(_primaryHedgeCode);
+            if (utd) {
+                const double tick = utd->getTickSize() > 0 ? utd->getTickSize() : 0;
+                const double aggr = _flattenAggrTicks * tick;
+                px = (excess < 0)
+                    ? (utd->getAsk() > 0 ? utd->getAsk() + aggr : utd->getMid())
+                    : (utd->getBid() > 0 ? utd->getBid() - aggr : utd->getMid());
+            }
+        }
+        _hedgeCoord.check(fcfg, nowSec, pd, px);
+        return;
+    }
     _hedgeCoord.check(nowSec, _risk->getPortfolioDelta());
 }
 
