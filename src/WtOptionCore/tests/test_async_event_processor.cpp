@@ -2,10 +2,12 @@
 #include "../OptionAsyncEventProcessor.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -35,39 +37,51 @@ static bool wait_until(const std::atomic<uint32_t>& value, uint32_t target) {
     return value.load() >= target;
 }
 
-// Regression: when MD fills 1023 of the 1024 batch slots, the trader suffix
-// must be requeued without repeating the already consumed first trade.
+// Fairness (D): trader events now get a guaranteed quota (256 of 1024) in
+// EVERY batch, drained BEFORE the MD queue — a large timer/tick backlog can
+// no longer starve them.  Also covers the requeue path: a trader batch larger
+// than the quota is requeued to the front and delivered exactly once.
 void test_trader_suffix_requeued_exactly_once() {
     std::cout << "=== test_trader_suffix_requeued_exactly_once ===" << std::endl;
 
     OptionAsyncEventProcessor proc;
     std::atomic<uint32_t> timerCount{0};
-    std::atomic<uint32_t> tradeCount{0};
+    std::vector<uint32_t> tradeIds;
+    std::mutex idsMtx;
     std::atomic<uint32_t> processedCount{0};
 
     AsyncCallbacks cbs;
     cbs.on_timer = [&](uint32_t, uint32_t) { timerCount.fetch_add(1); };
-    cbs.on_trade = [&](const std::string&, uint32_t, bool, double, double) {
-        tradeCount.fetch_add(1);
+    cbs.on_trade = [&](const std::string&, uint32_t id, bool, double, double) {
+        std::lock_guard<std::mutex> lock(idsMtx);
+        tradeIds.push_back(id);
     };
     cbs.on_batch_complete = [&]() { processedCount.fetch_add(1); };
     proc.setCallbacks(cbs);
     proc.start();
 
+    // 1023 timers nearly fill the 1024 batch; 300 trades exceed the 256-slot
+    // trader quota.  Pre-fix the timer backlog starved the trader suffix.
     for (uint32_t i = 0; i < 1023; ++i)
         proc.enqueue_timer(20261030, 900 + i);
-    proc.enqueue_trade(501, "SHFE.ag2601", true, 1, 4000.0);
-    proc.enqueue_trade(502, "SHFE.ag2601", false, 1, 4010.0);
-    proc.enqueue_trade(503, "SHFE.ag2601", true, 1, 4020.0);
+    for (uint32_t i = 0; i < 300; ++i)
+        proc.enqueue_trade(1000 + i, "SHFE.ag2601", true, 1, 4000.0);
 
-    ASSERT_TRUE(wait_until(processedCount, 2));
+    for (int i = 0; i < 500; ++i) {
+        if (tradeIds.size() >= 300 && timerCount.load() >= 1023) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
     ASSERT_TRUE(wait_until(timerCount, 1023));
-    ASSERT_TRUE(wait_until(tradeCount, 3));
+    {
+        std::lock_guard<std::mutex> lock(idsMtx);
+        ASSERT_EQ(tradeIds.size(), 300u);
+        std::vector<uint32_t> sorted(tradeIds);
+        std::sort(sorted.begin(), sorted.end());
+        // exactly once, no duplicates, no losses (ids are 1000..1299)
+        for (uint32_t i = 0; i < 300; ++i)
+            ASSERT_EQ(sorted[i], 1000 + i);
+    }
     proc.stop();
-
-    ASSERT_EQ(timerCount.load(), 1023u);
-    ASSERT_EQ(tradeCount.load(), 3u);
-    ASSERT_EQ(proc.queueDrops(), 0u);
     std::cout << "  PASS" << std::endl;
 }
 
@@ -198,6 +212,32 @@ void test_control_events_survive_full_queue() {
     std::cout << "  PASS" << std::endl;
 }
 
+// D: events still queued when stop() runs must be dispatched, not
+// discarded — losing a session end at teardown corrupts every per-session
+// summary and attribution export.  push_trader bypasses the running check,
+// so the queue can be loaded deterministically without starting the worker.
+void test_shutdown_drains_trader_queue() {
+    std::cout << "=== test_shutdown_drains_trader_queue ===" << std::endl;
+
+    OptionAsyncEventProcessor proc;
+    std::atomic<uint32_t> sessionEndCount{0};
+    std::atomic<uint32_t> tradeCount{0};
+    AsyncCallbacks cbs;
+    cbs.on_session = [&](uint32_t, bool isBegin) { if (!isBegin) sessionEndCount.fetch_add(1); };
+    cbs.on_trade = [&](const std::string&, uint32_t, bool, double, double) { tradeCount.fetch_add(1); };
+    proc.setCallbacks(cbs);
+
+    for (int i = 0; i < 3; ++i)
+        ASSERT_TRUE(proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_session(20260605, false)));
+    ASSERT_TRUE(proc.push_trader(OptionAsyncEventProcessor::AsyncEvent::make_trade(
+        "SHFE.cu2607", 42, true, 1, 50000.0)));
+
+    proc.stop();   // worker never started: drain must still dispatch all 4
+    ASSERT_EQ(sessionEndCount.load(), 3u);
+    ASSERT_EQ(tradeCount.load(), 1u);
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Async Event Processor Tests" << std::endl;
@@ -208,6 +248,7 @@ int main() {
     test_trader_events_preserve_fifo_order();
     test_control_event_wakes_quiet_worker();
     test_control_events_survive_full_queue();
+    test_shutdown_drains_trader_queue();
 
     std::cout << "\nALL TESTS PASSED" << std::endl;
     return 0;

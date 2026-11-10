@@ -148,6 +148,12 @@ public:
 
     // === MD queue: SPSC (single producer = MD thread) ===
     static constexpr size_t QUEUE_CAPACITY = 4096;
+    // Fairness (D): trader/control events get a guaranteed share of every
+    // batch.  Previously MD events filled all 1024 slots first, so under
+    // sustained tick pressure the trader queue starved PERMANENTLY (session
+    // ends never processed, combos never saw their fills).  256 of 1024.
+    static constexpr size_t BATCH_CAPACITY = 1024;
+    static constexpr size_t kTraderBatchQuota = 256;
     mutable boost::lockfree::spsc_queue<AsyncEvent, boost::lockfree::capacity<QUEUE_CAPACITY>> _md_queue;
 
     // MD overflow fallback (rare: ring full)
@@ -172,6 +178,9 @@ public:
     // Worker thread
     std::thread _worker;
     std::atomic<bool> _worker_running;
+    // D: set before join so the final drain in stop() runs while callbacks
+    // are still valid (strategy teardown happens after stop() returns).
+    std::atomic<bool> _draining{false};
     std::condition_variable _worker_cv;
     std::mutex _worker_sleep_mtx;  // mutex for cv wait only (not for queue access)
 
@@ -185,6 +194,10 @@ public:
 
     // Worker loop
     void worker_loop();
+
+    /// Shared batch dispatch (callbacks + dedup).  Used by worker_loop and by
+    /// the shutdown drain so both paths behave identically.
+    void dispatchEvents(std::vector<AsyncEvent>& events);
 
     // Helper: check if any queue has events
     bool has_events() const;
