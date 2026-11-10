@@ -36,6 +36,10 @@ void OptionScanCoordinator::panicAll()
 void OptionScanCoordinator::dispatchOption(OptionData* option)
 {
     if (!option) return;
+    // Market-readiness: the pricer marks options priced=false while an
+    // expiry has no accepted fit — a scanner firing on default/stale-curve
+    // theo would fabricate opportunities.
+    if (!option->values(0).isPriced()) return;
     for (auto& s : m_scanners) {
         if (s && s->isEnabled() && s->isExpiryEnabled(option->getExpiry()))
             s->onOptionUpdate(option);

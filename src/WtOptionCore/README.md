@@ -554,7 +554,18 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 - tick DSB 为 raw V2（0x03）时文件头必须是 **12 字节 BlockHeader**（`BLK_FLAG(8含NUL)+type(u16)+version(u16)`），C++ `proc_block_data` 按 12 字节去头
 - 回测双边报价依赖 `HftMocker::stra_quote`（buy+sell 模拟，第二腿失败回撤第一腿）
 - 建议 `use_newpx: false`（按对手价撮合；KS 期权 last 价可能陈旧，用 last 撮合会产生虚假滑点）
+- **`error_rate` 语义**：每个 order 每次 `procOrder` 有 `error_rate/10000` 概率被**随机撤单**（默认 100 = 1%）。对挂单撮合无所谓（重报即可），但会**杀死 scanner combo 的腿单**（腿单 3s 内被随机撤掉 → "leg1 terminal before hedge"）。验证 scanner 执行链路时用 `configbt_option_replay_scan_norand.yaml`（error_rate=0）
 - 取数方法已固化为 opencode skill：`ks-data-fetch`（数据布局、stat 探测、故障绕行、服务器侧转换）
+
+**scanner 配置要点（2026-11-09 整改）**：
+
+- `scannerThrottle`：`cooldownSec`（每代码 hit 冷却，默认 5）、`refireGrowth`（冷却期内仅当信号增长 ≥ 该比例才提前重发，默认 0.25）、`maxActiveCombos`（在途 combo 上限，默认 3）。无节流时同一 edge 每个 tick 重发（实测 568 hits/s），combo 执行器与事件队列会被淹没
+- `riskLimits.maxVega`：必须按期权链实际敞口配置（56 合约链实测峰值 ~32.5k；默认 10000 会让报价 100% 时间被抑制——用 `QuoteDuty` 日志确认）
+- `pricer.blackCalc.volCurve.fitter.point_count`（默认 15，与 `need` 默认一致）：**拟合候选选择**——取有效点（mid>threshold 且 IV 反演有效）中**距 forward 最近的 N 档**参与拟合。**不用 delta 带**：由拟合曲线的 Greeks 决定候选准入是自指系统（曲线翼决定准入、准入决定曲线翼），实测三种阈值（0.02/0.01/0.005）全部收敛到 ATM 平值吸引子、refit 永久停滞（市场全天提供 25-28 个有效点，修剪后永远差一点 <15）。邻近选择无自指、无需调阈值，死翼结构性进不来；Greeks 保持 theo vol 模型口径（FAST 重定价与风险一致性不受影响），且**不参与准入**。近邻窗口单边（forward 贴近档位网格边缘）时本次不 refit、用上一根曲线，不触发就绪封锁
+- **市场就绪 = 无门控有效点（`ptsU`）**：有活跃 mid（>threshold）且 IV 反演有效（>0）+ 双边覆盖。开盘稀疏（`ptsU < need`，如您所述：无成交/挂单不活跃/无最新 mid）→ 不拟合、就绪标志掉落 → pricer 置 `priced=false` → 不报价不扫描；`ptsU` 恢复后首次拟合自然启动（不带 delta 修剪，smile 得以成形）
+- **首拟合前 atmvol 市场引导（自动，无配置）**：进程启动后从未拟合过的 expiry（曲线版本为 0），其 `m_atmvol` 用平值 ±3% 内各腿 mid IV 的**中位数**引导（`OptionPricer2::initValuesCompute`）。作用：(1) 首拟合的 GVV 数值健康——拟合点是 `iv/atmVol`，默认 0.10 尺度下比值 ~1.7-2.5 已贴近 GVV 参数上限 2.0（IV>20% 会直接拟合失败走 fallback），引导后比值 ~1.0；(2) 首拟合前存储 Greeks 保持在市场量级。首次拟合发布后拟合尺度自动生效，引导停止
+- **市场就绪闸门（默认开启，无配置开关）——单标志语义**：`pts < need`（或单边 smile）意味着有效双边报价点不足——**市场数据未准备好**，此时该 expiry 不应有可信 theo，不应报价/扫描。实现上就绪态是 `ExpiryData::isFitReady` 这**一个**标志：session 开盘全部置 false；`publishFittedCurves` 接受新版本时置 true；点数持续干旱 >30s 重新置 false（滞回，防秒级抖动来回撤挂单）。pricer 在 `!fitReady` 时把 `computeValue`/`__computeValue`/`updateTheoreticalValues` 的产出标记为 `priced=false`（**Greeks 照常计算**，供拟合筛选），CTG 报价（refresh 的 `isPriced()` 门）与 scanner 分发（`dispatchOption` 的 `isPriced()` 门）自动失效，策略层**无**并行封锁集合。注意首拟合前 greeks 依赖 atmvol 引导才能到市场尺度
+- 每 session 结束输出 `QuoteDuty`（enabled 时长/占比）与 `OrderAnomaly` 归档，作为验收口径
 
 **验收基线（SHFE cu2607 期权链 56 期权 + 标的 × 20260602-0605，共 318.5 万 tick，2026-11-09 整改后复测）**：
 

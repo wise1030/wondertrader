@@ -37,6 +37,7 @@
 
 #include <limits>
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
 #include <algorithm>
 #include <iostream>
@@ -261,6 +262,20 @@ void OptionPricer2::publishFittedCurves(const std::vector<FittedCurveSet>& fitte
             ei->m_spVolCurve2->setMaturity(ei->m_maturity);
         }
         version = f.version;
+
+        // Market-readiness single flag: a successfully published curve is the
+        // proof that live market points were sufficient to fit — the expiry
+        // becomes quotable/scannable from the next compute pass on.  The
+        // drought/session re-block is the strategy's responsibility.
+        if (m_grid) {
+            ExpiryDataPtr ed = m_grid->getExpiryData(f.expiry);
+            if (ed && !ed->isFitReady()) {
+                ed->setFitReady(true);
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "MarketReadiness: expiry {} ready — vol fit published (curve v{})",
+                    f.expiry, f.version);
+            }
+        }
     }
 }
 
@@ -526,6 +541,45 @@ bool OptionPricer2::initValuesCompute(OptionGrid* grid)
             decay = std::max(0.0, std::min(1.0, decay));
             ed->setExpireGreeksFrac(decay);
         }
+
+        // Market bootstrap for the FIRST fit of an expiry (approved design):
+        // before any accepted fit the vol curve is the uninitialized default
+        // (flat m_defaultVolatility = 0.1), so the stored Greeks that feed
+        // the vol-fit point filter would be computed on a 10%-vol basis —
+        // far below the market level — and the delta band would shrink below
+        // the good-points gate forever (the fit never starts, nothing is ever
+        // priced).  Seed m_atmvol from the median near-ATM mid IV (inverted
+        // by computeImpliedValues on the previous pass) so the stored Greeks
+        // are market-scale until the first fit publishes.  Only runs while no
+        // curve version has been accepted; afterwards the fitted atmVol owns
+        // the scale.
+        if (getCurveVersion(ed->getExpiry()) == 0 && ed->isForwardReady())
+        {
+            const double fwd = ed->getForward();
+            std::vector<double> atmIvs;
+            if (fwd > 0)
+            {
+                for (const auto& sd : grid->getStrikesByExpiry(ed->getExpiry()))
+                {
+                    if (!sd) continue;
+                    const double K = sd->getStrikePrice();
+                    if (std::fabs(std::log(K / fwd)) > 0.03) continue;  // ±3% around forward
+                    for (const OptionData* leg : {sd->call().get(), sd->put().get()})
+                    {
+                        if (!leg) continue;
+                        const double iv = leg->values(getValuesIndex()).impliedVol();
+                        if (iv > 0) atmIvs.push_back(iv);
+                    }
+                }
+            }
+            if (atmIvs.size() >= 3)
+            {
+                std::sort(atmIvs.begin(), atmIvs.end());
+                const double med = atmIvs[atmIvs.size() / 2];
+                if (med >= 0.03 && med <= 1.0 && std::fabs(med - ei->m_atmvol) > 1e-6)
+                    setATMVol(ed->getExpiry(), med);
+            }
+        }
     }
     return true;
 }
@@ -602,8 +656,6 @@ void OptionPricer2::computeValue(OptionData* option)
     double gvv_weight = 0.0;
     if (m_gvv_weight.count(exp))
         gvv_weight = std::max(0.0, std::min(1.0, m_gvv_weight[exp]));
-    if (ed && !ed->isFitReady())
-        gvv_weight = 0.0;
 
     double vol  = spVolCurve  ? (*spVolCurve)(*option, atmforward)  * atmvol : atmvol;
     double vol2 = spVolCurve2 ? (*spVolCurve2)(*option, atmforward) * atmvol : atmvol;
@@ -626,6 +678,13 @@ void OptionPricer2::computeValue(OptionData* option)
     if (!other_od) { values.setPriced(false); return; }
     OptionValues& other_values = other_od->values(getValuesIndex());
     __computeTheoreticalValues(option, other_values, bci.get(), getValuesIndex());
+
+    // Market-readiness: theo/Greeks ARE computed (the stored Greeks feed the
+    // vol-fit point filter), but while the expiry's curve is still the
+    // default/stale one the values must not count as priced — no theo-based
+    // quoting or scanning on a curve that did not come from today's market.
+    if (ed && !ed->isFitReady())
+        values.setPriced(false);
 }
 
 void OptionPricer2::__computeValue(OptionData* otm, OptionData* itm)
@@ -640,8 +699,6 @@ void OptionPricer2::__computeValue(OptionData* otm, OptionData* itm)
     double gvv_weight = 0.0;
     if (m_gvv_weight.count(exp))
         gvv_weight = std::max(0.0, std::min(1.0, m_gvv_weight[exp]));
-    if (ed && !ed->isFitReady())
-        gvv_weight = 0.0;
 
     OptionValues& otmvals = otm->values(getValuesIndex());
     OptionValues& itmvals = itm->values(getValuesIndex());
@@ -658,6 +715,13 @@ void OptionPricer2::__computeValue(OptionData* otm, OptionData* itm)
 
     __computeTheoreticalValues(otm, itmvals, obci.get(), getValuesIndex());
     __computeTheoreticalValues(itm, otmvals, ibci.get(), getValuesIndex());
+
+    // Market-readiness: see computeValue — compute but do not mark priced
+    // while the expiry has no accepted fit for the current market.
+    if (ed && !ed->isFitReady()) {
+        otmvals.setPriced(false);
+        itmvals.setPriced(false);
+    }
 }
 
 bool OptionPricer2::updateTheoreticalValues(OptionData* option)
@@ -670,6 +734,16 @@ bool OptionPricer2::updateTheoreticalValues(OptionData* option)
     }
     OptionValues& values = option->values(getValuesIndex());
     if (!values.isPriced()) return false;
+
+    // Market-readiness: a fitted curve is only trustworthy while the expiry
+    // is fit-ready.  Without this check the FAST path would keep serving
+    // cached priced values (and thus quotes) off a stale/default curve for
+    // up to a whole SLOW interval after a drought re-block.
+    const ExpiryDataPtr& ed = option->getExpiryData();
+    if (ed && !ed->isFitReady()) {
+        values.setPriced(false);
+        return false;
+    }
 
     double F = ei->m_atmforward + __forwardSpreadFor(option, ei->m_atmforward);
     if (std::isnan(F) || EQ(F, 0)) return false;

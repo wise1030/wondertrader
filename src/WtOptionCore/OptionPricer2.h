@@ -108,6 +108,13 @@ public:
     double  vol_fitting_decay_window = 3600.0;
     double  vol_fitting_period       = 60.0;
     double  vol_fitting_threshold    = 0.0;
+    /// P1: fit-candidate selection — the N VALID points NEAREST to the
+    /// forward are fitted (proximity, NOT a delta band: a curve-derived delta
+    /// gate is self-referential and converged to an ATM-flat attractor in
+    /// replay at every tested threshold).  Dead wings never enter because
+    /// only the densest region around the forward is taken; the good-points
+    /// gate (need) still decides market readiness.  <= 0 means "no cap".
+    int32_t vol_fitting_point_count   = 15;
     bool    vol_fitting_to_all_expiries = false;
     int32_t trace_level              = 0;
     bool    use_parallel_for          = false;  // P1: enable via config "use_parallel"

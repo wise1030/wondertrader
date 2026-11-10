@@ -279,6 +279,35 @@ private:
     uint32_t _attrGraceSec = 300;       // done records younger than this are never purged
     uint32_t _curSessionDate = 0;       // owning session for new registry records
 
+    // Scanner throttle (D) — see setupScanners / ControllableTradingGrid
+    double _scanThrottleCooldown = 5.0;   // per-code hit cooldown (seconds)
+    double _scanThrottleGrowth = 0.25;    // refire early only if signal grew >= 25%
+    int32_t _scanMaxActiveCombos = 3;     // concurrent scanner combo cap
+
+    // P2: quoting-duty metric — sim-seconds with trading enabled, accumulated
+    // across state flips; logged at session end (the replay showed quoting
+    // was ~0.05% duty because risk gates kept blocking).
+    double _dutyAccumSec = 0;
+    double _dutyLastT = 0;
+    double _dutySessionStartT = 0;
+
+    /// Market-readiness gate (user-approved design): readiness is a SINGLE
+    /// flag owned by ExpiryData::isFitReady — session open clears it, a
+    /// successful fit publish sets it (OptionPricer2::publishFittedCurves),
+    /// and a sustained point drought (> MIN_FIT_AGE_BEFORE_REBLOCK since the
+    /// last publish) clears it again.  The pricer turns !fitReady into
+    /// priced=false, so CTG quoting and scanner dispatch are gated by the
+    /// existing isPriced() checks — no parallel block set here.
+    /// Hysteresis: time of the last fit publish per expiry — a fresh curve
+    /// survives transient point droughts (seconds of one-sided quotes)
+    /// without yanking resting orders.  Cleared at session open.
+    std::unordered_map<uint32_t, double> _expFitPublishT;
+    static constexpr double MIN_FIT_AGE_BEFORE_REBLOCK = 30.0;  // seconds
+    /// Strategy-side re-block (session open / sustained drought).  The
+    /// unblock side lives in OptionPricer2::publishFittedCurves.  Logs
+    /// transitions only.
+    void setExpiryFitReady(uint32_t exp, bool ready, const char* reason);
+
     // R1: latest exchange price limits per code (from tick feed)
     struct PriceLimit { double upper = 0; double lower = 0; };
     std::unordered_map<std::string, PriceLimit> _priceLimits;

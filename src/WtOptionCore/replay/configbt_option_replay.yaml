@@ -33,6 +33,12 @@ hft:
             maxTPS: 50
             marketFreshTimeoutMs: 3000
 
+            # P1: vega limit sized for the 56-contract chain (measured peak
+            # ~32.5k with default 2-tick quotes; the old 10000 blocked
+            # quoting ~100%% of the time).
+            riskLimits:
+                maxVega: 40000
+
             pricerType: composite_mm
 
             wgt_vegaflow: 0.35
@@ -60,7 +66,8 @@ hft:
                     volCurve:
                         type: gvv
                         fitter:
-                            period: 60
+                            period: 10
+                            point_count: 15
 
             orderManager:
                 option:

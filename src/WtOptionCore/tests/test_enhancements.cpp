@@ -1704,7 +1704,9 @@ void test_async_vol_fitter_publish() {
     for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     ASSERT_TRUE(fitter.hasResult());
-    ASSERT_TRUE(fitter.tryPublish(pricer));
+    std::vector<uint32_t> published;
+    ASSERT_TRUE(fitter.tryPublish(pricer, &published));   // exps out-param
+    ASSERT_TRUE(published.size() == 1u && published[0] == 202612u);
     ASSERT_TRUE(!fitter.tryPublish(pricer));   // result consumed
 
     ASSERT_EQ(pricer.getCurveVersion(202612), 1u);
@@ -1713,6 +1715,104 @@ void test_async_vol_fitter_publish() {
     ASSERT_TRUE(curve->isInitialized());
     const double eval = (*curve)(0.0);
     ASSERT_TRUE(std::isfinite(eval));
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// Market-readiness single flag (user-approved design):
+//  1. priced gate   — fitReady=false: theo/Greeks are computed (the stored
+//                     Greeks feed the vol-fit point filter) but priced=false;
+//                     updateTheoreticalValues must drop cached priced on a
+//                     drought re-block (FAST-cache clearing).
+//  2. atmvol bootstrap — before the first accepted fit, m_atmvol is seeded
+//                     from the median near-ATM mid IV so the stored Greeks
+//                     are market-scale; once a curve version is accepted the
+//                     fitted scale owns it and the bootstrap stops.
+//  3. publish       — publishFittedCurves lifts ExpiryData::isFitReady.
+// ============================================================================
+void test_market_readiness_gate() {
+    std::cout << "=== test_market_readiness_gate ===" << std::endl;
+
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+    wt_option::OptionPricer2Config cfg;
+    wt_option::OptionPricer2 pricer(cfg, grid.get(), risk.get());
+
+    // Underlying + three strikes around forward 4200 with two-sided markets.
+    auto reg = [&](const char* code, double bid, double ask) {
+        OptionGrid::TickDataRef t;
+        t.bid = bid; t.ask = ask; t.price = (bid + ask) * 0.5;
+        t.updateTime = 1000;
+        grid->onTick(code, t);
+    };
+    reg("CFFEX.000300", 4199, 4201);
+    reg("CFFEX.IO2606.C.4100", 150, 160);
+    reg("CFFEX.IO2606.P.4100", 140, 150);
+    reg("CFFEX.IO2606.C.4200", 100, 110);
+    reg("CFFEX.IO2606.P.4200",  95, 105);
+    reg("CFFEX.IO2606.C.4300",  70,  80);
+    reg("CFFEX.IO2606.P.4300",  65,  75);
+
+    auto ed = grid->getExpiryData(202606);
+    ASSERT_TRUE(ed != nullptr);
+    ed->updateDaysToExpiration(20260603, 20260619);
+    ed->setForward(4200.0);
+    ed->setForwardReady(true);
+    pricer.initValuesCompute(grid.get());
+    ASSERT_TRUE(pricer.getATMForward(202606) > 0);
+    ASSERT_TRUE(!ed->isFitReady());
+
+    // --- 2. atmvol bootstrap from stored near-ATM mid IVs (pre-first-fit) ---
+    auto setIv = [&](const char* code, double iv) {
+        grid->get(code)->values(0).setImpliedVol(iv);
+    };
+    setIv("CFFEX.IO2606.C.4100", 0.20); setIv("CFFEX.IO2606.P.4100", 0.21);
+    setIv("CFFEX.IO2606.C.4200", 0.22); setIv("CFFEX.IO2606.P.4200", 0.22);
+    setIv("CFFEX.IO2606.C.4300", 0.24); setIv("CFFEX.IO2606.P.4300", 0.23);
+    pricer.initValuesCompute(grid.get());
+    ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - 0.22) < 1e-9);   // median
+
+    // --- 1. priced gate ---
+    auto od = grid->get("CFFEX.IO2606.C.4200");
+    pricer.computeValue(od.get());
+    ASSERT_TRUE(std::fabs(od->values(0).greeks().delta()) > 1e-6);  // greeks computed
+    ASSERT_TRUE(!od->values(0).isPriced());                          // but unpriced
+
+    ed->setFitReady(true);
+    pricer.computeValue(od.get());
+    ASSERT_TRUE(od->values(0).isPriced());
+
+    // FAST-cache clearing: drought re-block drops cached priced immediately.
+    // Exercised through the public computeValues entry (FAST pass), which is
+    // how the strategy reaches updateTheoreticalValues in production.
+    ed->setFitReady(false);
+    pricer.setTime(1.0);                 // ensure the compute pass actually runs
+    ASSERT_TRUE(pricer.computeValues(grid.get()));
+    ASSERT_TRUE(!od->values(0).isPriced());
+
+    // --- 3. publish lifts fitReady; bootstrap scale freezes after version ---
+    AsyncVolFitter fitter("gvv");
+    VolFitExpirySnapshot s;
+    s.expiry = 202606;
+    s.forward = pricer.getATMForward(202606);
+    s.maturity = pricer.getMaturity(202606);
+    s.atmVol = pricer.getATMVol(202606);          // bootstrapped scale
+    s.version = 1;
+    for (double x : {-0.06, -0.03, 0.0, 0.03, 0.06})
+        s.points.push_back({x, 1.0});
+    ASSERT_TRUE(fitter.submit({s}));
+    for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(fitter.hasResult());
+    std::vector<uint32_t> published;
+    ASSERT_TRUE(fitter.tryPublish(pricer, &published));
+    ASSERT_TRUE(ed->isFitReady());                // publish lifts readiness
+    const double fittedScale = pricer.getATMVol(202606);
+
+    setIv("CFFEX.IO2606.C.4200", 0.40);           // market moves on
+    pricer.initValuesCompute(grid.get());
+    ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - fittedScale) < 1e-12);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -2016,6 +2116,7 @@ int main() {
     test_single_flight_task_runner();
     test_fast_incremental_gamma_correction();
     test_async_vol_fitter_publish();
+    test_market_readiness_gate();
     test_option_config_loader();
     test_optiongrid_market_freshness();
     test_pnl_tracker_session_reset();

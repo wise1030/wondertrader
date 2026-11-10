@@ -84,14 +84,22 @@ public:
     bool hasResult() const { return m_ready.load(std::memory_order_acquire); }
 
     /// Worker-only batch-boundary publish.  Returns false when no completed
-    /// result is available.
-    bool tryPublish(OptionPricer2& pricer) {
+    /// result is available.  When publishedExps is given, it receives the
+    /// expiry of every curve set delivered to the pricer (the pricer may
+    /// still skip individual stale-version sets) — the strategy uses this
+    /// to lift its market-readiness block per expiry.
+    bool tryPublish(OptionPricer2& pricer, std::vector<uint32_t>* publishedExps = nullptr) {
         if (!m_ready.load(std::memory_order_acquire)) return false;
         std::vector<OptionPricer2::FittedCurveSet> result;
         {
             std::lock_guard<std::mutex> lock(m_mtx);
             result.swap(m_result);
             m_ready.store(false, std::memory_order_release);
+        }
+        if (publishedExps) {
+            publishedExps->clear();
+            publishedExps->reserve(result.size());
+            for (const auto& r : result) publishedExps->push_back(r.expiry);
         }
         pricer.publishFittedCurves(result);
         return true;

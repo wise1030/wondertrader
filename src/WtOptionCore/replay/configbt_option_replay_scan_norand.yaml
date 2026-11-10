@@ -1,0 +1,103 @@
+replayer:
+    basefiles:
+        commodity: replay_common/commodities.json
+        contract: replay_common/contracts.json
+        holiday: replay_common/holidays.json
+        hot: replay_common/hots.json
+        session: replay_common/sessions.json
+    fees: replay_common/fees.json
+    stime: 202606020900
+    etime: 202606051500
+    mode: bin
+    path: ../WtBtFutu/storage/
+    tick: true
+
+env:
+    mocker: hft
+    slippage: 0
+
+hft:
+    module: hft/libWtOptionCore.so
+    use_newpx: false
+    error_rate: 0
+    match_this_tick: false
+    strategy:
+        id: opt_mm_cu
+        name: OptionMM
+        params:
+            exchange: SHFE
+            futuresProduct: cu
+            optionProduct: cu_o
+            underlyingCode: SHFE.cu.2607
+            riskFreeRate: 0.03
+            maxTPS: 50
+            marketFreshTimeoutMs: 3000
+
+            # P1: vega limit sized for the 56-contract chain (measured peak
+            # ~32.5k with default 2-tick quotes; the old 10000 blocked
+            # quoting ~100%% of the time).
+            riskLimits:
+                maxVega: 40000
+
+            # 3.6 fill-quality attribution — ON (this is the attr replay
+            # variant of configbt_option_replay.yaml; diff the two files to
+            # see exactly what attribution adds).
+            fillAttribution:
+                enable: true
+                outputDir: outputs_bt/opt_mm_cu
+                keepMaxRecords: 20000
+                graceSeconds: 300
+
+            # A6 scanners: MMScanner ON (edge = |theo-mid| >= min_edge)
+            scanners:
+                - type: MMScanner
+                  name: mm_main
+                  enable: true
+                  priority: 0
+
+            # D: scanner hit throttle — per-code cooldown, refire only when the
+            # edge grew >= 25%, at most 3 combos in flight (pre-fix: 568
+            # hits/s on one contract, 759 combos, 100% failure).
+            scannerThrottle:
+                cooldownSec: 5
+                refireGrowth: 0.25
+                maxActiveCombos: 3
+
+            pricerType: composite_mm
+
+            wgt_vegaflow: 0.35
+            wgt_frontfut_skew: 0.25
+            wgt_deltaflow: 0.20
+            wgt_atmsig: 0.15
+            wgt_rollema: 0.05
+            sticky_base: 0.5
+            improve_retreat_ratio: 3.0
+
+            # NOTE: must be a YAML array (loader iterates expiries->isArray()).
+            # expiry key must match grid's YYYYMM code (202607 for cu2607).
+            expiries:
+                - expiry: 202607
+                  enable: true
+                  delta_min: 0.05
+                  delta_max: 0.95
+
+            pricer:
+                quoting:
+                    numLevels: 1
+                    baseSpread: 2.0
+                    baseQty: 1
+                blackCalc:
+                    volCurve:
+                        type: gvv
+                        fitter:
+                            period: 10
+                            point_count: 15
+
+            orderManager:
+                option:
+                    maxQuoteSize: 5
+                    maxPendingQuotes: 10
+                    maxPosPerStrike: 20
+                future:
+                    maxQuoteSize: 10
+                    maxPendingQuotes: 5

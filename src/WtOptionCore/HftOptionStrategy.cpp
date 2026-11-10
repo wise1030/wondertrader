@@ -981,6 +981,8 @@ void HftOptionStrategy::setupPricer()
                         ? fitterCfg->getDouble("decay_window") : 300.0;
                     p2cfg.vol_fitting_threshold = fitterCfg->has("threshold")
                         ? fitterCfg->getDouble("threshold") : 0.0;
+                    p2cfg.vol_fitting_point_count = fitterCfg->has("point_count")
+                        ? fitterCfg->getInt32("point_count") : 15;
                     p2cfg.vol_fitting_to_all_expiries = fitterCfg->has("fit_all_expiries")
                         ? fitterCfg->getBoolean("fit_all_expiries") : false;
                     WTSVariant* threshCfg = fitterCfg->get("good_points_thresh");
@@ -1245,6 +1247,9 @@ void HftOptionStrategy::setupCTG()
     _ctg = std::make_shared<wt_option::ControllableTradingGrid>(_grid, _traderCtx);
     _ctg->setOTG(_otg.get());
     _ctg->setMaxTransactionsPerSec(_maxTPS);
+    // Market-readiness needs no CTG-side filter: the pricer marks options
+    // priced=false while an expiry has no accepted fit (ExpiryData::isFitReady),
+    // and refresh() already gates quoting on od->values(0).isPriced().
 
     // Wire executors to IHftStraCtx
     _ctg->setQuoteExecutor([this](const std::string& code, double bidP, uint32_t bidQ,
@@ -1784,14 +1789,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     // Check timeout for spread combos
                     auto spread = std::dynamic_pointer_cast<wt_option::SpreadComboOrder>(combo);
                     if (spread && spread->isActive() && spread->checkTimeout()) {
+                        spread->cancelReason = "own timeout (leg never traded — check entrust rejects / replay random-cancel)";
                         spread->cancelAll();
                     }
                     auto syn = std::dynamic_pointer_cast<wt_option::SynComboOrder>(combo);
                     if (syn && syn->isActive() && syn->checkTimeout()) {
+                        syn->cancelReason = "own timeout";
                         syn->cancelAll();
                     }
                     auto sim = std::dynamic_pointer_cast<wt_option::SimulComboOrder>(combo);
                     if (sim && sim->isActive() && sim->checkTimeout()) {
+                        sim->cancelReason = "own timeout";
                         sim->cancelAll();
                     }
                     // Keep active combos AND recently failed/timed-out combos
@@ -2105,6 +2113,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
     // Timer callback - trigger SLOW compute + session scheduling
     cbs.on_timer = [this](uint32_t curDate, uint32_t curTime) {
+        // P2: quoting-duty metric — accumulate sim-seconds while enabled.
+        {
+            const double nowS = _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
+            if (_dutyLastT > 0 && _traderCtx && _traderCtx->enabled.load())
+                _dutyAccumSec += nowS - _dutyLastT;
+            _dutyLastT = nowS;
+        }
+
         // 3.3/3.6: capacity+age purge of finished order records (bound
         // memory).  The age floor (graceSeconds) keeps the late-fill
         // attribution window open across session boundaries.
@@ -2265,6 +2281,22 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // (late fills arriving before this point stay attributed to the
             // session that just ended).
             _curSessionDate = tdate;
+            _dutySessionStartT = _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
+
+            // Market-readiness: yesterday's curves are stale for today's
+            // market.  Clear fit-ready on every expiry until a fresh fit with
+            // sufficient live points publishes — the pricer turns this into
+            // priced=false, so no theo-based quoting/scanning happens on
+            // stale/default curves at the open.
+            if (_grid) {
+                _expFitPublishT.clear();   // yesterday's publish times are irrelevant
+                size_t n = 0;
+                for (const auto& [exp, ed] : _grid->expiries())
+                    if (ed) { setExpiryFitReady(exp, false, "session open — awaiting first fit"); ++n; }
+                if (n > 0)
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "MarketReadiness: {} expiries blocked at session open (awaiting first vol fit)", n);
+            }
             // B20 fix: clear risk-signal latches (PnlLimit panic used to
             // survive across sessions until process restart)
             if (_compositePricer) {
@@ -2316,6 +2348,21 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_valWriter) _valWriter->close();
             // QuoteStatistics: print session summary
             _quoteStats.onSessionEnd();
+            // P2: quoting-duty — sim-seconds the strategy was allowed to
+            // quote, vs the session's sim length.  Low duty WITH visible risk
+            // blocks is expected; low duty WITHOUT blocks means the quote
+            // pipeline itself stalls.
+            {
+                const double sessLen = (_dutySessionStartT > 0)
+                    ? (_timeService.nowSeconds(_ctx) - _dutySessionStartT) : 0.0;
+                const double pct = sessLen > 0 ? 100.0 * _dutyAccumSec / sessLen : 0.0;
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "QuoteDuty session {}: enabled {:.1f}s of {:.1f}s sim ({:.1f}%)",
+                    tdate, _dutyAccumSec, sessLen, pct);
+            }
+            _dutyAccumSec = 0;
+            _dutyLastT = 0;
+            _dutySessionStartT = 0;
             // C5: dump OQM lifetime counters for exchange-report reconciliation
             if (_otg) {
                 std::string path = fmt::format("outputs_option/oqm_counters_{}.csv", tdate);
@@ -2479,10 +2526,27 @@ void HftOptionStrategy::setupScanners()
     };
 
     WTSVariant* scannersCfg = cfgPtr_->has("scanners") ? cfgPtr_->get("scanners") : nullptr;
+    // Market-readiness needs no coordinator-side filter: dispatchOption
+    // skips options whose values are not priced, which the pricer enforces
+    // while an expiry has no accepted fit (ExpiryData::isFitReady).
+
     if (!scannersCfg || !scannersCfg->isArray() || scannersCfg->size() == 0) {
         WTSLogger::log_by_cat("strategy", LL_INFO, "No scanners configured");
         return;
     }
+
+    // D: scanner throttle — per-code cooldown + refire-on-growth at the CTG
+    // hit entry point, plus a cap on concurrent scanner combos.
+    if (cfgPtr_->has("scannerThrottle")) {
+        WTSVariant* tCfg = cfgPtr_->get("scannerThrottle");
+        _scanThrottleCooldown = tCfg->has("cooldownSec") ? tCfg->getDouble("cooldownSec") : 5.0;
+        _scanThrottleGrowth   = tCfg->has("refireGrowth") ? tCfg->getDouble("refireGrowth") : 0.25;
+        _scanMaxActiveCombos  = tCfg->has("maxActiveCombos") ? tCfg->getInt32("maxActiveCombos") : 3;
+    }
+    _ctg->setScannerThrottle(_scanThrottleCooldown, _scanThrottleGrowth);
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "Scanner throttle: cooldown={}s refireGrowth={} maxActiveCombos={}",
+        _scanThrottleCooldown, _scanThrottleGrowth, _scanMaxActiveCombos);
 
     for (uint32_t i = 0; i < scannersCfg->size(); i++) {
         WTSVariant* sCfg = scannersCfg->get(i);
@@ -2553,6 +2617,11 @@ void HftOptionStrategy::setupScanners()
     // legacy call/put sibling spread path.
     _ctg->setScannerExecuteFn([this](const wt_option::ScannerHitEvent& event) {
         if (!_grid) return;
+        // D: bound concurrent scanner combos — each in-flight combo holds
+        // legs and latches; unlimited accumulation was part of the storm.
+        if (_activeCombos.size() >= static_cast<size_t>(_scanMaxActiveCombos)) {
+            return;
+        }
         if (event.legs.size() >= 2) {
             std::vector<wt_option::SimulComboOrder::LegInput> legs;
             legs.reserve(event.legs.size());
@@ -3093,9 +3162,21 @@ bool HftOptionStrategy::submitAsyncVolFit()
         s.version = _blackPricer->getCurveVersion(exp) + 1;
         s.timestamp = now;
 
-        // Quality gates ported from PeriodicCurveFitter::fitToExpiry:
-        // threshold (min mid), and per-side coverage is validated below.
+        // Fit-candidate selection (user-approved design): the candidates are
+        // the N = vol_fitting_point_count VALID points NEAREST to the forward
+        // — NOT a delta band.  A delta band derived from the fitted curve is
+        // self-referential (the curve's own wings decide which points may
+        // shape those same wings) and empirically converged to an ATM-flat
+        // attractor at every tested threshold (0.02/0.01/0.005 → trimmed
+        // 12-14/8-9/9-10 points, permanently below need=15, refits stalled
+        // for 3 days while the market offered 25-28 valid points).  Proximity
+        // selection is curve-independent: no self-reference, no threshold
+        // tuning, and dead wings never enter because only the densest region
+        // around the forward is taken.  Greeks stay computed from the theo
+        // vol — they are NOT used for admission at all.
+        struct FitCand { double dist, K, iv; };
         bool hasUpside = false, hasDownside = false;
+        std::vector<FitCand> cands;
         for (const auto& sd : _grid->getStrikesByExpiry(exp)) {
             if (!sd) continue;
             const wt_option::OptionData* pricing = nullptr;
@@ -3107,20 +3188,51 @@ bool HftOptionStrategy::submitAsyncVolFit()
             if (!pricing) continue;
             if (pricing->getMid() <= thr) continue;      // threshold gate
             const double iv = pricing->values(0).impliedVol();
-            if (iv > 0) {
-                s.points.push_back({sd->getStrikePrice() - fwd, iv / atmVol});
-                if (sd->getStrikePrice() > fwd) hasUpside = true;
-                else hasDownside = true;
-            }
+            if (iv <= 0) continue;                       // IV quality gate
+            const double K = sd->getStrikePrice();
+            cands.push_back({std::fabs(std::log(K / fwd)), K, iv});
+            if (K > fwd) hasUpside = true;
+            else hasDownside = true;
         }
         // good-points gate (days-aware) + ups/downs quadrant gate: a
-        // single-sided smile must not be fitted — it converges to a fake wing.
+        // single-sided market must not be fitted.
         const size_t need = std::max<size_t>(4,
             volFitGoodPointsNeeded(ed->daysToExpiry(), fcfg.vol_fitting_good_points_thresh));
-        if (s.points.size() < need || !hasUpside || !hasDownside) {
+        const size_t ptsUngated = cands.size();
+        if (ptsUngated < need || !hasUpside || !hasDownside) {
             WTSLogger::log_by_cat("strategy", LL_DEBUG,
-                "AsyncVolFitter exp={} skipped: pts={} need={} up={} down={}",
-                exp, s.points.size(), need, hasUpside, hasDownside);
+                "AsyncVolFitter exp={} skipped: ptsU={} need={} up={} down={}",
+                exp, ptsUngated, need, hasUpside, hasDownside);
+            // Market-readiness: insufficient VALID market points — the market
+            // is not ready to be fitted; the pricer maps the cleared flag to
+            // priced=false so nothing quotes/scans on a stale curve.
+            // Hysteresis: a curve published < 30s ago stays authoritative
+            // through transient point droughts (one-sided prints) — only a
+            // sustained drought re-blocks.
+            const auto ptIt = _expFitPublishT.find(exp);
+            if (ptIt == _expFitPublishT.end()
+                || now - ptIt->second >= MIN_FIT_AGE_BEFORE_REBLOCK)
+                setExpiryFitReady(exp, false, "insufficient valid market points");
+            continue;
+        }
+        // Take the N nearest valid points (both sides required among them).
+        std::sort(cands.begin(), cands.end(),
+                  [](const FitCand& a, const FitCand& b) { return a.dist < b.dist; });
+        const size_t take = std::min(cands.size(),
+            static_cast<size_t>(std::max(4, fcfg.vol_fitting_point_count)));
+        bool selUp = false, selDown = false;
+        for (size_t i = 0; i < take; ++i) {
+            s.points.push_back({cands[i].K - fwd, cands[i].iv / atmVol});
+            if (cands[i].K > fwd) selUp = true;
+            else selDown = true;
+        }
+        if (!selUp || !selDown) {
+            // Market IS liquid (ungated set passes) but the nearest-N window
+            // is one-sided (forward near the grid edge) — the last accepted
+            // curve stays authoritative; no readiness block.
+            WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                "AsyncVolFitter exp={} defer: nearest {} pts one-sided (keep last curve)",
+                exp, take);
             continue;
         }
         snapshots.push_back(std::move(s));
@@ -3133,8 +3245,38 @@ bool HftOptionStrategy::submitAsyncVolFit()
 
 void HftOptionStrategy::publishAsyncVolFit()
 {
-    if (_blackPricer)
-        _asyncVolFitter.tryPublish(*_blackPricer);
+    if (_blackPricer) {
+        std::vector<uint32_t> published;
+        if (_asyncVolFitter.tryPublish(*_blackPricer, &published)) {
+            // Record publish times for the drought hysteresis; the readiness
+            // lift itself happens in OptionPricer2::publishFittedCurves.
+            const double now = _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
+            for (uint32_t exp : published)
+                _expFitPublishT[exp] = now;
+            // Force a reprice this batch so the newly published curve (and
+            // the fitReady lift) takes effect immediately instead of waiting
+            // for the next underlying-driven compute.
+            _needsRefresh = true;
+        }
+    }
+}
+
+// ============================================================================
+// Market-readiness gate — strategy side.  Readiness is the single flag
+// ExpiryData::isFitReady: session open and sustained point droughts clear it
+// here; a successful fit publish sets it in OptionPricer2.  The pricer maps
+// !fitReady to priced=false, which gates CTG quoting and scanner dispatch
+// through the existing isPriced() checks — no parallel block set.
+// ============================================================================
+void HftOptionStrategy::setExpiryFitReady(uint32_t exp, bool ready, const char* reason)
+{
+    if (!_grid) return;
+    wt_option::ExpiryDataPtr ed = _grid->getExpiryData(exp);
+    if (!ed || ed->isFitReady() == ready) return;   // log transitions only
+    ed->setFitReady(ready);
+    WTSLogger::log_by_cat("strategy", ready ? LL_INFO : LL_WARN,
+        "MarketReadiness: expiry {} {} — {} (no theo-based quoting/scanning while blocked)",
+        exp, ready ? "ready" : "BLOCKED", reason);
 }
 
 // ============================================================================
