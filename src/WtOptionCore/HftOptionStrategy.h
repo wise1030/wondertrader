@@ -109,6 +109,16 @@ public:
     /// EVERY CZCE option).
     static bool isRawOptionCode(const std::string& rawCode);
 
+    /// Level-triggered quotable-zone query (pure — unit tested).  A section
+    /// is quotable while curSec (mapped into the section timeline) is past
+    /// its open+resumeLag and before its close-stopLead.  Preconditions:
+    /// sections sorted by start, end > start (cross-midnight already
+    /// normalized by adding 86400), gaps between sections larger than
+    /// stopLead + resumeLag (true for exchange session files).
+    static bool isInQuotableZone(uint32_t curSec,
+        const std::vector<std::pair<uint32_t, uint32_t>>& secSecs,
+        int32_t stopLeadSec, int32_t resumeLagSec);
+
 private:
     // Async event processor
     wt_option::OptionAsyncEventProcessorPtr _async;
@@ -228,6 +238,18 @@ private:
     wtp::WTSSessionInfo* _sessionInfo = nullptr;
     int32_t _stopLeadSeconds = 30;      // stop this many seconds before section end
     int32_t _resumeLagSeconds = 0;      // resume this many seconds after section start
+    // B4 level-triggered state: quoting-stop state is DERIVED from absolute
+    // time on every timer event (see isInQuotableZone), not from window-edge
+    // detection — a delayed/dropped timer can no longer lose a whole stop
+    // window.  _b4Primed guards startup: the CTG has been quoting since
+    // on_init, and tradingStopMidDay/resumeTrading are not idempotent (they
+    // fire the session-stop state machine), so the first event only
+    // reconciles a genuinely-stopped state instead of calling both ways.
+    bool _b4Primed = false;
+    /// Trading sections in normalized seconds-of-day; cross-midnight
+    /// sections have end > 86400 (e.g. 2100-0100 -> [75600, 90000]).
+    /// Built once from WTSSessionInfo on the first timer event.
+    std::vector<std::pair<uint32_t, uint32_t>> _secSecs;
     bool _sessionStopped = false;       // currently in session-stop state
 
     // B2: Risk-free rate curve
@@ -284,12 +306,19 @@ private:
     double _scanThrottleGrowth = 0.25;    // refire early only if signal grew >= 25%
     int32_t _scanMaxActiveCombos = 3;     // concurrent scanner combo cap
 
-    // P2: quoting-duty metric — sim-seconds with trading enabled, accumulated
-    // across state flips; logged at session end (the replay showed quoting
-    // was ~0.05% duty because risk gates kept blocking).
+    // P2: quoting-duty metric — enabled sim-seconds vs the session's
+    // tick-active window (first→last timer payload time).  ALL references
+    // are enqueue-side payload times (secOfDay + midnight-wrap base):
+    // processing-time clocks jitter run-to-run and made the ratio
+    // irreproducible (observed 25.8% vs 100% same-day variance), and the
+    // scheduled section sum is wrong here — one trading-date session spans
+    // night+day (~18h wall) so enabled can exceed it.
     double _dutyAccumSec = 0;
-    double _dutyLastT = 0;
-    double _dutySessionStartT = 0;
+    double _dutyEpochBase = 0;      // +86400 per midnight wrap (payload clock)
+    double _dutyLastSimT = 0;       // last payload sim-time (accumulation ref)
+    double _dutyWinStartT = 0;      // first timer payload time of the session
+    double _dutyWinEndT = 0;        // last timer payload time of the session
+    uint32_t _dutyLastSecOfDay = 0; // last payload secOfDay (wrap detector)
 
     /// Market-readiness gate (user-approved design): readiness is a SINGLE
     /// flag owned by ExpiryData::isFitReady — session open clears it, a

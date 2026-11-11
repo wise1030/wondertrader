@@ -2117,13 +2117,25 @@ void HftOptionStrategy::setupAsyncCallbacks()
     };
 
     // Timer callback - trigger SLOW compute + session scheduling
-    cbs.on_timer = [this](uint32_t curDate, uint32_t curTime) {
-        // P2: quoting-duty metric — accumulate sim-seconds while enabled.
+    cbs.on_timer = [this](uint32_t curDate, uint32_t curSecOfDay) {
+        // P2: quoting-duty metric — accumulate ENQUEUE-side payload seconds
+        // (secOfDay + midnight-wrap base), not processing-time clocks:
+        // queueing delay then cannot skew the ratio run-to-run.  The state
+        // sampled is `_traderCtx->enabled` as-is: Panic keeps enabled=true
+        // (quoting continues in protective mode), which is intentional —
+        // QuoteDuty measures whether the quote pipeline runs at all, not
+        // whether it runs cleanly (panic share is visible in TradingState
+        // logs).
         {
-            const double nowS = _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
-            if (_dutyLastT > 0 && _traderCtx && _traderCtx->enabled.load())
-                _dutyAccumSec += nowS - _dutyLastT;
-            _dutyLastT = nowS;
+            if (_dutyLastSecOfDay > 0 && curSecOfDay < _dutyLastSecOfDay)
+                _dutyEpochBase += 86400.0;   // midnight wrap
+            const double simNow = _dutyEpochBase + static_cast<double>(curSecOfDay);
+            if (_dutyLastSimT > 0 && _traderCtx && _traderCtx->enabled.load())
+                _dutyAccumSec += simNow - _dutyLastSimT;
+            _dutyLastSimT = simNow;
+            _dutyLastSecOfDay = curSecOfDay;
+            if (_dutyWinStartT <= 0) _dutyWinStartT = simNow;
+            _dutyWinEndT = simNow;
         }
 
         // 3.3/3.6: capacity+age purge of finished order records (bound
@@ -2132,76 +2144,91 @@ void HftOptionStrategy::setupAsyncCallbacks()
         _orderRegistry.purgeDone(_attrKeepMaxRecs, static_cast<double>(_attrGraceSec));
 
         // B4: Session-based mid-day stop/resume scheduling.
-        // Uses the underlying commodity WTSSessionInfo sections to detect
-        // section boundaries. Stops quoting stopLeadSeconds before a section
-        // ends, resumes resumeLagSeconds after a section starts.
+        // Level-triggered: curSec is the ENQUEUE-time seconds-of-day carried
+        // in the event payload (never read live here — see the enqueue site).
         if (_sessionInfo && _ctg && _traderCtx) {
-            uint32_t hh = curTime / 100;
-            uint32_t mm = curTime % 100;
-            uint32_t ss = 0;
-            if (_ctx) {
-                uint32_t ssms = _ctx->stra_get_secs();
-                ss = ssms / 1000;
-            }
-            uint32_t curSec = hh * 3600 + mm * 60 + ss;
+            const uint32_t curSec = curSecOfDay;
 
             const auto& sections = _sessionInfo->getTradingSections();
-            for (const auto& sec : sections) {
-                uint32_t startSec = (sec.first_raw / 100) * 3600 + (sec.first_raw % 100) * 60;
-                uint32_t endSec   = (sec.second_raw / 100) * 3600 + (sec.second_raw % 100) * 60;
-
-                // Stop stopLeadSeconds before section end
-                if (!_sessionStopped && curSec >= (endSec - _stopLeadSeconds) && curSec < endSec) {
+            // B4 (level-triggered): derive the desired quoting state from the
+            // absolute time on EVERY timer event instead of detecting section
+            // window edges.  A timer delayed under load fires the transition
+            // late-but-never-never (previously a window with no processed
+            // timer lost the stop or the resume for the whole section —
+            // observed as QuoteDuty 25.8% vs 100% run-to-run).
+            if (_secSecs.empty()) {
+                for (const auto& sec : sections) {
+                    uint32_t s = (sec.first_raw / 100) * 3600 + (sec.first_raw % 100) * 60;
+                    uint32_t e = (sec.second_raw / 100) * 3600 + (sec.second_raw % 100) * 60;
+                    if (e <= s) e += 86400;      // cross-midnight (2100-0100)
+                    _secSecs.emplace_back(s, e);
+                }
+            }
+            const bool wantQuote = isInQuotableZone(curSec, _secSecs,
+                                                    _stopLeadSeconds, _resumeLagSeconds);
+            if (!_b4Primed) {
+                // Startup reconcile (first timer event ever): the CTG has
+                // been quoting since on_init.  If the market is already
+                // inside a stop zone, stop NOW (real transition, safe); if
+                // it is quotable, do nothing — _sessionStopped is already
+                // false and resumeTrading() must NOT be called without a
+                // preceding stop (the session-stop state machine is not
+                // idempotent).
+                _b4Primed = true;
+                if (!wantQuote) {
                     _ctg->tradingStopMidDay();
                     _sessionStopped = true;
                     WTSLogger::log_by_cat("strategy", LL_WARN,
-                        "Session stop: section {}-{}, curSec={} lead={}s",
-                        sec.first_raw, sec.second_raw, curSec, _stopLeadSeconds);
+                        "Session stop (startup reconcile): curSec={} not in quotable zone",
+                        curSec);
                 }
-                // Resume resumeLagSeconds after section start
-                if (_sessionStopped && curSec >= (startSec + _resumeLagSeconds)
-                    && curSec < (endSec - _stopLeadSeconds)) {
-                    _ctg->resumeTrading();
-                    _sessionStopped = false;
-                    disarmCloseFlatten();
-                    WTSLogger::log_by_cat("strategy", LL_INFO,
-                        "Session resume: section {}-{}, curSec={} lag={}s",
-                        sec.first_raw, sec.second_raw, curSec, _resumeLagSeconds);
-                }
+            } else if (wantQuote && _sessionStopped) {
+                _ctg->resumeTrading();
+                _sessionStopped = false;
+                disarmCloseFlatten();
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "Session resume: curSec={} lag={}s", curSec, _resumeLagSeconds);
+            } else if (!wantQuote && !_sessionStopped) {
+                _ctg->tradingStopMidDay();
+                _sessionStopped = true;
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "Session stop: curSec={} lead={}s", curSec, _stopLeadSeconds);
             }
 
-            // Close-flatten arming (user requirement): the close times come
-            // from the FRAMEWORK session info via the median-gap rule (see
-            // computeCloseSectionEnds) — no strategy-layer close times.  The
-            // strategy only configures how long before the close to start
-            // (delta_hedge.flatten_lead_seconds).  This is independent of the
-            // B4 quoting stop: quoting stops on its own schedule, the hedge
-            // channel keeps working regardless (checkDeltaHedge is not gated
-            // on _traderCtx->enabled).
+            // Close-flatten arming (level-triggered, same rationale): arm
+            // while curSec is within (C - lead, C] before each daily close C
+            // (derived from the framework session info via the median-gap
+            // rule), and disarm on the FIRST event past C — an unfilled
+            // flatten order must be pulled the moment the close passes, not
+            // up to 120s later (a resting order can be matched by the
+            // reopening tick at a stale level).  The disarm branch is the
+            // exact complement of the arm branch; in particular it must NOT
+            // key on "any close already passed today" — that predicate is
+            // true all day long and would disarm/re-arm every timer event
+            // inside the arm window (observed: 239 oscillations per replay).
             if (_deltaHedgeEnable && _closeFlattenLead > 0) {
                 if (!_closeSectionEndsComputed)
                     computeCloseSectionEnds();
-                if (_closeFlattenActive) {
-                    // The close has passed: pull any unfilled flatten order
-                    // NOW — before the reopening tick can match it at a stale
-                    // level (disarm-on-resume alone fires too late).
-                    for (uint32_t closeEnd : _closeSectionEnds) {
-                        if (curSec >= closeEnd && curSec < closeEnd + 120) {
-                            disarmCloseFlatten();
-                            break;
-                        }
+                uint32_t windowClose = 0;
+                bool inArmZone = false;
+                for (uint32_t closeEnd : _closeSectionEnds) {
+                    const double dClose = static_cast<double>(closeEnd)
+                                        - static_cast<double>(curSec);
+                    if (dClose <= _closeFlattenLead && dClose > 0) {
+                        inArmZone = true;
+                        windowClose = closeEnd;
+                        break;
                     }
-                } else {
-                    for (uint32_t closeEnd : _closeSectionEnds) {
-                        const uint32_t leadSec = static_cast<uint32_t>(_closeFlattenLead);
-                        if (curSec + leadSec >= closeEnd && curSec < closeEnd) {
-                            _closeFlattenActive = true;
-                            WTSLogger::log_by_cat("strategy", LL_INFO,
-                                "Close flatten armed: {}s before daily close (section end {}s), hedging portfolio delta to 0",
-                                leadSec, closeEnd);
-                            break;
-                        }
-                    }
+                }
+                if (inArmZone && !_closeFlattenActive) {
+                    _closeFlattenActive = true;
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "Close flatten armed: {}s before daily close (section end {}s), hedging portfolio delta to 0",
+                        (uint32_t)_closeFlattenLead, windowClose);
+                } else if (!inArmZone && _closeFlattenActive) {
+                    disarmCloseFlatten();
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "Close flatten disarmed: close passed, pulling unfilled orders");
                 }
             }
         }
@@ -2322,7 +2349,16 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // (late fills arriving before this point stay attributed to the
             // session that just ended).
             _curSessionDate = tdate;
-            _dutySessionStartT = _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
+            // QuoteDuty window resets: the denominator is derived at session
+            // end from the FIRST/LAST timer payload times of the session
+            // (tick-active window) — both payload-based, so the ratio is
+            // reproducible across runs.
+            {
+                _dutyWinStartT = 0;
+                _dutyWinEndT = 0;
+                _dutyLastSimT = 0;      // numerator restarts at the first timer event
+                _dutyLastSecOfDay = 0;  // (wrap detector reset; epoch base carries)
+            }
 
             // Market-readiness: yesterday's curves are stale for today's
             // market.  Clear fit-ready on every expiry until a fresh fit with
@@ -2390,21 +2426,22 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_valWriter) _valWriter->close();
             // QuoteStatistics: print session summary
             _quoteStats.onSessionEnd();
-            // P2: quoting-duty — sim-seconds the strategy was allowed to
-            // quote, vs the session's sim length.  Low duty WITH visible risk
+            // P2: quoting-duty — enabled sim-seconds (pipeline running, panic
+            // included by design) vs the session's tick-active window
+            // (first→last timer payload time).  Low duty WITH visible risk
             // blocks is expected; low duty WITHOUT blocks means the quote
             // pipeline itself stalls.
             {
-                const double sessLen = (_dutySessionStartT > 0)
-                    ? (_timeService.nowSeconds(_ctx) - _dutySessionStartT) : 0.0;
-                const double pct = sessLen > 0 ? 100.0 * _dutyAccumSec / sessLen : 0.0;
+                const double winSec = (_dutyWinEndT > _dutyWinStartT)
+                    ? (_dutyWinEndT - _dutyWinStartT) : 0.0;
+                const double pct = winSec > 0 ? 100.0 * _dutyAccumSec / winSec : 0.0;
                 WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "QuoteDuty session {}: enabled {:.1f}s of {:.1f}s sim ({:.1f}%)",
-                    tdate, _dutyAccumSec, sessLen, pct);
+                    "QuoteDuty session {}: enabled {:.1f}s of {:.1f}s tick-active ({:.1f}%)",
+                    tdate, _dutyAccumSec, winSec, pct);
             }
             _dutyAccumSec = 0;
-            _dutyLastT = 0;
-            _dutySessionStartT = 0;
+            _dutyWinStartT = 0;
+            _dutyWinEndT = 0;
             // C5: dump OQM lifetime counters for exchange-report reconciliation
             if (_otg) {
                 std::string path = fmt::format("outputs_option/oqm_counters_{}.csv", tdate);
@@ -2727,7 +2764,15 @@ void HftOptionStrategy::on_tick(IHftStraCtx* ctx, const char* code, WTSTickData*
         secOfDay < _lastTimerSecOfDay ||
         (secOfDay - _lastTimerSecOfDay) >= 0.1)
     {
-        _async->enqueue_timer(curDate, ctx->stra_get_time());
+        // Timer payload = whole seconds-of-day AT ENQUEUE (not HHMM, and not
+        // seconds read live in the callback): the worker may run the callback
+        // batches later, and mixing a minute-resolution enqueue stamp with
+        // live-read seconds produced non-monotonic curSec around midnight
+        // (observed: B4 resume at 00:59:00 processed AFTER a stop at
+        // 00:59:31, close-flatten arm/disarm oscillation).  Payload time +
+        // FIFO delivery make the level-triggered scheduling decisions
+        // exactly reproducible.
+        _async->enqueue_timer(curDate, static_cast<uint32_t>(secOfDay));
         _lastTimerDate = curDate;
         _lastTimerSecOfDay = secOfDay;
     }
@@ -3496,6 +3541,27 @@ double HftOptionStrategy::resolveDeltaPerLot()
             _primaryHedgeCode);
     }
     return 0.0;
+}
+
+// ============================================================================
+// Level-triggered quotable-zone query (B4).  Pure function — see header for
+// the contract.  curSec is mapped into each section's own timeline (adding
+// 86400 to early-morning seconds for cross-midnight sections) so open-lag and
+// close-lead compare correctly around midnight.
+// ============================================================================
+bool HftOptionStrategy::isInQuotableZone(uint32_t curSec,
+    const std::vector<std::pair<uint32_t, uint32_t>>& secSecs,
+    int32_t stopLeadSec, int32_t resumeLagSec)
+{
+    for (const auto& [s, e] : secSecs) {
+        uint32_t t = curSec;
+        if (t < s && e > 86400 && t < e - 86400)
+            t += 86400;
+        if (t >= s + static_cast<uint32_t>(resumeLagSec)
+            && t < e - static_cast<uint32_t>(stopLeadSec))
+            return true;
+    }
+    return false;
 }
 
 void HftOptionStrategy::disarmCloseFlatten()

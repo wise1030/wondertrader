@@ -2081,6 +2081,47 @@ void test_delta_hedge_decide() {
     std::cout << "  PASS" << std::endl;
 }
 
+// B4 level-triggered quotable-zone: SHFE-style sections with a cross-midnight
+// night session (2100-0100 normalized to [75600, 90000]).
+void test_session_quotable_zone() {
+    std::cout << "=== test_session_quotable_zone ===" << std::endl;
+    using HOS = ::HftOptionStrategy;
+    const std::vector<std::pair<uint32_t, uint32_t>> shfe = {
+        {32400, 36900},   // 09:00-10:15
+        {37800, 41400},   // 10:30-11:30
+        {48600, 54000},   // 13:30-15:00
+        {75600, 90000},   // 21:00-01:00 (cross-midnight, +86400)
+    };
+    const int32_t lead = 30, lag = 0;
+
+    // inside a day section, away from both edges
+    ASSERT_TRUE(HOS::isInQuotableZone(33000, shfe, lead, lag));
+    // inside the cross-midnight night session, both sides of midnight
+    ASSERT_TRUE(HOS::isInQuotableZone(80000, shfe, lead, lag));   // 22:13
+    ASSERT_TRUE(HOS::isInQuotableZone(3500,  shfe, lead, lag));   // 00:58
+    // stop-lead zone before section end
+    ASSERT_TRUE(!HOS::isInQuotableZone(36880, shfe, lead, lag));  // 10:14:40
+    ASSERT_TRUE(!HOS::isInQuotableZone(3590,  shfe, lead, lag));  // 00:59:50
+    // lunch break / night break / pre-open
+    ASSERT_TRUE(!HOS::isInQuotableZone(42000, shfe, lead, lag));  // 11:40 lunch
+    ASSERT_TRUE(!HOS::isInQuotableZone(4000,  shfe, lead, lag));  // 01:06
+    ASSERT_TRUE(!HOS::isInQuotableZone(30000, shfe, lead, lag));  // 08:20
+    // resume-lag zone right after section open
+    ASSERT_TRUE(!HOS::isInQuotableZone(32410, shfe, lead, 30));   // 09:00:10, lag=30
+    ASSERT_TRUE(HOS::isInQuotableZone(32430, shfe, lead, 30));    // 09:00:30
+    // night-session open with lag: 21:00:10 not quotable, 21:00:30 is
+    ASSERT_TRUE(!HOS::isInQuotableZone(75610, shfe, lead, 30));
+    ASSERT_TRUE(HOS::isInQuotableZone(75630, shfe, lead, 30));
+    // CFFEX single-session market
+    const std::vector<std::pair<uint32_t, uint32_t>> cffex = {
+        {34200, 45000},   // 09:30-12:30
+        {48600, 56700},   // 13:30-15:45
+    };
+    ASSERT_TRUE(HOS::isInQuotableZone(35000, cffex, lead, lag));
+    ASSERT_TRUE(!HOS::isInQuotableZone(46000, cffex, lead, lag));
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2108,6 +2149,7 @@ int main() {
     test_command_bus();
     test_trading_state_flags();
     test_delta_hedge_decide();
+    test_session_quotable_zone();
     test_dynamic_otg_wiring();
     test_otg_gateway_senders();
     test_time_service_midnight_rollover();
