@@ -999,6 +999,19 @@ void HftOptionStrategy::setupPricer()
                                     item->getDouble("thresh");
                             }
                         }
+                        // Semantic-mismatch warning (R3): need (readiness bar)
+                        // and point_count (fit window) are independent knobs.
+                        // A need > point_count bucket means the market must
+                        // prove deeper than the window we actually fit —
+                        // legal, but usually a config slip; say so once.
+                        for (const auto& [days, thresh] : p2cfg.vol_fitting_good_points_thresh) {
+                            if (thresh > p2cfg.vol_fitting_point_count) {
+                                WTSLogger::log_by_cat("strategy", LL_WARN,
+                                    "VolFitter: good_points_thresh[{}d]={} > point_count={} — "
+                                    "readiness bar above the fit window (legal, likely unintended)",
+                                    days, thresh, p2cfg.vol_fitting_point_count);
+                            }
+                        }
                     }
                 }
             }
