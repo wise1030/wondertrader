@@ -3,9 +3,11 @@
  * \brief Async Event Processor for Option Market-Making
  *
  * P0-A fix: Double-queue architecture to fix SPSC multi-producer UB.
- * - _md_queue (SPSC): tick + timer events from MD callback thread (single producer)
- * - _trader_queue (mutex vector): trade/order/position/session/channel events
- *   from trader SPI thread and/or framework main thread (multi-producer safe)
+ * - _md_queue (SPSC): tick events from MD callback thread (single producer)
+ * - _trader_queue (mutex vector): trade/order/position/session/channel/timer
+ *   events from trader SPI / framework threads (multi-producer safe).
+ *   The timer rides here deliberately: it is the session-scheduling
+ *   heartbeat and must survive MD saturation (drained first, never dropped).
  *
  * Worker drains both queues into a unified batch, preserving the original
  * processing order: session → channel → position → trade → order → timer → tick.
@@ -58,7 +60,11 @@ struct AsyncCallbacks {
     std::function<void(const std::string& code, uint32_t localid, bool isBuy, double vol, double price)> on_trade;
     std::function<void(const std::string& code, uint32_t localid, bool isBuy,
                        double totalQty, double leftQty, double price, bool isCanceled)> on_order;
-    std::function<void(uint32_t curDate, uint32_t curTime)> on_timer;
+    /// (curDate, secondsOfDay) — secondsOfDay is the ENQUEUE-time
+    /// seconds-of-day carried in the payload (0..86399), NOT HHMM and NOT
+    /// seconds read live at dispatch; scheduling decisions must be
+    /// reproducible from the payload alone.
+    std::function<void(uint32_t curDate, uint32_t secondsOfDay)> on_timer;
     std::function<void(uint32_t tdate, bool isBegin)> on_session;
     std::function<void(const std::string& code, bool isLong,
                        double prevol, double preavail,

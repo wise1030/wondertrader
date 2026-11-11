@@ -37,41 +37,63 @@ static bool wait_until(const std::atomic<uint32_t>& value, uint32_t target) {
     return value.load() >= target;
 }
 
-// Fairness (D): trader events now get a guaranteed quota (256 of 1024) in
-// EVERY batch, drained BEFORE the MD queue — a large timer/tick backlog can
-// no longer starve them.  Also covers the requeue path: a trader batch larger
-// than the quota is requeued to the front and delivered exactly once.
-void test_trader_suffix_requeued_exactly_once() {
-    std::cout << "=== test_trader_suffix_requeued_exactly_once ===" << std::endl;
+// Fairness (D) + timer reliability: the trader queue (timer included) is
+// drained FIRST with a guaranteed quota (256 of 1024) in EVERY batch —
+// a large MD backlog can no longer starve it, and the session-scheduling
+// timer rides the trader queue so MD saturation can neither delay it past
+// its window nor drop it.  Also covers the requeue path: a trader batch
+// larger than the quota is requeued to the front and delivered exactly once.
+void test_timer_survives_md_saturation_and_trader_requeue() {
+    std::cout << "=== test_timer_survives_md_saturation_and_trader_requeue ===" << std::endl;
 
     OptionAsyncEventProcessor proc;
     std::atomic<uint32_t> timerCount{0};
+    std::atomic<uint32_t> timerBatch{0};   // batch index at which the timer fired
     std::vector<uint32_t> tradeIds;
     std::mutex idsMtx;
     std::atomic<uint32_t> processedCount{0};
 
     AsyncCallbacks cbs;
-    cbs.on_timer = [&](uint32_t, uint32_t) { timerCount.fetch_add(1); };
+    cbs.on_timer = [&](uint32_t, uint32_t) {
+        timerBatch.store(processedCount.load() + 1);
+        timerCount.fetch_add(1);
+    };
     cbs.on_trade = [&](const std::string&, uint32_t id, bool, double, double) {
         std::lock_guard<std::mutex> lock(idsMtx);
         tradeIds.push_back(id);
     };
     cbs.on_batch_complete = [&]() { processedCount.fetch_add(1); };
     proc.setCallbacks(cbs);
+
+    // Saturate the MD side BEFORE the worker starts: 5000 ticks in the
+    // overflow buffer (production path: tick bursts fill ring + overflow).
+    for (uint32_t i = 0; i < 5000; ++i) {
+        auto tick = OptionAsyncEventProcessor::AsyncEvent::make_control();
+        tick.type = OptionAsyncEventProcessor::AsyncEvent::Tick;
+        tick.setCode("SHFE.cu2607");
+        tick.tick.bid = 50000.0 + i;
+        proc.push_md_overflow(std::move(tick));
+    }
+
     proc.start();
 
-    // 1023 timers nearly fill the 1024 batch; 300 trades exceed the 256-slot
-    // trader quota.  Pre-fix the timer backlog starved the trader suffix.
-    for (uint32_t i = 0; i < 1023; ++i)
-        proc.enqueue_timer(20261030, 900 + i);
+    // One timer + 300 trades (300 > 256 quota → suffix requeued to front).
+    // Pre-fix the timer shared the MD queue: it would land BEHIND all 5000
+    // ticks (5+ batches of pure market data before the session-scheduling
+    // heartbeat ran — enough to lose a 30s stop window under real load).
+    proc.enqueue_timer(20261030, 900);
     for (uint32_t i = 0; i < 300; ++i)
         proc.enqueue_trade(1000 + i, "SHFE.ag2601", true, 1, 4000.0);
 
     for (int i = 0; i < 500; ++i) {
-        if (tradeIds.size() >= 300 && timerCount.load() >= 1023) break;
+        if (tradeIds.size() >= 300 && timerCount.load() >= 1) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    ASSERT_TRUE(wait_until(timerCount, 1023));
+    ASSERT_TRUE(wait_until(timerCount, 1));
+    // The timer is dispatched in the FIRST batch: the trader queue drains
+    // before any MD event, and 301 trader events fit the 256-quota drain of
+    // at most two batches even with a 5000-tick backlog.
+    ASSERT_TRUE(timerBatch.load() <= 2);
     {
         std::lock_guard<std::mutex> lock(idsMtx);
         ASSERT_EQ(tradeIds.size(), 300u);
@@ -85,13 +107,20 @@ void test_trader_suffix_requeued_exactly_once() {
     std::cout << "  PASS" << std::endl;
 }
 
-// MD overflow must stay bounded while retaining the newest tick per contract.
+// Timers are control-class now (trader queue, never dropped) but the MD
+// overflow must still stay bounded while retaining the newest tick per
+// contract; fill it with ticks as production would.
 void test_md_overflow_coalesces_ticks_by_code() {
     std::cout << "=== test_md_overflow_coalesces_ticks_by_code ===" << std::endl;
 
     OptionAsyncEventProcessor proc;
-    for (size_t i = 0; i < OptionAsyncEventProcessor::kMaxOverflow; ++i)
-        proc.push_md_overflow(OptionAsyncEventProcessor::AsyncEvent::make_timer(20261030, 900));
+    for (size_t i = 0; i < OptionAsyncEventProcessor::kMaxOverflow; ++i) {
+        auto t = OptionAsyncEventProcessor::AsyncEvent::make_control();
+        t.type = OptionAsyncEventProcessor::AsyncEvent::Tick;
+        t.setCode(("SHFE.fill" + std::to_string(i)).c_str());
+        t.tick.bid = static_cast<double>(i);
+        proc.push_md_overflow(std::move(t));
+    }
 
     ASSERT_EQ(proc._md_overflow.size(), OptionAsyncEventProcessor::kMaxOverflow);
 
@@ -243,7 +272,7 @@ int main() {
     std::cout << "WtOptionCore Async Event Processor Tests" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    test_trader_suffix_requeued_exactly_once();
+    test_timer_survives_md_saturation_and_trader_requeue();
     test_md_overflow_coalesces_ticks_by_code();
     test_trader_events_preserve_fifo_order();
     test_control_event_wakes_quiet_worker();

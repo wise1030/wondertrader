@@ -200,19 +200,18 @@ void OptionAsyncEventProcessor::enqueue_tick(const char* stdCode, WTSTickData* n
 void OptionAsyncEventProcessor::enqueue_timer(uint32_t curDate, uint32_t curTime)
 {
     if (!_worker_running) return;
-    AsyncEvent ev = AsyncEvent::make_timer(curDate, curTime);
-    if (!_md_queue.push(ev)) {
-        // Timers are periodic and do not carry per-contract state; a bounded
-        // drop under saturation is acceptable and observable via drops.
-        std::lock_guard<std::mutex> lock(_md_overflow_mtx);
-        if (_md_overflow.size() < kMaxOverflow) {
-            _md_overflow.push_back(std::move(ev));
-        } else {
-            _queue_drops.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    _total_events.fetch_add(1, std::memory_order_relaxed);
-    _worker_cv.notify_one();
+    // The timer is the session-scheduling heartbeat (B4 stop/resume,
+    // close-flatten arming, margin/delta-hedge guards, vol-fit trigger).
+    // It must NOT ride the MD SPSC ring: under tick saturation the ring and
+    // overflow fill with ticks and the timer is delayed past its window or
+    // dropped outright (observed: a whole session-stop window lost, QuoteDuty
+    // 25.8% vs 100% run-to-run).  The trader queue is drained FIRST in every
+    // batch with a guaranteed quota and never drops control-class events, so
+    // the timer is always dispatched within one batch (~ms).  Source-side it
+    // is already merged to 100ms by the strategy, so the mutex here costs
+    // nothing.  Batch dispatch order is unchanged: dispatchEvents still runs
+    // trader events first, then timers, then the deduped tick set.
+    enqueue_trader_event(AsyncEvent::make_timer(curDate, curTime));
 }
 
 //=============================================================================
@@ -263,9 +262,13 @@ bool OptionAsyncEventProcessor::push_trader(AsyncEvent&& ev)
     // keeps quoting on a dead channel; dropping an entrust-reject leaves a
     // phantom order that blocks its price level forever.  They bypass the
     // capacity gate entirely (they are rare and tiny, so the queue only
-    // exceeds the cap by their count).
+    // exceeds the cap by their count).  Timer rides the same exemption: it
+    // is the session-scheduling heartbeat (B4 stop/resume, close-flatten
+    // arming, margin/hedge guards) — a dropped timer silently loses a
+    // session-stop window or a close flatten.
     const bool isControl = ev.type == AsyncEvent::Session || ev.type == AsyncEvent::Channel
-                           || ev.type == AsyncEvent::Entrust  || ev.type == AsyncEvent::Custom;
+                           || ev.type == AsyncEvent::Entrust  || ev.type == AsyncEvent::Custom
+                           || ev.type == AsyncEvent::Timer;
 
     std::unique_lock<std::mutex> lock(_trader_mtx);
 
