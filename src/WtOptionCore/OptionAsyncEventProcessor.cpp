@@ -155,11 +155,12 @@ void OptionAsyncEventProcessor::stop()
     }
     if (_worker.joinable()) _worker.join();
 
-    // D: shutdown drain.  Events still queued when the worker exits are real
+    // Shutdown drain: events still queued when the worker exits are real
     // facts (session ends, fills, entrust rejects) — processing them keeps
-    // the strategy state consistent through teardown.  Remaining MD ticks are
-    // market data whose consumers are being torn down: drop them.
-    _draining = true;
+    // the strategy state consistent through teardown; the caller guarantees
+    // callbacks are still valid (strategy teardown happens after stop()
+    // returns).  Remaining MD ticks are market data whose consumers are
+    // being torn down: drop them.
     std::vector<AsyncEvent> remaining;
     {
         std::lock_guard<std::mutex> lock(_trader_mtx);

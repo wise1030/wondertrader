@@ -184,9 +184,6 @@ public:
     // Worker thread
     std::thread _worker;
     std::atomic<bool> _worker_running;
-    // D: set before join so the final drain in stop() runs while callbacks
-    // are still valid (strategy teardown happens after stop() returns).
-    std::atomic<bool> _draining{false};
     std::condition_variable _worker_cv;
     std::mutex _worker_sleep_mtx;  // mutex for cv wait only (not for queue access)
 
