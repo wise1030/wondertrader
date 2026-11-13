@@ -190,6 +190,19 @@ set(OPTION_CORE_HEADERS
 
 add_library(WtOptionCore SHARED ${OPTION_CORE_SOURCES} ${OPTION_CORE_HEADERS})
 
+# Warnings (audit 2026-11-13 v2 T1-7): full -Wall/-Wextra on the library in
+# every build type.  Two deliberate, documented relaxations:
+#  - Framework interface headers (Includes/Share/WTSTools/WTSUtils) are
+#    SYSTEM includes: 687 of 1132 initial warnings were attributed to them,
+#    and the module workflow forbids editing framework files — -isystem
+#    silences header-attributed diagnostics without touching them.
+#  - -Wno-unused-parameter: 439 of the 445 own-code warnings were unused
+#    parameters in virtual/interface implementations whose names exist for
+#    documentation (callbacks, vol-curve operator() args). Zero-value churn
+#    at that scale; the real classes (unused/dead variables etc.) are fixed
+#    to zero instead.
+target_compile_options(WtOptionCore PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
 # PERF: Aggressive optimization for HFT low-latency
 # -O3: maximum optimization level
 # -march=x86-64-v3: AVX2/FMA without binding to the build host CPU
@@ -212,12 +225,14 @@ endif()
 
 target_include_directories(WtOptionCore PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../build_all/compat_inc
+    ${INCS}
+)
+target_include_directories(WtOptionCore SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../Includes
     ${CMAKE_CURRENT_SOURCE_DIR}/../Share
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSTools
     ${CMAKE_CURRENT_SOURCE_DIR}/../WTSUtils
-    ${CMAKE_CURRENT_SOURCE_DIR}/../build_all/compat_inc
-    ${INCS}
 )
 
 # 插件边界: WtOptionCore 是 HFT 引擎上的策略插件, 头文件只依赖 Includes/*;

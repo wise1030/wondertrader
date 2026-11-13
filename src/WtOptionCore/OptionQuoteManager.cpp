@@ -8,7 +8,7 @@
 #include "OptionQuoteManager.h"
 #include "PositionOffsetMgr.h"
 #include "PositionGuard.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -583,6 +583,10 @@ void OptionQuoteManager::onFill(uint32_t localid, bool isLong,
         double now = m_getTime();
         if ((now - m_lastUpdateCycleTime) > LATE_FILL_THRESHOLD) {
             lateFill = true;
+            // Audit 2026-11-13 (v2 T1-7): late-fill detection is computed
+            // but not yet consumed downstream (no behavioral change here);
+            // void-cast to keep the instrumentation explicit.
+            (void)lateFill;
             m_numLateFills++;
             WTSLogger::log_by_cat("strategy", LL_WARN,
                 "OQM late fill: {} {}@{} ({}s after update cycle #{})",

@@ -20,7 +20,7 @@
 #include "GvvVolCurve.h"
 #include "BlackImpliedCalculator.h"  // wt_option::Brent
 #include "OptionData.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <iostream>
 #include <cmath>
@@ -348,8 +348,6 @@ bool GvvVolCurve::fit(const IVolCurve::dataset_t& src_pts)
 
     dataset_t points = src_pts;
     std::sort(points.begin(), points.end(), comp);
-    size_t n = points.size();
-
     // No alloc/free needed — WLS3 is stack-only
 
     double atmvol2, skew, kurt;

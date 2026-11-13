@@ -62,8 +62,6 @@ double LinearVolCurve::eval(double xi) const
     if (!m_bInitialized)
         return 1.0;
 
-    auto upper_point = m_points.begin();
-
     if (LE(xi, m_minXpt.first)) // left wing extrapolation
     {
         if (!std::isnan(m_maturity) && LE(m_maturity, 1.0 / 252))

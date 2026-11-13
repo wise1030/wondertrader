@@ -15,7 +15,7 @@
  * - OptionTradingData is wired to OptionData via OptionTradingGrid.
  * - UnderlyingTradingData is wired to ExpiryData via setHedgeUTD().
  */
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 #include "CompositeOptionPricer.h"
 #include "OptionPricer2.h"
 #include "OptionGrid.h"
@@ -368,7 +368,6 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
             decayGreeks(itm.get());
         }
 
-        uint32_t exp = ed ? ed->getExpiry() : 0;
         // OTD counters not available without OptionTradingGrid wiring; skip accumulation
     }
 
@@ -1247,8 +1246,6 @@ bool CompositeOptionPricer::updateOurMarketSideFuture(
     const ExpiryRiskConfig& erc) {
     if (!utd) return false;
     MultiMarket& multmkt = utd->ourMarket();
-    bool td_active = utd->isActive();
-
     if (side == BID) {
         PriceSize old_bid = multmkt.getBest(BID);
         bool valid = erc.enable && (bid_size > 0);

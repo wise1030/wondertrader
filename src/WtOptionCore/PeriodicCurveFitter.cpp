@@ -22,7 +22,7 @@
 #include "OptionPricer2.h"
 #include "ExpiryData.h"
 #include "OptionData.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -200,9 +200,6 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
         const IVolCurvePtr& volcurve  = m_spBlackPricer->getVolCurve(exp);
         const IVolCurvePtr& volcurve2 = m_spBlackPricer->getVolCurve2(exp);
         const IVolCurvePtr& fwdcurve  = m_spBlackPricer->getFwdCurve(exp);
-
-        // 2. maturity
-        double mat = m_spBlackPricer->getMaturity(exp);
 
         // 3. atm_vol — safe for 0/1 points and forwards outside the fitted range
         double atm_vol = 0.0;
