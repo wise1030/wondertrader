@@ -39,8 +39,9 @@ cd "$RUNNER_DIR"
 # of truth) and the run continues with a warning.
 YAML="${YAML:-configbt_option_replay.yaml}"   # e.g. YAML=configbt_option_replay_attr.yaml
 # Fresh logs for a fresh run: the gate below must analyze THIS run only, so
-# clear previous Runner logs (they are reproducible from the replay).
-rm -f Logs/Runner_*.log
+# clear previous Runner logs (they are reproducible from the replay).  Same
+# for the AEP metrics CSV sidecar (it is a per-run ledger, not a history).
+rm -f Logs/Runner_*.log outputs_bt/aep_metrics.csv
 for f in "$YAML"; do
   if ! cmp -s "$SCRIPT_DIR/$f" "$f"; then
     echo "NOTE: $f differs from src/ copy — refreshing"

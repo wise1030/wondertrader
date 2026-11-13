@@ -2466,12 +2466,36 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // (drops/depths), not only a one-time design argument; batch
             // latency percentiles are cumulative since strategy start.
             if (_async) {
+                const uint64_t totalEv = _async->totalEvents();
+                const uint64_t dropsDelta = _async->queueDrops() - _aepDropsSessionStart;
+                const size_t ovfDepth = _async->mdOverflowDepth();
+                const size_t trdDepth = _async->traderDepth();
+                const double p50 = _batchLatencyUs.p50();
+                const double p95 = _batchLatencyUs.p95();
                 WTSLogger::log_by_cat("strategy", LL_INFO,
                     "AEP session {}: events={} dropsDelta={} mdOverflowDepth={} traderQueueDepth={} batchLatency p50={:.0f}us p95={:.0f}us",
-                    tdate, _async->totalEvents(),
-                    _async->queueDrops() - _aepDropsSessionStart,
-                    _async->mdOverflowDepth(), _async->traderDepth(),
-                    _batchLatencyUs.p50(), _batchLatencyUs.p95());
+                    tdate, totalEv, dropsDelta, ovfDepth, trdDepth, p50, p95);
+                // CSV sidecar: the log line above can race process exit
+                // (spdlog flush_every(2s), no flush API exposed) and lose the
+                // FINAL session's row.  An ofstream with explicit close is
+                // deterministic, and the append-only ledger accumulates
+                // across sessions for run-over-run comparison.  The replay
+                // script clears it per run, same as the Runner logs.
+                const char* csvPath = "outputs_bt/aep_metrics.csv";
+                {
+                    std::ifstream probe(csvPath);
+                    const bool needHeader = !probe.good();
+                    probe.close();
+                    std::ofstream csv(csvPath, std::ios::app);
+                    if (csv) {
+                        if (needHeader)
+                            csv << "tdate,totalEvents,dropsDelta,mdOverflowDepth,traderQueueDepth,batchP50Us,batchP95Us\n";
+                        csv << tdate << ',' << totalEv << ',' << dropsDelta << ','
+                            << ovfDepth << ',' << trdDepth << ','
+                            << static_cast<uint64_t>(p50 + 0.5) << ','
+                            << static_cast<uint64_t>(p95 + 0.5) << '\n';
+                    }
+                }
             }
             // C5: dump OQM lifetime counters for exchange-report reconciliation
             if (_otg) {
