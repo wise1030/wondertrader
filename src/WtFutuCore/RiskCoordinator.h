@@ -51,6 +51,13 @@ public:
     bool checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bool in_cooloff);
 
 private:
+    /// §20.9 批 2(2026-11-12): halt 期硬闸监视子集 —— 恢复被拒/仍 halt 的 else 分支内
+    ///   调用。持仓硬顶/日亏盯市在 halt 期继续评估, 恶化到 IRREVERSIBLE 类别即升级
+    ///   (升级链与正常 HALT 路径一致)。报价闸门与恢复求值照旧跳过 (19.16 原则③不变);
+    ///   closeout 窗口由入口提前 return 覆盖 (平仓期持仓有意非零, 不监视)。
+    void _monitorHardGatesWhileHalted(wtp::IUftStraCtx* ctx, const TickContext& tc);
+
+private:
     ApplicationDeps _deps;  // 19.33: 按值切片 (消费点 _deps.xxx 零改动)
     std::unordered_map<std::string, uint64_t> _last_taker_reduce;   // 2a: taker 限频
     RiskLiquidator _liquidator;                  // 2b: 统一强平原语 (从 coordinator 迁入)

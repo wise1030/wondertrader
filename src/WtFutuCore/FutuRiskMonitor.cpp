@@ -159,13 +159,17 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
     const PortfolioParams& params = portfolio->getParams();
     uint64_t ts = _current_time.load(std::memory_order_relaxed);
 
+    // §20.7-S1: 单次取锁取全部聚合 (原 delta/gross/pnl 三次独立取锁);
+    // 大锁基线下本调用期间无置脏源, 值与逐 getter 完全一致。
+    const auto agg = portfolio->getAggregates();
+
     //==========================================================================
     // Delta 相关：软指标 + 硬限制
     // 软指标(<=delta_critical_mult)：用于 skew 偏移和对冲决策，仅日志
     // 硬限制(>delta_critical_mult)：产生 DELTA BREACH violation，触发风控动作
     // 利用率通过 SpreadOptimizer 的 computeDeltaAwareSkew 自动调整报价
     //==========================================================================
-    double delta = portfolio->getTotalDelta();
+    double delta = agg.total_delta;
     double absDelta = std::abs(delta);
 
     recordDeltaSnapshot(delta, ts);
@@ -213,7 +217,7 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
     // 使用getTotalGrossExposure替代getTotalExposure
     // 跨品种多空不能简单对冲，毛暴露更准确反映实际风险
     //==========================================================================
-    double exposure = portfolio->getTotalGrossExposure();
+    double exposure = agg.gross_exposure; // §20.7-S1: 复用入口快照
     // max_exposure > 0 防护: 配 0 表示禁用, 否则 exposure>0 恒真 → 每 tick 误报
     if (params.max_exposure > 0 && exposure > params.max_exposure) {
         RiskViolation v;
@@ -235,7 +239,7 @@ void FutuRiskMonitor::checkRiskLimits(const FutuPortfolio* portfolio, std::vecto
     //==========================================================================
     // 硬指标：Daily Loss（不可逆，需人工干预）
     //==========================================================================
-    double pnl = portfolio->getTotalPnL();
+    double pnl = agg.total_pnl; // §20.7-S1: 复用入口快照
     // max_loss > 0 防护: 配 0 表示禁用, 否则任何浮亏都触发 IRREVERSIBLE halt
     if (params.max_loss > 0 && pnl < -params.max_loss) {
         RiskViolation v;
@@ -476,7 +480,7 @@ RiskAction FutuRiskMonitor::determineActionWithCategory(const std::vector<RiskVi
 void FutuRiskMonitor::haltTrading(RiskCategory category, double pnl_snapshot)
 {
     _trading_halted.store(true, std::memory_order_relaxed);
-    HaltReasons::raise(HR_RISK_HALT); // F-core P1-6 阶段 1: 原因位图镜像 (影子)
+    _hrRaise(HR_RISK_HALT); // §20.9 批 1: 实例位图镜像 (替代原进程级 static)
     // V8-R6/WS-A: halt 域多字段复合写入收编 (写者含 arb 线程 handleRiskAlert)
     RecursiveSpinGuard _g(_halt_domain_lock);
     _halt_category.store(category, std::memory_order_release);
@@ -500,7 +504,7 @@ bool FutuRiskMonitor::resumeTrading()
     }
 
     _trading_halted.store(false, std::memory_order_relaxed);
-    HaltReasons::clear(HR_RISK_HALT); // F-core P1-6 阶段 1
+    _hrClear(HR_RISK_HALT); // §20.9 批 1: 实例位图
     _halt_timestamp = 0;
     broadcastAlert("TRADING_RESUMED", "Trading resumed after risk normalized");
     return true;
@@ -517,7 +521,7 @@ void FutuRiskMonitor::pauseQuoting()
     }
     RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     _pause_timestamp = _current_time.load(std::memory_order_relaxed);
-    HaltReasons::raise(HR_QUOTING_PAUSED); // F-core P1-6 阶段 1
+    _hrRaise(HR_QUOTING_PAUSED); // §20.9 批 1: 实例位图
     broadcastAlert("QUOTING_PAUSED", "Quoting paused due to risk limits");
 }
 
@@ -534,7 +538,7 @@ void FutuRiskMonitor::resumeQuoting()
     }
     RecursiveSpinGuard _g(_halt_domain_lock); // V8-R6/WS-A
     _pause_timestamp = 0;
-    HaltReasons::clear(HR_QUOTING_PAUSED); // F-core P1-6 阶段 1
+    _hrClear(HR_QUOTING_PAUSED); // §20.9 批 1: 实例位图
     broadcastAlert("QUOTING_RESUMED", "Quoting resumed after risk normalized");
 }
 
@@ -755,16 +759,16 @@ void FutuRiskMonitor::resetDaily()
     _long_blocked.store(false, std::memory_order_relaxed);
     _short_blocked.store(false, std::memory_order_relaxed);
     _quoting_paused.store(was_irreversible, std::memory_order_relaxed); // Stay paused if IRREVERSIBLE
-    // F-core P1-6 阶段 1: 原因位图镜像 (与上方三个标志逐一同步)
+    // F-core P1-6 阶段 1 / §20.9 批 1: 原因位图镜像 (与上方三个标志逐一同步)
     if (was_irreversible) {
-        HaltReasons::raise(HR_RISK_HALT);
-        HaltReasons::raise(HR_QUOTING_PAUSED);
+        _hrRaise(HR_RISK_HALT);
+        _hrRaise(HR_QUOTING_PAUSED);
     } else {
-        HaltReasons::clear(HR_RISK_HALT);
-        HaltReasons::clear(HR_QUOTING_PAUSED);
+        _hrClear(HR_RISK_HALT);
+        _hrClear(HR_QUOTING_PAUSED);
     }
-    HaltReasons::clear(HR_LONG_BLOCKED);
-    HaltReasons::clear(HR_SHORT_BLOCKED);
+    _hrClear(HR_LONG_BLOCKED);
+    _hrClear(HR_SHORT_BLOCKED);
     // _halt_category is preserved (not reset to REVERSIBLE)
     _halt_timestamp = 0;
     _pause_timestamp = 0;
@@ -808,8 +812,8 @@ bool FutuRiskMonitor::clearIrreversible()
     _halt_category.store(RiskCategory::REVERSIBLE, std::memory_order_release);
     _trading_halted.store(false, std::memory_order_relaxed);
     _quoting_paused.store(false, std::memory_order_relaxed);
-    HaltReasons::clear(HR_RISK_HALT); // F-core P1-6 阶段 1
-    HaltReasons::clear(HR_QUOTING_PAUSED);
+    _hrClear(HR_RISK_HALT); // §20.9 批 1: 实例位图
+    _hrClear(HR_QUOTING_PAUSED);
     _halt_timestamp = 0;
     _pause_timestamp = 0;
     _was_loss_triggered = false;

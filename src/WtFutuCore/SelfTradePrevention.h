@@ -57,7 +57,7 @@ struct StpConfig
     // 2026-09-19③ 批次E: 删除 allow_same_price/price_adjust_ticks/strategy/min_price_gap
     // 四个死字段 —— 实际判定链 UnifiedOrderTracker::checkSelfTrade 只读 stp_enabled
     // (价格比较 <=/>= 天然含同价), 价差/策略/同价容忍语义从未实现 (DIAGNOSTIC_REPORT_V10
-    // 已预警 "配了不生效, 最误导"); stpMinPriceGap 死链: coordinator.yaml→StpConfig→
+    // §4, 已归档 docs/archive/ — 已预警 "配了不生效, 最误导"); stpMinPriceGap 死链: coordinator.yaml→StpConfig→
     // _config.modules→UnifiedTrackerConfig, 三层传递零消费。
 
     StpConfig() : enabled(true) {}

@@ -19,6 +19,9 @@
  * 已知事实（本次审计）：`isQuotingPaused` 此前**没有任何报价门禁**（唯一读点在 RiskCoordinator
  * 的恢复判定），即 pauseQuoting 置位后报价路径并不读取它；`union`/`bits` 模式下该原因才会真正
  * 参与门禁 —— 这是从 legacy 切到 union 时**唯一新增的行为变化**，激活前需在影子期确认。
+ *
+ * §20.9 批 1（2026-11-12）: `blocked/statusLine` 改由调用方传入本策略实例位图
+ * （`TradingState::haltReasons().raw()`）—— 位图已从进程级 static 实例化，HaltGate 不再持有位图。
  */
 #pragma once
 
@@ -81,22 +84,23 @@ public:
 
     /// 门禁统一求值。
     /// @param legacy_blocked 该门禁点原本的判定（既有标志/相位算出的"禁止"）
+    /// @param bits           本策略实例的原因位图 (`TradingState::haltReasons().raw()`;
+    ///                       §20.9 批 1 起位图 per-strategy, 不再读进程级 static)
     /// @return 是否禁止（true = 禁止报价/报单）
-    static bool blocked(bool legacy_blocked)
+    static bool blocked(bool legacy_blocked, uint64_t bits)
     {
         switch (mode())
         {
         case HaltGateMode::LEGACY: return legacy_blocked;
-        case HaltGateMode::UNION: return legacy_blocked || HaltReasons::blocked();
-        case HaltGateMode::BITS: return HaltReasons::blocked();
+        case HaltGateMode::UNION: return legacy_blocked || bits != 0;
+        case HaltGateMode::BITS: return bits != 0;
         default: return legacy_blocked;
         }
     }
 
     /// 供巡检/KPI: 当前位图与模式的人读串
-    static std::string statusLine()
+    static std::string statusLine(uint64_t bits)
     {
-        const uint64_t bits = HaltReasons::raw();
         std::string s = "mode=";
         s += modeName(mode());
         s += " reasons=";

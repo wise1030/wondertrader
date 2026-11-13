@@ -223,8 +223,10 @@ void FutuPortfolio::markShadowStale(const std::string& code)
 {
     RecursiveSpinGuard _g(_lock);
     ContractState* cs = getContract(code);
-    if (cs)
+    if (cs) {
         cs->shadow_stale = true;
+        _shadow_stale_total.fetch_add(1, std::memory_order_relaxed); // §20.9 批 4: KPI 计数
+    }
 }
 
 void FutuPortfolio::clearShadowStale(const std::string& code)

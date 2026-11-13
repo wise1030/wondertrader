@@ -23,6 +23,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 #include <cstdint>
 #include <cmath>
 #include <chrono>
@@ -162,7 +163,7 @@ struct UnifiedTrackerConfig
     //   tracker 侧唯一用途 = STALE 订单延寿判定阈值(ticks), 独立成键。
     double stale_extension_ticks;
     uint32_t max_cancel_rate;
-    uint32_t pending_cancel_timeout_ms; ///< B+: 撤单重试间隔 (默认 300ms, 超时重发而非遗忘)
+    uint32_t pending_cancel_timeout_ms; ///< B+: 撤单重试基线间隔/退避基数 (默认 300ms; §20.8-B2 起第 n 次重试间隔 = base<<n, 指数退避)
     uint32_t cancel_max_retries;        ///< B+: 撤单最大重试次数, 达到后置 IS_ZOMBIE (默认 3)
 
     // Self-trade prevention
@@ -406,10 +407,14 @@ public:
     void markPendingCancel(uint32_t orderId, CancelReason reason, uint64_t now = 0)
     {
         RecursiveSpinGuard _g(_lock);
-        UnifiedOrderInfo* order = getOrderByOrderId(orderId);
-        if (order && !order->isPendingCancel()) {
+        auto it = _order_index.find(orderId);
+        if (it == _order_index.end())
+            return;
+        UnifiedOrderInfo* order = &_orders[it->second];
+        if (!order->isPendingCancel()) {
             // B+: active→pendingCancel, 仍计入全源 pending (撤单未确认前敞口未消)
             order->setPendingCancel(reason, now);
+            _pending_cancel_slots.insert(it->second); // §20.7-S2
         }
     }
 
@@ -419,21 +424,29 @@ public:
     bool tryMarkPendingCancel(uint32_t orderId, CancelReason reason, uint64_t now = 0)
     {
         RecursiveSpinGuard _g(_lock);
-        UnifiedOrderInfo* order = getOrderByOrderId(orderId);
-        if (!order || order->isPendingCancel())
+        auto it = _order_index.find(orderId);
+        if (it == _order_index.end())
+            return false;
+        UnifiedOrderInfo* order = &_orders[it->second];
+        if (order->isPendingCancel())
             return false;
 
         order->setPendingCancel(reason, now);
+        _pending_cancel_slots.insert(it->second); // §20.7-S2
         return true;
     }
 
     void clearPendingCancel(uint32_t orderId)
     {
         RecursiveSpinGuard _g(_lock);
-        UnifiedOrderInfo* order = getOrderByOrderId(orderId);
-        if (order && order->isPendingCancel()) {
+        auto it = _order_index.find(orderId);
+        if (it == _order_index.end())
+            return;
+        UnifiedOrderInfo* order = &_orders[it->second];
+        if (order->isPendingCancel()) {
             // B+: pending 未在 mark 时扣减, 此处无需加回
             order->clearPendingCancel();
+            _pending_cancel_slots.erase(it->second); // §20.7-S2
         }
     }
 
@@ -547,6 +560,9 @@ public:
     /// 调用方据此释放 zombie 已清零合约的 halt 闩锁 (retainZombieHalts)。
     const std::vector<std::string>& getAliveZombieContracts() const { return _zombie_alive_buf; }
 
+    /// §20.8-B3: 长闩锁升级诊断 — 指定合约当前挂起的 zombie 单号清单 (锁内拷贝)。
+    std::vector<std::string> getZombieOrderIds(const std::string& code) const;
+
     /// B+: 通道恢复锚点 - 清空 zombie 集合 (untrack 所有 IS_ZOMBIE 单, 清升级去重表)。
     /// 撤不掉的残留交引擎侧持仓对账 (登录 queryOrders/queryPosition 重建)。
     /// B+ 修复(P1-2): 返回被 untrack 的 zombie 订单 id -- 调用方需 (a) 引擎侧补发
@@ -609,6 +625,9 @@ public:
         _order_place_times.clear();
         _cancel_timestamps.clear();
         _orders_by_code.clear();
+        _active_by_code.clear();      // §20.7-S2
+        _pending_cancel_slots.clear();
+        _zombie_slots.clear();
         _mm_buy_by_code.clear();
         _mm_sell_by_code.clear();
         _pending_buy_all.clear();  // F9
@@ -657,6 +676,7 @@ private:
     std::vector<CancelAction> _actions_buf;
     std::vector<size_t> _active_indices_buf;
     std::vector<uint32_t> _stale_buf;
+    std::vector<uint32_t> _stale_slots_buf; // §20.7-S2: scan1 内待迁移 zombie 的槽位
 
     // Place times for lifetime calculation
     wtp::wt_hashmap<uint32_t, uint64_t> _order_place_times;
@@ -666,6 +686,15 @@ private:
 
     // Per-contract indices (lightweight - only order IDs)
     wtp::wt_hashmap<std::string, std::vector<uint32_t>> _orders_by_code;
+
+    // §20.7-S2: 活跃槽位索引 — 消除 checkAutoCancel 每 tick×每合约对 _orders
+    //   的全量扫描。std::set 保持槽位升序 = 原全扫的相对顺序 (逐比特等价前提)。
+    //   维护点: trackOrderInternal(加) / untrackOrder(清三者) / mark|tryMark|
+    //   setPendingCancel(入 pending) / clearPendingCancel(出 pending) /
+    //   checkAutoCancel 内 setZombie(pending→zombie)。全部在 _lock 内。
+    wtp::wt_hashmap<std::string, std::set<uint32_t>> _active_by_code; // scan3: 全部 active 槽位
+    std::set<uint32_t> _pending_cancel_slots; // scan1: active && pendingCancel && !zombie
+    std::set<uint32_t> _zombie_slots;         // scan2: active && zombie
 
     // F9: 全源 pending 增量计数 (track/untrack/updateQty 状态变迁时维护),
     //   getPending*QtyAllSources 从每 tick 遍历+hash 降为 O(1) 查询。

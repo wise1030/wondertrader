@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ApplicationDeps.h"  // 19.33: 统一聚合
+#include "ZombieLatchPolicy.h"  // §20.8-B1/B3: 闩锁计时策略 (steady 时钟, 可单测)
 #include <string>
 #include <cstdint>
 #include <memory>
@@ -66,6 +67,7 @@ struct TickContext
     uint64_t timestamp;
     uint32_t time_hms;
     uint32_t date;
+    uint32_t secs_in_min; ///< §20.7-S3: 入口一次性 stra_get_secs()/1000, 全链复用
 
     bool is_trading_session;
     bool market_state_paused;
@@ -182,6 +184,13 @@ struct CoordinatorConfig
     uint32_t closeout_max_retries;       // closeout 最大重试次数
     uint32_t closeout_retry_interval_ms; // closeout 重试间隔
 
+    // §20.9 批 3(2026-11-12): OrderRouter 分源限速 (原 FutuModuleAssembler 硬编码;
+    //   默认=历史值 30/30/0/1000, 行为零变化; yaml 键 orderRouter.* 可选覆盖)
+    uint32_t router_arb_rate_per_sec;      // Source::ARBITRAGE 限速 (0=不限)
+    uint32_t router_hedge_rate_per_sec;    // Source::HEDGING
+    uint32_t router_closeout_rate_per_sec; // Source::CLOSEOUT
+    uint32_t router_rate_window_ms;        // 限速窗口
+
     bool perf_enabled;
     uint32_t perf_log_interval;          // propagated from config.yaml via FutuMmConfig
     uint32_t perf_warn_threshold_ns;     // propagated from config.yaml via FutuMmConfig
@@ -217,6 +226,8 @@ struct CoordinatorConfig
           param_update_interval(100), closeout_minutes_before(5), close_time(150000),
           closeout_flatten_position(true), night_close_time(0), night_minutes_before(5),
           closeout_max_retries(3), closeout_retry_interval_ms(5000), perf_enabled(true),
+          router_arb_rate_per_sec(30), router_hedge_rate_per_sec(30),
+          router_closeout_rate_per_sec(0), router_rate_window_ms(1000),
           perf_log_interval(1000), perf_warn_threshold_ns(10000), perf_critical_threshold_ns(50000),
           perf_alert_throttle_ms(300000), perf_monitor_latency_threshold(100000),
           bilateral_stats_log_interval_sec(300),
@@ -432,6 +443,13 @@ private:
     uint64_t _halt_shadow_mismatch = 0;      ///< 累计不一致次数 (入 KPI)
     uint64_t _last_halt_shadow_bits = 0;     ///< 上次位图 (仅用于抑制重复 WARN)
     uint64_t _last_halt_shadow_legacy = 0;   ///< 上次 legacy 集合 (同上)
+
+    /// §20.9 批 1: 本策略实例 halt 位图读点 (_trading_state 未接线时回退空位图)
+    uint64_t _haltBits() const
+    {
+        return _trading_state ? _trading_state->haltReasons().raw() : 0;
+    }
+    uint64_t _last_shadowstale = 0; ///< §20.9 批 4: 上次 KPI 行打印时的 shadowstale 累计 (求窗口增量)
     uint64_t _nan_tick_cnt = 0;                 // v7.7 C3: nan tick 计数 (原 static thread_local)
     uint64_t _limit_skip_cnt = 0;               // 锁板单边盘口 skip 计数 (日志节流)
     uint64_t _last_pause_diag_ms = 0;           // 上次shouldPause诊断日志时间戳(ms)
@@ -476,13 +494,13 @@ private:
     uint64_t _last_bilateral_silence_warn_ms{0}; ///< 19.26 F3②: 统计沉默告警节流(10min)
 
     // F-core Z3(2026-09-15): zombie 闩锁生命周期观测与限时重探
-    //   _zombie_latch_ms: code -> 本进程首次置位时刻(ms); isZombieHalted==false 即清除
-    //   (Md 线程单写: processAutoCancel 为唯一触碰点, 无需加锁)
+    //   _zombie_latch_ms: code -> 上次重探的 tick 时刻(ms), 仅作重探倒计时;
+    //   isZombieHalted==false 即清除 (Md 线程单写: processAutoCancel 唯一触碰点, 无需加锁)
     std::unordered_map<std::string, uint64_t> _zombie_latch_ms;
-    // F-core B1(2026-09-16): 闩锁单调起点 (emplace 首次置位, 永不重置) —— 遥测/封顶以此计时;
-    //   _zombie_latch_ms 退化为"重探倒计时". capped 集合保证 EXCEEDED 告警每闩锁一次.
-    std::unordered_map<std::string, uint64_t> _zombie_latch_since_ms;
-    std::unordered_set<std::string> _zombie_latch_capped;
+    // §20.8-B1/B3(2026-11-02): 计时原点/封顶/长闩锁升级收编 ZombieLatchPolicy —
+    //   原点用 steady 墙钟 (抗 MdSpi 积压灌水, 10-22 实证), "本次连续持有"语义;
+    //   原 _zombie_latch_since_ms(emplace 永不重置) 与 _zombie_latch_capped 由该类承接。
+    ZombieLatchPolicy _zombie_latch_policy;
     uint64_t _last_zombie_tele_ms = 0;
     // F-core S1(2026-09-15): hedge_ratio 慢化 EMA (skew driver 纯化, Md 线程单写)
     std::unordered_map<std::string, double> _hr_slow;

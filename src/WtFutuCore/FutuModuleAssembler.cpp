@@ -378,15 +378,19 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     _order_router = std::make_unique<OrderRouter>();
     _order_router->setOrderTracker(_order_tracker.get());
 
-    // 设置限速：套利30单/秒，对冲10单/秒，平仓不限速
-    _order_router->setRateLimit(Source::ARBITRAGE, 30, 1000);
-    _order_router->setRateLimit(Source::HEDGING, 30, 1000);
-    _order_router->setRateLimit(Source::CLOSEOUT, 0, 1000); // 0 = 不限速
+    // 设置限速：套利/对冲 N 单每秒，平仓不限速（§20.9 批 3: 硬编码→配置键 orderRouter.*，
+    //   默认 30/30/0/1000 = 批前行为; 历史注释"对冲10单/秒"系笔误，代码自始 30 —— 2026-11-12 裁决以代码为准）
+    const CoordinatorConfig& router_cc = _coordinator->getConfig(); // 本段局部引用 (cc 主引用在 section 6 定义)
+    _order_router->setRateLimit(Source::ARBITRAGE, router_cc.router_arb_rate_per_sec, router_cc.router_rate_window_ms);
+    _order_router->setRateLimit(Source::HEDGING, router_cc.router_hedge_rate_per_sec, router_cc.router_rate_window_ms);
+    _order_router->setRateLimit(Source::CLOSEOUT, router_cc.router_closeout_rate_per_sec, router_cc.router_rate_window_ms); // 0 = 不限速
 
     deps.order_router = _order_router.get();
     deps.router = _order_router.get();        // 19.33: RiskLiquidator 窄接口别名
     deps.trading_state = &_trading_state;  // 19.33: 提前填充, orchestrator 切片前置消费
-    WTSLogger::info("OrderRouter: initialized (arb=30/s, hedge=30/s, closeout=unlimited)");
+    WTSLogger::info("OrderRouter: initialized (arb={}/s, hedge={}/s, closeout={}/s, window={}ms)",
+                    router_cc.router_arb_rate_per_sec, router_cc.router_hedge_rate_per_sec,
+                    router_cc.router_closeout_rate_per_sec, router_cc.router_rate_window_ms);
 
     //------------------------------------------------------------
     // 5.7 CloseoutExecutor（渐进式收盘对冲执行器）
@@ -450,6 +454,9 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     closeout_cfg.night_close_time = cc.night_close_time;
     closeout_cfg.night_minutes_before = cc.night_minutes_before;
     _risk_monitor->setCloseoutConfig(closeout_cfg);
+    // §20.9 批 1: 注入本策略 halt 原因位图 (owner = 策略壳 _trading_state;
+    //   替代原进程级 static, 修复双策略共享污染 11-06 根因)
+    _risk_monitor->setHaltReasons(&s._trading_state.haltReasons());
 
     WTSLogger::info("FutuRiskMonitor: maxOrdersPerSec={}, maxCancelsPerSec={}, cooldownMs={}, recoveryThreshold={}, "
                     "maxDeltaChangePerSec={}",
@@ -463,6 +470,8 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     if (_coordinator) {
         deps.risk_monitor = _risk_monitor.get();
     }
+    // §20.9 批 1: 本策略位图随 deps 下发 (RiskCoordinator rate-breach 镜像消费)
+    deps.halt_reasons = &s._trading_state.haltReasons();
 
     // 19.33: CloseoutOrchestrator 切片改由统一聚合下发 (消灭 orch_deps 第二填充源)。
     // 与 RiskMonitor 同链 (FutuConfigMap→CoordinatorConfig), 消灭最后的直读双链。
@@ -532,13 +541,6 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
     } else if (_config.modules.use_market_making) {
         WTSLogger::info("SignalAggregator: skipped (use_signal_aggregator=false, using legacy architecture)");
     }
-
-    //------------------------------------------------------------
-    // 8. MicroAlphaEngine（已移除）
-    // 新架构 (SignalAggregator) 已包含所有 Alpha 信号计算
-    // MicroAlphaEngine 不再需要，已完全移除
-    //------------------------------------------------------------
-    WTSLogger::info("MicroAlphaEngine: DISABLED (SignalAggregator handles all alpha signals)");
 
     //------------------------------------------------------------
     // 9. ToxicFlowDetector（毒性流动检测器）(仅做市)
@@ -627,11 +629,11 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         if (_spread_arb_manager->loadConfig(arb_cfg_path)) {
             WTSLogger::info("SpreadArbitrageManager: loaded config from {}", arb_cfg_path);
         } else {
-            // 加载失败，使用默认配置
+            // 加载失败，使用默认配置（§20.9 批 3: 兜底仓位改取配置字段, 默认=历史硬编码 20.0）
             SpreadArbitrageConfig arb_cfg;
             arb_cfg.enabled = true;
             arb_cfg.enhance_market_making = true;
-            arb_cfg.max_total_position = 20.0;
+            arb_cfg.max_total_position = arb_cfg.fallback_max_total_position;
             _spread_arb_manager->setConfig(arb_cfg);
 
             WTSLogger::warn("SpreadArbitrageManager: using default config (file load failed from {})", arb_cfg_path);
@@ -640,8 +642,10 @@ void FutuModuleAssembler::assemble(UftFutuMmStrategy& s, wtp::IUftStraCtx* ctx)
         // Scheme B-3: inject Portfolio SSOT for portfolio-derived spread monitoring.
         // Must be set before any generateSignal call. Portfolio outlives SpreadArbMgr.
         _spread_arb_manager->setPortfolio(_portfolio.get());
-        _spread_arb_manager->setInFlightTimeoutMs(120000ULL); // 120 seconds
-        WTSLogger::info("SpreadArbitrageManager: B-3 gate enabled (Portfolio SSOT, in_flight_timeout={}ms)", 120000ULL);
+        // §20.9 批 3: 超时值配置化 (默认 120000 = 批前行为)
+        const uint32_t in_flight_timeout_ms = _spread_arb_manager->getConfig().in_flight_timeout_ms;
+        _spread_arb_manager->setInFlightTimeoutMs(in_flight_timeout_ms);
+        WTSLogger::info("SpreadArbitrageManager: B-3 gate enabled (Portfolio SSOT, in_flight_timeout={}ms)", in_flight_timeout_ms);
     } else {
         WTSLogger::info("SpreadArbitrageManager: disabled");
     }

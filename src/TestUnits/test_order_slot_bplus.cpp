@@ -107,13 +107,13 @@ TEST(OrderSlotBPlus, ZombieAfterMaxRetriesKeepsTracked)
     t.trackMMOrder(1, 0, CODE, 2663.0, 10, 2663.0, 1000, true);
     ASSERT_TRUE(t.tryMarkPendingCancel(1, CancelReason::MANUAL, 1000));
 
-    // 3 次重试 (1300/1600/1900)
-    for (uint64_t now = 1300; now <= 1900; now += 300) {
+    // §20.8-B2 退避: 3 次重试间隔 300/600/1200ms — 1300/1900/3100
+    for (uint64_t now : {1300u, 1900u, 3100u}) {
         const auto& acts = t.checkAutoCancel(CODE, now, 2663.0, 0.2, false);
         ASSERT_EQ(acts.size(), 1u) << "now=" << now;
     }
-    // 第 4 次到点 (2200): 置 zombie, 不再产生重试动作
-    const auto& acts = t.checkAutoCancel(CODE, 2200, 2663.0, 0.2, false);
+    // 重试耗尽后再过退避间隔 (300<<3=2400): 置 zombie, 不再产生重试动作
+    const auto& acts = t.checkAutoCancel(CODE, 5500, 2663.0, 0.2, false);
     EXPECT_TRUE(acts.empty());
 
     UnifiedOrderInfo oi;
@@ -125,7 +125,7 @@ TEST(OrderSlotBPlus, ZombieAfterMaxRetriesKeepsTracked)
     // 升级列表含该合约, 且后续 checkAutoCancel 不重复升级
     ASSERT_EQ(t.getZombieEscalations().size(), 1u);
     EXPECT_EQ(t.getZombieEscalations()[0], CODE);
-    t.checkAutoCancel(CODE, 2500, 2663.0, 0.2, false);
+    t.checkAutoCancel(CODE, 5800, 2663.0, 0.2, false);
     EXPECT_TRUE(t.getZombieEscalations().empty());
 }
 
@@ -136,7 +136,8 @@ TEST(OrderSlotBPlus, ClearZombiesUntracksAndResets)
     initTracker(t);
     t.trackMMOrder(1, 0, CODE, 2663.0, 10, 2663.0, 1000, true);
     ASSERT_TRUE(t.tryMarkPendingCancel(1, CancelReason::MANUAL, 1000));
-    for (uint64_t now = 1300; now <= 2200; now += 300)
+    // §20.8-B2 退避 300/600/1200 + zombie 2400: 1300/1900/3100/5500
+    for (uint64_t now : {1300u, 1900u, 3100u, 5500u})
         t.checkAutoCancel(CODE, now, 2663.0, 0.2, false);
     UnifiedOrderInfo oi;
     ASSERT_TRUE(t.getOrderInfoCopy(1, oi));
@@ -149,9 +150,9 @@ TEST(OrderSlotBPlus, ClearZombiesUntracksAndResets)
     // 升级去重表已清: 同合约再次 zombie 可重新升级
     t.trackMMOrder(2, 0, CODE, 2663.0, 5, 2663.0, 3000, false);
     ASSERT_TRUE(t.tryMarkPendingCancel(2, CancelReason::MANUAL, 3000));
-    // 3 次重试 (3300/3600/3900) + 第 4 次到点 (4200) 置 zombie;
+    // §20.8-B2 退避: 3300/3900/5100 + zombie 7500 (5100+2400);
     // 注意不能再用更大时刻调用 checkAutoCancel — sweep 开始会清升级缓冲
-    for (uint64_t now = 3300; now <= 4200; now += 300)
+    for (uint64_t now : {3300u, 3900u, 5100u, 7500u})
         t.checkAutoCancel(CODE, now, 2663.0, 0.2, false);
     ASSERT_EQ(t.getZombieEscalations().size(), 1u);
     EXPECT_EQ(t.getZombieEscalations()[0], CODE);
@@ -183,7 +184,8 @@ TEST(OrderSlotBPlus, ClearZombiesReturnsUntrackedIds)
     t.trackMMOrder(2, 0, CODE, 2663.0, 5, 2663.0, 1000, false);
     ASSERT_TRUE(t.tryMarkPendingCancel(1, CancelReason::MANUAL, 1000));
     ASSERT_TRUE(t.tryMarkPendingCancel(2, CancelReason::MANUAL, 1000));
-    for (uint64_t now = 1300; now <= 2200; now += 300)
+    // §20.8-B2 退避 300/600/1200 + zombie 2400: 1300/1900/3100/5500
+    for (uint64_t now : {1300u, 1900u, 3100u, 5500u})
         t.checkAutoCancel(CODE, now, 2663.0, 0.2, false);
 
     auto ids = t.clearZombies();
@@ -202,7 +204,8 @@ TEST(OrderSlotBPlus, EscalationRearmsAfterZombieGone)
     initTracker(t);
     t.trackMMOrder(1, 0, CODE, 2663.0, 10, 2663.0, 1000, true);
     ASSERT_TRUE(t.tryMarkPendingCancel(1, CancelReason::MANUAL, 1000));
-    for (uint64_t now = 1300; now <= 2200; now += 300)
+    // §20.8-B2 退避 300/600/1200 + zombie 2400: 1300/1900/3100/5500
+    for (uint64_t now : {1300u, 1900u, 3100u, 5500u})
         t.checkAutoCancel(CODE, now, 2663.0, 0.2, false);
     ASSERT_EQ(t.getZombieEscalations().size(), 1u);
     ASSERT_EQ(t.getAliveZombieContracts().size(), 1u);
@@ -216,7 +219,8 @@ TEST(OrderSlotBPlus, EscalationRearmsAfterZombieGone)
     // 同合约新单再度 zombie -> 重新升级 (去重已重置, 不再被吞)
     t.trackMMOrder(2, 0, CODE, 2663.0, 5, 2663.0, 3000, false);
     ASSERT_TRUE(t.tryMarkPendingCancel(2, CancelReason::MANUAL, 3000));
-    for (uint64_t now = 3300; now <= 4200; now += 300)
+    // §20.8-B2 退避: 3300/3900/5100 + zombie 7500 (5100+2400)
+    for (uint64_t now : {3300u, 3900u, 5100u, 7500u})
         t.checkAutoCancel(CODE, now, 2663.0, 0.2, false);
     ASSERT_EQ(t.getZombieEscalations().size(), 1u);
     EXPECT_EQ(t.getZombieEscalations()[0], CODE);

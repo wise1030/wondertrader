@@ -28,6 +28,13 @@ coordinator:
   haltGate:
     mode: legacy
 
+  # --- §20.9 批 3: OrderRouter 分源限速 (默认=历史硬编码值 30/30/0/1000, 行为零变化) ---
+  orderRouter:
+    arbRatePerSec: 30
+    hedgeRatePerSec: 30
+    closeoutRatePerSec: 0          # 0 = 不限速 (平仓紧急路径)
+    windowMs: 1000
+
   # --- v7.1 taker 紧急减仓 (大量成交突然穿仓时主动吃单; 报价永不停) ---
   # [风控口径] 合约 util=|净头寸|/maxPosition >= takerReduceThreshold 时,
   # FAK 对手价平掉超出 takerReduceTargetUtil×maxPosition 的部分; 每合约限频.

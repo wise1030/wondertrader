@@ -38,6 +38,7 @@ class CloseoutExecutor;
 class CloseoutOrchestrator;
 class CorrelationManager;
 class FutuPortfolio;
+class HaltReasons;
 class IOrderSink;
 class FutuQuoter;
 class FutuRiskMonitor;
@@ -84,6 +85,7 @@ struct ApplicationDeps
     SpreadArbitrageManager* arb_manager = nullptr;   ///< nullable (arb disabled)
     SelfTradePrevention* stp = nullptr;              ///< nullable (STP disabled)
     QuotePolicyChain* quote_chain = nullptr;         ///< RiskCoordinator 引用 (与 coordinator 共享链)
+    HaltReasons* halt_reasons = nullptr;             ///< §20.9 批 1: 本策略 halt 原因位图 (owner=TradingState; 镜像写入用, 可空)
     CloseoutExecutor* executor = nullptr;            ///< CloseoutOrchestrator 执行器
     CloseoutOrchestrator* closeout_orch = nullptr;   ///< 19.34: Stage0 触发决策调用通道 (coordinator 持有, 非拥有)
 

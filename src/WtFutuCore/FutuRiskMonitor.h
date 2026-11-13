@@ -240,13 +240,13 @@ public:
     {
         SpinLockGuard _g(_zombie_halt_lock);
         _zombie_halt[code] = true;
-        HaltReasons::raise(HR_ZOMBIE_LATCH); // F-core P1-6 阶段 1: 原因位图镜像
+        _hrRaise(HR_ZOMBIE_LATCH); // §20.9 批 1: 实例位图镜像 (未注入则跳过)
     }
     void clearZombieHalts()
     {
         SpinLockGuard _g(_zombie_halt_lock);
         _zombie_halt.clear();
-        HaltReasons::clear(HR_ZOMBIE_LATCH); // F-core P1-6 阶段 1
+        _hrClear(HR_ZOMBIE_LATCH); // §20.9 批 1
     }
     /// 查询合约是否处于 zombie 闩锁 (2026-08-26: HALT_QUOTING 日志区分触发源 --
     /// zombie 闩锁与 maxPosition 硬闸门共用 halt_quoting 标志, 日志需可分辨)
@@ -270,13 +270,16 @@ public:
             else
                 ++it;
         }
-        // F-core P1-6 阶段 1: 闩锁集合清空 ⇒ 清原因位 (与 clearZombieHalts 同口径)
+        // F-core P1-6 阶段 1 / §20.9 批 1: 闩锁集合清空 ⇒ 清原因位 (与 clearZombieHalts 同口径)
         if (_zombie_halt.empty())
-            HaltReasons::clear(HR_ZOMBIE_LATCH);
+            _hrClear(HR_ZOMBIE_LATCH);
     }
 
 
     void setRecoveryConfig(const RecoveryConfig& config) { _recovery_config = config; }
+
+    /// §20.9 批 1: 注入本策略的 halt 原因位图 (owner=TradingState; 未注入则镜像静默跳过)
+    void setHaltReasons(HaltReasons* hr) { _halt_reasons = hr; }
 
     void setCloseoutConfig(const CloseoutConfig& config)
     {
@@ -402,7 +405,7 @@ public:
     void blockLong()
     {
         _long_blocked.store(true, std::memory_order_relaxed);
-        HaltReasons::raise(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
+        _hrRaise(HR_LONG_BLOCKED); // §20.9 批 1: 实例位图
         broadcastAlert("LONG_BLOCKED", "Opening long positions has been blocked");
     }
 
@@ -410,7 +413,7 @@ public:
     void blockShort()
     {
         _short_blocked.store(true, std::memory_order_relaxed);
-        HaltReasons::raise(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
+        _hrRaise(HR_SHORT_BLOCKED); // §20.9 批 1: 实例位图
         broadcastAlert("SHORT_BLOCKED", "Opening short positions has been blocked");
     }
 
@@ -418,14 +421,14 @@ public:
     void unblockLong()
     {
         _long_blocked.store(false, std::memory_order_relaxed);
-        HaltReasons::clear(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
+        _hrClear(HR_LONG_BLOCKED); // §20.9 批 1
     }
 
     /// Unblock short positions
     void unblockShort()
     {
         _short_blocked.store(false, std::memory_order_relaxed);
-        HaltReasons::clear(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
+        _hrClear(HR_SHORT_BLOCKED); // §20.9 批 1
     }
 
     /// Pause quoting (reversible)
@@ -608,6 +611,11 @@ private:
     //   mark*→transitionCloseoutSub 存在嵌套)。临界区内含低频日志/广播(可接受,
     //   均为罕见事件路径); 无跨锁调用外部模块, 锁序安全(halt_lock→portfolio_lock 单向)。
     std::atomic<RiskCategory> _halt_category{RiskCategory::REVERSIBLE};
+
+    // §20.9 批 1: 本策略实例位图 (owner=TradingState, assembler 注入; nullptr=镜像跳过)
+    HaltReasons* _halt_reasons = nullptr;
+    void _hrRaise(HaltReason r) { if (_halt_reasons) _halt_reasons->raise(r); }
+    void _hrClear(HaltReason r) { if (_halt_reasons) _halt_reasons->clear(r); }
 
     mutable RecursiveSpinLock _halt_domain_lock;
 

@@ -66,11 +66,16 @@ struct SpreadArbitrageConfig
     // 经 setMinProfitThreshold 接线到 AsyncArbitrageExecutor (价格调整成本超过此阈值则拒单)
     double min_profit_threshold_ticks;
 
+    // §20.9 批 3(2026-11-12): 原 assembler 硬编码魔数配置化 (默认=现值, 行为零变化)
+    uint32_t in_flight_timeout_ms;       ///< B-3 in_flight 单超时 (yaml: inFlightTimeoutMs, 默认 120000)
+    double   fallback_max_total_position;///< 配置文件加载失败时的兜底总仓位 (yaml: fallbackMaxTotalPosition, 默认 20.0)
+
     SpreadArbitrageConfig()
         : enabled(true), enhance_market_making(true),
           primary_strategy(ArbitrageStrategy::MEAN_REVERSION), max_total_position(50.0), max_pairs(10),
           min_signal_confidence(0.3), signal_cooldown_ms(1000),
-          min_profit_threshold_ticks(1.0)
+          min_profit_threshold_ticks(1.0),
+          in_flight_timeout_ms(120000), fallback_max_total_position(20.0)
     {}
 };
 

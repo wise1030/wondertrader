@@ -1,6 +1,6 @@
 /*!
  * \file HaltReason.h
- * \brief 停报/暂停**原因集** (F-core P1-6 阶段 1, 2026-09-19)
+ * \brief 停报/暂停**原因集** (F-core P1-6 阶段 1, 2026-09-19; §20.9 批 1 实例化, 2026-11-12)
  *
  * 背景（19.8 状态清单）: "能不能报价"当前由 4 组状态分别回答 —— FutuRiskMonitor
  *   (`_trading_halted/_quoting_paused/_long_blocked/_short_blocked/_zombie_halts`)、
@@ -11,6 +11,12 @@
  *   - P1-6 取代 WS-C（C10 事件通道并入）;
  *   - 门禁层 = **原子位图**（fetch_or/fetch_and, 无锁、多线程安全、读侧一次 load）,
  *     不引入新锁; 低频元数据(since/ttl/source)留待阶段 2 走 SPSC ring → tick 域唯一 writer。
+ *
+ * **§20.9 批 1（2026-11-12 用户批准）**: 位图由进程级 static 改为 **per-strategy 实例**
+ *   （owner = TradingState，经 deps/setter 注入 FutuRiskMonitor/RiskCoordinator）。
+ *   根因：static 位图被双策略共享 —— 11-06 ec halt 置位全局 RISK_HALT 污染 ao 影子对比
+ *   （分歧 2/2/8/10/17 与 ec halt 逐日正相关），且系 HaltGate union/bits 激活的前置硬阻塞。
+ *   bitOf/maskAll/name/describe 为无状态工具方法，保持 static。
  *
  * **阶段 1 为影子模式**: 既有标志仍是唯一门禁来源; 本组件只镜像 + 一致性对比, 行为零变更。
  *   不一致计数入 5min KPI (`halt_shadow=`), 影子期 ≥3 交易日零不一致才进入阶段 2(读点切换)。
@@ -43,6 +49,7 @@ enum HaltReason : uint32_t
 class HaltReasons
 {
 public:
+    // ---- 无状态工具方法 (static; 位运算/命名/描述不依赖实例) ----
     static constexpr uint32_t count() { return static_cast<uint32_t>(HR_COUNT); }
     static uint64_t bitOf(HaltReason r) { return 1ull << static_cast<uint32_t>(r); }
     static uint64_t maskAll() { return (HR_COUNT >= 64) ? ~0ull : ((1ull << HR_COUNT) - 1ull); }
@@ -65,15 +72,6 @@ public:
         }
     }
 
-    /// 置位/清位 —— 无锁 (单条 fetch_or / fetch_and), 任意线程可调用
-    static void raise(HaltReason r) { _bits.fetch_or(bitOf(r), std::memory_order_acq_rel); }
-    static void clear(HaltReason r) { _bits.fetch_and(~bitOf(r), std::memory_order_acq_rel); }
-    static void clearAll() { _bits.store(0, std::memory_order_release); }
-
-    static uint64_t raw() { return _bits.load(std::memory_order_acquire); }
-    static bool blocked() { return raw() != 0; }
-    static bool has(HaltReason r) { return (raw() & bitOf(r)) != 0; }
-
     /// "A|B|C" 形式 (空位图 → "NONE"), 供日志/巡检
     static std::string describe(uint64_t bits)
     {
@@ -91,8 +89,22 @@ public:
         return out;
     }
 
+    // ---- 实例状态 API (§20.9 批 1: per-strategy 位图; 拷贝被禁, 全程引用/指针持有) ----
+    HaltReasons() = default;
+    HaltReasons(const HaltReasons&) = delete;
+    HaltReasons& operator=(const HaltReasons&) = delete;
+
+    /// 置位/清位 —— 无锁 (单条 fetch_or / fetch_and), 任意线程可调用
+    void raise(HaltReason r) { _bits.fetch_or(bitOf(r), std::memory_order_acq_rel); }
+    void clear(HaltReason r) { _bits.fetch_and(~bitOf(r), std::memory_order_acq_rel); }
+    void clearAll() { _bits.store(0, std::memory_order_release); }
+
+    uint64_t raw() const { return _bits.load(std::memory_order_acquire); }
+    bool blocked() const { return raw() != 0; }
+    bool has(HaltReason r) const { return (raw() & bitOf(r)) != 0; }
+
 private:
-    static inline std::atomic<uint64_t> _bits{0};
+    std::atomic<uint64_t> _bits{0};
 };
 
 } // namespace futu

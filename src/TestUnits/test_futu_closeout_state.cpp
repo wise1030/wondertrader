@@ -50,16 +50,18 @@ void driveTo(FutuRiskMonitor& rm, CloseoutSub target, uint64_t ts)
 TEST(FutuCloseoutState, TriggerChainAndTimestamps)
 {
 	FutuRiskMonitor rm;
+	HaltReasons hr;                 // §20.9 批 1: 实例位图
+	rm.setHaltReasons(&hr);
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::IDLE);
 	EXPECT_FALSE(rm.isCloseoutTriggered());
 
-	HaltReasons::clearAll();
+	hr.clearAll();
 	rm.markCloseoutTriggered(1000);
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::TRIGGERED);
 	EXPECT_TRUE(rm.isCloseoutTriggered());           // 非 IDLE 即视为"清算进行中"
 	EXPECT_EQ(rm.getCloseoutSubInfo().trigger_time, 1000u);
 	// 触发时 pauseQuoting() ⇒ P1-6 原因位图必须同步出现 QUOTING_PAUSED (跨阶段一致性)
-	EXPECT_TRUE(HaltReasons::has(HR_QUOTING_PAUSED));
+	EXPECT_TRUE(hr.has(HR_QUOTING_PAUSED));
 
 	rm.markCloseoutDraining(2000);
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::DRAINING);
@@ -70,13 +72,15 @@ TEST(FutuCloseoutState, TriggerChainAndTimestamps)
 	EXPECT_TRUE(rm.isCloseoutCompleted());
 	EXPECT_EQ(rm.getCloseoutSubInfo().complete_time, 3000u);
 
-	HaltReasons::clearAll();
+	hr.clearAll();
 }
 
 // 非法转移必须被状态机拒绝且不改状态 (IDLE 只能 → TRIGGERED)
 TEST(FutuCloseoutState, IllegalTransitionsRejected)
 {
 	FutuRiskMonitor rm;
+	HaltReasons hr;
+	rm.setHaltReasons(&hr);
 	EXPECT_FALSE(rm.transitionCloseoutSub(CloseoutSub::EXECUTING, 1));
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::IDLE);
 	EXPECT_FALSE(rm.transitionCloseoutSub(CloseoutSub::COMPLETED, 1));
@@ -87,13 +91,15 @@ TEST(FutuCloseoutState, IllegalTransitionsRejected)
 	EXPECT_FALSE(rm.transitionCloseoutSub(CloseoutSub::ASSESSING, 11));
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::TRIGGERED);
 
-	HaltReasons::clearAll();
+	hr.clearAll();
 }
 
 // 失败 → 限时重试: 早于 retry_interval 拒绝, 到点放行; 超过 max_retries 后不再重试
 TEST(FutuCloseoutState, FailedRetriesAreBoundedAndTimed)
 {
 	FutuRiskMonitor rm;
+	HaltReasons hr;
+	rm.setHaltReasons(&hr);
 	driveTo(rm, CloseoutSub::FAILED, 100);
 	ASSERT_EQ(rm.getCloseoutSub(), CloseoutSub::FAILED);
 	const auto info = rm.getCloseoutSubInfo();
@@ -109,6 +115,8 @@ TEST(FutuCloseoutState, FailedRetriesAreBoundedAndTimed)
 
 	// 重试预算耗尽 (retry_count >= max_retries) ⇒ 不再重试 (需人工干预)
 	FutuRiskMonitor rm2;
+	HaltReasons hr2;
+	rm2.setHaltReasons(&hr2);
 	for (uint32_t i = 0; i < 5; ++i)
 	{
 		rm2.transitionCloseoutSub(CloseoutSub::TRIGGERED, 1 + i * 100000);
@@ -119,7 +127,7 @@ TEST(FutuCloseoutState, FailedRetriesAreBoundedAndTimed)
 	EXPECT_GE(rm2.getCloseoutSubInfo().retry_count, rm2.getCloseoutSubInfo().max_retries);
 	EXPECT_FALSE(rm2.checkCloseoutRetry(1'000'000'000ull));
 
-	HaltReasons::clearAll();
+	hr.clearAll();
 }
 
 // 卡死守卫: 非 force 的 reset 被状态机拒绝 (EXECUTING → IDLE 非法), force=true 必须硬清
@@ -127,6 +135,8 @@ TEST(FutuCloseoutState, FailedRetriesAreBoundedAndTimed)
 TEST(FutuCloseoutState, SessionBeginForceResetBreaksStuckState)
 {
 	FutuRiskMonitor rm;
+	HaltReasons hr;
+	rm.setHaltReasons(&hr);
 	driveTo(rm, CloseoutSub::EXECUTING, 100);
 	ASSERT_EQ(rm.getCloseoutSub(), CloseoutSub::EXECUTING);
 
@@ -147,13 +157,15 @@ TEST(FutuCloseoutState, SessionBeginForceResetBreaksStuckState)
 	rm.resetCloseout(true);
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::IDLE);
 
-	HaltReasons::clearAll();
+	hr.clearAll();
 }
 
 // COMPLETED → IDLE 是唯一允许的"回 IDLE"转移 (夜盘收尾后复位)
 TEST(FutuCloseoutState, CompletedAllowsResetToIdle)
 {
 	FutuRiskMonitor rm;
+	HaltReasons hr;
+	rm.setHaltReasons(&hr);
 	rm.markCloseoutTriggered(1);
 	rm.markCloseoutDraining(2);
 	rm.markCloseoutCompleted(3);
@@ -162,5 +174,5 @@ TEST(FutuCloseoutState, CompletedAllowsResetToIdle)
 	rm.resetCloseout(false); // COMPLETED → IDLE 在矩阵内, 无需 force
 	EXPECT_EQ(rm.getCloseoutSub(), CloseoutSub::IDLE);
 
-	HaltReasons::clearAll();
+	hr.clearAll();
 }

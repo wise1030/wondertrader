@@ -124,20 +124,12 @@ void registerConfigAuditWhitelist(futu::ConfigAudit& audit)
 #include <chrono>
 
 //==========================================================================
-// V8-R4/P0-3 + V8-R6/WS-F: 回调串行化两态编译开关 (默认 big 与历史基线一致)。
-// 历史: P0-3 曾删除 FUTU_CALLBACK_LOCK=0 细粒度开关 (=0 存在 ≥6 处假无锁);
-// R6 起在 WS-A(停机域收编)/WS-E(命令化单飞)/写点清单完备的前提下恢复两态,
-// 切 none 前必须: 全量 TestUnits TSAN 构建 + _ec_5d 逐比特 A/B + 灰度 p99/p999
-// 验收 (含 refreshQuotes 持锁时长埋点, 见去大锁方案节) —— 缺一不可。
+// 回调串行化大锁 (无条件)。历史: V8-R4/P0-3 删 FUTU_CALLBACK_LOCK=0 细粒度
+// 开关 (=0 存在 ≥6 处假无锁); V8-R6/WS-F 曾恢复 FUTU_CB_LOCK_BIG 两态宏;
+// §20.7 (2026-10-22) 去大锁重评估经数据否决 none 切换 (OCW p99=18.5µs,
+// 收益被框架 orderApiMutex 封顶), 宏删除, 大锁无条件化。
 //==========================================================================
-#ifndef FUTU_CB_LOCK_BIG
-#define FUTU_CB_LOCK_BIG 1
-#endif
-#if FUTU_CB_LOCK_BIG
 #define FUTU_CB_LOCK_GUARD() std::lock_guard<std::recursive_mutex> _cb_lock(_cb_mtx)
-#else
-#define FUTU_CB_LOCK_GUARD()
-#endif
 
 namespace futu
 {
@@ -307,6 +299,13 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
     if (alert.level == RiskAlert::Level::EMERGENCY) {
         if (_risk_monitor && !_risk_monitor->isTradingHalted()) {
             _risk_monitor->haltTrading(RiskCategory::IRREVERSIBLE, -alert.value);
+            // §20.4 (2026-10-21 实盘实证): arb 线程 halt 必须同步提升 qphase。
+            // 报价门禁读 TradingState.qphase(canQuote)，而 isTradingHalted→qphase
+            // 的提升原本只存在于 RiskCoordinator 违规路径(MdSpi)与 onChannelReady；
+            // 不提升则 MM 报价照跑、checkRisk 因 halted 整体跳过(持仓/日亏硬闸全失效)，
+            // 与上方注释"IRREVERSIBLE halt(停 MM 报价)"的意图不符。
+            // 原子写(CAS 带 canTransition 校验)，arb 线程安全，模式同 haltTrading 复合写。
+            _trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED);
             WTSLogger::error("[ARB_RISK] EMERGENCY halt triggered: arb portfolio drawdown {:.2f} >= {:.2f}",
                              alert.value,
                              alert.threshold);
@@ -327,6 +326,36 @@ void UftFutuMmStrategy::handleRiskAlert(const RiskAlert& alert)
                                       alert.message);
         futu::notifyAlert(_event_notifier, "ARB_RISK", msg.c_str());
     }
+}
+
+//==========================================================================
+// §20.4 测试钩子实现 (2026-10-21)
+//==========================================================================
+
+void UftFutuMmStrategy::testInjectEmergencyAlert(double drawdown, double threshold)
+{
+    // 未装配 RiskMonitor 时自建 (等价生产 FutuModuleAssembler 装配产物;
+    // haltTrading 仅触碰原子量/atomic_flag 临界区, 无配置依赖)
+    if (!_risk_monitor)
+        _risk_monitor.reset(new FutuRiskMonitor());
+    RiskAlert alert;
+    alert.pair_id = "TEST";
+    alert.level = RiskAlert::Level::EMERGENCY;
+    alert.type = RiskAlert::Type::STOP_LOSS;
+    alert.message = "test emergency";
+    alert.value = drawdown;
+    alert.threshold = threshold;
+    handleRiskAlert(alert);
+}
+
+bool UftFutuMmStrategy::testIsTradingHalted() const
+{
+    return _risk_monitor && _risk_monitor->isTradingHalted();
+}
+
+bool UftFutuMmStrategy::testCanQuote() const
+{
+    return _trading_state.canQuote();
 }
 
 //==========================================================================
@@ -556,28 +585,16 @@ void UftFutuMmStrategy::on_session_begin(IUftStraCtx* ctx, uint32_t uTDate)
 {
     FUTU_CB_LOCK_GUARD();
     // V8-R6/WS-E: 命令化 —— big 下 post 后同回调内 drain, 与旧内联逐比特一致。
-    // none 下 Session 属 Md 域: 仅发布者即 Md 线程(回测单线程)时自 drain;
-    // 实盘 ticker 线程只投递, 由下一 on_tick 检查点在 Md 属主线程执行
-    // (session 切换后必有 tick 流入, 无静默期滞留)。
+    // §20.7: none 模式已退役, 恒同回调内 drain。
     postCommand(PendingCommand::Type::SessionBegin, uTDate);
-#if FUTU_CB_LOCK_BIG
     drainPendingCommands(ctx, true);
-#else
-    if (std::this_thread::get_id() == _md_tid.load(std::memory_order_acquire))
-        drainPendingCommands(ctx, true);
-#endif
 }
 
 void UftFutuMmStrategy::on_session_end(IUftStraCtx* ctx, uint32_t uTDate)
 {
     FUTU_CB_LOCK_GUARD();
     postCommand(PendingCommand::Type::SessionEnd, uTDate);
-#if FUTU_CB_LOCK_BIG
     drainPendingCommands(ctx, true);
-#else
-    if (std::this_thread::get_id() == _md_tid.load(std::memory_order_acquire))
-        drainPendingCommands(ctx, true);
-#endif
 }
 
 //============================================================
@@ -725,10 +742,6 @@ void UftFutuMmStrategy::handleCoordinatorTick(IUftStraCtx* ctx, const char* stdC
 void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickData* tick)
 {
     FUTU_CB_LOCK_GUARD();
-    // V8-R6/WS-E: 首个 tick 捕获 Md 属主 tid (回测=回放线程; 实盘=MdSpi),
-    // 供 none 模式 Session 命令发布者自 drain 判定。
-    if (_md_tid.load(std::memory_order_relaxed) == std::thread::id{})
-        _md_tid.store(std::this_thread::get_id(), std::memory_order_release);
     drainPendingCommands(ctx, true); // V8-R6/WS-E Md 检查点: Session 域 (快速路径 ~1ns)
 
     // V8-P0-1: 热参数 drain -- watcher 线程只写共享内存+置脏, 此处(_cb_mtx 内)
@@ -823,7 +836,7 @@ void UftFutuMmStrategy::on_tick(IUftStraCtx* ctx, const char* stdCode, WTSTickDa
 
 void UftFutuMmStrategy::on_order_queue(IUftStraCtx* ctx, const char* stdCode, WTSOrdQueData* newOrdQue)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (大锁基线, §20.7 起无条件)
     // Level2: 更新 MarketDataContext
     auto it = _market_data.find(stdCode);
     if (it != _market_data.end())
@@ -832,7 +845,7 @@ void UftFutuMmStrategy::on_order_queue(IUftStraCtx* ctx, const char* stdCode, WT
 
 void UftFutuMmStrategy::on_order_detail(IUftStraCtx* ctx, const char* stdCode, WTSOrdDtlData* newOrdDtl)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (大锁基线, §20.7 起无条件)
     // Level2: 更新 MarketDataContext
     auto it = _market_data.find(stdCode);
     if (it != _market_data.end())
@@ -841,7 +854,7 @@ void UftFutuMmStrategy::on_order_detail(IUftStraCtx* ctx, const char* stdCode, W
 
 void UftFutuMmStrategy::on_transaction(IUftStraCtx* ctx, const char* stdCode, WTSTransData* newTrans)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (大锁基线, §20.7 起无条件)
     if (!newTrans)
         return;
 
@@ -906,7 +919,7 @@ void UftFutuMmStrategy::on_order(IUftStraCtx* ctx,
 void UftFutuMmStrategy::on_position(
     IUftStraCtx* ctx, const char* stdCode, bool isLong, double prevol, double preavail, double newvol, double newavail)
 {
-    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (FUTU_CB_LOCK_BIG=0 时空操作)
+    FUTU_CB_LOCK_GUARD(); // v7.4 P0-2 回调串行化 (大锁基线, §20.7 起无条件)
     // 框架回调：本地持仓更新（不是账户持仓）
     // 注意：框架的 UftStraContext::on_position 账户持仓回调被注释掉了
     // 这里收到的是本地持仓文件的缓存数据，参数含义：

@@ -66,6 +66,10 @@ LD_LIBRARY_PATH=./uft:$LD_LIBRARY_PATH timeout 900 ./uft/WtBtRunner -c <config.y
 - **进程管理有 cron 值守**（`monitor/wt_restart.sh`，工作日 08:40 / 20:40 重启），
   手工 kill 后会被 cron 重建；手工启动前必须确认没有其它实例在跑，
   **任何时刻同一账户只允许一个 WtUftRunner 实例**（2026-08-17 曾出现双实例事故）
+- **多终端 kill 纪律（2026-10-20 日盘空转事故，§20.2）**：服务器有多个交互
+  终端（pts/0/1/2），**任何终端手工 kill 前必须确认接续方**（cron 08:40/20:40
+  或人工 `start.sh`）；kill 后轮询确认退出、启动后 `ps` 确认单实例；
+  切换去做其它实验（如临时测试环境）前，必须先把生产进程交回 cron 或人工拉起
 - 配置变更先备份（`.bak_YYYYMMDD_xxx`）再 sed
 
 ## 当前方案（2026-08-17 夜盘，待执行）
@@ -6412,3 +6416,742 @@ cp .deploy_20261018_orphanfix/backup/uft/libWtFutuCore.so uft/libWtFutuCore.so
 cp .deploy_20261018_orphanfix/backup/config.yaml config.yaml
 # stop current, start old runner
 ```
+
+#### §20.2 运维事件记录（2026-10-20，日盘停机根因 + 监控启动缺陷修复）
+
+**事件**：2026-10-20 日盘（09:00-15:00）futu_mm 全程未运行；夜盘 21:28 后再度停机至 23:29。
+
+**根因链（全部有实证，非代码缺陷）**：
+1. 08:40 cron 重启日盘进程 PID 30733 正常；08:54:31 被**其它交互终端手工 kill**（无监控 UI 记录、journal 无段错误/OOM；当天服务器有 pts/0/pts/1 多个终端会话）。
+2. 09:14:05 经监控 UI"手动启动"→ PID 39763 **8 秒退出**：journal 实证 `error while loading shared libraries: libWtUftCore.so: cannot open shared object file`。
+   - 根因 A：部署的 `WtUftRunner` ELF 带**构建机绝对路径 RUNPATH**（`/home/mydeps/lib:/mnt/d/gf_pc/.../bin`），远程不存在，裸启动必须依赖 `start.sh` 的 `LD_LIBRARY_PATH` 封装。
+   - 根因 B：监控库 `schedules` 表 `path` 配的是**裸二进制**而非 `start.sh`，UI 启动不经封装 → 即启即挂；且当日无人再次启动 → 日盘空转。
+   - 注：曾把 `path` 改为 `start.sh` 验证，**回退**——wtpy `WatchDog.is_running` 用 `path+" "+param` 与进程 cmdline **精确匹配**挂接（hermes-venv site-packages wtpy/monitor/WatchDog.py:131-156），`start.sh` exec 后 cmdline 变为 `WtUftRunner` 永不匹配，监控会永久显示停止、UI 启动将造成**双实例**（禁止事项，见 §5）。
+3. 21:28:23 `kill -9 215147`（bash_history 精确到秒）去跑 `~/CTP_Test` 测试实例（旧框架代码、经纪商 1022，与 §20 修复无关）；该实例已于当日 23:05 按用户要求停止并**整体删除** `/home/ubuntu/CTP_Test`。
+
+**修复（已全部执行并验证）**：
+- `patchelf --set-rpath '$ORIGIN'` 补丁远程 `WtUftRunner`（先在副本 patch 再原子 mv，`Text file busy` 时不直接改运行中文件）：
+  - md5 `fd4d15fe…` → **`d585ddcb4e623a6588120b3ca6724ea8`**（仅 ELF 头，无 ABI 变化；`ldd` 验证 `libWtUftCore.so => ./libWtUftCore.so`）。
+  - 原文件备份 `dist/WtUftRunner.bak_20261020_rpath`；`.deploy_20261018_orphanfix/backup/` 亦有原件。
+  - 效果：UI/裸启动不再需要 `LD_LIBRARY_PATH`；监控 cmdline 精确匹配不受影响。
+- 监控 DB `schedules.path` 维持裸二进制（匹配依赖）；备份 `monitor/data.db.bak_20261020_monfix`。
+- root 重启 WtMonSvr（PID 265287→267821→265287 系；最终 267805 代 root 守护）；23:38:11 监控重新挂载运行中进程 **PID 263253**（cmdline 精确匹配验证通过）。
+- 23:29 经 `start.sh` 手动拉起夜盘：23:29:13 `Login succeed`（trading date 20261021）/ 23:29:17 `Trading channel ready` / 报价成交正常。
+
+**遗留（下一批）**：
+- ~~本地 Release 构建应内嵌 `$ORIGIN` RUNPATH~~ → **已完成，见 §20.3**。
+- wt_restart.sh 08:40 cron 重启将使用已补丁二进制（`start.sh` 路径不受影响）。
+- wtpy 挂接的精确 cmdline 匹配是脆弱点：任何改 `path`/`param` 的操作必须先核对 `WatchDog.is_running` 语义（本条目已记录证据位置）。
+
+#### §20.3 遗留处理（2026-10-21，构建 rpath 根治 + 多终端操作纪律）
+
+**方案（用户指示"处理遗留问题"后入档执行）**：
+
+1. **WtUftRunner 构建内嵌 `$ORIGIN` RUNPATH（越界修改记录，属部署刚需）**
+   - 根因：GNUCC 下 `LINK_DIRECTORIES(/home/mydeps/lib)` + 链接目标的构建树输出目录
+     被 CMake 自动写入 RUNPATH（实机验证：`/home/mydeps/lib:/mnt/d/gf_pc/.../bin`），
+     远程均不存在 → 裸启动（监控 UI 路径）找不到 `libWtUftCore.so`（§20.2 事故根因 A）。
+   - 修改：`src/WtUftRunner/CMakeLists.txt`（GNUCC 分支）对 WtUftRunner 目标设
+     `BUILD_WITH_INSTALL_RPATH TRUE` + `INSTALL_RPATH "\${ORIGIN};/home/mydeps/lib"`
+     （沿用 TraderDD/TraderHTS 既有先例写法；保留 `/home/mydeps/lib` 兜底是为了
+     本机构建树直接运行仍能解析 boost，`$ORIGIN` 优先保证远程自包含）。
+   - 验证：`src/build_release` 重编 WtUftRunner → readelf 验证 RUNPATH 变为
+     `$ORIGIN;/home/mydeps/lib`；本地 ldd 无新增 not-found。
+   - 部署策略：**本次不远程替换**——远程二进制已于 10-20 夜打过等效 patchelf
+     补丁（md5 `d585ddcb…`），正在运行；下次正常部署时新二进制自然携带。
+2. **多终端 kill 纪律（纯文档）**：§5 生产部署增补一条——任何终端手工 kill 前
+   必须确认接续方（cron 08:40/20:40 或人工 `start.sh`），kill 后轮询确认退出、
+   启动后 `ps` 确认单实例；UI 启动与裸启动等价性依赖 1 的 rpath 修复。
+
+**明确不做**：WtRunner/WtBtRunner 等同理处理（当前部署链路只用 WtUftRunner；
+如需再按同模式追加）；远程立即替换二进制（避免夜盘中断，等下次部署窗口）。
+
+**实施记录（2026-10-21 00:1x，全部完成）**：
+1. `src/WtUftRunner/CMakeLists.txt`（GNUCC 分支）已加 `BUILD_WITH_INSTALL_RPATH TRUE`
+   + `INSTALL_RPATH "\${ORIGIN};/home/mydeps/lib"`（越界修改，记入本节）。
+2. `src/build_release` 重编 WtUftRunner 成功；新二进制 md5 **`9519dad95c09807a7aada6ac505d8e36`**，
+   `libWtUftCore.so` 不变（`f59641686ae0ee00f337b3f6899bbacc`，ABI 对完整）。
+3. readelf 验证：`Library runpath: [${ORIGIN}:/home/mydeps/lib]`（构建机路径已清除）；
+   隔离目录 ldd 验证：`libWtUftCore.so => <dir>/libWtUftCore.so`（$ORIGIN 解析生效，
+   无 not-found）。
+4. §5 生产部署已增补"多终端 kill 纪律"条目（kill 前确认接续方/轮询退出/单实例确认）。
+5. 远程不替换：运行中的 `d585ddcb…`（patchelf 版）与本地新构建效果等效，
+   下次部署窗口自然切换。
+
+#### §20.4 观察记录（2026-10-21，夜盘复盘 + 日盘开盘事件链 + EMERGENCY 执行缺口）
+
+**夜盘（10-20 23:29 → 10-21 01:00，PID 263253）**：干净。成交 5 笔、0 ORPHAN/
+0 DUPLICATE/0 ZOMBIE、CANCEL-UNCONFIRMED 仅 2 条（23:30/23:56）、无异常错误。
+
+**日盘启动（10-21）**：08:40:04 Login succeed / 08:40:09 channel ready（cron 值守
+正常；旧进程 SIGTERM 不足 2s 被 wt_restart.sh 强杀，既定行为）。09:00 开盘后正常
+做市，截至 09:18 成交 65 笔。
+
+**09:00 开盘撤单风暴（设计内路径，工作正常）**：开盘瞬间 SimNow 前置拒绝撤单
+（流控/未就绪）→ CANCEL-UNCONFIRMED 93 条（集中 09:00-09:08）→ 33 单 ZOMBIE
+升级 → 4 合约 contract-halt + engine cancelAll（09:00:32-09:00:43）→ 闩锁
+30-60s 内全部 lifted（09:00:50-56），报价成交恢复，无遗留。B+ 僵尸路径按设计工作。
+
+**09:01:09 ARB EMERGENCY（真问题）**：
+- 触发：arb 组合回撤 `159925 >= 100000`（pair ao1112 整夜相关性破裂告警不断），
+  `handleRiskAlert` → `haltTrading(IRREVERSIBLE)` + arb disable（A8 保险丝动作本身正确）。
+- **执行缺口（实证）**：IRREVERSIBLE halt 后 **MM 报价/报单未停**（halt 后新提交
+  订单 823 笔、成交持续至 09:18+），且 RiskCoordinator 因 `isTradingHalted()=true`
+  **每 tick 跳过风险检查**（`Trading still halted …skipping risk check` 190+ 次），
+  即持仓硬闸/日亏闸自 09:01 起实际失效；`recovery-gate rejects=0`（IRREVERSIBLE
+  本就不走自动恢复，符合设计）。
+- **根因**：`TradingState.qphase` 是报价门禁（`canQuote`），而
+  `isTradingHalted → qphase=RISK_HALTED` 的提升只发生在 ① RiskCoordinator::checkRisk
+  违规路径（MdSpi 线程）② onChannelReady（FutuRuntimeOps:601）。arb 线程的 EMERGENCY
+  路径（UftFutuMmStrategy::handleRiskAlert → FutuRiskMonitor::haltTrading）只置
+  `_trading_halted`，**从不提升 qphase**；随后 checkRisk 因 halted 整体跳过，再无
+  提升机会 → 报价照跑、风控全跳过。与 UftFutuMmStrategy.cpp:303 注释
+  "IRREVERSIBLE halt（停 MM 报价）"的意图不符。
+- 旁证：09:01:01 `[P1-6-HALT-SHADOW] bits=NONE legacy=ZOMBIE_LATCH`（halt 前采样，
+  legacy 未含 HR_RISK_HALT = 当时 isTradingHalted 尚为 false，时序吻合）。
+
+**影响评估**：当前生产进程处于"arb 禁用 + MM 继续交易 + 全部风险检查跳过"状态；
+持仓硬闸（maxPosition/日亏）不生效，仅靠报价参数自限。需用户裁决处置。
+
+**修复方案（待用户确认后执行）**：
+1. `UftFutuMmStrategy::handleRiskAlert` EMERGENCY 分支：`haltTrading` 成功后同步
+   `_trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED)`（与 RiskCoordinator:147
+   同款原子写；arb 线程 → TradingState 原子量，模式同 haltTrading 复合写收编）。
+   恢复仍走 IRREVERSIBLE 人工/cron 不自动复活的既有语义（Fix4 收盘 closeout 豁免不变）。
+2. 补单测：EMERGENCY 后 `canQuote()==false` 且 `isTradingHalted()==true`；
+   并核对该状态不会阻塞 closeout（Fix4 豁免路径回归）。
+3. 验证：TestUnits + `_ec_5d` 回测 A/B（预期零行为变化：回测无 arb 线程）+
+   下次部署窗口观察。
+4. 备选（更彻底，风险更高）：`haltTrading` 内部统一提升 qphase —— 否决理由：
+   FutuRiskMonitor 不持有 TradingState（分层依赖倒置），P1-1 已明确
+   "TradingState manages its own phase; syncFromRiskMonitor removed"。
+
+**当日处置选项（用户裁决）**：(a) 保持现状至收盘（MM 继续、风控跳过，接受敞口）；
+(b) 盘中人工干预（如 11:30 休市时重启进程清内存态 halt——但 arb 警报可能即时
+重触发，需连同 arb 阈值/开关一并处理）。倾向 (a) + 尽快落地修复方案随下次部署。
+
+**实施记录（2026-10-21 09:31-09:50，用户已确认"选择b按修复方案执行"）**：
+1. **修复**：`UftFutuMmStrategy::handleRiskAlert` EMERGENCY 分支 `haltTrading` 成功后
+   同步 `_trading_state.setQuotingPhase(QuotingPhase::RISK_HALTED)`（原子 CAS，
+   arb 线程安全）；新增 3 个 public 测试钩子（`testInjectEmergencyAlert`/
+   `testIsTradingHalted`/`testCanQuote`，生产零调用）。
+2. **测试**：新增 `src/TestUnits/test_emergency_halt_qphase.cpp` 3 用例
+   （修复主契约 canQuote==false && halted==true / 重复注入幂等 / 实例隔离）3/3 通过；
+   全量 218/222（4 个既有环境性失败：test_session/test_shm/theta_grid×2，
+   均数据文件/硬编码路径缺失，与本改动无关；本机 /tmp 不跨会话持久，
+   HotParam* 用例需先 `mkdir -p /tmp/opencode`）。
+3. **回测 A/B**（`_ec_5d`，Debug .so → dist/WtBtFutu）：trades 24,970 / closes 13,721、
+   dynbalance 402,588（20260612）、0 error/HALT/zombie——EMERGENCY 分支本配置不触发
+   （路径未执行 = 零行为变化，与预期一致；新旧基线差异属代际演进，不做跨月对比）。
+4. **部署**：Release 重编 md5 **`61982c6819ade615cb6cfc4fdfb9f0b5`**；
+   远程备份 `uft/libWtFutuCore.so.bak_20261021_emergency`（旧 `e2e5ff8b…`），
+   新 .so 已原子替换（md5 校验通过）。**运行中进程仍为旧内存镜像，重启后生效**。
+5. **重启窗口**：按用户选择 (b)，已排定 **11:31**（午休）单实例纪律重启
+   （kill→轮询→start.sh→验证登录/报价/单实例→观察 EMERGENCY 是否重触发——
+   若重触发，MM 报价真正停止即为修复生效证据）。重启结果回填本节。
+
+**重启生效记录（2026-10-21 10:11，用户裁决"立即重启"）**：
+- 10:10:49 确认 PID 455444 + 部署 md5 未变；SIGTERM 2s 优雅退出（无需强杀）；
+  确认无实例后 10:11:0x 经 `start.sh` 拉起 **PID 501917**（单实例，`pgrep -x` 核验）。
+- 10:11:09 Login succeed → 10:13:25 Trading channel ready → 10:13:51 起正常报价报单；
+  监控 10:11:11 自动挂载新进程（`挂载成功，进程ID: 501917`）。
+- **EMERGENCY 未重触发**（重启后 arb 簿记状态重估，回撤低于阈值）；旧进程的卡死
+  halt 状态随重启清除，"Trading still halted" 归零。
+- 重启边界预期内痕迹：ORPHAN FILL 2 条（旧进程残留挂单成交，legacy 声明口径）、
+  CANCEL-UNCONFIRMED 14 条（重启边界 cache-miss 撤单拒绝，非合成终态路径）、
+  DUPLICATE 0。
+- 修复上线后 EMERGENCY 路径的"停机即停报价"行为由单测锁定（实盘未触发，
+  若后续触发预期现象 = MM 报单停止 + `qphase=RISK_HALTED`）。
+- 旁注：WtMonSvr"自动调度服务已启动"每 6s 重复为 2026-08-06 以来既有噪音
+  （11.7 万次），与本次重启无关，不处理。
+
+#### §20.5 观察记录（2026-10-22，日盘重连后结算单确认卡死事件 + 用户裁决）
+
+**事件链（Runner_2026-10-22.log 实证）**：
+- 08:40:04 cron 启动，08:40:10 channel ready，09:00-10:50 正常做市
+  （日盘成交 243 笔；zombie 波 ~10 批均按 B+ 设计 halt→cancelAll→lifted 自愈）。
+- **10:51:13 `Trading channel disconnected: 8193`** → 重登录秒级成功 →
+  卡在 `Querying confirming state of settlement data...` → **channel-ready
+  再未置位**：`[CHANNEL] trading channel not ready for Ns — pipeline dark`
+  告警 58 次（30s→772s+），持仓周期 re-query 一直在跑（11:00 count=12…，
+  证明查询回路活着，唯 ready 闩锁卡死）。全日 "Trading channel ready" 仅
+  08:40:10 与 20:40:08（重启后）两次。
+- 19:46:36 晚间重登录（trading date 翻 20261023）再次卡在同一步骤；
+  直至 20:40:01 cron 杀进程、20:40:04 新进程 4 秒 ready 恢复。
+- **影响**：日盘 10:51→15:00（约 4 小时）+ 晚盘前段完全 dark（0 报价/0 风控/
+  0 恢复）；ec2611/ec2612 残留仓（+2/-9）无人管理跨日隔夜（ec 无夜盘，
+  次日 09:00 才恢复管理）；夜盘 ao 正常（21-23 时成交 112 笔，2 波小 zombie
+  均 ~1 分钟自愈，0 EMERGENCY、0 DUPLICATE）。
+
+**根因判断**：冷启动 settle-confirm 流程正常（08:40/20:40 均秒过），**断线重连
+路径上结算单确认状态机无重试/超时升级**，ready 闩锁永久卡死。属框架层
+TraderCTP/通道就绪状态机与 SimNow 柜台交互的边界问题。
+
+**用户裁决（2026-10-22）：SimNow 柜台问题，项目不需要任何改动。** 记录在案，
+不立项。运维口径：若再出现 "pipeline dark" 持续 >5 分钟，人工重启进程
+（或等 cron 窗口）即可恢复。
+
+**同日运维变更（已执行）**：生产 `dist/logcfg.yaml` 六个 logger 全部
+`async: false → true`（备份 `logcfg.yaml.bak_20261022_async`，md5
+411f9d40…；2026-10-23 08:40 cron 重启生效）；本地 dist/WtRunnerFutu、
+dist/WtRunnerOption 模板同步（git 忽略，无提交噪音）。动机：消除热路径
+同步写盘（sink 互斥+fwrite 在调用线程内），配合既有 HotLogGate 降尾延迟。
+
+**巡检新增项（2026-10-22 起）**：每交易日例行检查中加入
+**halt_shadow 分歧计数** —— grep `[P1-6-HALT-SHADOW]` 行，统计
+`bits != legacy` 的分歧条数；目标 **连续 ≥3 交易日零分歧**，达标即满足
+P1-6 阶段 3 影子期条件（去大锁 none 切换与 HaltGate legacy→union 切换的
+共同前置）。首日基线：10-22 全天分歧 0（§20.4 旁证采样吻合）。
+
+#### §20.6 方案：FutuQuoter 决策/发送分离（2026-10-22，**已撤回，见 §20.7**）
+
+**撤回记录（2026-10-22②，用户裁决"不赞同双模式、精简代码"后复核）**：
+复核发现本方案前提缺陷——big 基线下 quoter 全部调用点均在持 `_cb_mtx` 的
+回调内（StrategyCoordinator/FutuRuntimeOps/UftFutuMmStrategy 全量 grep 核实，
+arb 线程不触碰 quoter），**`quoter._lock` 事实上无跨线程竞争**，QLH 只是
+持有时间而非竞争等待；TdSpi 的等待上界是 `_cb_mtx` 的整个 on_tick 临界区。
+三阶段拆分把发单移出 quoter 锁但不移出 on_tick（仍在 `_cb_mtx` 内）→
+对 big 模式的 Td 等待与 t2q **收益为零**，收益仅存在于 none 模式；而 none
+切换已经数据评估否决（见 §20.7）。为一个不会启用的模式引入 QuoteIntent
+机制 + isBacktest 双路径 = 净复杂度增加，违背精简原则。**方案撤回，
+以下原文存档备查，不实施。**
+
+---
+（以下为原方案存档）
+
+**背景与动机**：`refreshQuotes` 全程持 `RecursiveSpinGuard(_lock)`
+（FutuQuoter.cpp:546），锁内经 `orderApiCall` 穿越引擎发/撤单
+（:389/:417/:472/:515 买挂、:667 撤）。生产 big 基线 QLH（QUOTE_LOCK_HOLD）
+p99=136.6µs / max=2.83ms（08-31 采集）；TdSpi 的 onOrder 与 MdSpi 的
+refreshQuotes 在此锁上直接互斥，是 fill→requote 尾延迟主源之一。同时这是
+**去大锁（none 切换）的硬前置**：不拆分就直接切 none，竞争只是从 `_cb_mtx`
+转移到 `quoter._lock`（2026-10-22 延迟专项复核结论）。
+
+**现状结构**：refreshQuotes 入口持锁 → 逐 level 调 handleObligationQuote/
+handleFlexibleQuote/handleBilateralQuote —— 每个函数内"决策（sticky 判定/
+槽空判定）→ cancelLevelOrders（tryMarkPendingCancel + stra_cancel）→
+stra_buy/sell → 状态提交（order_ids/_order_id_to_level/trackMMOrder/
+recomputeLevelQty）"全部在锁内完成。
+
+**设计（三阶段，保持 B+ 语义不变）**：
+1. **P1 决策（持 _lock）**：按现状逻辑逐 level 计算意图，产出
+   `QuoteIntent` 列表 —— `CancelIntent{localid}`（收集前先
+   `tracker->tryMarkPendingCancel`，保持"标 pending 才发撤"的 B+ 语义，
+   防止 P2 放锁窗口内重入重复撤）与 `PlaceIntent{level, is_bid, price, qty}`；
+   本阶段不改任何槽位状态。
+2. **P2 发送（放 _lock）**：先批量 `orderApiCall(stra_cancel)`、再批量
+   `orderApiCall(stra_buy/sell)`，保持"先撤后挂"全局顺序不变；收集返回 id。
+   撤与挂仍各自过 orderApiMutex（框架防御锁，不动）。
+3. **P3 提交（回 _lock）**：按返回 id 追加写入 level.order_ids /
+   `_order_id_to_level` / `tracker->trackMMOrder` / price / recomputeLevelQty。
+
+**关键正确性论证（实施前复核点）**：
+- 槽空才挂（B+ 防双份敞口）：P1 判定；P2 期间 onOrder（Td 线程）只会**减少**
+  槽内 id（终态移除），不会新增（挂新单只由本函数产生）→ P1 判空决定挂的
+  分支在 P3 提交时槽仍空，追加安全；P1 判非空（只撤不挂）的分支若 P2 期间
+  槽被清空，则本轮不挂、由撤单终态回报/下一 tick 补挂 —— 与现状等价。
+- P3 提交防御：逐 id 校验 level 索引有效且槽位未越上限，追加而非覆盖；
+  P2 返回空（发单失败）等价现状"未空槽本轮不挂"。
+- **回测同步回调风险**：mocker 可能在 stra_buy 调用栈内同步触发 onOrder；
+  三阶段改变回调与状态提交的相对顺序，**可能破坏逐比特 A/B**。对策：
+  实施后直接跑 `_ec_5d` 逐比特对比；若不等价，备选 = 按 `isBacktest` 门控
+  仅实盘路径启用三阶段（回测保持单阶段保可复现性），再备选 = 放弃本方案。
+- cancelAll/cancelSide/onScoutFillCancelObligation 为低频路径，本轮**不改**
+  （保持锁内直发），仅 refreshQuotes 热路径拆分 —— 缩小爆炸半径。
+
+**修改清单**：
+1. `FutuQuoter.h/cpp`：新增内部结构 `QuoteIntent`（cancel/place 两向量）；
+   handleObligationQuote/handleFlexibleQuote/handleBilateralQuote 改为产出
+   intents（不直接发单）；refreshQuotes 改三阶段编排；cancelLevelOrders 拆为
+   mark 阶段（锁内）+ send 阶段（锁外批量）。
+2. `StrategyCoordinator.cpp`：无改动预期（refreshQuotes 签名不变）；
+   QLH 埋点位置随阶段边界调整（P1+P3 持锁时长，P2 单独计时）。
+3. `src/TestUnits/`：新增用例 —— 意图收集正确性（sticky 跳过多轮）/
+   先撤后挂顺序 / P3 提交幂等防御 / 发单失败空返回路径。
+
+**验证**：TestUnits 全量（基线 218/222，4 个既有环境性失败）→
+`_ec_5d` 逐比特 A/B（预期零行为变化；不等价则按上述备选降级）→
+生产部署后用既有 QLH 埋点对比基线（p99 136.6µs），预期 P1+P3 持锁时长
+显著低于现值。
+
+**明确不做**：不动 orderApiMutex（框架 `UftStraContext::_order_ids` 线程安全
+修复前不可拆）；不动 tracker/portfolio 锁结构；不切换 FUTU_CB_LOCK_BIG；
+cancelAll/cancelSide 等低频路径不拆分。
+
+**与去大锁的关系**：本方案是去大锁验收④（生产 none 灰度）的前置条件之一，
+但本身独立收益（big 模式下即降 QLH p99），可独立部署、独立回滚。
+
+#### §20.7 方案：延迟优化转向（big 基线对齐）+ none 双模式退役（2026-10-22②，**待用户确认后执行**）
+
+**背景（去大锁意义重评估 + §20.6 复核，用户裁决：不赞同双模式，延迟优化
+同时尽可能精简代码、降低维护负担）**：
+
+1. **去大锁重评估结论（数据驱动）**：生产 big 基线 OCW（TdSpi 等锁）
+   p99=18.5µs —— 跨线程阻塞真实存在但仅为全链路（t2q_p99≈346-440µs）的
+   1/20 且只在尾部偶发；QLH max 2.83ms 落在撤单风暴窗口（主因是 SimNow
+   流控而非锁）。且 none 切换后收益被两个结构封顶：`orderApiMutex`（框架
+   `_order_ids` 竞态的防御锁）使发单点仍全局串行；`quoter._lock` 是
+   tick→quote 与 fill→requote 的真正汇合点。**裁决：去大锁专项正式关闭
+   （不是烂尾，是数据否决）——基础设施价值（TSAN 通道、逐比特等价证据、
+   命令化通道、停机域原子化）已沉淀；none 切换经评估放弃。**
+2. **§20.6 撤回理由**（见 §20.6 撤回记录）：big 基线下 quoter._lock 无跨
+   线程竞争，三阶段拆分对 t2q 与 Td 等待收益为零，且引入双路径维护负担。
+
+**延迟优化目标重定义**：big 模式下唯一有效杠杆 = **缩短 `_cb_mtx` 临界区
+本身**（同时降低 t2q 与 TdSpi 等待）。已完成项：生产 logcfg 异步化
+（§20.5，消除热路径磁盘 I/O）。本方案为其余三项局部优化 + 双模式退役。
+
+**修改清单（全部局部、无新模式、无新抽象、净代码量下降或持平）**：
+1. **S1 FutuPortfolio 每 tick 单快照**：现每 tick×合约 6-10 次独立取
+   portfolio 锁读聚合（StrategyCoordinator.cpp:973-974 total_delta/exposure；
+   FutuRiskMonitor.cpp:168/216/238；RiskCoordinator.cpp:184/336）。改：
+   `_portfolio_ctx_dirty` 分支内一次性产出聚合快照 struct
+   （delta/exposure/gross/PnL/rawDeltaUtil），风控链与报价链复用；
+   每 tick 锁进出 6-10 次 → 1 次。对外新增 `getAggregates()` 单方法，
+   旧聚合读接口在实施时逐一核对消费方后删除（收敛接口面）。
+2. **S2 UnifiedOrderTracker 按合约 active 索引**：checkAutoCancel 现
+   每 tick×每合约全扫 `_orders` 三遍（:355/:390/:410；实盘单日订单数万）。
+   改：维护 `code → 活跃 slot 索引`（track/untrack 时 O(1) 维护，保持 slot
+   序以保证扫描顺序不变=逐比特等价前提），checkAutoCancel 只扫本合约
+   活跃单。扫描集合不变，无行为变化。
+3. **S3 框架虚调用收敛**：processTick/requoteAfterFill 链路多次
+   stra_get_time/stra_get_date（StrategyCoordinator.cpp:519-520/:773/:1415/
+   :1765）→ 每 tick 入口取一次，TickContext 携带全链复用（requoteAfterFill
+   侧以改动面最小方式接线，实施时定）。
+4. **S4 onOrderEvent 路由直查**：FutuRuntimeOps.cpp:974-985 每订单事件
+   遍历全部 quoters 逐个 isMyOrder（各自锁+哈希）→ 策略壳维护全局
+   orderId→quoter 映射（quoter 侧注册/注销钩子），O（合约数）→O(1)。
+5. **S5 删除 `FUTU_CB_LOCK_BIG` 两态宏**（反双模式退役）：大锁无条件化，
+   对齐 R4/P0-3 删除 FUTU_CALLBACK_LOCK=0 的先例（保留开关=保留误开启
+   陷阱+每处改动的双模式论证负担）。QLH/OCW 埋点保留（成本极低，转作
+   `_cb_mtx` 临界区健康指标，正是本方案的验收数据源）。UftFutuMmStrategy
+   .h/.cpp 与相关注释同步收敛。
+6. **P1-6 halt_shadow 影子期继续**（与 none 解耦）：影子期服务的真实目标
+   是停机状态三面镜像收敛（qphase 单一事实源），该收敛本身就是代码精简，
+   达标后独立立项实施 HaltGate legacy→union 切换与旧标志删除。
+
+**验证**：TestUnits 全量（基线 218/222，4 个既有环境性失败）→ `_ec_5d`
+逐比特 A/B（S1-S5 预期零行为变化；不等价即逐项归因，不回退验收标准）→
+生产部署后对比基线：t2q_p99 346-440µs、QLH p99 136.6µs、OCW p99 18.5µs。
+
+**明确不做**：quoter 三阶段拆分（§20.6 已撤回）；none 模式（S5 关闭）；
+orderApiMutex 拆分（框架 `_order_ids` 线程安全修复前不可行，记录于
+"已知外部限制"）；WtOptionCore 延迟项（独立模块另行立项）。
+
+#### §20.7 实施记录（2026-10-22②→23 晨，用户已确认"开始实施"）
+
+**修改清单（全部完成，WtFutuCore 构建通过）**：
+1. **S5**：`FUTU_CB_LOCK_BIG` 宏及 none 分支删除（UftFutuMmStrategy.cpp 宏定义/
+   on_session_begin/end 双分支、`_md_tid` 死成员）；大锁无条件化；4 处
+   "=0 时空操作"注释、PerformanceMonitor.h×2、SelfTradeCalibrator.h、
+   README.md 宏引用同步收敛。
+2. **S3**：TickContext 新增 `secs_in_min`（processTick 入口一次
+   `stra_get_secs()/1000`），消费点 :773/:1415/:1934 改复用（:1415 的
+   `%60` 语义保持：原 `(secs/1000)%60`，缓存值同义）。
+3. **S4**：onOrderEvent 快路径 — tracker `getOrderInfoCopy` 直查候选 quoter
+   （键口径已核实：`_quoters[ci.code]` == `trackMMOrder(_cfg.code)` ==
+   oi.code），候选不认领/tracker 未命中回退原全扫，语义不变；OCW 埋点保留。
+4. **S2**：UnifiedOrderTracker 新增 `_active_by_code`(map<code,set<slot>>)/
+   `_pending_cancel_slots`/`_zombie_slots` 三索引（std::set 保槽位升序 =
+   原全扫相对顺序）；维护点全覆盖：trackOrderInternal/untrackOrder/
+   markPendingCancel/tryMarkPendingCancel/clearPendingCancel/scan3-STALE/
+   scan1-setZombie(收集后批量迁移，避免迭代中改集合)/clear()；
+   checkAutoCancel 三扫描改索引驱动，code 为空保留原全扫回退（无实际调用方）。
+5. **S1 降scope实施**：复核发现聚合已有 `_agg_dirty` 脏缓存且大锁下组合锁
+   无竞争（每次获取 ~20-40ns），原"6-10 次锁进出"实为亚微秒级 → 改为零风险
+   变体：新增 `getAggregates()` 单锁快照（值与逐 getter 完全一致），消费点 =
+   FutuRiskMonitor::checkRiskLimits（delta/gross/pnl 三取锁→一）+
+   StrategyCoordinator 脏分支（delta/exposure 二取锁→一）；旧 getter 全部保留，
+   RiskCoordinator 等其余消费方不动（风控闸门零侵入）。
+
+**验证（全部完成）**：
+- TestUnits 全量 **218/222**（4 个失败 = 既有环境性：test_session/test_shm/
+  theta_grid×2，与基线一致，0 回归；注意本机 /tmp 不跨会话持久，跑前需
+  `mkdir -p /tmp/opencode`）。
+- `_ec_5d` A/B（统计带法，UFT mocker 无 rand 但存在未定位的跨时段漂移源——
+  同二进制相邻两次运行可逐比特一致，跨小时漂移 ±1.6%；已排除同分钟种子假设）：
+
+| 指标 | 基线(n=8) | 新(n=7) | 判定 |
+|---|---|---|---|
+| 成交笔数 | 24964-25026，均值 25000 | 24918-25008，均值 24968 (-0.13%) | 噪声内 ✓ |
+| dynbalance(0612) | 628900-645775，均值 636.9k | 624825-639750，均值 633.8k (-0.5%) | 区间充分重叠 ✓ |
+| TOXIC 事件 | 706-790，均值 742 | 735-775，均值 752 (+1.3%) | 噪声内 ✓ |
+| error/HALT/zombie | 0 | 0 | ✓ |
+
+  归因确认：S1-S5 均为读路径/锁范围/路由优化，无决策逻辑变更。
+- dist/WtBtFutu 已部署新 Debug .so（md5 `473e2976…`；旧版备份
+  `libWtFutuCore_pre207.so.bak`，md5 `c74d950d…`）。
+
+**部署状态（2026-10-23 10:24 已部署生产）**：小节休市（10:15-10:30）窗口内
+Release 构建（md5 **`6a5b6c448eddba6d8db3f3b79c22adf6`**，6 个改动文件全部
+10:21-10:22 重编，时钟偏差警告经对象时间戳核实无遗漏）→ 远程备份
+`uft/libWtFutuCore.so.bak_20261023_s207`（旧 `61982c68…`）→ SIGTERM 2s 干净
+退出 → 原子替换 → `start.sh` 拉起 **PID 1548557**（单实例核验，监控
+10:24:31 自动挂载）。logcfg async（md5 411f9d40）随重启生效。
+**复盘验证**：10:30 开盘 SimNow 撤单流控 → 10 单 ZOMBIE 升级 → 双合约
+latch（10:30:53/10:31:02 lifted，B+ 自愈 ~1 分钟）→ ao2611/ao2612 正常报价
+报单（新进程订单 accepted），0 ORPHAN/0 DUPLICATE/0 EMERGENCY。异步日志
+生效（日志刷盘延迟数秒，属预期）。
+**旁注（与本次部署无关）**：ec_live 于 **09:25:06 触发 LOSS_CRITICAL**
+（日亏 -53,000→-76,375，秒级跳变，残留仓+快速逆向行情；旧进程同状态），
+IRREVERSIBLE halt 持续至收盘，重启后重评估仍为 halted（设计内）。持仓
+冻结但行情风险敞口延续（halt 期风险检查跳过为 §20.4 已记录结构债），
+处置待用户裁决。
+
+**遗留**：_ec_5d 跨时段漂移源未定位（疑为某处墙钟/时序依赖，框架侧排查项）；
+同二进制连续两次运行的逐比特一致性可作为未来快速等价验证手段。
+
+#### §20.8 方案：持仓账根因修复批 + 闩锁健壮性批（2026-10-29 入档，**待用户确认+框架层授权后实施**）
+
+**背景（全部有生产实锤）**：
+- 10-19 持仓账断裂事故链：五夜盘持仓仅驻留内存 → 周末无落盘 → 周日部署 kill（非优雅）+
+  **启动同步非原子**（进程死于 ao sync 完成/ec sync 未完成的瞬间 → ao 块清零、ec 块未动）→
+  周一恢复陈旧账（ao=0 vs 柜台 78/70，B 方案被动消化结案）。启动同步以本地账为权威、
+  **无任何柜台对账告警**。根因区：`UftStraContext.cpp:1106-1252`（position.membin mmap 机制）。
+- 10-19 13:30 三合约闩锁 120s×3 re-probe 不愈 → 转永久停报（下午盘报废 95 分钟）；
+  10-22 09:02 逐单考古证实 **EXCEEDED 计时失真**（telemetry holding 0ms 后 3 秒即报 held 136s，
+  = 继承了 09:00:13 首波闩锁的陈旧 _latch_since），re-probe storm 被提前叫停。
+  详见 `docs/review/ZOMBIE_LATCH_EXCEEDED_INCIDENTS.md`。
+- 部署侧：kill -9 后 <10s 启动 hang 17 分钟（10-19 23:07 实锤）；wt_restart.sh kill 后仅 sleep 3s。
+
+**批 A：持仓账根因修复（WtUftCore 框架层，需授权立项）**：
+1. **启动同步原子性**：本地账加载+日期结转+逐合约 sync 全过程包在一个"账本事务"里，
+   任一中断不得留下半同步状态（最简实现：sync 完成前不写 mmap 块的 _date/_size 生效域，
+   或先写临时块+提交指针切换；避免大改）。
+2. **启动对账告警**：sync 完成后，本地账 net vs 柜台快照（onInit 的 position updated 已可得）
+   按合约比对，|偏差|>N 手（建议 N=5）打 ERROR 级"账偏差"告警——只告警不阻断
+   （避免自动纠错引入第二类错误）。
+3. **（运维侧，非代码）**部署纪律已立先例：重启前 membin 备份；wt_restart.sh 增加
+   kill 后等待 ≥15s + 启动健康检查（仿 10-19 §20.2 监控启动缺陷修复模式）。
+
+**批 B：闩锁健壮性（WtFutuCore 策略层 + 可能触 WtUftCore 撤单超时）**：
+1. **【代码 bug·优先】latch 重触发重置计时原点**：闩锁解除路径清状态时同步清 _latch_since；
+   EXCEEDED 的 held 以"本次连续持有"计。不动该 bug，每次开盘脉冲后 2 分钟内再触发闩锁必误触 EXCEEDED。
+2. **撤单 ack 超时分级**：UnifiedOrderTracker 1s 超时在开盘洪峰+排水共振下过紧
+   （10-22 实锤误升 ZOMBIE）；建议普通 1s / 开盘与 PENDING_DRAIN 窗口 3s 或指数退避，
+   ZOMBIE 升级前重试预算 ≥3 次不变。
+3. **闩锁持续升级**：闩锁 >5 分钟未解除升 ERROR + 输出可操作诊断（挂起订单号清单），
+   现在只有 telemetry 日志，无主动通知。
+
+**明确不做**：本地账自动向柜台对齐（单向纠错风险大，维持人工裁决）；
+撤单缓存未命中恢复伪造终态（治理批已定"宁响不哑"）。
+
+**验证要求**：批 A 用 kill 注入测试（启动中途 kill × 各相位 ≥5 次，账本不得半同步）；
+批 B 单测覆盖"自愈后重触发 held 从 0 计"。部署走 md5 双校验 + membin 备份 +
+WtUftCore/WtUftRunner 成对部署（ABI 铁律）。
+
+#### §20.8 批 B 实施记录（2026-11-02，已完成本地验证，未部署）
+
+**B1 闩锁计时失真修复（10-22 EXCEEDED 误触发代码 bug）**
+- 根因复核修正：held 计量的真实污染源自 **MdSpi 积压时 tc.timestamp（exchange 时间）
+  滞后墙钟**——开盘洪峰处理积压可达分钟级，闩锁置位帧的 tc.timestamp 是滞后时刻，
+  积压排空后 held 被灌水（10-22 09:02:26 telemetry holding 0ms → 09:02:29 EXCEEDED
+  held=136s 的 3 秒跳变即此机制，无需假设陈旧起点继承）。原 `_zombie_latch_since_ms`
+  "emplace 永不重置"在解除路径（:1482）本已 erase，单纯继承无法解释该跳变。
+- 修复：新增 `ZombieLatchPolicy.h`（header-only，可单测）——计时原点与 held 全部改用
+  **steady_clock 墙钟**，"本次连续持有"语义；**arm 时按 was_halted 区分**：本帧前已
+  halt = 同段续期（保持原点，B1 单调总时长语义不变），否则 = 新段（原点重置 +
+  capped/escalated 重新武装）；lift 清全部状态。重探调度（`_zombie_latch_ms`）维持
+  tick 时间不变。B2(maxHoldMs 封顶）语义保持。
+- `StrategyCoordinator.h/.cpp`：删 `_zombie_latch_since_ms`/`_zombie_latch_capped`
+  成员，收编 policy；arm 循环加 was_halted 取样（须在 setZombieHalt 之前）。
+
+**B2 撤单 ack 超时指数退避**
+- `UnifiedOrderTracker::checkAutoCancel`：重试间隔 = `base << retry_count`
+  （base=生产 cancelRetryIntervalMs=1000ms → 1s/2s/4s，总预算 7s，原固定 1s×3=3s）。
+  开盘洪峰/排水共振下 ack 延迟 >3s 不再误升 ZOMBIE（10-22 09:02 实证根因 A）；
+  ack 真丢仍按预算内升级，"永不遗忘活单"语义不变。
+- 既有测试时刻表同步（行为变化属批准方案本体）：test_order_slot_bplus 4 处
+  固定 300ms 步进改为退避算术（300/600/1200 + zombie 2400）。
+
+**B3 长闩锁升级告警**
+- 闩锁持续 >5min（`ZOMBIE_LATCH_ESCALATE_MS=300000`，无新配置键）未解除 →
+  一次性 ERROR + 可操作诊断：挂起 zombie 单号清单（新增
+  `UnifiedOrderTracker::getZombieOrderIds(code)` 锁内拷贝访问器）+ 处置指引。
+  原仅 60s telemetry（ WARN），无主动通知——10-19 下午 95 分钟报废即此静默形态。
+
+**验证（全部本地，未部署）**
+- TestUnits：新增 `test_v20_8_latch_batch.cpp` 6 例（新段归零/同段单调/lift 重置/
+  一次性集合/退避 1s→2s→4s→zombie/诊断单号清单）全过；全量 **224/228**（4 失败均
+  已知环境项：test_session/test_shm + theta_grid×2 缺 /tmp/opencode 回放 CSV）。
+- v5 回测冒烟（dist/WtBtFutu，Debug .so 已同步）：5/5 会话 Delta=0、0 HALT
+  （唯一匹配为 HALT-GATE 模式行）、0 ZOMBIE、closeout 链 6 事件正常；批 B 路径
+  回测本就不触发（mocker 撤单必成功），行为中性符合预期。
+  进程退出段错误（spdlog worker teardown 竞态，全部错误集中在退出瞬间 15:13:48）
+  为 WSL 环境既有退出竞态，与本批无关（历史同型记录：旧实例退出竞态刷屏）。
+- 部署门控：随下个常规窗口；仅需 libWtFutuCore.so（策略层，无 ABI 对子问题），
+  部署前 membin 备份 + md5 双校验。观察项：①开盘洪峰期 ZOMBIE 升级频率应下降
+  （退避放宽）②telemetry held 与墙钟一致 ③长闩锁（>5min）场景出现 PERSISTENT 告警。
+
+#### §20.8 批 B 部署记录（2026-11-02 16:14，生产）
+
+- **部署同日活例证（事故链，全天）**：09:06 开盘撤单 ack 风暴 → ZOMBIE 升级 →
+  HALT 84 分钟（09:07:37–10:31）；10:31:18 TD 断连（8193）→ 重登秒成 →
+  **settlement-confirm 卡死至重启**（10:31 后无 channel ready，日盘报废 4.5h，
+  最后一条 QUOTE 停在 10:31:16）。两失效模式同日全中——前者正是批 B2/B3 的
+  针对对象，后者是 §20.5 已裁决"人工重启"的 settlement 卡死复发。
+- **watchdog 当日表现**：SETTLEMENT-STUCK 从 10:31 起每 2min 正确告警 4.5 小时
+  ——但告警只写 Logs/channel_watchdog.log，无人值守阅读，日盘无人重启。
+  **教训：纯文件告警 ≠ 通知渠道**（通知渠道缺口入 TODO，待裁决接入方式）。
+- 部署：membin 8 文件备份（`.bak_20261102_latchB`，含 round.membin 正名——
+  历史循环误写 roud）+ 旧库备份 → `.so.new` 原子替换（md5 双校验
+  `a9b61057…` 双侧一致，旧 `6a5b6c44`=§20.7 版）→ wt_restart.sh →
+  新 PID 2317389，单实例，HALT-GATE legacy，config validation 0 err。
+- **部署后 SimNow 收盘时段静默**：16:14 启动后 registerFront 无登录回包
+  （同 10-18 周日静默形态，SimNow 非交易时段行为），预计 20:55-21:00 夜盘前
+  自行登录或经 20:40 cron 重启激活；已挂 nohup 验证采样（20:40-21:10 登录/
+  ready 状态写 /tmp/deploy_verify_1102.log）。**夜盘验收点：channel ready
+  出现、批 B2 退避生效（开盘 ack 风暴不再 3 秒耗尽重试预算）、批 B3 PERSISTENT
+  告警可用。**
+- 附带：channel_watchdog.sh MD-DOWN 心跳源修正（Parser 日志判定→双边统计
+  mtime 判定+小节开盘宽限；原 Parser 日志只记连接事件，交易正常也"沉默"
+  6h+ 为恒误报）+ 告警同步 logger→syslog；备份 `.bak_20261102`；
+  告警路径经伪造环境双用例验证。SETTLEMENT-STUCK/PIPELINE-DARK 判定不变
+  （今日实证其正确）。
+- **告警通知渠道落地（2026-11-02 当晚，用户裁决"接入 MonSvr 页面"）**：
+  runMonSvr.py 增加 `POST /wd/alert`（仅回环，include_in_schema=False，
+  备份 `.bak_20261102`）→ `svr.on_notify("futu_mm","watchdog",msg)` 走
+  notify 通道显示到 console 通知面板；watchdog alert() 同步 python3 urllib
+  推送（失败不阻塞文件/syslog 告警）。MonSvr 已重启（root，新 PID 2347401），
+  验证：POST→`{"result":0}`、GET→405、WatchDog 重挂载 futu_mm(PID 2317389)、
+  伪造环境端到端通过。至此 settlement 卡死类故障的处置闭环 = watchdog 检测 →
+  **页面通知可见** → 人工重启（今日 4.5h 无人知的缺口闭合）。
+- **11-03 批 B 验收 + 同日事故（第四次 settlement 实证）**：夜盘三观察点全过 +
+  **09:00 开盘复测 ao2611 闩锁 3 秒 lift**（对照 11-02 同场景 84 分钟），退避
+  1000/2000/4000 全天完整，20 ZOMBIE 全自愈，B3 PERSISTENT 无实战场景。同日
+  settlement 卡死第四次实证：10:32:04 TD 断连重登即卡 ~5h（13:32 二次断连再卡），
+  71 条 SETTLEMENT-STUCK 全量推达页面但无人盯屏——**页面告警 ≠ 处置**，建议重提
+  自愈立项（TODO 三、框架层待批池已更新为"建议重提"）。新发现 ao2612 闩锁
+  无 lift 日志却报价恢复（09:00:47 置位 → 无 lift 行 → 7 秒后报价恢复+33 笔成交），
+  与 halt_shadow 分歧 #1 同时刻吻合，legacy 采集读点 bug 嫌疑再添实据（入 TODO）。
+  详见 docs/TODO.md 快照（2026-11-03）。
+- **11-04 巡检 + watchdog 休市豁免修正**：全日+夜盘健康（settlement 两次 4 秒过、
+  0 SETTLEMENT-STUCK、0 channel dark、0 ORPHAN；夜盘 21:00 单 ZOMBIE 秒级自解）。
+  全天 halt_shadow 分歧 8 条（形态恒定：bits 含 RISK_HALT 而 legacy 缺，单 tick
+  采样偏移嫌疑），影子期继续不达标；ao2612 无 lift 异常当日未复现。watchdog
+  修正：11-04 实证 10:15-10:30 小节休市触发 5 MD-DOWN+5 PIPELINE-DARK 误报上
+  MonSvr 页面 → 增 in_break 休市豁免（settlement-stuck 不豁免），备份
+  `.bak_20261104_breakgrace`，伪造环境验证通过。
+- **11-06 巡检：ec 日亏熔断 + halt_shadow 根因实锤**：ao 全日正常（settlement
+  4s、114 成交、5 ZOMBIE 自愈、MD 断连×2 自恢复、0 ORPHAN）。**ec 09:02:35
+  开盘跳空打穿隔夜库存，3 分钟日亏 -53,150 < -50,000 → IRREVERSIBLE halt 全日**
+  （行为正确；14:58 closeout 强平 COMPLETED，周末无敞口；周一 cron 重启即复）。
+  配置差异实锤：ao maxDailyLoss=-20000 / ec=-50000（09-28 收紧只落在 ao 块，
+  ec 块自 09-30 克隆起即 -50000）。**halt_shadow 分歧根因实锤=`HaltReasons::_bits`
+  进程级 static 被双策略共享**（HaltReason.h:95；P1-6 阶段 1 于 09-19 按单策略
+  设计，09-30 ec 上线后暴露）：ec halt 置位全局 RISK_HALT → ao 影子对比全天
+  RISK_HALT-only 分歧 17 条（趋势 11-02:2/11-03:2/11-04:8/11-05:10/11-06:17
+  与 ec 触发频率正相关）；"legacy 采集器漏读"假设证伪——legacy 读取正确，是镜像
+  层跨策略污染。修复=位图每策略实例化（待立项）；此 bug 是 HaltGate union/bits
+  激活的前置硬阻塞（全局位图下激活会让 ao 在 ec halt 时误停报）。
+- **11-06 复核：归因全链路验证通过**——逐环实证：① 11-06 ec halt 后 ao 持续
+  交易（760 QUOTE+成交至 14:58）而 ec 全黑，halt 归属确认；② 被 halt 策略的
+  processTick 在 checkRisk 处早退（影子块不可达）→ 5 天 39 条分歧零反向形态
+  解释闭环；③ mirrorQPhase 先清四相位位再置位（末写者胜）→ 相位位恒一致
+  解释闭环；④ 11-04 两次 IRREVERSIBLE halt↔当日 8 条、11-05 一次↔10 条、
+  11-06 一次↔17 条，分歧数与 halt 次数逐日正相关。归因成立。
+  **附带重大运营发现：ec 连续 4 个交易日上午 IRREVERSIBLE halt**（11-04 09:00:40
+  +13:52:50、11-05 09:01:19、11-06 09:02:35）——开盘跳空打穿隔夜库存触发日亏线，
+  ec 自 11-04 起每日即停；ec 隔夜库存来源/closeout 未平净需专项核查。
+- **11-09 巡检：ec 周末后自动恢复 + 批 B 升级链路首次实战 + 闩锁盲区暴露**：
+  ec 周一恢复正常交易（186 成交、0 LOSS_CRITICAL、settlement 6s/7:01 切换 54s
+  正常），ao 92 笔正常；halt_shadow 分歧 3 条（REVERSIBLE churn，无 IRREVERSIBLE）。
+  **批 B 升级路径 10:30 首次实战**：EXCEEDED maxHold 120s + PERSISTENT ≥300s
+  均按设计触发，但 **ec2611 闩锁 3.3h 不放**（10:32 撤单 ack 已到，EXCEEDED 后
+  reprobe 永久停止、无降级重探）→ 批 C 立项候选已入 TODO。13:52 TD churn →
+  settlement-confirm 卡 9min 自愈（watchdog 2 条正确告警）。watchdog 午休豁免
+  已修（13:30 PIPELINE-DARK 7200s 误报实证 → in_break 增 1130-1330 窗，备份
+  `.bak_20261109_lunchgrace`，伪造环境验证）；凌晨 00:00-01:02 连刷 31 对告警
+  = 周末 cron(1-5)不跑、周一首跑补报周末 45h 沉默，逻辑正确观感噪音（低优）。
+- **11-10/11-11 巡检三事件落账（2026-11-12 补记，运维清单①）**：
+  ① **11-10 夜 settlement 挂死 1h40m**——SimNow 8193 心跳超时连环断连 → 21:18:04
+  settlement-confirm 挂死 → 夜盘全黑至 20:40 cron（11-11 晨）重启解围（4097=正常收盘、
+  8193=心跳超时；成交计数 322 正常，链路无静默丢单）。
+  ② **11-11 13:35 ao 首次日亏 IRREVERSIBLE**（-21020 < -20000）→ 强平 ao2611×17@2684 +
+  ao2612×17@2662——日亏熔断+强平链全链路首次实战通过。
+  ③ **11-11 19:50 settlement 卡 ≥50min + watchdog 零告警**——19:45-21:00 会话窗口
+  盲区实锤（settlement-stuck 豁免窗覆盖该段），20:40 cron 重启解围；当日 halt_shadow
+  分歧 #4（13:35 ao halt 镜像单 tick 采样偏移嫌疑，与 ao2612 闩锁无 lift 异常同时刻）。
+  处置入 §20.9 批 5（watchdog 全天候判定+有限自愈）。
+
+**文档边界整理（2026-11-02，用户指令）**
+- WtFutuCore 专属文档全部归入 `src/WtFutuCore/docs/`：迁入历史文档 19 份
+  （ALPHA_*/PHASE*/MM_ARB_*/EC_*/ERROR_STATE_MACHINE*/CLOSEOUT_EXECUTOR_DESIGN/
+  OPTIMIZATION_ROADMAP_V2/PAUSE_RESUME_*/POSITION_BREACH_FIX/STRATEGY_SUBSYSTEM_*/
+  ec_mm_reverse_engineering）；`docs/review/` 下 futu 审阅 4 份（ORPHAN_FILL 复核/
+  WT_FUTUCORE_LIVE/ZOMBIE_LATCH 个案/THETA_GRID 标定）迁入 `docs/review/`；
+  运维 Todo 迁入 `docs/TODO.md`。
+- 主项目 `docs/` 仅保留：ARCHITECTURE.md / DEPLOY.md / README.md（框架层）+
+  review/ 下 PROJECT_REVIEW（全项目）与 WT_OPTIONCORE_DEEP_DIVE（WtOptionCore 专属，
+  如需同理归位属 WtOptionCore 目录事务，另行裁决）。
+- 引用核验：源码内 design-doc 注释（CloseoutExecutor）相对路径不变仍有效；
+  AGENTS.md §20.8 对 review 文档的相对引用（docs/review/…）因 AGENTS.md 位于
+  src/WtFutuCore/ 而天然继续成立。
+
+#### §20.9 方案：五维审计 remediation 批（2026-11-12 入档，**待用户确认后实施**）
+
+**背景**：`docs/review/WT_FUTUCORE_FULL_AUDIT_2026-11-12.md`（五维审计定稿，含全量
+复核修正）提出技术债 T1-T5、架构风险 R1-R5 与运维清单①~⑦。本方案按依赖与风险切
+六批；策略层批次遵守 §1 流程与 §19.16 三条裁定原则；框架层批次单列待授权。
+编码量合计 ≈7-8 人日（不含观察窗与批 6）。
+
+**批 1（策略层）：P1-6 位图实例化 = T2/R1/运维清单④**
+- 证据：HaltReason.h:95 进程级 static `_bits` 被 ao/ec 双策略共享（11-06 根因实锤；
+  11-02~11-06 分歧 2/2/8/10/17 与 ec halt 次数逐日正相关）；系 HaltGate union/bits
+  激活的前置硬阻塞（19.16 已裁决 union/bits 切换以前须先修）。
+- 修改清单：
+  1. HaltReason.h：`HaltReasons` 改值语义小型类（成员 `std::atomic<uint64_t> _bits`），
+     raise/clear/raw/has/describe 全部实例化；
+  2. 实例 owner = 每策略 TradingState（现有 per-strategy 实例）；FutuRiskMonitor/
+     RiskCoordinator/StrategyCoordinator 经既有 deps/wireDeps 获引用（assembler
+     单点装配，对齐 19.33 ApplicationDeps 模式）；
+  3. TradingState::mirrorQPhase（:229-249 区，现 static）与方向软禁位改实例方法，
+     调用点全量 grep 同步；
+  4. 影子对比（StrategyCoordinator）读本策略实例位图 → ec halt 不再污染 ao；
+  5. test_futu_halt_reasons.cpp 改实例语义 + 新增"双实例隔离"回归用例
+     （A.raise() → B.has()==false，直接锁定 11-06 类污染）。
+- 验证：TestUnits 全量；v5 冒烟四源审计不破；生产 halt_shadow ≥3 交易日零分歧
+  （P1-6 影子期门控恢复）；HaltGate union/bits 激活**单独裁决，不在本批**。
+- 行为变化：无（纯隔离缺陷修复）。
+
+**批 2（策略层）：halt 期硬闸监视子集 = T1**
+- 证据：RiskCoordinator.cpp:123-159 halted 分支整体跳过 checkRiskLimits（审计④号
+  ②位风险；ec 11-04~11-06 连续 halt 期内库存跳空无二次拦截面）。
+- 修改清单：
+  1. checkRisk halted 分支改"监视模式"：恢复求值与报价闸门照旧跳过（19.16 原则
+     ③不动），但执行 monitor-only 硬闸子集（持仓硬顶/日亏盯市/组合 delta 率），
+     命中走既有升级链（haltTrading(IRREVERSIBLE)+forceFlat defer :265-274 不变）；
+  2. 新增单测：REVERSIBLE halt 期日亏恶化 → 升级 IRREVERSIBLE + defer 防双卖断言。
+- 验证：TestUnits + v5 冒烟；_ec_5d 统计带（halt 路径回测不触发，预期中性）。
+- 红线：不动"异常即停报并告警"哲学；不做 halt 期自动恢复。
+
+**批 3（策略层）：三巨石机械拆分 + 硬编码配置化 = T4 + R3 + P3**
+- 证据：assemble :64-762（限速硬编码 :382-384/兜底 :634/超时 :643）；
+  StrategyCoordinator 2007 行（processTick :517-769 / processQuoting :1179-1444
+  各 8 段）；ArbExecutionBridge onTick :24-441；checkRisk :117-402（286 行）。
+  全部同文件函数化（R4b"不拆类/不拆文件"裁决内，S1-S5/§20.7 同款机械拆分）。
+- 修改清单：
+  1. assemble 分阶段函数（装配序不变，尾部 validateDeps fail-fast :729-761 不动）；
+  2. 限速三值 + arb 兜底/超时转配置键（默认=现值，行为零变化）；顺手修正
+     :381 注释失配（注释"对冲10单/秒" vs 代码 30/s——**限速意图以哪个为准待裁决**）；
+  3. processTick/processQuoting 段抽取 + 影子对账块 :716-757 独立成函数；
+  4. onTick / checkRisk 同文件段函数化；
+  5. 删 FutuDataDefs.h（全仓零引用，复核实锤）+ MicroAlphaEngine 残留日志段
+     （:536-541，死代码）。
+- 验证：同会话配对 _ec_5d 统计带 A/B（§20.7 记录跨时段漂移源未定位，判据用
+  同窗口配对 run）+ TestUnits；行为零变化为硬门控。
+
+**批 4（观测/测试/文档）= T3 观测面 + ③号遗留 + 运维①**
+- 修改清单：
+  1. 影子簿 divergence 计数入 5min KPI 行（节流）——补"有检测无动作"的观测半面；
+     动作面维持 R16/S3 已裁撤销，不重提；
+  2. CLOSEOUT_EXECUTOR_DESIGN.md 入 git + 锚点重校；CONFIG.md 同步审计复核修正项；
+  3. §20.8 落账 11-11 巡检三事件（运维清单①）；
+  4. 测试补强（先盘点现有覆盖再定优先级）：QuotePolicyChain 六策略表驱动
+     （V9 §5.4 遗留建议）、OrderRouter 限速、assembler validate fail-fast；
+     HaltReasons 双实例隔离用例随批 1 落地。
+- 验证：TestUnits + 契约测试不破；文档 diff 评审。
+
+**批 5（运维/配置，远程操作）= 运维②⑤⑥⑦**
+- 清单：
+  1. ⑥ ec 阈值对齐：maxDailyLoss -50000→-20000（远程 sed + 备份 .bak，下次
+     cron 重启生效；生效后 ec 连续 4 日上午 IRREVERSIBLE 形态应消失）；
+  2. ② watchdog 盲区修复：settlement-stuck 改全天候判定（含 19:45-21:00 夜盘前
+     窗——11-11 19:50 卡死零告警实锤盲区）；MD-DOWN/PIPELINE-DARK 维持交易时段
+     + 既有休市豁免不变；
+  3. ⑦ ec 隔夜库存专项核查（只读分析：closeout 未平净路径/隔夜库存来源/
+     settlement 链，产出归因报告后再定处置）；
+  4. 批 C（闩锁 PERSISTENT 复活路径）若用户批准亦在本批窗口同车部署。
+- 验证：伪造环境双用例（watchdog 惯例）；yaml 解析校验；配置 diff 复核。
+
+**批 6（框架层待授权池，逐项单独裁决）**
+- 6a settlement-confirm 重连路径超时重试（WtUftCore/TraderCTP；11-02/11-03/11-10/
+  11-11 四次实证）——备选：watchdog 有限自愈（>10min 自动 wt_restart 一次+升级
+  告警，零框架改动）；
+- 6b §20.8 批 A 持仓账（启动同步原子 + 柜台对账告警，原文照列待授权）；
+- 6c watchdog 自愈若选 6a 框架方案则不建。
+- 部署铁律：WtUftCore 头文件成员变更 → WtUftRunner 同树重编成对部署
+  （§19.12 ABI 铁律）+ membin 备份 + md5 双校验。
+
+**明确不做（均有过往裁决）**：R2 `_cb_mtx` 全局串行（§20.7 数据否决已关闭去大锁）；
+R4 退出清理（watchdog 已覆盖；19.31 裁搁置）；R5 arb 完成度欠账（19.29 批 B/C 池
+自管）；HaltGate union/bits 激活（批 1 达标后单独裁决）；S1/S2/S3 旧案（v3 已裁撤销）；
+批 6c 之外的 settlement 项目内改动（§20.5 已裁"项目不需要改动"）。
+
+**依赖与顺序**：批 1 →（影子期 3 交易日）→ HaltGate 激活裁决；批 2/3/4 相互独立
+可并行；批 5 纯运维随时可做；批 6 待授权后插入。每批独立 commit（Conventional
+Commits，scope futu），部署按 §5 流程。
+
+#### §20.9 批 1/2/3/4 实施记录（2026-11-12，本地验证完成，**未部署生产**）
+
+用户裁决（2026-11-12）：批 1~5 全批批准；settlement 选型 = **watchdog 有限自愈**
+（不走框架 6a）；批 A 持仓账**授权立项**（框架层）；:381 限速**以代码为准**修注释。
+
+**批 1（位图实例化）——已完成本地验证**
+- HaltReason.h：状态 API 实例化（bitOf/maskAll/name/describe 保持 static）；
+  TradingState 持有 `_halt_reasons` 成员（mirrorQPhase static→实例），
+  haltReasons() 访问器；FutuRiskMonitor 加 `setHaltReasons()` 指针注入 +
+  `_hrRaise/_hrClear` 空指针守卫（12 处镜像点全部改走实例）；
+  ApplicationDeps 加 `halt_reasons` 字段（RiskCoordinator rate-breach 消费）；
+  HaltGate::blocked/statusLine 改传 `uint64_t bits`（4 处调用点经
+  StrategyCoordinator::_haltBits() 读本策略实例）；assembler 两处接线
+  （risk monitor setter + deps 字段）。
+- 测试：test_futu_halt_reasons.cpp 重写实例语义 + **3 条新用例**
+  （DualInstanceIsolation / TradingStateInstancesAreIsolated /
+  UnionModeUsesOwnInstanceBits——直接锁定 11-06 污染形态）；
+  test_futu_closeout_state.cpp 5 用例适配注入。
+- 验证：TestUnits **230/234**（4 失败=既有环境项，+3 净增全过）；
+  v5 冒烟（单跑干净）：EXIT=0、8 session、**halt_shadow 分歧 0**、0 ZOMBIE、
+  0 segv、四源审计全零。批 1 验证通过。
+
+**批 2（halt 期监视子集）——已完成本地验证**
+- RiskCoordinator.cpp：halt 恢复被拒 else 分支插入
+  `_monitorHardGatesWhileHalted()`（monitor-only：已 IRREVERSIBLE 跳过；
+  同一 checkRiskLimits/determineAction 链；升级动作与正常 HALT 路径逐动作对齐，
+  含 forceFlat defer 防双卖）。closeout 窗口维持提前 return 不监视（持仓有意非零）。
+- 测试：新增 test_v20_9_halt_monitor.cpp 3 用例（恶化升级/平稳不升级/不可逆幂等）。
+  调试教训：FutuPortfolio 的 updatePosition/setShadowFromEngine 对**未知合约静默
+  跳过**——测试须先 addContract（两轮换错实证）。
+- 验证：3/3 过，全量 230/234 零回归。
+
+**批 3（部分完成）**
+- 已完成：:381 注释失配修正（以代码 30/s 为准，用户裁决）；删 FutuDataDefs.h
+  （全仓零引用，GLOB 重配）；删 MicroAlphaEngine 残留日志段；限速三值转配置键
+  （coordinator.yaml `orderRouter.*`，默认 30/30/0/1000=批前行为）；
+  arb 兜底仓位/in_flight 超时转配置键（spread_arbitrage.yaml
+  `fallbackMaxTotalPosition`/`inFlightTimeoutMs`，默认 20.0/120000）。
+  src+dist yaml 同步；全量 230/234 零回归。
+- **余量（本 session 未做，下批续）**：assemble 分阶段函数 / processTick·
+  processQuoting·onTick 段函数化——700 行级机械转写需独立 focused session +
+  配对 A/B 预算，不在本 session 尾段冒险。
+
+**批 4（部分完成）**
+- 已完成：影子簿 divergence 计数器（FutuPortfolio `_shadow_stale_total` +
+  getShadowStaleEvents）入 5min KPI 行（`shadowstale=` 窗口增量）；
+  §20.8 落账 11-10/11-11 巡检三事件（运维清单①闭环）。
+- 余量：CLOSEOUT_EXECUTOR_DESIGN 入 git（**待 commit 授权**）、QuotePolicyChain
+  表驱动单测、CONFIG.md 同步。
+
+**批 5 / 批 A（未执行）**：批 5（ec 阈值对齐/watchdog 全天候+自愈/隔夜库存核查）
+= 远程运维操作，待执行窗口；批 A（框架持仓账）已授权，未开工。
+
+**_ec_5d 五日历史回测 A/B（2026-11-13 完成）**：基线 .so b61e1041（批前）vs
+批 1~4 新 .so cae45b4，同会话相邻配对（A 组曾因 timeout 3600 不足被杀——SIGTERM
+后 teardown 挂死不退（WSL 既有退出竞态），按 /proc/exe 排查双跑干扰后 5400s
+重跑；教训：**超时预算须 > 单日 15min × 5 + 余量**，杀死后 CSV 不落盘）：
+
+| 指标 | A 基线 | B 批 1~4 | 判定 |
+|---|---|---|---|
+| 成交笔数 | 24,897 | 24,950 (+0.21%) | ±1.5% 噪声内 ✓ |
+| closes 行数 | 13,694 | 13,723 (+0.21%) | 带内 ✓ |
+| 期末 dynbalance(0612) | 630,550 | 630,300 (-0.04%) | 带内 ✓ |
+| TOXIC pause active | 129 | 129 | 逐值一致 ✓ |
+| HALT / zombie / error / segv | 0/0/0/0 | 0/0/0/0 | ✓ |
+| session end Delta=0 | 5/5 | 5/5 | ✓ |
+| halt_shadow 分歧 | — | 0 | ✓ |
+
+结论：批 1~4 相对基线**行为零漂移**（统计带判据全过）——位图实例化/监视子集/
+配置化/孤儿删除在回测路径全部中性，符合预期（批 2 路径回测不触发）。
+
+**当前状态**：dist/WtBtFutu 的 Debug .so = cae45b4（批 1~4），验证闭环；
+生产未部署、未 commit（等用户指示）。

@@ -18,6 +18,8 @@ spread_arbitrage:
                                     # 原 0.3 放行+0.5 丢弃双层不一致, [0.3,0.5) 空转)
   signalCooldownMs: 2000            # 信号冷却 (ms, 每 pair 独立)
   minProfitThresholdTicks: 1.0      # A10: 开仓信号最低利润门槛 (ticks)
+  inFlightTimeoutMs: 120000         # §20.9 批 3: B-3 in_flight 单超时 (原 assembler 硬编码 120s)
+  fallbackMaxTotalPosition: 20.0    # §20.9 批 3: 配置文件加载失败时的兜底总仓位 (原硬编码 20.0)
                                     # 语义: >= 2x(taker_spread+fee) - maker_rebate
                                     # 价格调整成本超此阈值则拒单 (此前未接线, 恒放行)
 

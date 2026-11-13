@@ -219,25 +219,26 @@ struct TradingState
         qphase.store(QuotingPhase::NORMAL, std::memory_order_release);
         long_blocked.store(false, std::memory_order_release);
         short_blocked.store(false, std::memory_order_release);
-        // F-core P1-6 阶段 1: 影子镜像复位 (qphase 位 + 方向软禁位)
+        // F-core P1-6 阶段 1 影子镜像复位 + §20.9 批 1 实例位图复位
         mirrorQPhase(QuotingPhase::NORMAL);
-        HaltReasons::clear(HR_LONG_BLOCKED);
-        HaltReasons::clear(HR_SHORT_BLOCKED);
+        _halt_reasons.clear(HR_LONG_BLOCKED);
+        _halt_reasons.clear(HR_SHORT_BLOCKED);
     }
 
     /// F-core P1-6 阶段 1(2026-09-19): qphase → 原因位镜像 (影子模式; 阶段 1 无门禁读取)
-    static void mirrorQPhase(QuotingPhase q)
+    /// §20.9 批 1(2026-11-12): 由 static 改实例方法 —— 位图 per-strategy, 随本状态实例
+    void mirrorQPhase(QuotingPhase q)
     {
-        HaltReasons::clear(HR_QPHASE_RISK);
-        HaltReasons::clear(HR_QPHASE_ERROR);
-        HaltReasons::clear(HR_QPHASE_TOXICITY);
-        HaltReasons::clear(HR_QPHASE_MARKET);
+        _halt_reasons.clear(HR_QPHASE_RISK);
+        _halt_reasons.clear(HR_QPHASE_ERROR);
+        _halt_reasons.clear(HR_QPHASE_TOXICITY);
+        _halt_reasons.clear(HR_QPHASE_MARKET);
         switch (q)
         {
-        case QuotingPhase::RISK_HALTED: HaltReasons::raise(HR_QPHASE_RISK); break;
-        case QuotingPhase::ERROR: HaltReasons::raise(HR_QPHASE_ERROR); break;
-        case QuotingPhase::TOXICITY: HaltReasons::raise(HR_QPHASE_TOXICITY); break;
-        case QuotingPhase::MARKET: HaltReasons::raise(HR_QPHASE_MARKET); break;
+        case QuotingPhase::RISK_HALTED: _halt_reasons.raise(HR_QPHASE_RISK); break;
+        case QuotingPhase::ERROR: _halt_reasons.raise(HR_QPHASE_ERROR); break;
+        case QuotingPhase::TOXICITY: _halt_reasons.raise(HR_QPHASE_TOXICITY); break;
+        case QuotingPhase::MARKET: _halt_reasons.raise(HR_QPHASE_MARKET); break;
         default: break;
         }
     }
@@ -250,32 +251,43 @@ struct TradingState
     {
         _check_writer_thread();
         long_blocked.store(true, std::memory_order_release);
-        HaltReasons::raise(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
+        _halt_reasons.raise(HR_LONG_BLOCKED); // F-core P1-6 阶段 1 (§20.9 批 1: 实例位图)
     }
     void unblockLong()
     {
         _check_writer_thread();
         long_blocked.store(false, std::memory_order_release);
-        HaltReasons::clear(HR_LONG_BLOCKED); // F-core P1-6 阶段 1
+        _halt_reasons.clear(HR_LONG_BLOCKED); // F-core P1-6 阶段 1 (§20.9 批 1)
     }
     void blockShort()
     {
         _check_writer_thread();
         short_blocked.store(true, std::memory_order_release);
-        HaltReasons::raise(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
+        _halt_reasons.raise(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1 (§20.9 批 1)
     }
     void unblockShort()
     {
         _check_writer_thread();
         short_blocked.store(false, std::memory_order_release);
-        HaltReasons::clear(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1
+        _halt_reasons.clear(HR_SHORT_BLOCKED); // F-core P1-6 阶段 1 (§20.9 批 1)
     }
+
+    /// §20.9 批 1: 本策略实例的 halt 原因位图 (owner; 镜像由本类写入, 门禁/影子经此读取)
+    HaltReasons& haltReasons() { return _halt_reasons; }
+    const HaltReasons& haltReasons() const { return _halt_reasons; }
 
     //==========================================================================
     // 日志/调试
     //==========================================================================
 
 private:
+    //==========================================================================
+    // §20.9 批 1(2026-11-12): per-strategy halt 原因位图 (owner)
+    //   修复进程级 static 被双策略共享的污染 (11-06 根因实锤: ec halt 置位全局
+    //   RISK_HALT → ao 影子对比全天分歧); 由本类镜像写入, 经 haltReasons() 读取。
+    //==========================================================================
+    HaltReasons _halt_reasons;
+
     //==========================================================================
     // P1-7: DEBUG-only 线程契约校验
     //   v7.6 原子化后单写者契约已废弃; 保留仅为过渡期观察,

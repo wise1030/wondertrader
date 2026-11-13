@@ -305,6 +305,17 @@ public:
     //==========================================================================
     void setEventNotifier(wtp::EventNotifier* notifier);
 
+    //==========================================================================
+    // §20.4 测试钩子 (2026-10-21): 单测直达 private handleRiskAlert 及
+    // 停机/报价门禁状态的受控观测通道。生产路径零调用、零开销。
+    //==========================================================================
+    /// 注入一笔 EMERGENCY 级 RiskAlert (等价 arb 线程回调), 走完整处置链
+    void testInjectEmergencyAlert(double drawdown, double threshold);
+    /// 观测: RiskMonitor 全局停机标志
+    bool testIsTradingHalted() const;
+    /// 观测: 报价门禁 (TradingState.qphase 驱动)
+    bool testCanQuote() const;
+
 private:
     //==========================================================================
     // 内部方法
@@ -434,17 +445,15 @@ private:
     //==========================================================================
     // V8-R6/WS-E: 罕见重操作命令化 (channel/session 跨模块序列)
     //   发布-单飞消费模型: 回调入口只 post + drain(自旋标志快速路径);
-    //   大锁默认模式下 post 后同回调内 claim 必然成功 => 行为与旧内联逐比特一致;
-    //   未来切 FUTU_CB_LOCK_BIG=0 时并发到达由 claim 串行化。
+    //   大锁基线下 post 后同回调内 claim 必然成功 => 行为与旧内联逐比特一致
+    //   (§20.7: none 双模式已退役, FUTU_CB_LOCK_BIG 宏删除, 大锁无条件化)。
     //   V8-R6 收官修订(属主域拆分):
     //   - Channel 类命令属 Td 域 (触达的 _violations_buf 等均为 Td 专属/自锁状态):
     //     发布者即 TdSpi 线程, 允许自 drain => 行情静默期无滞留;
     //     Td 检查点 (on_trade/on_order/on_entrust) 兜底。
     //   - Session 类命令属 Md 域 (onSessionBegin/End 触达 coordinator resetSession/
-    //     quote_chain 等 Md 属主无锁状态): 实盘发布者为 WtUftTicker 线程, 不得
-    //     自 drain, 仅由 on_tick (Md) 检查点消费 —— session 切换后必有 tick 流入,
-    //     无静默期滞留; 回测单线程下发布者即 Md 线程 (tid 相等) 自 drain,
-    //     与 big 模式逐比特一致。
+    //     quote_chain 等 Md 属主无锁状态): 由 on_tick (Md) 检查点消费 ——
+    //     session 切换后必有 tick 流入, 无静默期滞留。
     struct PendingCommand
     {
         enum class Type : uint8_t
@@ -466,7 +475,6 @@ private:
     std::vector<PendingCommand> _pending_cmds;         // 仅 _cmd_mtx 内触碰
     std::atomic<bool> _cmd_has_pending{false};          // 快速路径标志 (release/acquire)
     std::atomic<uint8_t> _cmd_executing{0};             // 单飞 claim
-    std::atomic<std::thread::id> _md_tid{};             // 首个 on_tick 捕获 (回测=发布线程, 实盘=MdSpi)
 
     std::vector<RiskViolation> _violations_buf; // 风控违规复用缓冲 (严格 TdSpi 专属: processTradeFill/onEntrust;
                                                 //   V8-R6 收官: onChannelReady 恢复序列已改局部缓冲 ——
@@ -496,7 +504,7 @@ private:
     //   recursive: 防回调路径嵌套(如实盘 on_trade 内 stra_buy 的同步回执)。
     //
     // V8-R4/P0-3: FUTU_CALLBACK_LOCK=0 细粒度开关已删 (≥6 处假无锁, 生产恒用
-    // 大锁; 细粒度化需先建跨线程写点清单逐项加锁 -- 见 DIAGNOSTIC_REPORT_V8)
+    // 大锁; 细粒度化需先建跨线程写点清单逐项加锁 -- 见 DIAGNOSTIC_REPORT_V8(已归档 docs/archive/)
     std::recursive_mutex _cb_mtx;
 
     // P0-1 (v7.4): 统一强平/减仓原语 (无状态, setDeps 即用)

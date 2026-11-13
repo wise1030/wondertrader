@@ -948,6 +948,7 @@ void FutuRuntimeOps::onOrderEvent(UftFutuMmStrategy& strat,
     auto& _async_arb = strat._async_arb;
     auto& _arb_bridge = strat._arb_bridge;
     auto& _performance_monitor = strat._performance_monitor; // V10-R7e/WS-F 埋点
+    auto& _order_tracker = strat._order_tracker;             // §20.7-S4 快路径路由
 
     // 更新频率统计
     if (_risk_monitor && isCanceled)
@@ -971,16 +972,34 @@ void FutuRuntimeOps::onOrderEvent(UftFutuMmStrategy& strat,
     // R3 v2: 改用 (uTime_HHMM, sec_in_min) 签名
     uint32_t uTime_HHMM = time_hhmm;
     uint32_t sec_in_min = s;
-    for (auto& [code, quoter] : _quoters) {
-        if (quoter->isMyOrder(localid)) {
-            // V10-R7e/WS-F: TdSpi 取 quoter 锁阻塞时长埋点 (Td 单写) ——
-            // big 锁时代被 _cb_mtx 掩盖, none 模式下这是 Md 持锁穿越发单的
-            // 直接竞争点, 切 none 前后对比的验收判据之一
-            uint64_t _ow_t0 = futu::TscClock::now();
-            quoter->onOrder(localid, isCanceled, leftQty, uTime_HHMM, sec_in_min);
-            if (_performance_monitor)
-                _performance_monitor->recordOrderCbWait(futu::TscClock::toNs(futu::TscClock::now() - _ow_t0));
-            break;
+    // §20.7-S4: tracker 快路径路由 —— id→code 直查候选 quoter, 避免每事件逐
+    // quoter 锁内 isMyOrder 全扫 (O(合约数)→O(1))。tracker 未命中或候选不认领
+    // (纯 quoter 簿记单/非 MM 单) 时回退原全扫, 语义与旧实现一致。
+    bool routed = false;
+    if (_order_tracker) {
+        UnifiedOrderInfo oi;
+        if (_order_tracker->getOrderInfoCopy(localid, oi)) {
+            auto qit = _quoters.find(oi.code);
+            if (qit != _quoters.end() && qit->second && qit->second->isMyOrder(localid)) {
+                uint64_t _ow_t0 = futu::TscClock::now();
+                qit->second->onOrder(localid, isCanceled, leftQty, uTime_HHMM, sec_in_min);
+                if (_performance_monitor)
+                    _performance_monitor->recordOrderCbWait(futu::TscClock::toNs(futu::TscClock::now() - _ow_t0));
+                routed = true;
+            }
+        }
+    }
+    if (!routed) {
+        for (auto& [code, quoter] : _quoters) {
+            if (quoter->isMyOrder(localid)) {
+                // V10-R7e/WS-F: TdSpi 取 quoter 锁阻塞时长埋点 (Td 单写) ——
+                // §20.7 起转作 _cb_mtx 临界区健康指标
+                uint64_t _ow_t0 = futu::TscClock::now();
+                quoter->onOrder(localid, isCanceled, leftQty, uTime_HHMM, sec_in_min);
+                if (_performance_monitor)
+                    _performance_monitor->recordOrderCbWait(futu::TscClock::toNs(futu::TscClock::now() - _ow_t0));
+                break;
+            }
         }
     }
 

@@ -65,6 +65,18 @@ std::string stdCodeToFullCode(const std::string& stdCode)
     return stdCode.substr(0, p1 + 1) + stdCode.substr(p2 + 1);
 }
 
+/// §20.8-B1: 闩锁计时用 steady_clock —— 开盘洪峰 MdSpi 积压时 tc.timestamp
+/// (exchange 时间) 滞后墙钟可达分钟级, 以其计量 held 会灌水失真 (10-22 09:02
+/// 实证: 置位 3 秒后 EXCEEDED 报 held=136s)。
+uint64_t latchSteadyNowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+/// §20.8-B3: 闩锁持续超此值未解除 → 一次性 ERROR 升级 + 可操作诊断 (挂起单号)。
+constexpr uint64_t ZOMBIE_LATCH_ESCALATE_MS = 300000;
+
 struct BilateralSeed
 {
     uint64_t bil = 0;
@@ -281,6 +293,19 @@ void StrategyCoordinator::loadConfigFromVariant(wtp::WTSVariant* cfg)
                             HaltGate::modeName(HaltGate::mode()));
     }
     WTSLogger::info("[HALT-GATE] quoting gate mode = {}", HaltGate::modeName(HaltGate::mode()));
+
+    // §20.9 批 3: OrderRouter 分源限速 (默认=历史硬编码值; 未配置时行为与批前逐比特一致)
+    if (wtp::WTSVariant* or_node = cfg->get("orderRouter"))
+    {
+        ConfigAudit::instance().noteRead(or_node, "arbRatePerSec");
+        ConfigAudit::instance().noteRead(or_node, "hedgeRatePerSec");
+        ConfigAudit::instance().noteRead(or_node, "closeoutRatePerSec");
+        ConfigAudit::instance().noteRead(or_node, "windowMs");
+        _cfg.router_arb_rate_per_sec = readUInt32(or_node, "arbRatePerSec", _cfg.router_arb_rate_per_sec);
+        _cfg.router_hedge_rate_per_sec = readUInt32(or_node, "hedgeRatePerSec", _cfg.router_hedge_rate_per_sec);
+        _cfg.router_closeout_rate_per_sec = readUInt32(or_node, "closeoutRatePerSec", _cfg.router_closeout_rate_per_sec);
+        _cfg.router_rate_window_ms = readUInt32(or_node, "windowMs", _cfg.router_rate_window_ms);
+    }
 
     // Read modules section (modules.<name>.enabled 是模块级开关的唯一权威位置)
     wtp::WTSVariant* modules = cfg->get("modules");
@@ -518,6 +543,7 @@ ProcessingResult StrategyCoordinator::processTick(
     tc.code = stdCode;
     tc.time_hms = ctx->stra_get_time();
     tc.date = ctx->stra_get_date();
+    tc.secs_in_min = ctx->stra_get_secs() / 1000; // §20.7-S3: 每 tick 一次, 全链复用
     // 毫秒时间戳(epoch), 用于冷却期/closeout 等计算.
     // now_ms 由调用方(on_tick)注入时复用, 避免每 tick 重复读墙钟.
     tc.timestamp = (now_ms > 0) ? now_ms : TimeUtils::getLocalTimeNow();
@@ -675,15 +701,18 @@ ProcessingResult StrategyCoordinator::processTick(
         }
 
         // F-core P2(2026-09-17): 5min 健康巡检行 —— 窗口 p99 + 超限 EPISODE 计数 + 影子簿 realized 滞后计数
+        // §20.9 批 4: 追加 shadowstale= (净仓漂移 divergence 计数 —— 观测"有检测无动作"的半面)
         if (tc.timestamp - _last_kpi_ms >= 300000) {
             uint64_t reallag = _portfolio ? _portfolio->getRealizedLagEvents() : 0;
-            WTSLogger::info("[PERF] kpi {} reallag={} hotlog={}/{} halt_shadow={}",
+            uint64_t shadowstale = _portfolio ? _portfolio->getShadowStaleEvents() : 0;
+            WTSLogger::info("[PERF] kpi {} reallag={} shadowstale={} hotlog={}/{} halt_shadow={}",
                             _perf_monitor->formatKpi(),
                             reallag >= _last_reallag ? (reallag - _last_reallag) : reallag,
+                            shadowstale >= _last_shadowstale ? (shadowstale - _last_shadowstale) : shadowstale,
                             HotLogGate::emitted(),
                             HotLogGate::skipped(),
                             _halt_shadow_mismatch);
-            WTSLogger::info("[PERF] halt-gate {}", HaltGate::statusLine()); // P1-6 阶段 2: 模式+原因位
+            WTSLogger::info("[PERF] halt-gate {}", HaltGate::statusLine(_haltBits())); // §20.9 批 1: 实例位图
             // 19.26 F3③: 恢复闸拒绝观测入 KPI (2026-09-24 停摆实证: 恢复被拒完全黑盒)
             if (_risk_monitor) {
                 WTSLogger::info("[PERF] recovery-gate rejects={} last=[{}]",
@@ -691,6 +720,7 @@ ProcessingResult StrategyCoordinator::processTick(
                                 _risk_monitor->getLastRecoveryRejectReason());
             }
             _last_reallag = reallag;
+            _last_shadowstale = shadowstale;
             _last_kpi_ms = tc.timestamp;
         }
 
@@ -728,7 +758,7 @@ ProcessingResult StrategyCoordinator::processTick(
             if (_risk_coord.isRateBreachActive())
                 legacy |= HaltReasons::bitOf(HR_RATE_BREACH);
 
-            const uint64_t bits = HaltReasons::raw();
+            const uint64_t bits = _haltBits(); // §20.9 批 1: 本策略实例位图 (原进程级 static raw())
             if (bits != legacy) {
                 ++_halt_shadow_mismatch;
                 if (bits != _last_halt_shadow_bits || legacy != _last_halt_shadow_legacy) {
@@ -769,8 +799,8 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
     // 当前分钟 (stra_get_time 返回 HHMM(4位), 兼容 HHMMSS)
     uint32_t cur_hhmm = (tc.time_hms >= 10000) ? tc.time_hms / 100 : tc.time_hms;
 
-    // v7.9: 秒级窗口 — 当前秒内毫秒 stra_get_secs (ssmmm/1000 = 分钟内秒)
-    uint32_t secs_in_min = ctx->stra_get_secs() / 1000;
+    // v7.9: 秒级窗口 — 当前秒内毫秒 (secs_in_min = 入口缓存的分钟内秒, §20.7-S3)
+    uint32_t secs_in_min = tc.secs_in_min;
     bool in_break = _phase_mgr.inSectionBreak(tc.code, tc.time_hms, secs_in_min);
 
     if (in_break) {
@@ -811,7 +841,7 @@ bool StrategyCoordinator::processSectionBreak(wtp::IUftStraCtx* ctx, TickContext
             // B2 fix: RISK_HALTED 时不复活 arb - 由 checkRisk 恢复路径
             // (resumeFromRisk + enabled=true) 在风险正常化后统一复活,
             // 避免 break 期间触发的风控 halt 被此处绕过
-            if (!HaltGate::blocked(isTradingHalted())) { // F-core P1-6 阶段 2: arb 复活门
+            if (!HaltGate::blocked(isTradingHalted(), _haltBits())) { // §20.9 批 1: 实例位图
                 AsyncArbConfig arbCfg = _arb_executor->getConfig();
                 arbCfg.enabled.store(true);
                 _arb_executor->setConfig(arbCfg);
@@ -970,8 +1000,10 @@ void StrategyCoordinator::updateMarketData(wtp::IUftStraCtx* ctx, TickContext& t
         if (mid_it != _last_mid.end() && mid_it->second)
             mid_it->second->v.store(tc.mid, std::memory_order_relaxed);
 
-        _global_portfolio_ctx.total_delta = _portfolio->getTotalDelta();
-        _global_portfolio_ctx.total_exposure = _portfolio->getTotalExposure();
+        // §20.7-S1: 单次取锁取全部聚合 (原 delta/exposure 两次独立取锁)
+        const auto _agg_snap = _portfolio->getAggregates();
+        _global_portfolio_ctx.total_delta = _agg_snap.total_delta;
+        _global_portfolio_ctx.total_exposure = _agg_snap.total_exposure;
         _global_portfolio_ctx.related.clear();
         _portfolio_ctx_dirty = false;
 
@@ -1165,7 +1197,7 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
 {
     // F-core P1-6 阶段 2(2026-09-19): 门禁统一求值 —— legacy(默认) = 与切换前逐比特一致;
     //   union/bits 模式下原因位图参与判定 (见 HaltGate.h 的模式表与已知差异说明)
-    if (HaltGate::blocked(!_trading_state || !_trading_state->canQuote())) {
+    if (HaltGate::blocked(!_trading_state || !_trading_state->canQuote(), _haltBits())) { // §20.9 批 1
         return false;
     }
 
@@ -1412,7 +1444,7 @@ bool StrategyCoordinator::processQuoting(wtp::IUftStraCtx* ctx, TickContext& tc,
             tc.mid, l0_bid, l0_ask, spread_mult, allow_bid, allow_ask,
             tc.timestamp, tick->upperlimit(), tick->lowerlimit(),
             tick->bidprice(0), tick->askprice(0),
-            tc.time_hms, ctx->stra_get_secs() / 1000 % 60,
+            tc.time_hms, tc.secs_in_min % 60,
             decision.risk, decision.strategy
         });
         if (_perf_monitor)
@@ -1444,17 +1476,22 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
     // fullCode (回测 mocker 用 stdCode 匹配, 行为不一致, 见 AGENTS.md 已知外部限制).
     //==========================================================================
     const auto& zcodes = _order_tracker->getZombieEscalations();
+    const uint64_t latch_steady_now = latchSteadyNowMs();
     for (const auto& zcode : zcodes) {
         std::string fc = stdCodeToFullCode(zcode);
         WTSLogger::error("[RISK] {} ZOMBIE: cancel retries exhausted -> halt contract quoting + engine cancelAll({})",
                          zcode,
                          fc);
+        // §20.8-B1: 新闩锁段判定必须在 setZombieHalt 之前取样 —— 本帧之前
+        //   已 halt = 同段续期 (保持单调原点); 否则 = 新段 (原点重置, 防自愈后
+        //   短时间内再触发时 EXCEEDED 继承陈旧起点瞬时误触发, 10-22 实证)。
+        const bool was_halted = (_risk_monitor != NULL && _risk_monitor->isZombieHalted(zcode));
         if (_risk_monitor)
             _risk_monitor->setZombieHalt(zcode);
-        // F-core Z3(2026-09-15): 记录闩锁起始时刻(重复置位不覆盖首次时间)
+        // F-core Z3(2026-09-15): _zombie_latch_ms 仅作重探倒计时 (每段重置)
         _zombie_latch_ms.emplace(zcode, tc.timestamp);
-        // F-core B1(2026-09-16): 单调起点单独记账 (重探只重置 _zombie_latch_ms 倒计时)
-        _zombie_latch_since_ms.emplace(zcode, tc.timestamp);
+        // §20.8-B1: 计时原点收编 ZombieLatchPolicy (steady 时钟)
+        _zombie_latch_policy.arm(zcode, was_halted, latch_steady_now);
         orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
     }
 
@@ -1471,23 +1508,24 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
     //   可撤单是二次消解机会)。释放后清 _zombie_latch_ms。
     if (!_zombie_latch_ms.empty())
     {
+        const uint64_t steady_now = latchSteadyNowMs();
         for (auto it = _zombie_latch_ms.begin(); it != _zombie_latch_ms.end();)
         {
             const std::string& code = it->first;
             if (_risk_monitor == NULL || !_risk_monitor->isZombieHalted(code))
             {
-                _zombie_latch_since_ms.erase(code);
-                _zombie_latch_capped.erase(code);
+                _zombie_latch_policy.lift(code);
                 it = _zombie_latch_ms.erase(it);
                 continue;
             }
-            // F-core B1/B2(2026-09-16): held_total = 自首次置位的单调持有 (遥测/封顶用);
+            // F-core B1/B2(2026-09-16): held_total = 自首次置位的单调持有 (封顶用);
             //   held_reprobe = 自上次重探的间隔 (重探调度用)。此前二者混用一个变量,
             //   导致重探把"持有时间"重置, 遥测退回 15s/30s 且停报时长无上界
             //   (2026-09-16 14:13 双合约 136s 停报实证)。
-            auto sit = _zombie_latch_since_ms.find(code);
-            uint64_t since = (sit != _zombie_latch_since_ms.end()) ? sit->second : it->second;
-            uint64_t held_total = tc.timestamp > since ? tc.timestamp - since : 0;
+            // §20.8-B1(2026-11-02): held_total 改用 steady 时钟的"本次连续持有"
+            //   (ZombieLatchPolicy), 抗 MdSpi 积压导致的 exchange-time 滞后灌水
+            //   (10-22 09:02 实证); held_reprobe 维持 tick 时间调度不变。
+            uint64_t held_total = _zombie_latch_policy.heldMs(code, steady_now);
             uint64_t held_reprobe = tc.timestamp > it->second ? tc.timestamp - it->second : 0;
 
             const bool capped = (_cfg.modules.zombie_latch_max_hold_ms > 0 &&
@@ -1496,7 +1534,7 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
             {
                 // 停止 reprobe 风暴 (撤单风暴本身会新造 ZOMBIE 并续期闩锁), 保持停报不放开;
                 //   恢复仍由 retainZombieHalts 的 zombie 清账路径驱动, 告警每闩锁一次。
-                if (_zombie_latch_capped.insert(code).second)
+                if (_zombie_latch_policy.markCapped(code))
                 {
                     std::string fc = stdCodeToFullCode(code);
                     WTSLogger::error("[RISK] {} zombie latch EXCEEDED maxHold {}ms (held {}ms) -> "
@@ -1517,6 +1555,24 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
                 orderApiCall([&] { return ctx->stra_cancel_all(fc.c_str()); });
                 it->second = tc.timestamp; // 重置计时, 下一个 reprobe 周期再探
             }
+
+            // §20.8-B3: 长闩锁升级 — 持续 >5min 未解除, 一次性 ERROR + 可操作诊断
+            //   (挂起 zombie 单号清单), 原仅 telemetry 日志无主动通知。
+            if (held_total >= ZOMBIE_LATCH_ESCALATE_MS && _zombie_latch_policy.markEscalated(code))
+            {
+                std::string zorders;
+                if (_order_tracker) {
+                    const auto ids = _order_tracker->getZombieOrderIds(code);
+                    for (size_t k = 0; k < ids.size(); ++k) {
+                        zorders += (k ? "," : "");
+                        zorders += ids[k];
+                    }
+                }
+                WTSLogger::error("[RISK] {} zombie latch PERSISTENT for {}ms (>={}ms) — contract quoting "
+                                 "STILL halted; pending zombie orders: [{}]. 处置: 核对上述单柜台状态/"
+                                 "撤单回报, 确认无活单后重启释放",
+                                 code, held_total, (uint64_t)ZOMBIE_LATCH_ESCALATE_MS, zorders);
+            }
             ++it;
         }
         if (!_zombie_latch_ms.empty() && tc.timestamp >= _last_zombie_tele_ms &&
@@ -1526,9 +1582,7 @@ bool StrategyCoordinator::processAutoCancel(wtp::IUftStraCtx* ctx, const TickCon
             uint64_t oldest = UINT64_MAX;
             for (const auto& kv : _zombie_latch_ms)
             {
-                auto sit = _zombie_latch_since_ms.find(kv.first);
-                uint64_t since = (sit != _zombie_latch_since_ms.end()) ? sit->second : kv.second;
-                oldest = std::min(oldest, tc.timestamp > since ? tc.timestamp - since : 0);
+                oldest = std::min(oldest, _zombie_latch_policy.heldMs(kv.first, steady_now));
             }
             WTSLogger::warn("[RISK] zombie latch telemetry: {} contract(s) halted, oldest holding {}ms",
                             _zombie_latch_ms.size(), oldest == UINT64_MAX ? 0 : oldest);
@@ -1600,7 +1654,7 @@ bool StrategyCoordinator::requoteAfterFill(wtp::IUftStraCtx* ctx, const std::str
     //    -> 旧实现 HALT 期间仍重挂(13:50 后 943 笔成交绕过风控), 故显式拦截必须保留)
     const bool legacy_blocked = (!_trading_state || !_trading_state->canQuote()) ||
                                 (_risk_monitor != nullptr && _risk_monitor->isTradingHalted());
-    if (HaltGate::blocked(legacy_blocked)) // F-core P1-6 阶段 2(2026-09-19)
+    if (HaltGate::blocked(legacy_blocked, _haltBits())) // §20.9 批 1: 实例位图
         return false;
 
     // V10-R8-b: 时段/竞价撮合分钟禁止补挂 —— 事件驱动补挂绕过 preCheck; 与时段门
@@ -1931,7 +1985,7 @@ void StrategyCoordinator::logBilateralStatsPeriodic(wtp::IUftStraCtx* ctx, const
         return;
 
     uint32_t cur_hhmm = (tc.time_hms >= 10000) ? tc.time_hms / 100 : tc.time_hms;
-    uint32_t secs_in_min = ctx->stra_get_secs() / 1000;
+    uint32_t secs_in_min = tc.secs_in_min; // §20.7-S3: 复用入口缓存
     std::string line = stats.formatLiveString(cur_hhmm, secs_in_min);
     if (line.empty())
         return;

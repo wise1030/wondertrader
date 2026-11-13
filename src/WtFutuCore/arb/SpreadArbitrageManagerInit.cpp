@@ -88,6 +88,10 @@ bool SpreadArbitrageManager::loadConfig(const std::string& config_file)
     // A10: 开仓信号最低利润门槛 (ticks), 接线到 AsyncArbitrageExecutor
     _config.min_profit_threshold_ticks = readDouble(arb, "minProfitThresholdTicks", 1.0);
 
+    // §20.9 批 3: B-3 in_flight 超时与兜底总仓位配置化 (原 assembler 硬编码 120000/20.0)
+    _config.in_flight_timeout_ms = readUInt32(arb, "inFlightTimeoutMs", _config.in_flight_timeout_ms);
+    _config.fallback_max_total_position = readDouble(arb, "fallbackMaxTotalPosition", _config.fallback_max_total_position);
+
     //----------------------------------------------------------------------
     // F-core P1-4 阶段 2(2026-09-19): asyncExecutor 节 —— 异步套利执行器配置的 yaml 入口
     //   (此前该组参数只有编译期默认, 属"已知无入口键"; 缺省 = AsyncArbConfig 默认值 ⇒ 行为不变)

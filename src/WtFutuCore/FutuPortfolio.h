@@ -273,6 +273,8 @@ public:
     void noteRealizedLag(const std::string& code);
     /// 累计 realized 滞后事件数 (巡检 KPI 用)
     uint64_t getRealizedLagEvents() const { return _realized_lag_total.load(std::memory_order_relaxed); }
+    /// §20.9 批 4: 累计 shadow-book divergence (markShadowStale) 事件数 (巡检 KPI 用)
+    uint64_t getShadowStaleEvents() const { return _shadow_stale_total.load(std::memory_order_relaxed); }
     bool hasStaleCostBasis() const;
     double getShadowNet(const std::string& code) const;
     double getShadowRealizedPnl(const std::string& code) const;
@@ -347,6 +349,31 @@ public:
         RecursiveSpinGuard _g(_lock);
         refreshAggregates();
         return _agg_total_pnl;
+    }
+
+    /// §20.7-S1: 单次取锁返回全部聚合快照 — 风控链路一次调用替代多次独立取锁
+    ///   (每 tick 锁进出 6-10 次 → 1 次)。值与逐 getter 完全一致: 同一
+    ///   refreshAggregates 脏缓存, 且大锁基线下调用期间无人可置脏。
+    struct AggregateSnapshot
+    {
+        double total_delta;
+        double net_delta;
+        double total_exposure; // max(long, short)
+        double gross_exposure;
+        double unrealized_pnl;
+        double total_pnl;
+    };
+
+    inline AggregateSnapshot getAggregates() const
+    {
+        RecursiveSpinGuard _g(_lock);
+        refreshAggregates();
+        return {_agg_total_delta,
+                _agg_net_delta,
+                std::max(_agg_long_exposure, _agg_short_exposure),
+                _agg_gross_exposure,
+                _agg_unrealized_pnl,
+                _agg_total_pnl};
     }
 
     /// Get position for specific contract - O(1)
@@ -437,6 +464,8 @@ private:
     std::string _anchor_code;
     /// F-core C(2026-09-17): realized 滞后事件累计 (无锁读写, 仅遥测)
     std::atomic<uint64_t> _realized_lag_total{0};
+    /// §20.9 批 4: shadow-book divergence 事件累计 (与 realized_lag 同口径入 KPI)
+    std::atomic<uint64_t> _shadow_stale_total{0};
 
     std::vector<ContractState> _contracts;
 

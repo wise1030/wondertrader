@@ -146,6 +146,9 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
             if (_deps.trading_state) {
                 _deps.trading_state->setQuotingPhase(QuotingPhase::RISK_HALTED);
             }
+            // §20.9 批 2: halt 期硬闸监视子集 —— 持仓/日亏盯市继续评估, 恶化即升级
+            //   IRREVERSIBLE (风控盲区收窄: 审计 T1; 恢复与报价语义不变)。
+            _monitorHardGatesWhileHalted(ctx, tc);
             // 限频日志：每5秒输出一次，避免刷屏
             {
                 uint64_t now_ms = TimeUtils::getLocalTimeNow();
@@ -211,7 +214,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
         if (rate_breach) {
             if (_rate_breach_since_ms == 0) {
                 _rate_breach_since_ms = now_ms;
-                HaltReasons::raise(HR_RATE_BREACH); // F-core P1-6 阶段 1: 原因位图镜像
+                if (_deps.halt_reasons) _deps.halt_reasons->raise(HR_RATE_BREACH); // §20.9 批 1: 实例位图
             } else if (
                 now_ms > _rate_breach_since_ms &&
                 now_ms - _rate_breach_since_ms >= _deps.risk_monitor->getRateLimits().order_rate_pause_ms) {
@@ -232,7 +235,7 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
             }
         } else {
             _rate_breach_since_ms = 0;
-            HaltReasons::clear(HR_RATE_BREACH); // F-core P1-6 阶段 1
+            if (_deps.halt_reasons) _deps.halt_reasons->clear(HR_RATE_BREACH); // §20.9 批 1
         }
     }
 
@@ -399,6 +402,55 @@ bool RiskCoordinator::checkRisk(wtp::IUftStraCtx* ctx, const TickContext& tc, bo
 
     // 空指针保护
     return !_deps.trading_state || _deps.trading_state->qphase != QuotingPhase::RISK_HALTED;
+}
+
+void RiskCoordinator::_monitorHardGatesWhileHalted(wtp::IUftStraCtx* ctx, const TickContext& tc)
+{
+    if (!_deps.risk_monitor || !_deps.portfolio)
+        return;
+    // 已 IRREVERSIBLE: 恢复本就拒绝, 原触发路径已执行 forceFlat, 无需再升级
+    if (_deps.risk_monitor->getHaltCategory() == RiskCategory::IRREVERSIBLE)
+        return;
+
+    // 监视子集 = 与正常路径同一 checkRiskLimits/determineAction 链 (单点语义, 防漂移)
+    _deps.risk_monitor->checkRiskLimits(_deps.portfolio, _violations_buf);
+    if (_violations_buf.empty())
+        return;
+
+    RiskCategory category = RiskCategory::REVERSIBLE;
+    RiskAction action = _deps.risk_monitor->determineActionWithCategory(
+        _violations_buf, category, _deps.portfolio->hasStaleCostBasis());
+    if (action != RiskAction::HALT_TRADING || category != RiskCategory::IRREVERSIBLE)
+        return;
+
+    // 升级: REVERSIBLE halt 期风险恶化至不可逆类别 (日亏继续扩大等) ——
+    // 升级链与正常 HALT 路径逐动作对齐 (haltTrading + 全源撤单 + forceFlat defer
+    // 防双卖 + arb 禁用)。closeout 窗口在本分支入口已提前 return, 此处 defer 判断
+    // 保留为防御性对齐。
+    WTSLogger::error("[RISK] halt-period monitor: risk worsened to IRREVERSIBLE while halted "
+                     "(code={}, pnl={:.2f}) — escalating",
+                     tc.code,
+                     _deps.portfolio->getTotalPnL());
+    _deps.risk_monitor->haltTrading(RiskCategory::IRREVERSIBLE, _deps.portfolio->getTotalPnL());
+    if (_deps.cancel_all_quotes)
+        _deps.cancel_all_quotes(ctx);
+    if (_deps.order_router) {
+        _deps.order_router->cancelAllBySource(ctx, Source::CLOSEOUT);
+        _deps.order_router->cancelAllBySource(ctx, Source::HEDGING);
+        _deps.order_router->cancelAllBySource(ctx, Source::ARBITRAGE);
+        _deps.order_router->cancelAllBySource(ctx, Source::RISK_REDUCE);
+    }
+    if (_deps.risk_monitor->isCloseoutFlattening() || _deps.risk_monitor->isCloseoutTriggered()) {
+        WTSLogger::warn("[RISK] halt-period IRREVERSIBLE during closeout: forceFlatAll deferred to closeout "
+                        "(avoid cross-source dual-sell)");
+    } else {
+        _liquidator.forceFlatAll(ctx, "HALT-PERIOD MONITOR ESCALATION FORCE FLAT");
+    }
+    if (_deps.arb_executor) {
+        AsyncArbConfig arbCfg = _deps.arb_executor->getConfig();
+        arbCfg.enabled.store(false);
+        _deps.arb_executor->setConfig(arbCfg);
+    }
 }
 
 } // namespace futu

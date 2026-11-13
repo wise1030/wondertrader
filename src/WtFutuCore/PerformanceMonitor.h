@@ -34,7 +34,7 @@ enum class LatencyType : uint8_t
     SIGNAL_TO_ORDER, ///< Strategy signal to order sent
     /// V10-R7e/WS-F: 去大锁验收埋点 —— quoter 自旋锁竞争显性化 (AGENTS 去大锁
     /// 方案 WS-F 验收标准: refreshQuotes 持锁时长 p99 + TdSpi onOrder 因该锁
-    /// 阻塞时长; 切 FUTU_CB_LOCK_BIG=0 前必须量化确认无恶化)
+    /// 阻塞时长; §20.7 起转作 _cb_mtx 临界区健康指标)
     QUOTE_LOCK_HOLD, ///< Md: refreshQuotes 持 quoter 锁全程时长 (含锁内穿越引擎发单)
     ORDER_CB_WAIT    ///< Td: onOrderEvent 中 quoter->onOrder 获取该锁的阻塞时长
 };
@@ -85,7 +85,7 @@ struct LatencyStats
 struct ThroughputStats
 {
     // V8-R6 收官: 全部字段原子化 —— record*(Md: tick/quote; Td: fill/order 补挂路径)
-    // 双线程写, 拆回调大锁 (FUTU_CB_LOCK_BIG=0) 的硬阻断项。统计口径允许字段间
+    // 双线程写防护(历史去大锁阻断项收编产物, §20.7 起保留为常态保护)。统计口径允许字段间
     // 微撕裂 (监控用途), 单字段不再 torn/lost-update。
     std::atomic<uint64_t> ticks_processed{0};
     std::atomic<uint64_t> quotes_placed{0};
