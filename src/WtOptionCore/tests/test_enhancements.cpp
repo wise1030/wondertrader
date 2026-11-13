@@ -2081,6 +2081,74 @@ void test_delta_hedge_decide() {
     std::cout << "  PASS" << std::endl;
 }
 
+// Multi-expiry underlying routing (audit 2026-11-13 multi-month config fix):
+// (1) a global tick whose code is NOT any expiry's routing key must not
+//     overwrite the per-month futures leg of own-underlying expiries
+//     (the auto-derived main-continuous pollution);
+// (2) SHFE one-futures-one-expiry isolation: each month's futures tick
+//     updates only its own expiry.
+void test_multi_expiry_underlying_isolation() {
+    std::cout << "=== test_multi_expiry_underlying_isolation ===" << std::endl;
+    OptionGrid::TickDataRef opt;
+    opt.price = 100; opt.bid = 99; opt.ask = 101;
+
+    // --- scenario 1: global = main, ALL expiries own their month ---------
+    {
+        auto grid = std::make_shared<OptionGrid>("cu", "SHFE.cu.main", nullptr, nullptr);
+        grid->setExpiryOwnUnderlying(202607, "SHFE.cu.2607");
+        grid->setExpiryOwnUnderlying(202608, "SHFE.cu.2608");
+        grid->onTick("SHFE.cu2607.C.100000", opt);
+        grid->onTick("SHFE.cu2608.C.100000", opt);
+        auto ed7 = grid->getExpiryData(202607);
+        auto ed8 = grid->getExpiryData(202608);
+        ASSERT_TRUE(ed7 != nullptr && ed8 != nullptr);
+
+        // main tick: must touch NOTHING per-expiry (pre-fix: polluted all)
+        OptionGrid::TickDataRef mainTick; mainTick.price = 70500;
+        mainTick.bid = 70490; mainTick.ask = 70510;
+        grid->onTick("SHFE.cu.main", mainTick);
+        ASSERT_TRUE(!ed7->isUnderlyingPriceValid());
+        ASSERT_TRUE(!ed8->isUnderlyingPriceValid());
+        ASSERT_TRUE(ed7->getFutureMid() == 0);
+        ASSERT_TRUE(ed8->getFutureMid() == 0);
+
+        // each month tick updates only its own expiry
+        OptionGrid::TickDataRef f7; f7.price = 71000; f7.bid = 70990; f7.ask = 71010;
+        grid->onTick("SHFE.cu.2607", f7);
+        ASSERT_TRUE(ed7->isUnderlyingPriceValid());
+        ASSERT_TRUE(std::fabs(ed7->getUnderlyingPrice() - 71000) < 1e-9);
+        ASSERT_TRUE(std::fabs(ed7->getFutureMid() - 71000) < 1e-9);
+        ASSERT_TRUE(!ed8->isUnderlyingPriceValid());
+        ASSERT_TRUE(ed8->getFutureMid() == 0);
+    }
+
+    // --- scenario 2: global = front month, one expiry falls back to it ---
+    {
+        auto grid = std::make_shared<OptionGrid>("cu", "SHFE.cu.2607", nullptr, nullptr);
+        grid->setExpiryUnderlying(202607, "SHFE.cu.2607");   // fallback == global
+        grid->setExpiryOwnUnderlying(202608, "SHFE.cu.2608");
+        grid->onTick("SHFE.cu2607.C.100000", opt);
+        grid->onTick("SHFE.cu2608.C.100000", opt);
+        auto ed7 = grid->getExpiryData(202607);
+        auto ed8 = grid->getExpiryData(202608);
+        ASSERT_TRUE(ed7 != nullptr && ed8 != nullptr);
+
+        OptionGrid::TickDataRef f8; f8.price = 70000; f8.bid = 69990; f8.ask = 70010;
+        grid->onTick("SHFE.cu.2608", f8);
+        ASSERT_TRUE(std::fabs(ed8->getUnderlyingPrice() - 70000) < 1e-9);
+        ASSERT_TRUE(!ed7->isUnderlyingPriceValid());
+
+        // global(front month) tick reaches ONLY the fallback expiry
+        OptionGrid::TickDataRef f7; f7.price = 71000; f7.bid = 70990; f7.ask = 71010;
+        grid->onTick("SHFE.cu.2607", f7);
+        ASSERT_TRUE(std::fabs(ed7->getUnderlyingPrice() - 71000) < 1e-9);
+        ASSERT_TRUE(std::fabs(ed7->getFutureMid() - 71000) < 1e-9);
+        ASSERT_TRUE(std::fabs(ed8->getUnderlyingPrice() - 70000) < 1e-9);
+        ASSERT_TRUE(std::fabs(ed8->getFutureMid() - 70000) < 1e-9);
+    }
+    std::cout << "  PASS" << std::endl;
+}
+
 // T1-4: ExpiryData intraday fraction must be anchored to the INJECTED sim
 // seconds-of-day. The old implementation read the wall clock in HHMMSS
 // format (getCurMin) while timeToMinutes expects HHMM — with an offset-0
@@ -2187,6 +2255,7 @@ int main() {
     test_command_bus();
     test_trading_state_flags();
     test_delta_hedge_decide();
+    test_multi_expiry_underlying_isolation();
     test_expiry_intraday_fraction_sim_clock();
     test_session_quotable_zone();
     test_dynamic_otg_wiring();

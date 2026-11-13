@@ -372,6 +372,14 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 > 两个不同品种（如 CFFEX IO+MO）**不能**共用一个策略实例，否则同到期月会串数据
 > （同一 ExpiryData/strike 桶互覆 call/put 槽）。多品种请部署多个策略实例（WtRunner 支持）。
 
+**多到期标的路由（2026-11-13 修复后行为）**：
+
+- SHFE「一期货对一期权」多月并列：每个 expiry 配 `underlyingCode`（如 202607→`SHFE.cu.2607`、202608→`SHFE.cu.2608`），**global `underlyingCode` 务必显式赋主月代码**（或任一月份）；
+- CZCE「一期货对多到期系列」：多个 expiry 可配同一 `underlyingCode`，路由表（期货代码 → expiry 列表）天然支持一对多；
+- global 留空且配了任何 per-expiry `underlyingCode` 时，**不再推导/订阅主连**（旧行为自动订阅 `{exch}.{prod}.main` 且其 tick 覆盖所有 expiry 合成远期的期货腿——已修）；
+- global 的 tick 只喂"回落到 global 的 expiry"（路由表拦截优先），不会碰独占 per-expiry 标的的 expiry（`test_multi_expiry_underlying_isolation` 双场景锁定）；
+- 某 expiry 既无 per-expiry `underlyingCode`、global 又为空 → 启动 ERROR 日志（该到期月无法定价）。
+
 ```json
 "expiries": [
     {

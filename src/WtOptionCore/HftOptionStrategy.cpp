@@ -385,9 +385,25 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     }
 
     if (_underlyingCode.empty() && !_futuresProduct.empty()) {
-        _underlyingCode = fmt::format("{}.{}.main", _exchange, _futuresProduct);
+        // Audit 2026-11-13 (multi-month config fix): only fall back to the
+        // main-continuous code when NO expiry declared its own underlying.
+        // With per-expiry underlyings configured (SHFE one-futures-one-expiry
+        // multi-month, or CZCE series), the auto-derived main contract would
+        // be subscribed for nothing and (before the OptionGrid fix) its ticks
+        // overwrote every expiry's synthetic-forward futures leg.
+        bool anyOwnUnderlying = false;
+        for (const auto& [exp, ec] : _expiryConfigs) {
+            if (!ec.underlyingCode.empty()) { anyOwnUnderlying = true; break; }
+        }
+        if (!anyOwnUnderlying) {
+            _underlyingCode = fmt::format("{}.{}.main", _exchange, _futuresProduct);
+        } else {
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "Global underlyingCode unset and per-expiry underlyings configured "
+                "— main-continuous fallback skipped");
+        }
     }
-    if (_futuresProduct.empty()) {
+    if (_futuresProduct.empty() && !_underlyingCode.empty()) {
         // Extract from underlying code
         auto pos1 = _underlyingCode.find('.');
         if (pos1 != std::string::npos) {
@@ -708,6 +724,12 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     std::set<std::string> perExpiryUnderlyingCodes;
     for (const auto& [exp, ec] : _expiryConfigs) {
         std::string ulCode = ec.underlyingCode.empty() ? _underlyingCode : ec.underlyingCode;
+        if (ulCode.empty()) {
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "Expiry {} has NO pricing underlying (neither expiries[].underlyingCode "
+                "nor global underlyingCode) — its options cannot be priced or routed",
+                exp);
+        }
         if (!ulCode.empty() && ulCode != _underlyingCode) {
             perExpiryUnderlyingCodes.insert(ulCode);
         }

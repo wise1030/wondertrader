@@ -214,9 +214,15 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
 
     // 2. Global underlying tick? (e.g. index price for CFFEX options, or single-series commodity)
     if (stdCode == m_underlyingCode) {
-        // Update future market data for all expiries that use the global underlying
+        // Update future market data for expiries that FALL BACK to the global
+        // underlying.  Audit 2026-11-13 (multi-month config fix): an expiry
+        // with an EXCLUSIVE own underlying (m_expiryOwnUnderlying) receives
+        // its future mid ONLY from that contract's ticks — otherwise the
+        // global tick (which may be an auto-derived main-continuous code)
+        // overwrites the per-month futures leg of the synthetic forward.
         for (auto& [exp, ed] : m_expiries) {
-            if (ed && ed->getIncludeFuture()) {
+            if (ed && ed->getIncludeFuture()
+                && m_expiryOwnUnderlying.find(exp) == m_expiryOwnUnderlying.end()) {
                 double futSpread = (tick.bid > 0 && tick.ask > 0) ? (tick.ask - tick.bid) : 0;
                 ed->setFutureMid(tick.price, futSpread);
             }
