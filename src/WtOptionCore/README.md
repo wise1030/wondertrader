@@ -548,6 +548,21 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 - **SOFT**（风险路径事件）：FillPriceChecker PANIC / Auto-panic / PositionGuard / market stale /
   Greeks 限额 / `session_end 非零持仓` —— 打印分类计数供人工 triage，不自动失败。
 
+**golden 结构基线**（2026-11-13 批次 A 加入）：`GOLDEN=1 bash run_option_replay.sh` 在 error 门禁
+之外追加结构比对——把回放日志归一化为"结构集合"并与 `replay/golden/<config>.golden` 逐行 diff，
+不一致 exit 1。两级分类（详见 `replay/golden_extract.sh` 头注释，初版三级在写基线当天被门禁
+自身证据降级）：
+
+- **结构性**（必须逐字一致）：B4 stop/resume 序列、收盘 flatten **armed** 序列、session 生命周期
+  tick 计数、市场就绪 session-open 封锁、队列完整性/QuoteDuty 骨架——全部由 timer 载荷时钟驱动；
+- **分子级**（归一化为 N）：事件计数、批延迟、QuoteDuty 分子、**全部成交明细**——关键发现：
+  异步 worker 在引擎线程"当前模拟时刻"挂单，订单时间戳泄漏引擎/worker 实时交错，因此
+  **即便 `error_rate=0` 回放，成交层也不逐次一致**（初版"可全等"层级因此撤销）；同理
+  flatten **disarmed** 行受收盘窗对冲在途状态影响可多出转移，亦归分子级。既有可比口径只有
+  载荷时钟驱动的动作序列。
+
+纪律：基线更新只允许 `GOLDEN=write` 独立提交并注明行为变化原因；抽取归一化规则变更视同基线变更。
+
 **回放要点**：
 
 - replayer 只回放已订阅合约：commodities 中 SHFE 期权品种须 `category=2`（`CC_FutOption`），contracts 须含期权链全部代码

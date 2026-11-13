@@ -1,0 +1,59 @@
+Session stop (startup reconcile): curSec=75540 not in quotable zone
+Session resume: curSec=75600 lag=0s
+Session stop: curSec=3570 lead=30s
+Session resume: curSec=32400 lag=0s
+Session stop: curSec=36870 lead=30s
+Session resume: curSec=37800 lag=0s
+Session stop: curSec=41370 lead=30s
+Session resume: curSec=48600 lag=0s
+Session stop: curSec=53970 lead=30s
+Session resume: curSec=75600 lag=0s
+Session stop: curSec=3570 lead=30s
+Session resume: curSec=32400 lag=0s
+Session stop: curSec=36870 lead=30s
+Session resume: curSec=37800 lag=0s
+Session stop: curSec=41370 lead=30s
+Session resume: curSec=48600 lag=0s
+Session stop: curSec=53970 lead=30s
+Session resume: curSec=75600 lag=0s
+Session stop: curSec=3570 lead=30s
+Session resume: curSec=32400 lag=0s
+Session stop: curSec=36870 lead=30s
+Session resume: curSec=37800 lag=0s
+Session stop: curSec=41370 lead=30s
+Session resume: curSec=48600 lag=0s
+Session stop: curSec=53970 lead=30s
+Session resume: curSec=75600 lag=0s
+Session stop: curSec=3570 lead=30s
+Session resume: curSec=32400 lag=0s
+Session stop: curSec=36870 lead=30s
+Session resume: curSec=37800 lag=0s
+Session stop: curSec=41370 lead=30s
+Session resume: curSec=48600 lag=0s
+Session stop: curSec=53970 lead=30s
+Close flatten armed: 60s before daily close (section end 3600s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 54000s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 3600s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 54000s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 3600s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 54000s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 3600s), hedging portfolio delta to 0
+Close flatten armed: 60s before daily close (section end 54000s), hedging portfolio delta to 0
+HftOptionStrategy[opt_mm_cu] session_end: 20260602 total_ticks=804998
+HftOptionStrategy[opt_mm_cu] session_end: 20260603 total_ticks=1563198
+HftOptionStrategy[opt_mm_cu] session_end: 20260604 total_ticks=2409219
+HftOptionStrategy[opt_mm_cu] session_end: 20260605 total_ticks=3184988
+MarketReadiness: expiry N BLOCKED — session open — awaiting first fit (no theo-based quoting/scanning while blocked)
+MarketReadiness: 1 expiries blocked at session open (awaiting first vol fit)
+MarketReadiness: expiry N BLOCKED — session open — awaiting first fit (no theo-based quoting/scanning while blocked)
+MarketReadiness: 1 expiries blocked at session open (awaiting first vol fit)
+MarketReadiness: expiry N BLOCKED — session open — awaiting first fit (no theo-based quoting/scanning while blocked)
+MarketReadiness: 1 expiries blocked at session open (awaiting first vol fit)
+AEP session 20260602: dropsDelta=0 mdOverflowDepth=N traderQueueDepth=N
+AEP session 20260603: dropsDelta=0 mdOverflowDepth=N traderQueueDepth=N
+AEP session 20260604: dropsDelta=0 mdOverflowDepth=N traderQueueDepth=N
+AEP session 20260605: dropsDelta=0 mdOverflowDepth=N traderQueueDepth=N
+QuoteDuty session 20260602: enabled Ns of Ns tick-active (N%)
+QuoteDuty session 20260603: enabled Ns of Ns tick-active (N%)
+QuoteDuty session 20260604: enabled Ns of Ns tick-active (N%)
+QuoteDuty session 20260605: enabled Ns of Ns tick-active (N%)

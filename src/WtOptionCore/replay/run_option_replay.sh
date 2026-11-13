@@ -100,3 +100,45 @@ if [ -n "$LOG_F" ]; then
 else
   echo "WARNING: no runner log found — gate skipped"
 fi
+
+# === [5/4] golden baseline compare (opt-in) ==============================
+# Audit 2026-11-13 v2 batch A: structural behavior is pinned per config and
+# compared run-over-run.  Three tiers (see golden_extract.sh):
+#   structural    — exact match (scheduling actions, session lifecycle,
+#                   readiness gating BLOCK family, queue-integrity shape)
+#   molecular     — normalized to N (mocker RNG is wall-clock seeded)
+#   full-equality — scan_norand additionally pins the futures fill set and
+#                   combo outcomes (deterministic under error_rate=0)
+# Usage:  GOLDEN=1   bash run_option_replay.sh          # compare, exit 1 on drift
+#         GOLDEN=write GOLDEN_NAME=default ...          # (re)baseline, explicit act
+GOLDEN_DIR="$SCRIPT_DIR/golden"
+if [ -n "${GOLDEN:-}" ]; then
+  case "$YAML" in
+    configbt_option_replay.yaml)             GKEY=default;   GMODE=default ;;
+    configbt_option_replay_scan_norand.yaml) GKEY=scan_norand; GMODE=norand ;;
+    *) echo "GOLDEN: no baseline registered for $YAML (add it to the case first)"; exit 2 ;;
+  esac
+  EXTRACT=$("$SCRIPT_DIR/golden_extract.sh" "$LOG_F" "$GMODE" \
+            "outputs_bt/opt_mm_cu/trades.csv" "outputs_bt/aep_metrics.csv")
+  if [ "$GOLDEN" = "write" ]; then
+    mkdir -p "$GOLDEN_DIR"
+    echo "$EXTRACT" > "$GOLDEN_DIR/$GKEY.golden"
+    echo "GOLDEN: baseline (re)written for $GKEY — commit it with the reason"
+  elif [ "$GOLDEN" = "1" ]; then
+    if [ ! -f "$GOLDEN_DIR/$GKEY.golden" ]; then
+      echo "GOLDEN: no baseline for $GKEY — run GOLDEN=write first"; exit 2
+    fi
+    echo "$EXTRACT" > /tmp/golden_extract_$$.txt
+    if diff -u "$GOLDEN_DIR/$GKEY.golden" /tmp/golden_extract_$$.txt > /tmp/golden_diff_$$.txt; then
+      echo "GOLDEN: $GKEY structural set matches baseline ($(grep -vc '^$' /tmp/golden_extract_$$.txt) lines: $(grep -c 'Session stop' /tmp/golden_extract_$$.txt) stops / $(grep -c 'Session resume' /tmp/golden_extract_$$.txt) resumes / $(grep -c 'flatten armed' /tmp/golden_extract_$$.txt) armed)"
+      rm -f /tmp/golden_extract_$$.txt /tmp/golden_diff_$$.txt
+    else
+      echo "GOLDEN: $GKEY DRIFTED from baseline — diff (baseline vs this run):"
+      head -40 /tmp/golden_diff_$$.txt
+      echo "GOLDEN GATE FAILED (intended behavior change? re-baseline with GOLDEN=write + reason)"
+      exit 1
+    fi
+  else
+    echo "GOLDEN: bad value '$GOLDEN' (use 1 or write)"; exit 2
+  fi
+fi
