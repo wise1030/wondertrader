@@ -2159,6 +2159,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // B4: Session-based mid-day stop/resume scheduling.
         // Level-triggered: curSec is the ENQUEUE-time seconds-of-day carried
         // in the event payload (never read live here — see the enqueue site).
+        // T1-4: the same payload clock anchors ExpiryData's intraday fraction
+        // (was wall-clock — audit 2026-11-13 v2).
+        if (_grid) _grid->setCurSecOfDay(curSecOfDay);
         if (_sessionInfo && _ctg && _traderCtx) {
             const uint32_t curSec = curSecOfDay;
 

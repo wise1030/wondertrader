@@ -185,6 +185,7 @@ void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick
             if (ed) {
                 uint32_t curDate = m_currentDate;
                 if (curDate == 0) return;  // not yet initialized
+                ed->setCurSecOfDay(m_curSecOfDay);
                 ed->updateDaysToExpiration(curDate, ci->getExpireDate());
             }
         }
@@ -259,6 +260,7 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
         if (tick.expireDate > 0) {
             auto ed = od->getExpiryData();
             if (ed && m_currentDate != 0) {
+                ed->setCurSecOfDay(m_curSecOfDay);
                 ed->updateDaysToExpiration(m_currentDate, tick.expireDate);
             }
         }
@@ -361,6 +363,7 @@ OptionDataPtr OptionGrid::__createOption(const std::string& stdCode) {
         std::string rawCode = product + monthStr;
         WTSContractInfo* cInfo = m_bdMgr->getContract(rawCode.c_str(), exchg.c_str());
         if (cInfo && cInfo->getExpireDate() > 0) {
+            ed->setCurSecOfDay(m_curSecOfDay);
             ed->updateDaysToExpiration(m_currentDate, cInfo->getExpireDate());
         }
     }
@@ -463,6 +466,7 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
         expireDate = (expiry / 100) * 10000 + (expiry % 100) * 100 + 15;
 
     if (m_currentDate > 0) {
+        ed->setCurSecOfDay(m_curSecOfDay);
         ed->updateDaysToExpiration(m_currentDate, expireDate);
     }
 
@@ -620,6 +624,7 @@ void OptionGrid::refreshExpiryDays() {
         if (!ed) continue;
         uint32_t expireDate = ed->getExpirationDate();
         if (expireDate > 0) {
+            ed->setCurSecOfDay(m_curSecOfDay);
             ed->updateDaysToExpiration(m_currentDate, expireDate);
         }
     }

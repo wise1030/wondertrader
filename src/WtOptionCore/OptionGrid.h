@@ -193,6 +193,8 @@ public:
     // P10: Current trading date (set by strategy from stra_get_date)
     void setCurrentDate(uint32_t d) { m_currentDate = d; }
     uint32_t getCurrentDate() const { return m_currentDate; }
+    void setCurSecOfDay(uint32_t s) { m_curSecOfDay = s; }
+    uint32_t getCurSecOfDay() const { return m_curSecOfDay; }
 
     // Forward stale timeout (microseconds). When validCount drops below minStrikes,
     // forwardReady stays true for this duration before being set to false.
@@ -229,6 +231,10 @@ private:
     std::vector<StrikeDataPtr> m_allStrikes;
     std::set<uint32_t> m_holidays;  // holiday calendar from holidays.json
     uint32_t m_currentDate = 0;  // P10: current trading date
+    /// Simulated seconds-of-day, injected per tick by the strategy (timer
+    /// payload) and forwarded to every ExpiryData — see ExpiryData::
+    /// getIntradayFraction() (audit 2026-11-13 v2 T1-4).
+    uint32_t m_curSecOfDay = 0;
     std::unordered_map<std::string, OptionDataPtr> m_optionsByCode;
     ExpiryTable m_expiries;
 

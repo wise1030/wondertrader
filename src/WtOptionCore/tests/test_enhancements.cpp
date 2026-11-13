@@ -2081,6 +2081,44 @@ void test_delta_hedge_decide() {
     std::cout << "  PASS" << std::endl;
 }
 
+// T1-4: ExpiryData intraday fraction must be anchored to the INJECTED sim
+// seconds-of-day. The old implementation read the wall clock in HHMMSS
+// format (getCurMin) while timeToMinutes expects HHMM — with an offset-0
+// session info every wall time from 00:09 onward compared above all section
+// bounds and the fraction collapsed to ~0, so intraday T-decay never
+// applied. These expectations pin the corrected HHMM conversion against a
+// hand-computed 9:00-15:00 (360 trading minutes) session.
+void test_expiry_intraday_fraction_sim_clock() {
+    std::cout << "=== test_expiry_intraday_fraction_sim_clock ===" << std::endl;
+    wtp::WTSSessionInfo* si = wtp::WTSSessionInfo::create("TEST", "TEST");
+    si->addTradingSection(900, 1500);   // 09:00-15:00 → 360 trading mins
+    wt_option::ExpiryData ed(202607, "TEST");
+    ed.setSessionInfo(si);
+
+    auto frac = [&](uint32_t secOfDay) {
+        ed.setCurSecOfDay(secOfDay);
+        return ed.getIntradayFraction();
+    };
+
+    // 10:00 → elapsed 60/360 → remaining 300/360
+    ASSERT_TRUE(std::fabs(frac(10 * 3600) - 300.0 / 360.0) < 1e-6);
+    // 12:00 → half the session remains
+    ASSERT_TRUE(std::fabs(frac(12 * 3600) - 0.5) < 1e-9);
+    // 14:59 → elapsed 359/360
+    ASSERT_TRUE(std::fabs(frac(14 * 3600 + 59 * 60) - 1.0 / 360.0) < 1e-6);
+    // exactly at / after close → 0.0
+    ASSERT_TRUE(frac(15 * 3600) == 0.0);
+    ASSERT_TRUE(frac(16 * 3600) == 0.0);
+    // before open (auto-aligns to session start) → full fraction
+    ASSERT_TRUE(std::fabs(frac(8 * 3600 + 59 * 60) - 1.0) < 1e-9);
+    // determinism: same injected input → same output, run after run
+    const double a = frac(11 * 3600), b = frac(11 * 3600);
+    ASSERT_TRUE(a == b);
+
+    si->release();
+    std::cout << "  PASS" << std::endl;
+}
+
 // B4 level-triggered quotable-zone: SHFE-style sections with a cross-midnight
 // night session (2100-0100 normalized to [75600, 90000]).
 void test_session_quotable_zone() {
@@ -2149,6 +2187,7 @@ int main() {
     test_command_bus();
     test_trading_state_flags();
     test_delta_hedge_decide();
+    test_expiry_intraday_fraction_sim_clock();
     test_session_quotable_zone();
     test_dynamic_otg_wiring();
     test_otg_gateway_senders();

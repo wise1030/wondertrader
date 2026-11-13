@@ -111,9 +111,30 @@ double ExpiryData::getIntradayFraction() const {
     if (!m_sessionInfo) return 0.0;
     // Use WTSSessionInfo trading minutes to compute intraday fraction
     // Fraction = remaining trading minutes / total trading minutes
-    uint32_t curTime = TimeUtils::getCurMin(); // current minute of day
+    //
+    // Audit 2026-11-13 (v2, T1-4): this used to read TimeUtils::getCurMin(),
+    // the WALL CLOCK, with two compounding defects:
+    //   1. Format — getCurMin() returns HHMMSS (e.g. 93015) while
+    //      timeToMinutes() expects HHMM (0910). With an offset-0 session info
+    //      the value passed straight through, so every wall time from 00:09
+    //      onward compared ABOVE all section bounds and timeToMinutes
+    //      returned INVALID_UINT32 → fraction clamped to ~0. Only wall times
+    //      00:00–00:08:59 (numeric < first section start) yielded frac≈1.
+    //      Net effect: intraday T-decay was NEVER applied — in backtest AND
+    //      in live — except in that 9-minute window.
+    //   2. Clock source — in backtest the wall clock is the RUN time, not
+    //      the simulated time, so even a correctly formatted read would make
+    //      T depend on when the replay was executed.
+    // The injected seconds-of-day (per-tick from the strategy timer payload)
+    // fixes both: sim-anchored AND converted to the documented HHMM format.
+    // Pre-existing limitation preserved as-is: for cross-midnight sessions a
+    // post-midnight sim time compares below the night section's raw bounds
+    // (e.g. 00:10 < 2100) and auto-aligns to frac=1.0 — same behaviour the
+    // old wall-clock path exhibited, left for a future precision pass.
     uint32_t totalMins = m_sessionInfo->getTradingMins();
     if (totalMins == 0) return 0.0;
+    const uint32_t sec = m_curSecOfDay;
+    const uint32_t curTime = (sec / 3600) * 100 + ((sec % 3600) / 60);  // HHMM
 
     // Convert curTime to minutes since session start
     // WTSSessionInfo has timeToMinutes which converts time offset to trading minutes

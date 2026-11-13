@@ -183,6 +183,16 @@ private:
     wtp::WTSSessionInfo* m_sessionInfo = nullptr;
     const std::set<uint32_t>* m_holidays = nullptr;  // holiday calendar (from holidays.json)
 
+    /// Simulated seconds-of-day injected per tick by the strategy (timer
+    /// payload). Anchors getIntradayFraction() to the replay/sim clock
+    /// instead of the wall clock — see the function comment (audit
+    /// 2026-11-13 v2 T1-4). 0 = unset (fraction degrades to the clamped
+    /// floor until the first tick arrives).
+    uint32_t m_curSecOfDay = 0;
+public:
+    void setCurSecOfDay(uint32_t s) { m_curSecOfDay = s; }
+private:
+
     int32_t m_numOptions = 0;
     int32_t m_daysToExpiration = 0;    // calendar days
     int32_t m_bdaysToExpiration = 0;   // business (trading) days
