@@ -12,6 +12,8 @@ WtOptionCore 是 WonderTrader 量化交易平台下的**期权做市引擎**，�
 | 郑州商品期权 | CZCE | C/P 双品种自动发现（如 SRC+SRP） | 对应期货 |
 | 股指期权 | CFFEX IO/MO/HO | 现货指数（不可交易） | 股指期货（分月对冲） |
 
+> **当前状态（2026-11-13）**：功能完备，经 64 提交持续治理后债务可控、全程可追溯（`analysis/` 18 份报告）。近期主线：**timer/会话调度可靠性**（11-12，timer 走 trader 队列永不丢弃 + 电平触发）→ **回放时钟正确性 + golden 结构基线 + `-Wall` 零告警**（11-13，全面审计 v2 及其实施，见 `analysis/project-audit-2026-11-13.md`）。已知结构性债务：`HftOptionStrategy` 待按 SessionScheduler → VolFitDriver → ExecutorAdapters 分块抽取（T2，golden 门禁已备）、CTG ranking 无直测（T2-C）。
+
 ---
 
 ## 目录
@@ -37,6 +39,7 @@ Market Tick / Order / Trade / Position 回调 (WtRunner 主线程或回测 repla
 OptionAsyncEventProcessor                ← 回调只入队，绝不在回调线程直写状态
     │  双队列: MD SPSC 无锁队列 + Trader mutex 队列
     │  事件优先级桶: Session > Channel > Position > Trade > Order > Timer > Tick
+    │  timer 走 Trader 队列（control 类，永不丢弃；on_tick 源头 100ms 合并，载荷=入队时刻秒级模拟时间）
     │  Tick 按合约去重 (保留最新)  → batch
     ▼
 Worker 线程 (唯一状态写者)
@@ -74,7 +77,7 @@ Worker 线程 (唯一状态写者)
 | `OptionTradingGrid` (OTD/UTD) | 每 option/underlying 的 OQM（订单、持仓、QuoteMode） | worker | CTG、strategy |
 | `ControllableTradingGrid` (CTG) | desired quote/执行、scanner 注册、TPS/状态机 | worker | CTG 自身、strategy |
 
-约束：MD/交易回调只入队；`HftOptionStrategy` 作为 Shell 只做装配/生命周期/回调路由。
+约束：MD/交易回调只入队；`HftOptionStrategy` 作为 Shell 负责装配/生命周期/回调路由与 worker 编排。现状披露（审计 v2）：策略类约 3.8k 行、37 个模块 include、成员百余个，是系统内公认的"上帝协调者"——T2 按 `SessionScheduler → VolFitDriver → ExecutorAdapters` 三块抽取，每块一提交一 golden 门禁（`GOLDEN=1`）。
 
 ### 策略 pricer 边界
 
@@ -90,14 +93,14 @@ Worker 线程 (唯一状态写者)
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| HftOptionStrategy | HftOptionStrategy.h/.cpp | HFT 策略入口（Shell）：装配所有组件、生命周期、回调路由、executeQuote/Order/Cancel 桥接到 IHftStraCtx |
+| HftOptionStrategy | HftOptionStrategy.h/.cpp | HFT 策略入口（Shell）：装配所有组件、生命周期、回调路由、worker 侧编排（setupAsyncCallbacks 9 个 lambda）、executeQuote/Order/Cancel 桥接到 IHftStraCtx；B4 会话调度/收盘 flatten/vol-fit 驱动/对冲检查均收编于此（T2 拆分对象） |
 | HftOptionStraFact | HftOptionStraFact.cpp | DLL 工厂，供 WtRunner `strategies.hft[]` 动态加载 |
 
 ### 2. 异步事件处理
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| OptionAsyncEventProcessor | OptionAsyncEventProcessor.h/.cpp | 双队列（MD SPSC + Trader mutex）、优先级桶排序、tick 按合约去重、overflow 有界背压、`on_batch_complete` 始终执行、worker 异常兜底 |
+| OptionAsyncEventProcessor | OptionAsyncEventProcessor.h/.cpp | 双队列（MD SPSC + Trader mutex）、优先级桶排序、tick 按合约去重、overflow 有界背压、trader 每批 256/1024 保底配额、control 类事件（Session/Channel/Entrust/Timer/Custom）豁免容量门永不丢弃、shutdown drain、`on_batch_complete` 始终执行、worker 异常兜底、session-end 队列指标（日志 + `outputs_bt/aep_metrics.csv` sidecar） |
 | SingleFlightTaskRunner | SingleFlightTaskRunner.h | 昂贵任务（曲线拟合）单飞执行，过期快照直接丢弃 |
 | LatencyHistogram | LatencyHistogram.h | tick→quote 延迟直方图，batch 日志输出 p50/p95/p99/p99.9 |
 | OptionTimeService | OptionTimeService.h | 连续时钟（跨午夜回绕检测）、FAST/SLOW 计算调度、timer 100ms 源头合并 |
@@ -109,7 +112,7 @@ Worker 线程 (唯一状态写者)
 |------|------|------|
 | OptionGrid | OptionGrid.h/.cpp | 3 级网格、tick 驱动合约自动发现、per-expiry 标的路由、平价合成 ATM forward（`__getBestSyntheticPrice`）、`refreshExpiryDays` |
 | OptionData | OptionData.h/.cpp | 单合约：盘口/last、计算值双缓冲（atomic swap）、`getMid()`（双边缺失回退 last） |
-| ExpiryData | ExpiryData.h/.cpp | 日历（节假日/周末感知交易日计数）、forward、maturity（下限 1/252）、discount factor、利率曲线 |
+| ExpiryData | ExpiryData.h/.cpp | 日历（节假日/周末感知交易日计数）、forward、maturity（= bdays/252 + 日内分数，下限 1/252；日内分数由策略注入的**模拟秒**驱动——2026-11-13 修复墙钟 HHMMSS 错配缺陷）、discount factor（日历 365 口径）、利率曲线 |
 | StrikeData | StrikeData.h/.cpp | 行权价层 call/put 对（scanner 与 parity 策略依赖 sibling 腿） |
 | OptionTradingData / UnderlyingTradingData | OptionTradingData.* / UnderlyingTradingData.* | 交易域状态：OQM、持仓、QuoteMode、multiMarket |
 
@@ -119,7 +122,7 @@ Worker 线程 (唯一状态写者)
 |------|------|------|
 | BlackCalc | BlackCalc.h/.cpp | 统一 BS/Black76 计算：d1=ln(F/K)/σ√T+½σ√T，value/delta/gamma/vega/vanna/theta/volga/rho |
 | BlackImpliedCalculator | BlackImpliedCalculator.h/.cpp | Black76 隐含波动率 Brent 求解（PriceError 残差函数） |
-| OptionPricer2 | OptionPricer2.h/.cpp | 定价内核：forward/maturity/discount 装配、理论价 + Greeks、**per-strike 平价合成远期反推 IV**（`computeImpliedValues`）、支持 OpenMP |
+| OptionPricer2 | OptionPricer2.h/.cpp | 定价内核：forward/maturity/discount 装配（BCI thread_local 单实例、全量赋值——去键化消除 purge 后悬空指针整类风险）、理论价 + Greeks、**per-strike 平价合成远期反推 IV**（`computeImpliedValues`）、支持 OpenMP |
 | GvvVolCurve | GvvVolCurve.h/.cpp | GVV 波动率曲面：WLS3 栈上回归 + Brent α 搜索、α=1 闭式快路径、log-moneyness 约定 x=ln(K/F)、归一化输出 iv/atmVol、判别式负值防护 |
 | LinearVolCurve / ConstantVolCurve / PowerVolCurve | 同名文件 | 备用曲线：线性 / 常数 / 幂律双曲线 |
 | PeriodicCurveFitter | PeriodicCurveFitter.* | 拟合调度（period/decay_window/start/end、good-points 阈值、ups+downs 象限检查） |
@@ -136,7 +139,7 @@ Worker 线程 (唯一状态写者)
 | OptionTradingGrid | OptionTradingGrid.* | OTD/UTD 容器、QuoteExecutor 桥 |
 | BaseOrder / OptionOrder | BaseOrder.* / OptionOrder.* | 订单状态机、ValuesAtIssue、腿级 PnL |
 | OptionOrderInfo / FutureOrderInfo | 同名文件 | 订单快照 |
-| ComboOrders | ComboOrders.* | 多腿组合单：SpreadCombo（两腿）/ SynCombo（三腿）；**同时多腿发出**，任一腿撤/拒→撤其余腿并置 FAILED，终态要求 filledQty≥desiredQty 或残量匹配，杜绝裸腿 |
+| ComboOrders | ComboOrders.* | 多腿组合单：SpreadCombo（两腿）/ SynCombo（三腿）/ SimulCombo（N 腿同时）；**同时多腿发出**，任一腿撤/拒→撤其余腿并置 FAILED，终态要求 filledQty≥desiredQty 或残量匹配，杜绝裸腿；腿超时 `setTimeoutSec` 可配（`scannerThrottle.comboTimeoutMs`，默认 130ms） |
 | check_markets | check_markets.* | desired vs current 市场比较（UT_NONE/NEW/MODIFY/CANCEL） |
 
 ### 6. 风控
@@ -239,6 +242,17 @@ Worker 线程 (唯一状态写者)
 - `eval`：x = ln(K/F_atm)（log-moneyness），解 GVV 隐式方程求 σ(K)，输出归一化 σ/σ_ATM；α=1 时走闭式快路径
 - 失败防护：解 bracket 失败回退 ATM（告警节流）；maturity≤0 返回 1.0；拟合点 <4 或 ATM vol 越界拒绝拟合
 
+### ④ maturity / 年化时间 T 口径（2026-11-13 审计文档化 + 缺陷修复）
+
+`ExpiryData::getMaturity() = (bdays + intradayFraction) / 252`：
+
+| 组成 | 口径 | 说明 |
+|------|------|------|
+| `bdays` | 交易日（节假日/周末感知） | 到期日 `bdays=0` 时取 1（防除零） |
+| `intradayFraction` | **交易日历内剩余交易分钟/总交易分钟** | 由策略注入的**模拟秒**（timer 载荷）换算 HHMM 后经 `timeToMinutes` 计算。**2026-11-13 修复**：旧实现读墙钟且格式 HHMMSS 与接口契约 HHMM 错配——offset=0 时透传后数值恒大于全部时段上界，日内分数被钳到 ~0，**日内 T 衰减从未生效（回测与实盘皆然）**；仅每天墙钟 00:00–00:08:59 例外。修复后跨午夜 session 午夜后时刻 auto-align 到 frac=1.0（与原实现等价，属既有限制） |
+| `discount factor` | 日历日 /365 | 与 maturity 的 /252 各链一致混用（行业常见做法，此处文档固化） |
+| `BlackCalc theta` | 日历 365 折现 + 交易日 252 gamma 衰减 | 头注释自认；调用处 rate=0 仅 gamma 项生效 |
+
 ### Forward 防崩保护（P0）
 
 - 平价点不足 5 个 strike → `forwardReady=false`，定价跳过，**不回退标的价格**
@@ -295,13 +309,17 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 5. **dropped-quote 保留重试** — TPS 丢弃的报价不清除，下周期重发
 6. **channel_ready 延迟启用** — 等首个标的 tick 到达才真正激活交易（恢复门）
 7. **session_end 清场** — 显式 cancelAll 并告警非零 gross 持仓；OQM 计数器 session 复位
-8. **多腿组合原子性** — SpreadCombo/SynCombo 同时发出，残腿自动撤销，终态严格校验
+8. **多腿组合原子性** — SpreadCombo/SynCombo/SimulCombo 同时发出，残腿自动撤销，终态严格校验
+9. **timer 永不丢弃** — timer 是 B4 停复/收盘 flatten/对冲守卫的会话心跳，归入 control 类走 trader 队列（行情饱和下观测过整窗丢失 → QuoteDuty 25.8% vs 100%）
+10. **会话调度电平触发** — 每个 timer 事件从绝对时间重推导目标状态（`isInQuotableZone` 纯函数 + 启动对账 priming），迟到只晚动作不漏动作；armed 窗 `(C-lead, C]`、disarm 为精确互补
+11. **BCI 去键化** — 定价装配信息用 thread_local 单实例全量赋值，不做裸指针键缓存（purge 后悬空/地址复用整类风险，成本=一次 hash 查找）
 
 ---
 
 ## 配置参考
 
-完整配置参见 `config/option_strategy_full.json` / `config/option_strategy_advanced.json`。启动时 `ConfigValidator` 校验，未知键 WARN。
+完整配置以 `config/option_strategy_full.json` 为准（启动时 `ConfigValidator` 校验，未知键 WARN）。
+⚠️ `config/option_strategy_advanced.json` 是**迁移期旧 schema 样例**（2026-11-13 审计确认整体过时，会逐键 WARN），仅作历史参考，新配置不要照抄。
 
 ### 顶层键
 
@@ -466,6 +484,8 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 - `enable / threshold_delta / target_delta / max_order_size / cooldown_sec`
 - `delta_per_lot`：一手对冲合约的 delta（不配置则从合约乘数解析，解析失败禁用对冲并告警）
+- `flatten_lead_seconds`（默认 60）：收盘前多久启动 delta flatten——收盘时刻本身由框架 session 配置派生，策略层不配收盘时间
+- `flatten_aggr_ticks`（默认 2）：收盘窗内对冲定价跨点差 tick 数，保证收盘窗内成交
 - 在途抑制：上一批对冲单未终态前不发新批
 
 ### fillAttribution（成交质量归因，3.6）
@@ -521,7 +541,8 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
    scanner/PnL 按 `_dirtyOptions` 门控
 
 **容量规划**：SLOW 档全量 IV 反推的成本为 `期权数 × (1/slow_compute_interval)` 次 Brent/秒。
-56 期权 × 10Hz（interval=0.1）≈ 560 次/秒，实测 batch p50≈51-64µs 可控；
+56 期权 × 10Hz（interval=0.1）≈ 560 次/秒；2026-11-13 AEP session 指标实测 batch
+p50≈40-43µs / p95≈55-130µs（`-O3 -march=x86-64-v3` 库， dropsDelta=0）；
 链式品种（数百期权）上线时应调大 `slow_compute_interval` 至 0.5-1s 或评估 IV 反推增量化
 （BS 全量 + IV 仅对 dirty 期权）。
 
@@ -533,7 +554,8 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 | 文件 | 职责 |
 |------|------|
-| `run_option_replay.sh` | 一键回放：取数（缺数据时）→ DSB 校验 → 注入 basefiles → WtBtRunner → **运行时 error 分类门禁** → 延迟指标提取 |
+| `run_option_replay.sh` | 一键回放：取数（缺数据时）→ DSB 校验 → 注入 basefiles → `libWtOptionCore.so` 漂移自动刷新（byte 比较，防 ABI 错位）→ WtBtRunner → **运行时 error 分类门禁** → **golden 结构基线比对（`GOLDEN=1`）** → 延迟指标提取 |
+| `golden_extract.sh` + `golden/` | 结构集合抽取与基线文件（default / scan_norand 各 59 行；`GOLDEN=write` 再基线，独立提交纪律） |
 | `configbt_option_replay.yaml` | 默认回放配置（归因关闭） |
 | `configbt_option_replay_attr.yaml` | 归因开启变体（`YAML=configbt_option_replay_attr.yaml` 选用） |
 | `fetch_option_ticks.sh` | 服务器侧取数管道（KS/MinIO tar → 服务器环回拉取+转换 → 分块拉回），含外网数据面故障绕行 |
@@ -570,7 +592,7 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 - 回测双边报价依赖 `HftMocker::stra_quote`（buy+sell 模拟，第二腿失败回撤第一腿）
 - 建议 `use_newpx: false`（按对手价撮合；KS 期权 last 价可能陈旧，用 last 撮合会产生虚假滑点）
 - **`error_rate` 语义**：每个 order 每次 `procOrder` 有 `error_rate/10000` 概率被**随机撤单**（默认 100 = 1%）。对挂单撮合无所谓（重报即可），但会**杀死 scanner combo 的腿单**（腿单 3s 内被随机撤掉 → "leg1 terminal before hedge"）。验证 scanner 执行链路时用 `configbt_option_replay_scan_norand.yaml`（error_rate=0）
-- **会话调度可靠性（2026-11-12 整改）**：timer 事件（B4 停报价/恢复、收盘 flatten 武装、margin/hedge 守卫的驱动心跳）走 **trader 队列**（批内首批排水 + control 类永不丢弃），不再与 tick 共用 MD SPSC 环——行情饱和下 timer 不会再被挤丢（曾观测到整个停报价窗口丢失、QuoteDuty 同日 25.8% vs 100% 波动）。B4 停报价/恢复与收盘 flatten 武装均改为**电平触发**：每个 timer 事件从绝对时间重推导目标状态，迟到只会晚动作、不会漏动作；首次事件仅做启动对账（CTG 自 on_init 起在报价，不重复调用非幂等的 stop/resume）。timer 载荷携带**入队时刻的秒级时间**（非 HHMM + 回调实时读秒，后者跨午夜会产生非单调 curSec）。**QuoteDuty 口径**：分子 = 正常 enabled（含 panic，panic 的 enabledFlag 为 true 属设计）payload 秒累计，分母 = session 内首/末 timer 载荷时间窗（tick 活跃窗），两侧全为载荷基准；注意跨回放逐字一致仅在 `error_rate=0`（mocker RNG 按 `srand(time(NULL))` 墙钟播种，1% 随机撤单使事件流本身逐次不同，框架层属性非策略层可达）下成立，error_rate≠0 时残余 wobble 来自 panic-fill 历史分叉而非调度机制
+- **会话调度可靠性（2026-11-12 整改）**：timer 事件（B4 停报价/恢复、收盘 flatten 武装、margin/hedge 守卫的驱动心跳）走 **trader 队列**（批内首批排水 + control 类永不丢弃），不再与 tick 共用 MD SPSC 环——行情饱和下 timer 不会再被挤丢（曾观测到整个停报价窗口丢失、QuoteDuty 同日 25.8% vs 100% 波动）。每 session 另输出 **AEP 队列指标**（events/dropsDelta/双队列深度/批延迟 p50·p95），日志行之外落 `outputs_bt/aep_metrics.csv` sidecar（ofstream 显式 close，防 spdlog flush_every(2s) 退出竞态吃掉末 session 行）。B4 停报价/恢复与收盘 flatten 武装均改为**电平触发**：每个 timer 事件从绝对时间重推导目标状态，迟到只会晚动作、不会漏动作；首次事件仅做启动对账（CTG 自 on_init 起在报价，不重复调用非幂等的 stop/resume）。timer 载荷携带**入队时刻的秒级时间**（非 HHMM + 回调实时读秒，后者跨午夜会产生非单调 curSec）。**QuoteDuty 口径**：分子 = 正常 enabled（含 panic，panic 的 enabledFlag 为 true 属设计）payload 秒累计，分母 = session 内首/末 timer 载荷时间窗（tick 活跃窗），两侧全为载荷基准；注意跨回放逐字一致仅在 `error_rate=0`（mocker RNG 按 `srand(time(NULL))` 墙钟播种，1% 随机撤单使事件流本身逐次不同，框架层属性非策略层可达）下成立，error_rate≠0 时残余 wobble 来自 panic-fill 历史分叉而非调度机制
 - 取数方法已固化为 opencode skill：`ks-data-fetch`（数据布局、stat 探测、故障绕行、服务器侧转换）
 
 **scanner 配置要点（2026-11-09 整改）**：
@@ -598,6 +620,20 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 - 延迟（Debug 构建，worker 批处理直方图）：batch p50≈56-63µs / 尾部受批内 tick 数影响
   （同量级复测见 `LatencyHistogram` 批日志；早期 11µs 口径为单 tick 计算路径，非批处理）
 
+**2026-11-13 复核整改后复测**（timer 可靠性 + 回放时钟修复 + golden 基线，数字以 `GOLDEN=1` 输出为准）：
+
+- **golden 结构基线**：default 与 scan_norand 双基线各 59 行（17 stop / 16 resume / 8 armed），
+  写基线后连续 3 次验证逐字一致；分子级通道（QuoteDuty 分子、成交明细、flatten disarmed、
+  事件计数）已归一化——异步 worker 挂单取引擎"当前模拟时刻"，**成交层即便 error_rate=0
+  也不逐次一致**（归一化规则见 `golden_extract.sh` 头注释）
+- **AEP 队列指标**：4 session dropsDelta 全 0（timer/control 事件零丢失），批延迟 p50≈40-43µs
+- **B4/flatten 动作序列跨跑逐字一致**（payload 时钟驱动）；拟合 ~8.7k 次、HARD=0、8/8 单测 PASS
+- **`-Wall -Wextra` 全库启用、自有代码告警清零**（框架头走 `-isystem`；unused-parameter 豁免
+  见 CMakeLists 注释）；ExpiryData 模拟时钟修复后日内 T 衰减生效（此前恒为 ~0）
+- 已知分子级 wobble：QuoteDuty 分子/曲线版本号随 panic-fill 历史分叉（mocker RNG 墙钟播种，
+  框架层属性）；末 session 日志尾部行有 spdlog 退出冲刷竞态（OQM counters 行，既有限制，
+  指标以 CSV sidecar 为准）
+
 合成延迟基线：`tests/test_replay_benchmark.cpp`。
 验收以**当前机器复跑 + 门禁输出**为准；上表数字随回放配置/机器波动，不作为绝对基线。
 
@@ -613,11 +649,14 @@ make -j$(nproc) WtBtRunner                                        # 回测 runne
 ```
 
 发行构建使用 `-march=x86-64-v3`（避免 `-march=native` 换机 SIGILL），`-O3 -flto`。
+**`-Wall -Wextra` 已在库目标全量启用、自有代码告警清零**（2026-11-13；框架头 `-isystem`、
+`-Wno-unused-parameter` 的豁免理由见 CMakeLists 注释）——新增代码不允许引入警告。
 
 ### 部署
 
 ```
 hft/libWtOptionCore.so        ← WtRunner/WtBtRunner 的 strategies.hft[] 加载
+                                （回放脚本按 byte 比较自动从 build 输出刷新，防 ABI 错位）
 ```
 
 插件边界：公共头文件只依赖 `Includes/*`；`libWtOptionCore.so` 无 `Wt*` 未定义符号、不 link WtCore。
@@ -630,7 +669,7 @@ ctest --test-dir src/build_all/WtOptionCore --output-on-failure
 
 | 测试 | 覆盖 |
 |------|------|
-| test_ctg_ranking | CTG 排序 + 风控 |
+| test_ctg_ranking | check_markets/市场模型/EMA/Greeks/update_types（⚠️ 文件头声明的 ranking/TPS 本体无直测——审计 v2 记录的测试债务，T2-C 补） |
 | test_enhancements | 过滤器/持仓/偏离/风控/OQM |
 | test_scanners | 工厂/生命周期/9 类信号/参数/GARCH/协调器 |
 | test_async_event_processor | 双队列/背压/去重/异常兜底 |
@@ -706,10 +745,10 @@ src/WtOptionCore/
 │
 ├── Scanners/                           # 9 类扫描器
 ├── Signals/                            # Alpha + Risk 信号 + 工厂
-├── config/                             # option_strategy_full/advanced.json
-├── replay/                             # 端到端回测工具链（取数/basefiles/配置）
-├── tests/                              # 8 个 GoogleTest 测试
-└── analysis/                           # 诊断报告与分阶段修复记录
+├── config/                             # option_strategy_full.json（advanced.json 为旧 schema 样例，勿照抄）
+├── replay/                             # 端到端回测工具链（取数/basefiles/配置/golden 基线）
+├── tests/                              # 8 个自研断言宏测试（无 GoogleTest 框架；7 注册 CTest + 1 手工 benchmark）
+└── analysis/                           # 诊断报告与分阶段修复记录（18 份，含 project-audit-2026-11-13 v2）
 ```
 
 ---
@@ -731,4 +770,12 @@ src/WtOptionCore/
 | UFT | 双框架 | 仅保留 HFT |
 | 诊断 | std::cout | WTSLogger（结构化日志） |
 
-诊断与修复历程见 `analysis/`（diagnostic-report/fix-plan 2026-08-24，phase0-11 2026-10-30，code-review-and-optimization-plan 2026-10-30）。
+诊断与修复历程见 `analysis/`（diagnostic-report/fix-plan 2026-08-24，phase0-11 2026-10-30，code-review-and-optimization-plan 2026-10-30，**project-audit-2026-11-13 v2** 全面审计及复核修订）。
+
+2026-11 治理主线（审计 v2 → T0/T1 实施，全部附回放验证）：
+
+| 日期 | 主题 | 要点 |
+|------|------|------|
+| 11-12 | timer/会话调度可靠性 | timer 走 trader 队列（control 类永不丢弃）；B4/flatten 电平触发 + 启动对账；timer 载荷秒级化（修跨午夜非单调） |
+| 11-13 | 全面审计 v2 + T0/T1 | scanner 限额决策门、`.so` 漂移自动刷新、AEP session 指标（+CSV sidecar）、BCI 去键化、**ExpiryData 墙钟 HHMMSS 修复**（日内 T 衰减此前从未生效）、combo 超时配置化 + A/B、`-Wall -Wextra` 零告警 |
+| 11-13 | golden 结构基线（批次 A） | `GOLDEN=1` 行为差异 exit 1；写基线当天抓到两个误判为结构性的分子通道（成交层实时交错泄漏、disarmed 多转移）——后续 T2 重构的门禁 |
