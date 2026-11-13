@@ -156,7 +156,7 @@ Worker 线程 (唯一状态写者)
 
 ### 7. 扫描器（Scanners/，9 类）
 
-统一经 `OptionScanCoordinator` 生命周期管理（`setEnabled → onStart → onOptionUpdate/onUnderlyingUpdate → onStop/onPanic`），分数 > `min_edge` 时 `publishHit` 发 `ScannerHitEvent` 到 CTG 执行；支持 `delta_min/max`、`max_spread`、`min_size`、GARCH `warmup_returns` 等数值参数；`expiryOverrides` 按 expiry 过滤。
+统一经 `OptionScanCoordinator` 生命周期管理（`setEnabled → onStart → onOptionUpdate/onUnderlyingUpdate → onStop/onPanic`），分数 > `min_edge` 时 `publishHit` 发 `ScannerHitEvent` 到 CTG 执行；支持 `delta_min/max`、`max_spread`、`min_size`、GARCH `warmup_returns` 等数值参数；`expiryOverrides` **仅支持按 expiry 启停**（`{"expiry":YYYYMM,"enabled":bool}`）。注意：per-expiry **数值限额**（maxPosOpt/maxPosFut/maxOrderSize/minProfit）历史上被解析但从未被执行路径消费（审计 2026-11-13 发现并移除），配置中出现这些键会打 WARN——scanner 组合单的持仓限额与所有订单一样由 `orderManager.riskFilters` / `RiskLimitsEx` 全局执行
 
 | Scanner | 说明 |
 |---------|------|

@@ -131,20 +131,15 @@ using IScanModulePtr = std::shared_ptr<IScanModule>;
 /**
  * @brief Per-expiry override for scanner configuration
  *
- * Mirrors longbeach MMScanner::ExpiryContext pattern:
- * each expiry can override common scanner params.
+ * Audit 2026-11-13 (v2, T0-1): the numeric limits (maxPosOpt/maxPosFut/
+ * maxOrderSize/minProfit) used to be parsed into this struct but were NEVER
+ * consumed by any execution path — a silently ignored safety limit. They are
+ * removed; a config still containing them now gets an explicit startup WARN.
+ * Global position limits for scanner combos are enforced like every other
+ * order, via orderManager.riskFilters / RiskLimitsEx.
  */
 struct ScannerExpiryOverrides {
-    bool enabled = true;            // Per-expiry enable/disable
-    int32_t maxPosOpt = -1;         // Max option position (-1 = use global)
-    int32_t maxPosFut = -1;         // Max future/hedge position (-1 = use global)
-    int32_t maxOrderSize = -1;      // Max order size (-1 = use global)
-    double minProfit = -1;          // Min profit threshold (-1 = use global)
-    double minProfitVol = -1;       // Min vol profit threshold (-1 = use global)
-
-    /// Check if field is overridden (not default -1)
-    static bool isSet(int32_t v) { return v >= 0; }
-    static bool isSet(double v)  { return v >= 0; }
+    bool enabled = true;            // Per-expiry enable/disable (the only supported override)
 };
 
 /**
@@ -182,12 +177,6 @@ struct ScannerConfig {
         auto it = expiryOverrides.find(expiry);
         if (it != expiryOverrides.end()) return it->second.enabled;
         return true; // default: enabled if not explicitly overridden
-    }
-
-    /// Get expiry override (nullptr if none)
-    const ScannerExpiryOverrides* getExpiryOverride(uint32_t expiry) const {
-        auto it = expiryOverrides.find(expiry);
-        return (it != expiryOverrides.end()) ? &it->second : nullptr;
     }
 
     virtual ~ScannerConfig() = default;

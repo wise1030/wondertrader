@@ -2662,18 +2662,29 @@ void HftOptionStrategy::setupScanners()
         config.warmup_returns = sCfg->has("warmup_returns") ? sCfg->getInt32("warmup_returns") : 50;
         config.annualization_factor = sCfg->has("annualization_factor") ? sCfg->getDouble("annualization_factor") : 60480.0;
 
-        // Parse per-expiry overrides
+        // Parse per-expiry overrides (enable-only — see ScannerExpiryOverrides
+        // for why the numeric limits were removed).
         if (sCfg->has("expiryOverrides")) {
             WTSVariant* overrides = sCfg->get("expiryOverrides");
             if (overrides && overrides->isArray()) {
+                bool numericWarned = false;
                 for (uint32_t j = 0; j < overrides->size(); j++) {
                     WTSVariant* ov = overrides->get(j);
                     uint32_t exp = ov->getUInt32("expiry");
-                    wt_option::ScannerExpiryOverrides eo;
-                    eo.enabled = ov->has("enabled") ? ov->getBoolean("enabled") : true;
-                    eo.maxPosOpt = ov->has("maxPosOpt") ? ov->getInt32("maxPosOpt") : -1;
-                    eo.maxPosFut = ov->has("maxPosFut") ? ov->getInt32("maxPosFut") : -1;
-                    config.expiryOverrides[exp] = eo;
+                    config.expiryOverrides[exp].enabled =
+                        ov->has("enabled") ? ov->getBoolean("enabled") : true;
+                    if (!numericWarned
+                        && (ov->has("maxPosOpt") || ov->has("maxPosFut")
+                            || ov->has("maxOrderSize") || ov->has("minProfit")
+                            || ov->has("minProfitVol"))) {
+                        numericWarned = true;
+                        WTSLogger::log_by_cat("strategy", LL_WARN,
+                            "Scanner '{}' expiryOverrides: numeric limits (maxPosOpt/"
+                            "maxPosFut/maxOrderSize/minProfit) are NOT implemented and "
+                            "are ignored. Position limits are enforced globally via "
+                            "orderManager.riskFilters / RiskLimitsEx",
+                            type);
+                    }
                 }
             }
         }
