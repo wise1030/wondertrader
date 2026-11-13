@@ -305,6 +305,11 @@ private:
     double _scanThrottleCooldown = 5.0;   // per-code hit cooldown (seconds)
     double _scanThrottleGrowth = 0.25;    // refire early only if signal grew >= 25%
     int32_t _scanMaxActiveCombos = 3;     // concurrent scanner combo cap
+    /// Leg-fill timeout for scanner combos (seconds). 130ms is the quantbox
+    /// original — right for live HFT, but under backtest tick cadence (~500ms)
+    /// it leaves ~one event to fill. Configurable via
+    /// scannerThrottle.comboTimeoutMs (audit 2026-11-13 v2 T1-6).
+    double _comboTimeoutSec = 0.130;
 
     // P2: quoting-duty metric — enabled sim-seconds vs the session's
     // tick-active window (first→last timer payload time).  ALL references

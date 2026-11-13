@@ -560,7 +560,7 @@ TraderAdapter 回调线程 / 回测 replayer      ShareManager 监控线程     
 
 **scanner 配置要点（2026-11-09 整改）**：
 
-- `scannerThrottle`：`cooldownSec`（每代码 hit 冷却，默认 5）、`refireGrowth`（冷却期内仅当信号增长 ≥ 该比例才提前重发，默认 0.25）、`maxActiveCombos`（在途 combo 上限，默认 3）。无节流时同一 edge 每个 tick 重发（实测 568 hits/s），combo 执行器与事件队列会被淹没
+- `scannerThrottle`：`cooldownSec`（每代码 hit 冷却，默认 5）、`refireGrowth`（冷却期内仅当信号增长 ≥ 该比例才提前重发，默认 0.25）、`maxActiveCombos`（在途 combo 上限，默认 3）、`comboTimeoutMs`（scanner combo 腿填充超时，默认 130=quantbox 原值）。无节流时同一 edge 每个 tick 重发（实测 568 hits/s），combo 执行器与事件队列会被淹没。**回放节奏交互（2026-11-13 A/B）**：combo 腿只有在 tick 上才能成交（mocker 零排队模型），130ms 超时在 ~500ms tick 节奏下≈给一个事件窗；但 A/B（scan_norand，130/500/1000ms）显示**成交腿数不随时长增加**（6/6/6）——更长超时主要让 combo 占住在途槽位更久（尝试数 6/5/4 被 maxActiveCombos 上限抑制）、略降 leg-terminal 失败（3/2/1）。当前 regime 下瓶颈是 edge 供给与 tick 节奏而非超时值，默认保持 130（live HFT 语义）；回测量化 scanner 策略时可按需调大
 - `riskLimits.maxVega`：必须按期权链实际敞口配置（56 合约链实测峰值 ~32.5k；默认 10000 会让报价 100% 时间被抑制——用 `QuoteDuty` 日志确认）
 - `pricer.blackCalc.volCurve.fitter.point_count`（默认 15，与 `need` 默认一致）：**拟合候选选择**——取有效点（mid>threshold 且 IV 反演有效）中**距 forward 最近的 N 档**参与拟合。**不用 delta 带**：由拟合曲线的 Greeks 决定候选准入是自指系统（曲线翼决定准入、准入决定曲线翼），实测三种阈值（0.02/0.01/0.005）全部收敛到 ATM 平值吸引子、refit 永久停滞（市场全天提供 25-28 个有效点，修剪后永远差一点 <15）。邻近选择无自指、无需调阈值，死翼结构性进不来；Greeks 保持 theo vol 模型口径（FAST 重定价与风险一致性不受影响），且**不参与准入**。近邻窗口单边（forward 贴近档位网格边缘）时本次不 refit、用上一根曲线，不触发就绪封锁。注意 `need`（就绪门槛，`good_points_thresh`）与 `point_count`（拟合窗）是**两个独立配置**：`need ≤ point_count` 是常规搭配；若某 days 档位 `thresh > point_count`，启动会打 WARN（合法但通常是配置笔误）
 - **市场就绪 = 无门控有效点（`ptsU`）**：有活跃 mid（>threshold）且 IV 反演有效（>0）+ 双边覆盖。开盘稀疏（`ptsU < need`，如您所述：无成交/挂单不活跃/无最新 mid）→ 不拟合、就绪标志掉落 → pricer 置 `priced=false` → 不报价不扫描；`ptsU` 恢复后首次拟合自然启动（不带 delta 修剪，smile 得以成形）

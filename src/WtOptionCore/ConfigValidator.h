@@ -34,7 +34,7 @@ public:
                     "pricerType","wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow",
                     "wgt_atmsig","wgt_rollema","sticky_base","improve_retreat_ratio",
                     "gammascalp","delta_hedge","fillAttribution","scannerThrottle" } },
-            { "scannerThrottle", { "cooldownSec","refireGrowth","maxActiveCombos" } },
+            { "scannerThrottle", { "cooldownSec","refireGrowth","maxActiveCombos","comboTimeoutMs" } },
             { "fillAttribution", { "enable","outputDir","keepMaxRecords","graceSeconds" } },
             { "pricer", { "wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow","wgt_atmsig",
                           "wgt_rollema","sticky_base","improve_retreat_ratio",

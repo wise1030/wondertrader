@@ -2652,11 +2652,14 @@ void HftOptionStrategy::setupScanners()
         _scanThrottleCooldown = tCfg->has("cooldownSec") ? tCfg->getDouble("cooldownSec") : 5.0;
         _scanThrottleGrowth   = tCfg->has("refireGrowth") ? tCfg->getDouble("refireGrowth") : 0.25;
         _scanMaxActiveCombos  = tCfg->has("maxActiveCombos") ? tCfg->getInt32("maxActiveCombos") : 3;
+        _comboTimeoutSec      = tCfg->has("comboTimeoutMs")
+            ? tCfg->getDouble("comboTimeoutMs") / 1000.0 : 0.130;
     }
     _ctg->setScannerThrottle(_scanThrottleCooldown, _scanThrottleGrowth);
     WTSLogger::log_by_cat("strategy", LL_INFO,
-        "Scanner throttle: cooldown={}s refireGrowth={} maxActiveCombos={}",
-        _scanThrottleCooldown, _scanThrottleGrowth, _scanMaxActiveCombos);
+        "Scanner throttle: cooldown={}s refireGrowth={} maxActiveCombos={} comboTimeout={}ms",
+        _scanThrottleCooldown, _scanThrottleGrowth, _scanMaxActiveCombos,
+        _comboTimeoutSec * 1000.0);
 
     for (uint32_t i = 0; i < scannersCfg->size(); i++) {
         WTSVariant* sCfg = scannersCfg->get(i);
@@ -2757,6 +2760,7 @@ void HftOptionStrategy::setupScanners()
             }
             auto combo = std::make_shared<wt_option::SimulComboOrder>(
                 event.reason, std::move(legs), &_comboCtx);
+            combo->setTimeoutSec(_comboTimeoutSec);
             if (combo->sendOrders() == wt_option::ComboOrder::SendResult::Success) {
                 _activeCombos.push_back(combo);
                 WTSLogger::log_by_cat("strategy", LL_INFO,
@@ -2782,6 +2786,7 @@ void HftOptionStrategy::setupScanners()
                          const_cast<wt_option::OptionData*>(sibling.get()), !buyMain,
                          buyMain ? od->getAsk() : od->getBid(),
                          buyMain ? sibling->getBid() : sibling->getAsk());
+        combo->setTimeoutSec(_comboTimeoutSec);
         if (combo->sendOrders() == wt_option::ComboOrder::SendResult::Success)
             _activeCombos.push_back(combo);
     });

@@ -64,6 +64,8 @@ public:
         return (m_leg1Sent && !m_leg1Terminal && m_leg1Filled < m_totalSize)
             || !m_leg2Open.empty();
     }
+    /// Overridable via scannerThrottle.comboTimeoutMs (audit 2026-11-13 v2 T1-6).
+    void setTimeoutSec(double s) { m_timeoutSec = s; }
 
 private:
     void sendLeg2();
@@ -76,7 +78,7 @@ private:
     bool m_active = false;
     bool m_done = false;
     double m_sendTime = 0;
-    double m_timeoutSec = 0.130;  // 130ms timeout (matching original)
+    double m_timeoutSec = 0.130;  // 130ms default (quantbox original); overridable via scannerThrottle.comboTimeoutMs
 
     // Leg info for execution
     std::string m_leg1Code, m_leg2Code;
@@ -159,6 +161,9 @@ private:
     bool m_done = false;
     double m_sendTime = 0;
     double m_timeoutSec = 0.130;
+public:
+    void setTimeoutSec(double s) { m_timeoutSec = s; }
+private:
     bool m_unwound = false;
 
     int m_nextLegToSend = 0;  // 0=leg1, 1=leg2, 2=leg3(future)
@@ -205,6 +210,9 @@ private:
     bool m_failed = false;
     double m_sendTime = 0;
     double m_timeoutSec = 0.130;
+public:
+    void setTimeoutSec(double s) { m_timeoutSec = s; }
+private:
 };
 
 using SimulComboOrderPtr = std::shared_ptr<SimulComboOrder>;
