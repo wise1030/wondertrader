@@ -7153,5 +7153,24 @@ Commits，scope futu），部署按 §5 流程。
 结论：批 1~4 相对基线**行为零漂移**（统计带判据全过）——位图实例化/监视子集/
 配置化/孤儿删除在回测路径全部中性，符合预期（批 2 路径回测不触发）。
 
-**当前状态**：dist/WtBtFutu 的 Debug .so = cae45b4（批 1~4），验证闭环；
-生产未部署、未 commit（等用户指示）。
+**生产部署记录（2026-11-13 22:19 CST，用户指示"部署最新版本"=批准夜盘中插停）**
+- 部署物：Release libWtFutuCore.so md5 **`415d716f981857f329feffaed7325e34`**
+  （双端校验一致）；旧版 `a9b61057`（§20.8 批B）备份 `uft/.bak_20261113_b194`；
+  两策略 membin tgz 备份 `generated/outputs/*/membin_bak_20261113_b194.tgz`；
+  `.so.new`+`mv -f` 原子替换（策略层单库，无 ABI 对子问题）。
+- 重启验证（22:19:02 启动，22:19:48 channel ready，settlement-confirm 46s 正常）：
+  单实例；双策略 parameter/Config validation 0 err 0 warn；四源审计零
+  （spread_arb read_missing=2 = 远程缺批 3 两新键 → 已补 `inFlightTimeoutMs/
+  fallbackMaxTotalPosition` + 备份 `.bak_20261113_b194`，下轮重启归零，
+  期间默认值=批前行为零影响）；HotLogGate/OrderRouter 配置化行生效；
+  KPI 新字段 `shadowstale=0 halt_shadow=0`；夜盘 ao 报价成交正常。
+- 已知痕迹（均既有形态，非本批引入）：旧进程 teardown segv（22:19:00 击杀瞬间，
+  WSL/退出竞态同型）+ `bspolicy default not exists`（§19.21 一次性内存态，监视）；
+  ORPHAN FILL×1（22:21 重启边界孤儿单成交，§20.1 告警按设计显形）。
+- **影子期自本部署起算**：halt_shadow ≥3 交易日零分歧 → HaltGate union/bits
+  激活另行裁决；观察项=批 2 升级链（无实战场景则保持静默为正常）。
+- 回滚：`cp uft/libWtFutuCore.so.bak_20261113_b194 uft/libWtFutuCore.so` +
+  membin tgz 还原 + wt_restart.sh。
+
+**当前状态**：代码已推送 origin/master（29b40aa2）；生产已部署批 1~4（415d716f）
+并运行；批 5 运维三件与批 A 框架持仓账待执行。
