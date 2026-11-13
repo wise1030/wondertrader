@@ -55,6 +55,15 @@ if [ -d replay_common ]; then
 else
   cp -r "$SCRIPT_DIR/replay_common" .
 fi
+# ABI mismatch between the strategy module and the runner is a real failure
+# mode (segfault / bogus FAIL), and the dist copy is refreshed from the build
+# output by hand today — same drift-refresh rule as the yaml above.
+SRC_SO="$REPO/src/build_all/WtOptionCore/libWtOptionCore.so"
+DST_SO="hft/libWtOptionCore.so"
+if [ -f "$SRC_SO" ] && ! cmp -s "$SRC_SO" "$DST_SO"; then
+  echo "NOTE: libWtOptionCore.so differs from build output — refreshing"
+  cp "$SRC_SO" "$DST_SO"
+fi
 env LD_LIBRARY_PATH="$REPO/src/build_all/build_x64/Debug/bin" \
   ./WtBtRunner.fresh -c "$YAML" -l logcfgbt_option.yaml
 
