@@ -1,7 +1,7 @@
 #include "RiskSignals.h"
 #include "SignalFactory.h"
-#include "../Includes/WTSVariant.hpp"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSVariant.hpp"
+#include "WTSLogger.h"
 #include <algorithm>
 #include <cmath>
 

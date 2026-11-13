@@ -7,10 +7,10 @@
  */
 #pragma once
 
-#include "../Includes/HftStrategyDefs.h"
-#include "../Includes/IHftStraCtx.h"
-#include "../Includes/WTSVariant.hpp"
-#include "../Includes/WTSSessionInfo.hpp"
+#include "HftStrategyDefs.h"
+#include "IHftStraCtx.h"
+#include "WTSVariant.hpp"
+#include "WTSSessionInfo.hpp"
 #include "OptionAsyncEventProcessor.h"
 #include "OptionTimeService.h"
 #include "OptionConfigLoader.h"

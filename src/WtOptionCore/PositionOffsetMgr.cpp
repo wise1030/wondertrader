@@ -1,5 +1,5 @@
 #include "PositionOffsetMgr.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 #include <algorithm>
 #include <cmath>
 

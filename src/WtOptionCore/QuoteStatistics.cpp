@@ -10,8 +10,8 @@
  * - All updates from OQM callbacks (no hot-path overhead)
  */
 #include "QuoteStatistics.h"
-#include "../Includes/WTSSessionInfo.hpp"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSSessionInfo.hpp"
+#include "WTSLogger.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

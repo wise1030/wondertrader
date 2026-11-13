@@ -4,7 +4,7 @@
  */
 #include "CffexIOStrikeFinder.h"
 #include "DceMOStrikeFinder.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <stdexcept>
 

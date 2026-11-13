@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include "../Includes/WTSVariant.hpp"
+#include "WTSVariant.hpp"
 
 #include <cstdint>
 #include <map>

@@ -1,5 +1,5 @@
 #include "PositionGuard.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 #include <cmath>
 #include <algorithm>
 

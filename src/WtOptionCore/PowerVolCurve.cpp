@@ -4,7 +4,7 @@
  */
 #include "PowerVolCurve.h"
 #include "OptionData.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <cmath>
 #include <vector>

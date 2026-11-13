@@ -24,7 +24,7 @@
 #include "BlackImpliedCalculator.h"
 #include "PowerVolCurve.h"
 #include "OptionGrid.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 #include "StrikeData.h"
 #include "ExpiryData.h"
 #include "OptionData.h"

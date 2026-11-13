@@ -8,10 +8,10 @@
 #include <algorithm>
 
 #include "ExpiryData.h"
-#include "../Includes/IBaseDataMgr.h"
-#include "../Includes/WTSSessionInfo.hpp"
-#include "../Share/TimeUtils.hpp"
-#include "../WTSTools/WTSLogger.h"
+#include "IBaseDataMgr.h"
+#include "WTSSessionInfo.hpp"
+#include "TimeUtils.hpp"
+#include "WTSLogger.h"
 
 #include <cmath>
 

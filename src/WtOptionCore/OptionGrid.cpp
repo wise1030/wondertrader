@@ -12,13 +12,13 @@
 #include <algorithm>
 #include <chrono>
 
-#include "../Includes/WTSDataDef.hpp"
-#include "../Includes/IBaseDataMgr.h"
-#include "../Includes/WTSContractInfo.hpp"
-#include "../Includes/WTSStruct.h"
-#include "../Share/CodeHelper.hpp"
-#include "../WTSTools/WTSLogger.h"
-#include "../Share/fmtlib.h"
+#include "WTSDataDef.hpp"
+#include "IBaseDataMgr.h"
+#include "WTSContractInfo.hpp"
+#include "WTSStruct.h"
+#include "CodeHelper.hpp"
+#include "WTSLogger.h"
+#include "fmtlib.h"
 
 namespace wt_option {
 

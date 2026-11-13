@@ -5,7 +5,7 @@
  * Exports createStrategyFact/deleteStrategyFact for HftStrategyMgr dynamic library loading.
  */
 #include "HftOptionStrategy.h"
-#include "../Includes/HftStrategyDefs.h"
+#include "HftStrategyDefs.h"
 
 #include <cstring>
 

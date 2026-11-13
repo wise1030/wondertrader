@@ -4,7 +4,7 @@
 #include "OptionRisk.h"
 #include "OptionGrid.h"
 #include "IOptionGrid.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <cmath>
 #include <algorithm>

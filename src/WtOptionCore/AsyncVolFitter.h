@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 namespace wt_option {
 

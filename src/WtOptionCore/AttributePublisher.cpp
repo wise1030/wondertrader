@@ -4,8 +4,8 @@
 #include "UnderlyingTradingData.h"
 #include "OptionRisk.h"
 #include "OptionGrid.h"
-#include "../WTSTools/WTSLogger.h"
-#include "../Share/fmtlib.h"
+#include "WTSLogger.h"
+#include "fmtlib.h"
 
 #include <cmath>
 #include <algorithm>

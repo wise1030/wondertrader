@@ -1,6 +1,6 @@
 #include "AlphaSignals.h"
 #include "SignalFactory.h"
-#include "../Includes/WTSVariant.hpp"
+#include "WTSVariant.hpp"
 #include "../OptionData.h"
 #include "../ExpiryData.h"
 #include "../OptionGrid.h"

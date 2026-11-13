@@ -1,7 +1,7 @@
 #include "OptionValueWriter.h"
 #include "OptionGrid.h"
 #include "OptionData.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <iomanip>
 #include <sstream>

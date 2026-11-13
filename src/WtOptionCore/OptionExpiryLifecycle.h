@@ -9,7 +9,7 @@
 #pragma once
 
 #include "OptionGrid.h"
-#include "../Includes/IHftStraCtx.h"
+#include "IHftStraCtx.h"
 
 #include <cstddef>
 #include <functional>

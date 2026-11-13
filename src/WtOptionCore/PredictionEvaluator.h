@@ -18,7 +18,7 @@
 #include <string>
 #include <functional>
 
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 namespace wt_option {
 

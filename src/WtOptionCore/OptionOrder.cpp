@@ -7,7 +7,7 @@
 #include "OptionData.h"
 #include "StrikeData.h"
 #include "ExpiryData.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 #include <chrono>
 #include <cmath>
 

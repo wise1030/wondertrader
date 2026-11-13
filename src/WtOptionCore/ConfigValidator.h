@@ -16,8 +16,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "../Includes/WTSVariant.hpp"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSVariant.hpp"
+#include "WTSLogger.h"
 
 namespace wt_option {
 

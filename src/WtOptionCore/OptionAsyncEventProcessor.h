@@ -27,7 +27,7 @@
 
 #include <boost/lockfree/spsc_queue.hpp>
 
-#include "../Includes/WTSMarcos.h"
+#include "WTSMarcos.h"
 
 namespace wtp { class WTSTickData; }
 using wtp::WTSTickData;

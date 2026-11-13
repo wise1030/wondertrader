@@ -10,11 +10,11 @@
 #include "OptionRisk.h"
 #include "OptionRiskData.h"
 #include "OptionExpiryGreeks.h"
-#include "../Includes/IHftStraCtx.h"
-#include "../Includes/WTSContractInfo.hpp"
-#include "../Share/CodeHelper.hpp"
-#include "../Share/fmtlib.h"
-#include "../WTSTools/WTSLogger.h"
+#include "IHftStraCtx.h"
+#include "WTSContractInfo.hpp"
+#include "CodeHelper.hpp"
+#include "fmtlib.h"
+#include "WTSLogger.h"
 
 #include <fstream>
 

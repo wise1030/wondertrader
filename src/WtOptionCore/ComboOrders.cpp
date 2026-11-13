@@ -1,6 +1,6 @@
 #include "ComboOrders.h"
 #include "OptionData.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <cmath>
 #include <algorithm>

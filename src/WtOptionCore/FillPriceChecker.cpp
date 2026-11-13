@@ -1,5 +1,5 @@
 #include "FillPriceChecker.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 #include <cmath>
 
 namespace wt_option {

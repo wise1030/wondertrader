@@ -9,7 +9,7 @@
 #include <chrono>
 
 // WT logger before any wt_option headers (WTSLogger pulls spdlog which needs clean namespace)
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include "ControllableTradingGrid.h"
 #include "OptionGrid.h"
@@ -23,7 +23,7 @@
 #include "StrikeData.h"
 #include "Scanners/IScanModule.h"
 #include "CompositeOptionPricer.h"
-#include "../Share/fmtlib.h"
+#include "fmtlib.h"
 
 #include <cmath>
 #include <algorithm>

@@ -1,5 +1,5 @@
 #include "RiskFilterChain.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <cstdlib>
 #include <cmath>

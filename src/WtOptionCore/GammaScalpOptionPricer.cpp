@@ -11,8 +11,8 @@
 #include "OptionRisk.h"
 #include "ExpiryData.h"
 #include "UnderlyingTradingData.h"
-#include "../Share/TimeUtils.hpp"
-#include "../WTSTools/WTSLogger.h"
+#include "TimeUtils.hpp"
+#include "WTSLogger.h"
 #include <algorithm>
 #include <cmath>
 

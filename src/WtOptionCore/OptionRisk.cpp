@@ -20,7 +20,7 @@
 #include "OptionRiskData.h"
 #include "OptionTradingData.h"
 #include "OptionGrid.h"
-#include "../WTSTools/WTSLogger.h"
+#include "WTSLogger.h"
 
 #include <memory>
 #include <set>
