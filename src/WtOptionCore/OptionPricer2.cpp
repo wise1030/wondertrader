@@ -412,18 +412,20 @@ bool OptionPricer2::computeValues(OptionGrid* grid)
 const OptionPricer2::BlackCalculatorInfoPtr&
 OptionPricer2::__setupBlackCalculatorInfo(OptionData* option)
 {
-    // NOTE: original stashed bci inside option->get<BlackCalculatorInfoPtr>().
-    // OptionData migration does not expose arbitrary typed slots, so we keep a
-    // side-table keyed by option pointer. This preserves behaviour with no
-    // change to pricing math.
-    static thread_local std::map<OptionData*, BlackCalculatorInfoPtr> s_cache;
-    BlackCalculatorInfoPtr& bci = s_cache[option];
-    if (!bci) {
-        bci = std::make_shared<BlackCalculatorInfo>();
-        bci->ei = getExpiryInfo(option->getExpiry());
-        bci->m_optionType = (option->getRight() == OR_Call) ? OT_Call : OT_Put;
-        bci->m_strike = option->getStrike();
-    }
+    // Audit 2026-11-13 (v2, T1-5): the original side-table keyed BCI by raw
+    // OptionData* and never evicted it. OptionGrid::purgeExpired erases
+    // contracts on every session begin, so the map kept dangling keys and
+    // grew without bound; and if the allocator ever reused an address, the
+    // stale ExpiryInfo/strike/type would silently price a DIFFERENT option.
+    // The cache only ever saved one getExpiryInfo() map lookup plus two
+    // assignments — negligible on a hash map. De-keying to a single
+    // thread-local instance removes the entire lifetime-bug class at zero
+    // practical cost and is OpenMP-safe (one instance per thread).
+    static thread_local BlackCalculatorInfoPtr s_bci = std::make_shared<BlackCalculatorInfo>();
+    BlackCalculatorInfoPtr& bci = s_bci;
+    bci->ei = getExpiryInfo(option->getExpiry());
+    bci->m_optionType = (option->getRight() == OR_Call) ? OT_Call : OT_Put;
+    bci->m_strike = option->getStrike();
     const ExpiryDataPtr& ed = option->getExpiryData();
     const ExpiryInfo& ei = *(bci->ei);
     bci->m_forward = ei.m_atmforward + __forwardSpreadFor(option, ei.m_atmforward);
