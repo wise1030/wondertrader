@@ -319,6 +319,9 @@ private:
     double _dutyWinStartT = 0;      // first timer payload time of the session
     double _dutyWinEndT = 0;        // last timer payload time of the session
     uint32_t _dutyLastSecOfDay = 0; // last payload secOfDay (wrap detector)
+    // AEP session-begin snapshot of queueDrops for the per-session delta in
+    // the session-end metrics line (T0-3, audit 2026-11-13 v2).
+    uint64_t _aepDropsSessionStart = 0;
 
     /// Market-readiness gate (user-approved design): readiness is a SINGLE
     /// flag owned by ExpiryData::isFitReady — session open clears it, a

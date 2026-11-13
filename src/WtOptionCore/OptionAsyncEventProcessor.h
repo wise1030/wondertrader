@@ -113,6 +113,17 @@ public:
 
     uint64_t totalEvents() const { return _total_events.load(std::memory_order_relaxed); }
     uint64_t queueDrops() const { return _queue_drops.load(std::memory_order_relaxed); }
+    /// Observability for the session-end metrics line (audit 2026-11-13 v2
+    /// T0-3): queue integrity must be a continuously MEASURED quantity, not
+    /// a one-time design argument. Depths are instantaneous snapshots.
+    size_t mdOverflowDepth() {
+        std::lock_guard<std::mutex> lock(_md_overflow_mtx);
+        return _md_overflow.size();
+    }
+    size_t traderDepth() {
+        std::lock_guard<std::mutex> lock(_trader_mtx);
+        return _trader_queue.size();
+    }
 
 public:
     // AsyncEvent is public so factory methods can be defined in .cpp

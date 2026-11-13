@@ -2371,6 +2371,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _dutyWinEndT = 0;
                 _dutyLastSimT = 0;      // numerator restarts at the first timer event
                 _dutyLastSecOfDay = 0;  // (wrap detector reset; epoch base carries)
+                // T0-3: snapshot queue drops for the per-session delta logged
+                // at session end (queue integrity as a measured quantity).
+                _aepDropsSessionStart = _async ? _async->queueDrops() : 0;
             }
 
             // Market-readiness: yesterday's curves are stale for today's
@@ -2455,6 +2458,18 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _dutyAccumSec = 0;
             _dutyWinStartT = 0;
             _dutyWinEndT = 0;
+            // T0-3: queue-integrity metrics, one line per session. Event
+            // reliability is a continuously MEASURED quantity from here on
+            // (drops/depths), not only a one-time design argument; batch
+            // latency percentiles are cumulative since strategy start.
+            if (_async) {
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "AEP session {}: events={} dropsDelta={} mdOverflowDepth={} traderQueueDepth={} batchLatency p50={:.0f}us p95={:.0f}us",
+                    tdate, _async->totalEvents(),
+                    _async->queueDrops() - _aepDropsSessionStart,
+                    _async->mdOverflowDepth(), _async->traderDepth(),
+                    _batchLatencyUs.p50(), _batchLatencyUs.p95());
+            }
             // C5: dump OQM lifetime counters for exchange-report reconciliation
             if (_otg) {
                 std::string path = fmt::format("outputs_option/oqm_counters_{}.csv", tdate);
