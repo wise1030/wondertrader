@@ -541,6 +541,30 @@ P2 约 4–6 人日（命令/ack/Ticket/审计/SETPARAM 实测），P3 约 3–5
 
 §11 P1 验收标准全绿；FITGATE 临时日志（`HftOptionStrategy.cpp` 中标注 TEMP 的诊断块）待服务器冒烟确认 fit 门可见后由运维删除。
 
+### 14.5 P2 实施记录（2026-11-16，同日）
+
+**交付**
+
+- `OptionCommandHandlers`：新增 `CANCELO,<localid>`（→ `executeCancel`）与 `SETPARAM,<key>,<value>` 两个 handler；Hooks 增 `cancelOne`/`setHotParam`。
+- `HftOptionStrategy::registerCommands`：`setHotParam` 白名单仅 6 键（5 alpha 权重 + `max_tps`，范围校验），双路径写入（`_hot.*` 指针非空写指针，否则写成员并置 `_hotUpdatePending`，由同批 `applyHotParams()` 应用）；`sticky_base/improve_retreat_ratio` 显式拒绝（非热参数）。
+- worker drain：`on_batch_complete` 顶部 drain 中非 refresh 线直接 `_cmdBus.dispatch`，**全量写命令审计日志**（线格式 + 结果 + worker 侧耗时 µs）。
+- `UiBridge::handleLine`：P2 写路径 JSON→CommandBus 线格式翻译在 **IO 线程**完成（字段校验不过即拒答，不唤醒 worker）；裸 CSV 直通（nc 兼容）；浮点用 fmt 最短回环格式。
+- 快照增 `params` 回显（6 热参当前值，`hotVal` 语义），前端编辑前可见当前值。
+- 前端：`SetParamPanel`（6 参输入+set）、CommandPanel STOP/RESUME/PANIC/QMODE 按钮在 `readonly:false` 时启用、订单表双击/✕ 撤单、Ticket 下单带 cmdSeq；网格双击提示 qmode 为全网格（CommandBus 无 per-code 命令，P3 可选）。
+
+**验证**
+
+- `test_uibridge` 增 3 组（handler 白名单/写路径翻译+ack/params 回显），全过；8 个测试二进制回归全过；零告警。
+- golden 双过（基线 + ui 场景各一次 `GOLDEN=1`，结构集 59 行一致）——drain 路径改造零交易扰动。
+- 前端 `tsc+vite` 零错误构建；middleware 上行转发 P1 已证（verb 无关）。
+
+**运行方式**：`readonly:true` 维持 P1 行为；写命令需在配置显式 `readonly:false`（dist 默认保持 true，授权后打开）。
+
+### 14.6 残余事项（P2 后）
+
+- 服务器授权窗口：开 `readonly:false` 人工点单闭环（ORDER→成交→CANCELO 撤单→SETPARAM 生效核对审计日志）——需实盘/仿真环境，无法在开发机完成。
+- per-code qmode、Cancel All、回放期可视化：P3。
+
 ---
 
 **附：二轮复核的代码证据索引**
