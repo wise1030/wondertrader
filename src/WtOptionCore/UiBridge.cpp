@@ -6,11 +6,15 @@
 
 #include "UiSnapshotBuilder.h"
 #include "WTSLogger.h"
+#include "fmtlib.h"
 
 #include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <sstream>
 #include <utility>
 
 #ifndef _WIN32
@@ -52,6 +56,104 @@ std::string extractAuthToken(const std::string& line)
     auto it = doc.FindMember("auth");
     if (it == doc.MemberEnd() || !it->value.IsString()) return "";
     return it->value.GetString();
+}
+
+/// P2 write path: translate a UI JSON command into the CommandBus wire
+/// format (CSV). Bare CSV lines pass through untouched (nc-friendly). The
+/// worker only ever sees wire-format lines for writes.
+bool translateCommand(const std::string& line, const std::string& verb,
+                      std::string& wire, std::string& err)
+{
+    if (line.empty() || line[0] != '{')
+    {
+        wire = line;
+        return true;
+    }
+
+    rapidjson::Document doc;
+    if (doc.Parse(line.c_str()).HasParseError() || !doc.IsObject())
+    {
+        err = "invalid JSON";
+        return false;
+    }
+    auto strField = [&doc](const char* name, std::string& out) -> bool {
+        auto it = doc.FindMember(name);
+        if (it == doc.MemberEnd() || !it->value.IsString()) return false;
+        out = it->value.GetString();
+        return !out.empty();
+    };
+    auto numField = [&doc](const char* name, double& out) -> bool {
+        auto it = doc.FindMember(name);
+        if (it == doc.MemberEnd() || !it->value.IsNumber()) return false;
+        out = it->value.GetDouble();
+        return std::isfinite(out);
+    };
+
+    auto numStr = [](double v) { return fmt::format("{}", v); };   // shortest round-trip
+
+    if (verb == "stop" || verb == "resume" || verb == "panic")
+    {
+        std::string v = verb;
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        wire = v;
+        return true;
+    }
+    if (verb == "qmode")
+    {
+        std::string mode;
+        if (!strField("mode", mode) ||
+            (mode != "on" && mode != "off" && mode != "close"))
+        {
+            err = "qmode needs mode=on|off|close";
+            return false;
+        }
+        wire = "QMODE," + mode;
+        return true;
+    }
+    if (verb == "order")
+    {
+        std::string code, side;
+        double px = 0, qtyD = 0;
+        if (!strField("code", code)) { err = "order needs code"; return false; }
+        if (!strField("side", side) || (side != "B" && side != "S" && side != "b" && side != "s"))
+        {
+            err = "order needs side=B|S";
+            return false;
+        }
+        if (!numField("price", px) || px <= 0) { err = "order needs price>0"; return false; }
+        if (!numField("qty", qtyD) || qtyD < 1) { err = "order needs qty>=1"; return false; }
+        std::ostringstream os2;
+        os2 << "ORDER," << static_cast<char>(std::toupper(static_cast<unsigned char>(side[0])))
+            << "," << code << "," << numStr(px) << "," << static_cast<uint32_t>(qtyD);
+        wire = os2.str();
+        return true;
+    }
+    if (verb == "cancel")
+    {
+        std::string code;
+        if (!strField("code", code)) { err = "cancel needs code"; return false; }
+        wire = "CANCEL," + code;
+        return true;
+    }
+    if (verb == "cancel_order")
+    {
+        auto it = doc.FindMember("id");
+        if (it == doc.MemberEnd() || !it->value.IsUint()) { err = "cancel_order needs id"; return false; }
+        wire = fmt::format("CANCELO,{}", it->value.GetUint());
+        return true;
+    }
+    if (verb == "set_param")
+    {
+        std::string key;
+        double value = 0;
+        if (!strField("key", key)) { err = "set_param needs key"; return false; }
+        if (!numField("value", value)) { err = "set_param needs numeric value"; return false; }
+        wire = fmt::format("SETPARAM,{},{}", key, numStr(value));
+        return true;
+    }
+    err = "unsupported command: " + verb;
+    return false;
 }
 #endif
 
@@ -363,7 +465,7 @@ void UiBridge::handleLine(int clientId, const std::string& raw)
         return;
     }
 
-    if (pc.cmd == "refresh" || !_cfg.readonly)
+    if (pc.cmd == "refresh")
     {
         {
             std::lock_guard<std::mutex> lk(_cmdMtx);
@@ -378,10 +480,36 @@ void UiBridge::handleLine(int clientId, const std::string& raw)
         _cmdsAccepted.fetch_add(1, std::memory_order_relaxed);
         if (_wakeWorker) _wakeWorker();
     }
-    else
+    else if (_cfg.readonly)
     {
         queueAck(clientId, pc.cmdSeq, false, "readonly");
         _cmdsRejected.fetch_add(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        // P2 write path: translate JSON to the CommandBus wire format here
+        // (IO thread); malformed commands are rejected without waking the
+        // worker. The worker drains the wire line at the next batch top and
+        // acks the execution result.
+        std::string wire, terr;
+        if (!translateCommand(line, pc.cmd, wire, terr))
+        {
+            queueAck(clientId, pc.cmdSeq, false, terr);
+            _cmdsRejected.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(_cmdMtx);
+            if (_commands.size() >= COMMAND_CAP)
+            {
+                queueAck(clientId, pc.cmdSeq, false, "busy");
+                _cmdsRejected.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            _commands.push_back(UiCommand{clientId, pc.cmdSeq, std::move(wire)});
+        }
+        _cmdsAccepted.fetch_add(1, std::memory_order_relaxed);
+        if (_wakeWorker) _wakeWorker();
     }
 }
 

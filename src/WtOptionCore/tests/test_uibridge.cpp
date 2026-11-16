@@ -1,12 +1,17 @@
 // P1 UI bridge tests: builder field mapping, JSON null semantics, command
 // parsing, and a loopback integration test of UiBridge (hello/snapshot/
 // events/refresh-ack/readonly gate/auth/FIFO backpressure).
+// P2 additions: CANCELO/SETPARAM command handlers and the write path
+// (JSON -> CommandBus wire translation -> worker dispatch -> ack).
 #include "../UiBridge.h"
 #include "../UiSnapshotBuilder.h"
 #include "../UiSnapshotView.h"
 #include "../OptionData.h"
 #include "../ExpiryData.h"
 #include "../StrikeData.h"
+#include "../CommandBus.h"
+#include "../OptionCommandHandlers.h"
+#include "../TradingState.h"
 
 #include <atomic>
 #include <chrono>
@@ -304,6 +309,136 @@ int main()
     cfg4.port = 0;
     UiBridge remote(cfg4);
     ASSERT_TRUE(!remote.start());
+
+    // ------------------------------------------------------------------
+    // 8) P2 command handlers: CANCELO + SETPARAM (whitelist in the strategy)
+    // ------------------------------------------------------------------
+    CommandBus bus;
+    OptionCommandHandlers cmdHandlers;
+    bool cancelOneOk = true;
+    std::string lastParamKey;
+    double lastParamValue = -1;
+    OptionCommandHandlers::Hooks hooks;
+    hooks.setState = [](TradingStateType, const std::string&) {};
+    hooks.channelReady = []() { return true; };
+    hooks.setQModeAll = [](const std::string&, std::string&) { return true; };
+    hooks.executeOrder = [](const std::string&, bool, double, uint32_t) { return 1; };
+    hooks.cancelAll = [](const std::string&) {};
+    hooks.cancelOne = [&](uint32_t, std::string& err) {
+        if (!cancelOneOk) { err = "stra_cancel failed"; return false; }
+        return true;
+    };
+    hooks.setHotParam = [&](const std::string& key, double value, std::string& err) {
+        // strategy-side whitelist replica (fixture): only hot-effective keys
+        if (key != "wgt_vegaflow" && key != "max_tps") {
+            err = "key not hot-adjustable: " + key;
+            return false;
+        }
+        lastParamKey = key;
+        lastParamValue = value;
+        return true;
+    };
+    cmdHandlers.registerAll(bus, std::move(hooks));
+
+    std::string be;
+    ASSERT_TRUE(bus.dispatch("CANCELO,42", be));
+    cancelOneOk = false;
+    ASSERT_TRUE(!bus.dispatch("CANCELO,42", be));
+    ASSERT_TRUE(!bus.dispatch("CANCELO,abc", be));      // malformed localid
+    cancelOneOk = true;
+    ASSERT_TRUE(bus.dispatch("SETPARAM,wgt_vegaflow,0.4", be));
+    ASSERT_EQ(lastParamKey, std::string("wgt_vegaflow"));
+    ASSERT_EQ(lastParamValue, 0.4);
+    ASSERT_TRUE(bus.dispatch("SETPARAM,max_tps,60", be));
+    ASSERT_EQ(lastParamValue, 60.0);
+    ASSERT_TRUE(!bus.dispatch("SETPARAM,sticky_base,0.9", be));  // not hot-adjustable
+    ASSERT_TRUE(!bus.dispatch("SETPARAM,wgt_vegaflow,abc", be)); // malformed value
+
+    // ------------------------------------------------------------------
+    // 9) P2 bridge write path: JSON -> wire translation -> dispatch -> ack
+    // ------------------------------------------------------------------
+    UiBridge::Config cfgW;
+    cfgW.enabled = true;
+    cfgW.port = 0;
+    cfgW.readonly = false;               // write path open
+    cfgW.heartbeatSec = 0;
+    cfgW.sid = "opt";
+    UiBridge wb(cfgW);
+    ASSERT_TRUE(wb.start());
+    int fdW = connectLocal(wb.boundPort());
+    std::string helloW = recvLine(fdW);
+    ASSERT_TRUE(helloW.find("\"readonly\":false") != std::string::npos);
+
+    std::vector<std::string> dispatched;
+    auto drainToBus = [&]() {
+        wb.drainCommands([&](const std::string& line, std::string& err) -> bool {
+            if (line.find("refresh") != std::string::npos ||
+                line.find("REFRESH") != std::string::npos) return true;
+            dispatched.push_back(line);
+            return bus.dispatch(line, err);
+        });
+    };
+
+    // JSON stop -> wire "STOP" -> bus ok -> ack ok:true
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"stop\",\"cmdSeq\":20}\n"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    drainToBus();
+    std::string ackW = recvLine(fdW);
+    ASSERT_TRUE(ackW.find("\"cmdSeq\":20") != std::string::npos);
+    ASSERT_TRUE(ackW.find("\"ok\":true") != std::string::npos);
+    ASSERT_EQ(dispatched.back(), std::string("STOP"));
+
+    // JSON order -> translated wire line
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"order\",\"code\":\"SHFE.cu2612C100000\",\"side\":\"B\",\"price\":12.5,\"qty\":3,\"cmdSeq\":21}\n"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    drainToBus();
+    std::string ackO = recvLine(fdW);
+    ASSERT_TRUE(ackO.find("\"ok\":true") != std::string::npos);
+    ASSERT_EQ(dispatched.back(),
+              std::string("ORDER,B,SHFE.cu2612C100000,12.5,3"));
+
+    // malformed order (missing qty) -> immediate ack err, nothing dispatched
+    const size_t nBefore = dispatched.size();
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"order\",\"code\":\"X\",\"side\":\"B\",\"price\":12.5,\"cmdSeq\":22}\n"));
+    std::string ackBad = recvLine(fdW);
+    ASSERT_TRUE(ackBad.find("\"ok\":false") != std::string::npos);
+    ASSERT_TRUE(ackBad.find("qty") != std::string::npos);
+    ASSERT_EQ(dispatched.size(), nBefore);
+
+    // set_param translation + whitelist rejection propagation
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"set_param\",\"key\":\"wgt_vegaflow\",\"value\":0.4,\"cmdSeq\":23}\n"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    drainToBus();
+    std::string ackP = recvLine(fdW);
+    ASSERT_TRUE(ackP.find("\"ok\":true") != std::string::npos);
+    ASSERT_EQ(dispatched.back(), std::string("SETPARAM,wgt_vegaflow,0.4"));
+    ASSERT_EQ(lastParamValue, 0.4);
+
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"set_param\",\"key\":\"sticky_base\",\"value\":0.9,\"cmdSeq\":24}\n"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    drainToBus();
+    std::string ackP2 = recvLine(fdW);
+    ASSERT_TRUE(ackP2.find("\"ok\":false") != std::string::npos);
+    ASSERT_TRUE(ackP2.find("not hot-adjustable") != std::string::npos);
+
+    close(fdW);
+    wb.stop();
+
+    // ------------------------------------------------------------------
+    // 10) snapshot params echo (P2 SETPARAM current values)
+    // ------------------------------------------------------------------
+    UiSnapshotView pv;
+    pv.pWgtVegaflow = 0.35;
+    pv.pWgtFrontfutSkew = 0.25;
+    pv.pWgtDeltaflow = 0.2;
+    pv.pWgtAtmsig = 0.15;
+    pv.pWgtRollema = 0.05;
+    pv.pMaxTps = 30;
+    std::string pj;
+    UiSnapshotBuilder::encodeSnapshot(pv, "sid", pj);
+    ASSERT_TRUE(pj.find("\"params\"") != std::string::npos);
+    ASSERT_TRUE(pj.find("\"wgt_vegaflow\":0.35") != std::string::npos);
+    ASSERT_TRUE(pj.find("\"max_tps\":30") != std::string::npos);
 
     std::cout << "ALL UI BRIDGE TESTS PASSED" << std::endl;
     return 0;

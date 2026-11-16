@@ -139,6 +139,14 @@ struct UiSnapshotView
     std::vector<UiExpiryView> expiries;
     std::vector<UiOrderView> orders;                      // live orders only
     std::vector<std::pair<std::string, std::pair<double, double>>> contracts; // code -> {mult, tick}
+
+    // Hot-param echo (P2 SETPARAM whitelist, hotVal semantics: sync_param ptr
+    // when share_domain is active, member otherwise) — the UI shows these as
+    // the current values before an edit.
+    bool hasParams = false;
+    double pWgtVegaflow = 0, pWgtFrontfutSkew = 0, pWgtDeltaflow = 0;
+    double pWgtAtmsig = 0, pWgtRollema = 0;
+    int32_t pMaxTps = 0;
 };
 
 // ---------------------------------------------------------------------------

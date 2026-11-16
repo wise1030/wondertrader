@@ -24,6 +24,13 @@ public:
     using ExecuteOrderFn = std::function<int32_t(const std::string& code, bool isBuy,
                                                 double price, uint32_t qty)>;
     using CancelAllFn = std::function<void(const std::string& code)>;
+    /// P2: cancel one order by framework localid (UI double-click cancel).
+    using CancelOneFn = std::function<bool(uint32_t localid, std::string& err)>;
+    /// P2: hot parameter write. The strategy validates the whitelist and
+    /// applies via its existing hot-update path (sync_param ptr when present,
+    /// member + applyHotParams otherwise). Only truly hot-effective keys are
+    /// accepted (5 alpha weights + max_tps).
+    using SetHotParamFn = std::function<bool(const std::string& key, double value, std::string& err)>;
 
     struct Hooks {
         SetStateFn setState;
@@ -31,6 +38,8 @@ public:
         SetQModeFn setQModeAll;
         ExecuteOrderFn executeOrder;
         CancelAllFn cancelAll;
+        CancelOneFn cancelOne;
+        SetHotParamFn setHotParam;
     };
 
     void registerAll(CommandBus& bus, Hooks hooks);

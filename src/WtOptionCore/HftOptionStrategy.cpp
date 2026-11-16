@@ -1608,7 +1608,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
     // Batch complete: computeValues + refresh + drainPendingQuotes (single pass per batch)
     cbs.on_batch_complete = [this]() {
-        // P1 UI: drain bridge commands FIRST — before the !grid/!pricer early
+        // P1/P2 UI: drain bridge commands FIRST — before the !grid/!pricer early
         // return — so a refresh is served even while the engine is still
         // initializing (that is exactly when the UI is most needed).
         if (_uiBridge) {
@@ -1623,8 +1623,16 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     _uiFillsPending = true;
                     return true;
                 }
-                err = "unsupported command (readonly)";
-                return false;
+                // P2 write path: the IO thread already translated JSON to the
+                // CommandBus wire format (CSV); unknown lines fail safe here.
+                // Every write is audited (result + worker-side latency).
+                const auto t0 = std::chrono::steady_clock::now();
+                const bool ok = _cmdBus.dispatch(line, err);
+                const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+                WTSLogger::log_by_cat("strategy", ok ? LL_INFO : LL_WARN,
+                    "UI cmd: {} -> {} ({}us)", line, ok ? "ok" : err.c_str(), us);
+                return ok;
             });
         }
         if (!_grid || !_pricer) return;
@@ -3750,6 +3758,62 @@ void HftOptionStrategy::registerCommands()
     hooks.cancelAll = [this](const std::string& code) {
         executeCancel(code);
     };
+    // P2 UI: cancel one order by framework localid (double-click cancel).
+    hooks.cancelOne = [this](uint32_t localid, std::string& err) -> bool {
+        if (!_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) {
+            err = "channel not ready";
+            return false;
+        }
+        if (!executeCancel(localid)) {
+            err = "stra_cancel failed (unknown id or channel)";
+            return false;
+        }
+        return true;
+    };
+    // P2 UI: hot parameter write. Whitelist = ONLY the keys applyHotParams()
+    // consumes hot (5 alpha weights + max_tps). sticky_base / improve_retreat
+    // are init-time only and are rejected here by design. Dual path per v2.1:
+    // sync_param ptr when share_domain is active, member + _hotUpdatePending
+    // otherwise (current dist default) — applyHotParams() picks it up later
+    // in this same on_batch_complete.
+    hooks.setHotParam = [this](const std::string& key, double value, std::string& err) -> bool {
+        if (!std::isfinite(value)) { err = "value not finite"; return false; }
+        bool ptrPath = false;
+        auto setWeight = [&](double* ptr, double* member) {
+            ptrPath = (ptr != nullptr);
+            if (ptr) *ptr = value; else *member = value;
+            _hotUpdatePending.store(true, std::memory_order_release);
+        };
+        if (key == "wgt_vegaflow") {
+            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
+            setWeight(_hot.wgt_vegaflow, &_wgt_vegaflow);
+        } else if (key == "wgt_frontfut_skew") {
+            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
+            setWeight(_hot.wgt_frontfut_skew, &_wgt_frontfut_skew);
+        } else if (key == "wgt_deltaflow") {
+            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
+            setWeight(_hot.wgt_deltaflow, &_wgt_deltaflow);
+        } else if (key == "wgt_atmsig") {
+            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
+            setWeight(_hot.wgt_atmsig, &_wgt_atmsig);
+        } else if (key == "wgt_rollema") {
+            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
+            setWeight(_hot.wgt_rollema, &_wgt_rollema);
+        } else if (key == "max_tps") {
+            const int32_t tps = static_cast<int32_t>(value);
+            if (tps < 1 || tps > 10000) { err = "max_tps out of range [1,10000]"; return false; }
+            ptrPath = (_hot.max_tps != nullptr);
+            if (_hot.max_tps) *_hot.max_tps = tps; else _maxTPS = tps;
+            _hotUpdatePending.store(true, std::memory_order_release);
+        } else {
+            err = "key not hot-adjustable: " + key;
+            return false;
+        }
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "UI SETPARAM: {} = {} ({} path)", key, value,
+            ptrPath ? "shm-ptr" : "member");
+        return true;
+    };
     _cmdHandlers.registerAll(_cmdBus, std::move(hooks));
 }
 
@@ -4149,6 +4213,15 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
                 std::make_pair(od->getMultiplier(), od->getTickSize()));
         }
     }
+
+    // P2 hot-param echo (same hotVal semantics applyHotParams uses)
+    v.hasParams = true;
+    v.pWgtVegaflow = hotVal(_hot.wgt_vegaflow, _wgt_vegaflow);
+    v.pWgtFrontfutSkew = hotVal(_hot.wgt_frontfut_skew, _wgt_frontfut_skew);
+    v.pWgtDeltaflow = hotVal(_hot.wgt_deltaflow, _wgt_deltaflow);
+    v.pWgtAtmsig = hotVal(_hot.wgt_atmsig, _wgt_atmsig);
+    v.pWgtRollema = hotVal(_hot.wgt_rollema, _wgt_rollema);
+    v.pMaxTps = hotVal(_hot.max_tps, _maxTPS);
 }
 
 void HftOptionStrategy::collectUiFills(std::vector<wt_option::UiFillView>& out)

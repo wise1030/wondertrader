@@ -49,6 +49,30 @@ void OptionCommandHandlers::registerAll(CommandBus& bus, Hooks hooks)
         m_hooks.cancelAll(args[1]);
         return true;
     });
+    // P2: cancel one order by framework localid (UI double-click cancel).
+    bus.registerCommand("CANCELO", [this](const auto& args, std::string& err) {
+        if (args.size() < 2) { err = "CANCELO needs localid"; return false; }
+        if (!m_hooks.cancelOne) { err = "not initialized"; return false; }
+        try {
+            const uint32_t localid = static_cast<uint32_t>(std::stoul(args[1]));
+            return m_hooks.cancelOne(localid, err);
+        } catch (const std::exception& e) {
+            err = std::string("invalid CANCELO localid: ") + e.what();
+            return false;
+        }
+    });
+    // P2: hot parameter write (whitelist lives in the strategy hook).
+    bus.registerCommand("SETPARAM", [this](const auto& args, std::string& err) {
+        if (args.size() < 3) { err = "SETPARAM needs key,value"; return false; }
+        if (!m_hooks.setHotParam) { err = "not initialized"; return false; }
+        try {
+            const double value = std::stod(args[2]);
+            return m_hooks.setHotParam(args[1], value, err);
+        } catch (const std::exception& e) {
+            err = std::string("invalid SETPARAM value: ") + e.what();
+            return false;
+        }
+    });
 }
 
 } // namespace wt_option

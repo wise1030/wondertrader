@@ -352,6 +352,17 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.EndObject();
     w.EndObject();
 
+    // P2 hot-param echo (SETPARAM whitelist — sticky_base / improve_retreat
+    // are init-time only and deliberately absent)
+    w.key("params"); w.StartObject();
+    w.numOrNull("wgt_vegaflow", v.pWgtVegaflow);
+    w.numOrNull("wgt_frontfut_skew", v.pWgtFrontfutSkew);
+    w.numOrNull("wgt_deltaflow", v.pWgtDeltaflow);
+    w.numOrNull("wgt_atmsig", v.pWgtAtmsig);
+    w.numOrNull("wgt_rollema", v.pWgtRollema);
+    w.key("max_tps"); w.Int(v.pMaxTps);
+    w.EndObject();
+
     w.EndObject();
     out.assign(sb.GetString(), sb.GetSize());
     out.push_back('\n');
