@@ -98,7 +98,7 @@ interface Props {
 }
 
 export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelectByIndex, onNotify }) => {
-  const { snapshot, readonly, sendCommand } = useData();
+  const { snapshot, readonly } = useData();
   const [vshiftVisible, setVshiftVisible] = useState(false);
   const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
   const [isTicketOpen, setIsTicketOpen] = useState(false);
@@ -121,13 +121,14 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
     setIsTicketOpen(true);
   }, []);
 
-  const handleCellClick = useCallback((row: GridRow, side: 'C' | 'P', type: string) => {
+  const handleCellClick = useCallback((_row: GridRow, _side: 'C' | 'P', type: string) => {
     if (type === 'pos_dbl') {
-      if (readonly) { onNotify('readonly mode — qmode control is P2', 'info'); return; }
-      const leg = side === 'C' ? row.call : row.put;
-      if (leg) sendCommand(JSON.stringify({ cmd: 'qmode', mode: 'off' })); // P2: per-code qmode
+      // P2: per-code qmode is not in the CommandBus (QMODE is grid-wide);
+      // the double-click only explains where the control lives.
+      onNotify('qmode is grid-wide in P2 — use the command bar buttons', 'info');
+      return;
     }
-  }, [readonly, sendCommand, onNotify]);
+  }, [onNotify]);
 
   // Qt keyboard shortcuts (navigation/toggles live; trading shortcuts gated by readonly)
   useEffect(() => {

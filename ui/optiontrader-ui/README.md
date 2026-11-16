@@ -14,7 +14,9 @@ WtRunner(HftOptionStrategy)                    本目录
 
 - 桥接在策略插件进程内（`params.ui.enabled=true` 才创建，默认关闭——回测加载同一 .so 零影响）。
 - 下行：1Hz 全量快照（seq 水位去重）+ 订单/成交/拒单增量事件 + 重连 fills 历史。
-- 上行（P1）：仅 `refresh`；其余命令被 readonly 硬门拒绝（P2 开放）。
+- 上行：P1 仅 `refresh`；P2 已支持 STOP/RESUME/PANIC/QMODE/ORDER/CANCEL/CANCELO/SETPARAM，
+  JSON 在桥内翻译成 CommandBus 线格式、worker 批顶执行并审计；**`readonly:true` 时
+  除 refresh 外全部拒答**（写命令需配置显式 `readonly:false` 并授权）。
 - 静默行情：有客户端时每 `heartbeat` 秒 `enqueue_control()` 唤醒出快照（golden/回测必须 `heartbeat:false`）。
 
 ## 启动（服务器）

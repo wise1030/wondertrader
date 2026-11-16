@@ -125,6 +125,14 @@ export interface Snapshot {
   expiries: ExpiryView[];
   orders: OrderView[];
   meta: { contracts: Record<string, { mult: number | null; priceTick: number | null }> };
+  params?: {
+    wgt_vegaflow: number;
+    wgt_frontfut_skew: number;
+    wgt_deltaflow: number;
+    wgt_atmsig: number;
+    wgt_rollema: number;
+    max_tps: number;
+  } | null;
 }
 
 export interface OrderEvent {

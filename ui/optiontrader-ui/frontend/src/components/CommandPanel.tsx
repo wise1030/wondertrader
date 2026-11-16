@@ -1,5 +1,6 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
+import { SetParamPanel } from './SetParamPanel';
 
 interface Props {
   onNotify: (msg: string, type: 'info' | 'error') => void;
@@ -29,8 +30,8 @@ export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
         {(['STOP', 'RESUME', 'PANIC'] as const).map(c => (
           <button
             key={c}
-            className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-400' : 'bg-gray-400'} ${readonly ? 'cursor-not-allowed opacity-60' : 'hover:opacity-80'}`}
-            onClick={() => readonly ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase() }))}
+            className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
+            onClick={() => readonly ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase(), cmdSeq: Date.now() % 100000 }))}
           >
             {c}
           </button>
@@ -38,13 +39,14 @@ export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
         {(['on', 'off', 'close'] as const).map(m => (
           <button
             key={m}
-            className={`px-2 py-0.5 rounded bg-gray-400 text-white ${readonly ? 'cursor-not-allowed opacity-60' : 'hover:opacity-80'}`}
-            onClick={() => readonly ? p2(`qmode ${m}`) : sendCommand(JSON.stringify({ cmd: 'qmode', mode: m }))}
+            className={`px-2 py-0.5 rounded bg-gray-600 hover:bg-gray-500 text-white ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
+            onClick={() => readonly ? p2(`qmode ${m}`) : sendCommand(JSON.stringify({ cmd: 'qmode', mode: m, cmdSeq: Date.now() % 100000 }))}
           >
             qmode {m}
           </button>
         ))}
       </div>
+      <SetParamPanel />
       <div className="h-20 overflow-y-auto bg-gray-50 border border-gray-200 rounded px-2 py-0.5 text-[10px] font-mono">
         {msgLogs.slice().reverse().map((l, i) => (
           <div key={i} className={l.type === 'error' || l.type === 'reject' ? 'text-red-600' : 'text-gray-600'}>

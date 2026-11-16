@@ -2,8 +2,13 @@ import React from 'react';
 import { useData } from '../context/DataContext';
 
 export const OrdersTable: React.FC = () => {
-  const { orders } = useData();
+  const { orders, readonly, sendCommand } = useData();
   const list = Object.values(orders).sort((a, b) => b.id - a.id);
+
+  const cancel = (id: number) => {
+    if (readonly) return;
+    sendCommand(JSON.stringify({ cmd: 'cancel_order', id, cmdSeq: Date.now() % 100000 }));
+  };
 
   return (
     <table className="w-full border-collapse text-[11px]">
@@ -16,11 +21,17 @@ export const OrdersTable: React.FC = () => {
           <th className="border border-gray-300 px-1 py-0.5">qty</th>
           <th className="border border-gray-300 px-1 py-0.5">filled</th>
           <th className="border border-gray-300 px-1 py-0.5">rem</th>
+          <th className="border border-gray-300 px-1 py-0.5">{readonly ? '' : 'cxl'}</th>
         </tr>
       </thead>
       <tbody>
         {list.map(o => (
-          <tr key={o.id} className="hover:bg-yellow-50">
+          <tr
+            key={o.id}
+            className="hover:bg-yellow-50"
+            title={readonly ? undefined : 'double-click to cancel'}
+            onDoubleClick={() => cancel(o.id)}
+          >
             <td className="border border-gray-200 px-1 font-mono">{o.id}</td>
             <td className="border border-gray-200 px-1 font-mono">{o.code}</td>
             <td className={`border border-gray-200 px-1 text-center font-bold ${o.buy ? 'text-green-700' : 'text-red-700'}`}>{o.buy ? 'B' : 'S'}</td>
@@ -28,10 +39,20 @@ export const OrdersTable: React.FC = () => {
             <td className="border border-gray-200 px-1 text-right">{o.qty}</td>
             <td className="border border-gray-200 px-1 text-right">{o.filled}</td>
             <td className="border border-gray-200 px-1 text-right">{o.qty - o.filled}</td>
+            <td className="border border-gray-200 px-1 text-center">
+              {!readonly && (
+                <button
+                  className="px-1.5 bg-red-100 hover:bg-red-200 text-red-700 rounded text-[10px]"
+                  onClick={e => { e.stopPropagation(); cancel(o.id); }}
+                >
+                  ✕
+                </button>
+              )}
+            </td>
           </tr>
         ))}
         {list.length === 0 && (
-          <tr><td colSpan={7} className="text-center py-6 text-gray-400">no live orders</td></tr>
+          <tr><td colSpan={8} className="text-center py-6 text-gray-400">no live orders</td></tr>
         )}
       </tbody>
     </table>

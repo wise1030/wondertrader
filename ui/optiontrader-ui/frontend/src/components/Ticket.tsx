@@ -17,12 +17,13 @@ export const Ticket: React.FC<Props> = ({ buysell, leg, onClose, onNotify }) => 
   const [qty, setQty] = useState<string>('1');
 
   const submit = () => {
-    if (readonly) { onNotify('readonly mode — order entry is P2', 'info'); return; }
+    if (readonly) { onNotify('readonly mode — order entry is gated', 'info'); return; }
     sendCommand(JSON.stringify({
       cmd: 'order', code: leg.code,
       side: buysell, price: parseFloat(price), qty: parseInt(qty, 10),
+      cmdSeq: Date.now() % 100000,
     }));
-    onNotify(`${buysell} ${qty} ${leg.code} @ ${price}`, 'info');
+    onNotify(`${buysell} ${qty} ${leg.code} @ ${price} sent`, 'info');
     onClose();
   };
 
