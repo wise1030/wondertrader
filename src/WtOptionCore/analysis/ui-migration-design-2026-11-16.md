@@ -565,6 +565,27 @@ P2 约 4–6 人日（命令/ack/Ticket/审计/SETPARAM 实测），P3 约 3–5
 - 服务器授权窗口：开 `readonly:false` 人工点单闭环（ORDER→成交→CANCELO 撤单→SETPARAM 生效核对审计日志）——需实盘/仿真环境，无法在开发机完成。
 - per-code qmode、Cancel All、回放期可视化：P3。
 
+### 14.7 P3 实施记录（2026-11-17）
+
+**交付**
+
+- 命令层：`QMODES,<code>,<mode>` 单码报价模式（`_ctg->onSetQMode`，码存在性校验）与 `CANCELALL`（遍历 `_orderRegistry` 活跃单逐笔 `executeCancel`，channel 检查一致，计数审计）。
+- 桥翻译：`qmode_code`/`cancel_all` JSON → 线格式。
+- 前端 Analysis 页（纯 SVG，零新依赖）：
+  - Vol smile：选中到期的 C/P 市场 iv 与 theo vol（=atmVol+vshift）+ atmVol 参考线；
+  - PnL 曲线：快照流环形缓冲（600 点≈10 分钟）cur/realized；
+  - Batch latency 曲线：p50/p95/p99 同图。
+  - 回放期可视化由快照流天然覆盖（快照率由 `snapshot_interval` 控制，无需额外节流）。
+- 交互补全：网格双击 pos 单码 qmode 切换（off↔on，恢复原版双击习惯）；订单表 **Cancel All** 按钮。
+- 测试：`test_uibridge` 增 QMODES/CANCELALL handler 断言 + 两种翻译断言。
+
+**验证**
+
+- 8 个测试二进制全过（含 P3 新增断言）；golden 基线 + ui 场景双过（59 行结构集一致）。
+- 前端 `tsc+vite` 零错误构建。
+
+**至此 §11 三期全部交付**：P1 只读 MVP / P2 写命令 / P3 分析增强。
+
 ---
 
 **附：二轮复核的代码证据索引**
