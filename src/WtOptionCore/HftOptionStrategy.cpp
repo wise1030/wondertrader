@@ -3814,6 +3814,34 @@ void HftOptionStrategy::registerCommands()
             ptrPath ? "shm-ptr" : "member");
         return true;
     };
+    // P3: single-code quote mode — same CTG entry the grid-wide hook uses.
+    hooks.setQModeOne = [this](const std::string& code, const std::string& mode,
+                               std::string& err) -> bool {
+        if (!_otg || !_ctg || !_grid) { err = "not initialized"; return false; }
+        if (mode != "on" && mode != "off" && mode != "close") {
+            err = "mode needs on|off|close";
+            return false;
+        }
+        auto od = _grid->get(code);
+        if (!od) { err = "unknown code: " + code; return false; }
+        _ctg->onSetQMode(code, mode);
+        return true;
+    };
+    // P3: cancel every live order. Channel check mirrors executeCancel; each
+    // cancel goes through the same stra_cancel path as a single cancel.
+    hooks.cancelAllLive = [this]() -> uint32_t {
+        if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire))
+            return 0;
+        uint32_t n = 0;
+        for (const auto& kv : _orderRegistry.orders()) {
+            const auto& rec = kv.second;
+            if (rec.done || rec.rejected) continue;
+            if (executeCancel(kv.first)) ++n;
+        }
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "UI CANCELALL: {} cancels issued", n);
+        return n;
+    };
     _cmdHandlers.registerAll(_cmdBus, std::move(hooks));
 }
 

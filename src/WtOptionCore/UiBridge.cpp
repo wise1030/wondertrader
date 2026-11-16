@@ -111,6 +111,24 @@ bool translateCommand(const std::string& line, const std::string& verb,
         wire = "QMODE," + mode;
         return true;
     }
+    if (verb == "qmode_code")
+    {
+        std::string code, mode;
+        if (!strField("code", code)) { err = "qmode_code needs code"; return false; }
+        if (!strField("mode", mode) ||
+            (mode != "on" && mode != "off" && mode != "close"))
+        {
+            err = "qmode_code needs mode=on|off|close";
+            return false;
+        }
+        wire = "QMODES," + code + "," + mode;
+        return true;
+    }
+    if (verb == "cancel_all")
+    {
+        wire = "CANCELALL";
+        return true;
+    }
     if (verb == "order")
     {
         std::string code, side;

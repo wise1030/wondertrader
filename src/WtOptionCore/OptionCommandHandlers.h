@@ -31,6 +31,10 @@ public:
     /// member + applyHotParams otherwise). Only truly hot-effective keys are
     /// accepted (5 alpha weights + max_tps).
     using SetHotParamFn = std::function<bool(const std::string& key, double value, std::string& err)>;
+    /// P3: single-code quote mode (UI double-click pos toggle).
+    using SetQModeOneFn = std::function<bool(const std::string& code, const std::string& mode, std::string& err)>;
+    /// P3: cancel every live order (UI Cancel All).
+    using CancelAllLiveFn = std::function<uint32_t()>;   // returns cancels issued
 
     struct Hooks {
         SetStateFn setState;
@@ -40,6 +44,8 @@ public:
         CancelAllFn cancelAll;
         CancelOneFn cancelOne;
         SetHotParamFn setHotParam;
+        SetQModeOneFn setQModeOne;
+        CancelAllLiveFn cancelAllLive;
     };
 
     void registerAll(CommandBus& bus, Hooks hooks);

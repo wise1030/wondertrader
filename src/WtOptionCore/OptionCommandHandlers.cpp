@@ -73,6 +73,18 @@ void OptionCommandHandlers::registerAll(CommandBus& bus, Hooks hooks)
             return false;
         }
     });
+    // P3: single-code quote mode (UI double-click pos toggle).
+    bus.registerCommand("QMODES", [this](const auto& args, std::string& err) {
+        if (args.size() < 3) { err = "QMODES needs code,mode"; return false; }
+        if (!m_hooks.setQModeOne) { err = "not initialized"; return false; }
+        return m_hooks.setQModeOne(args[1], args[2], err);
+    });
+    // P3: cancel every live order (UI Cancel All).
+    bus.registerCommand("CANCELALL", [this](const auto&, std::string& err) {
+        if (!m_hooks.cancelAllLive) { err = "not initialized"; return false; }
+        m_hooks.cancelAllLive();
+        return true;
+    });
 }
 
 } // namespace wt_option

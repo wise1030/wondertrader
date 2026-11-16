@@ -338,6 +338,13 @@ int main()
         lastParamValue = value;
         return true;
     };
+    hooks.setQModeOne = [&](const std::string& code, const std::string& mode, std::string& err) {
+        if (mode != "on" && mode != "off" && mode != "close") { err = "bad mode"; return false; }
+        if (code != "SHFE.cu2612C100000") { err = "unknown code: " + code; return false; }
+        return true;
+    };
+    uint32_t cancelAllCount = 7;
+    hooks.cancelAllLive = [&]() { return cancelAllCount; };
     cmdHandlers.registerAll(bus, std::move(hooks));
 
     std::string be;
@@ -353,6 +360,10 @@ int main()
     ASSERT_EQ(lastParamValue, 60.0);
     ASSERT_TRUE(!bus.dispatch("SETPARAM,sticky_base,0.9", be));  // not hot-adjustable
     ASSERT_TRUE(!bus.dispatch("SETPARAM,wgt_vegaflow,abc", be)); // malformed value
+    ASSERT_TRUE(bus.dispatch("QMODES,SHFE.cu2612C100000,off", be));
+    ASSERT_TRUE(!bus.dispatch("QMODES,SHFE.cu2612C100000,bad", be));
+    ASSERT_TRUE(!bus.dispatch("QMODES,NOPE,off", be));
+    ASSERT_TRUE(bus.dispatch("CANCELALL", be));
 
     // ------------------------------------------------------------------
     // 9) P2 bridge write path: JSON -> wire translation -> dispatch -> ack
@@ -420,6 +431,21 @@ int main()
     std::string ackP2 = recvLine(fdW);
     ASSERT_TRUE(ackP2.find("\"ok\":false") != std::string::npos);
     ASSERT_TRUE(ackP2.find("not hot-adjustable") != std::string::npos);
+
+    // P3 translations: qmode_code + cancel_all
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"qmode_code\",\"code\":\"SHFE.cu2612C100000\",\"mode\":\"off\",\"cmdSeq\":25}\n"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    drainToBus();
+    std::string ackQ = recvLine(fdW);
+    ASSERT_TRUE(ackQ.find("\"ok\":true") != std::string::npos);
+    ASSERT_EQ(dispatched.back(), std::string("QMODES,SHFE.cu2612C100000,off"));
+
+    ASSERT_TRUE(sendAll(fdW, "{\"cmd\":\"cancel_all\",\"cmdSeq\":26}\n"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    drainToBus();
+    std::string ackC = recvLine(fdW);
+    ASSERT_TRUE(ackC.find("\"ok\":true") != std::string::npos);
+    ASSERT_EQ(dispatched.back(), std::string("CANCELALL"));
 
     close(fdW);
     wb.stop();
