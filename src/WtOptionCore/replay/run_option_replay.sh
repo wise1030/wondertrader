@@ -115,6 +115,7 @@ GOLDEN_DIR="$SCRIPT_DIR/golden"
 if [ -n "${GOLDEN:-}" ]; then
   case "$YAML" in
     configbt_option_replay.yaml)             GKEY=default;   GMODE=default ;;
+    configbt_option_replay_ui.yaml)          GKEY=default;   GMODE=default ;;
     configbt_option_replay_scan_norand.yaml) GKEY=scan_norand; GMODE=norand ;;
     *) echo "GOLDEN: no baseline registered for $YAML (add it to the case first)"; exit 2 ;;
   esac
