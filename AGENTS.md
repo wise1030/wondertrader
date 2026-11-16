@@ -7,7 +7,8 @@ WonderTrader is a C++17 quant-trading framework. All sources live in `src/` (CMa
 - Brokerage gateways: `ParserCTP*`/`TraderCTP*` and other `Parser*`/`Trader*` pairs (market data / order)
 - Runners & tools: `WtRunner`, `WtBtRunner`, `WtUftRunner`, `WtPorter`, `WtLatencyHFT`/`WtLatencyUFT`
 - Shared code: `Share`, `Includes`, `Common`, `API`
-- Tests: `src/TestUnits` (GoogleTest) plus `Test*` harness apps
+- Tests: `src/TestUnits` (GoogleTest) plus `Test*` harness apps; `src/WtOptionCore/tests` (module-local, plain main() style)
+- `ui/optiontrader-ui/` WtOptionCore 监控 UI（P1 只读版；设计: `src/WtOptionCore/analysis/ui-migration-design-2026-11-16.md`）：纯 Python middleware + React19 SPA，经策略内 UiBridge（127.0.0.1:8710 JSON Lines）对接
 - `dist/` ready-to-run bundles (e.g. `dist/WtBtFutu`, `dist/WtRunnerFutu`), `deps/` third-party libs, `docker/` Linux build image, `docs/`
 
 ## Build, Test, and Development Commands
