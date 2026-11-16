@@ -43,6 +43,8 @@
 #include "DeltaHedgeExecutor.h"
 #include "PredictionEvaluator.h"
 #include "ConfigValidator.h"
+#include "UiBridge.h"
+#include "UiSnapshotView.h"
 #include "StressAnalyzer.h"
 
 #include <string>
@@ -387,6 +389,17 @@ private:
     // callback thread that invokes on_params_updated().
     std::atomic<bool> _hotUpdatePending{false};
     void applyHotParams();
+
+    // P1 UI bridge (config: params.ui — WtRunner only passes the params
+    // subtree, so the section must live here, not at config root). Disabled
+    // by default: backtest loads the same .so untouched.
+    wt_option::UiBridge::Config _uiCfg;
+    std::unique_ptr<wt_option::UiBridge> _uiBridge;
+    // Worker-thread flags consumed by on_batch_complete (never locked).
+    bool _uiForceSnapshot = false;
+    bool _uiFillsPending = false;
+    void buildUiSnapshot(wt_option::UiSnapshotView& v);
+    void collectUiFills(std::vector<wt_option::UiFillView>& out);
 
     // R10: portfolio delta-hedge executor (default off)
     bool   _deltaHedgeEnable = false;

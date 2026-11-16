@@ -33,7 +33,7 @@ public:
                     "riskLimits","signals","scanners","optionValueWriter","margin","pnl",
                     "pricerType","wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow",
                     "wgt_atmsig","wgt_rollema","sticky_base","improve_retreat_ratio",
-                    "gammascalp","delta_hedge","fillAttribution","scannerThrottle" } },
+                    "gammascalp","delta_hedge","fillAttribution","scannerThrottle","ui" } },
             { "scannerThrottle", { "cooldownSec","refireGrowth","maxActiveCombos","comboTimeoutMs" } },
             { "fillAttribution", { "enable","outputDir","keepMaxRecords","graceSeconds" } },
             { "pricer", { "wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow","wgt_atmsig",

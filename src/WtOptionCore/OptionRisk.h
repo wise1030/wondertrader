@@ -111,6 +111,14 @@ public:
 
     OptionRiskDataPtr           get(const std::string& instr);
     const OptionExpiryGreeksPtr& getExpiryGreeks(uint32_t exp);
+    /// P1 UI snapshot path: read-only peek, NEVER creates the aggregate
+    /// (unlike getExpiryGreeks, which lazy-creates and auto-registers the
+    /// hedge instrument — side effects a monitoring read must not trigger).
+    const OptionExpiryGreeks*   peekExpiryGreeks(uint32_t exp) const
+    {
+        auto it = m_expiryTable.find(exp);
+        return (it != m_expiryTable.end() && it->second) ? it->second.get() : nullptr;
+    }
     std::vector<OptionRiskDataPtr> getNonZeroPositions();
     std::vector<OptionRiskDataPtr> getNonZeroPositions(uint32_t exp);
 

@@ -61,6 +61,10 @@ set(OPTION_CORE_SOURCES
     # B7: Attribute publishing for monitoring
     AttributePublisher.cpp
 
+    # P1 UI bridge (JSON Lines over loopback TCP; design 2026-11-16 v2.1)
+    UiBridge.cpp
+    UiSnapshotBuilder.cpp
+
     # B9: Expiration simulator
     ExpirationSimulator.cpp
 
@@ -186,6 +190,11 @@ set(OPTION_CORE_HEADERS
     RiskLimitsEx.h
     IssuedOrderRegistry.h
     CommandBus.h
+
+    # P1 UI bridge
+    UiBridge.h
+    UiSnapshotBuilder.h
+    UiSnapshotView.h
 )
 
 add_library(WtOptionCore SHARED ${OPTION_CORE_SOURCES} ${OPTION_CORE_HEADERS})
@@ -319,4 +328,10 @@ add_test(NAME test_async_event_processor COMMAND test_async_event_processor)
 # Synthetic replay-style benchmark harness (not registered as a pass/fail test)
 add_executable(test_replay_benchmark tests/test_replay_benchmark.cpp)
 target_link_libraries(test_replay_benchmark PRIVATE WtOptionCore)
+
+# P1 UI bridge: builder/encoder unit tests + loopback integration test
+add_executable(test_uibridge tests/test_uibridge.cpp)
+target_link_libraries(test_uibridge PRIVATE WtOptionCore WtCore WTSTools WTSUtils)
+target_include_directories(test_uibridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_uibridge COMMAND test_uibridge)
 target_include_directories(test_replay_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

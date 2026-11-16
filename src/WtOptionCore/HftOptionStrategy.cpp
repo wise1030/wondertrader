@@ -49,8 +49,10 @@
 #include "DeltaHedgeExecutor.h"
 #include "PredictionEvaluator.h"
 #include "ConfigValidator.h"
+#include "UiSnapshotBuilder.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace wt_option {
 // Forward-declared in header, full definition in ControllableTradingGrid.h
@@ -63,6 +65,9 @@ HftOptionStrategy::HftOptionStrategy(const char* name)
 
 void HftOptionStrategy::shutdown()
 {
+    // P1 UI bridge must stop BEFORE the AEP worker: the IO heartbeat calls
+    // enqueue_control() on _async; after the worker stops that would race.
+    if (_uiBridge) { _uiBridge->stop(); _uiBridge.reset(); }
     if (_async) _async->stop();
     // 3.6: final attribution flush.  The worker is stopped and joined above,
     // so the registry is single-threaded again; this covers fills recorded
@@ -520,6 +525,28 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     WTSLogger::log_by_cat("strategy", LL_INFO, "{}",
         wt_option::OptionConfigLoader::dumpEffectiveValues(_configLoad));
 
+    // P1 UI bridge config. MUST live under params.ui: WtRunner only forwards
+    // the params subtree to the strategy, so a top-level ui: would be
+    // unreadable (design: analysis/ui-migration-design-2026-11-16.md v2.1).
+    if (cfg->has("ui")) {
+        WTSVariant* uiCfg = cfg->get("ui");
+        _uiCfg.enabled = uiCfg->has("enabled") ? uiCfg->getBoolean("enabled") : false;
+        _uiCfg.bind = uiCfg->has("bind") ? uiCfg->getCString("bind") : "127.0.0.1";
+        _uiCfg.port = static_cast<uint16_t>(uiCfg->has("port") ? uiCfg->getInt32("port") : 8710);
+        _uiCfg.snapshotIntervalSec = uiCfg->has("snapshot_interval")
+            ? uiCfg->getDouble("snapshot_interval") : 1.0;
+        _uiCfg.heartbeatSec = uiCfg->has("heartbeat") ? uiCfg->getDouble("heartbeat") : 1.0;
+        _uiCfg.readonly = uiCfg->has("readonly") ? uiCfg->getBoolean("readonly") : true;
+        if (uiCfg->has("token")) _uiCfg.token = uiCfg->getCString("token");
+        _uiCfg.allowRemote = uiCfg->has("allow_remote") ? uiCfg->getBoolean("allow_remote") : false;
+        if (_uiCfg.enabled)
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "UI bridge configured: {}:{} interval={}s heartbeat={}s readonly={} token={}",
+                _uiCfg.bind.c_str(), (int)_uiCfg.port, _uiCfg.snapshotIntervalSec,
+                _uiCfg.heartbeatSec, _uiCfg.readonly ? 1 : 0,
+                _uiCfg.token.empty() ? "off" : "on");
+    }
+
     // R-B33: startup config schema validation — unknown keys WARN loudly
     wt_option::ConfigValidator::validate(cfg);
     return true;
@@ -695,6 +722,17 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     setupAsyncCallbacks();
 
     _async->start();
+
+    // P1 UI bridge: created only when explicitly enabled (params.ui.enabled)
+    // — backtest loads the same .so untouched. A bind failure never blocks
+    // trading; the bridge self-disables with an ERROR log.
+    if (_uiCfg.enabled) {
+        _uiCfg.sid = id();
+        _uiBridge = std::make_unique<wt_option::UiBridge>(_uiCfg);
+        _uiBridge->setWakeCallback([this]() { if (_async) _async->enqueue_control(); });
+        if (!_uiBridge->start())
+            _uiBridge.reset();
+    }
     _initialized = true;
 
     // P10: Register hot-update params via sync_param (实盘生效, 回测返回nullptr)
@@ -1570,6 +1608,25 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
     // Batch complete: computeValues + refresh + drainPendingQuotes (single pass per batch)
     cbs.on_batch_complete = [this]() {
+        // P1 UI: drain bridge commands FIRST — before the !grid/!pricer early
+        // return — so a refresh is served even while the engine is still
+        // initializing (that is exactly when the UI is most needed).
+        if (_uiBridge) {
+            _uiBridge->drainCommands([this](const std::string& line, std::string& err) {
+                wt_option::UiParsedCommand pc;
+                if (!wt_option::UiSnapshotBuilder::parseCommand(line, pc)) {
+                    err = pc.err.empty() ? "bad command" : pc.err;
+                    return false;
+                }
+                if (pc.cmd == "refresh") {
+                    _uiForceSnapshot = true;
+                    _uiFillsPending = true;
+                    return true;
+                }
+                err = "unsupported command (readonly)";
+                return false;
+            });
+        }
         if (!_grid || !_pricer) return;
         publishAsyncVolFit();
         if (_hotUpdatePending.exchange(false, std::memory_order_acq_rel))
@@ -1853,6 +1910,25 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
 
             if (_ctg) _ctg->drainPendingQuotes();
+
+            // P1 UI snapshot tail. Built unconditionally — no enabled/fit/channel
+            // gating (seeing the gates IS the point; smoke 2026-11-16 lesson).
+            // Worker only fills POD views; JSON encoding runs on the bridge IO
+            // thread, so batch p99 is untouched. Missing data is a null field.
+            if (_uiBridge && _uiBridge->snapshotDue(now)) {
+                wt_option::UiSnapshotView view;
+                buildUiSnapshot(view);
+                _uiBridge->publishSnapshot(std::move(view));
+                _uiBridge->noteSnapshotSent(now);
+                if (_uiFillsPending) {
+                    std::vector<wt_option::UiFillView> fills;
+                    collectUiFills(fills);
+                    std::string json;
+                    wt_option::UiSnapshotBuilder::encodeFills(fills, id(), _batchCount, json);
+                    _uiBridge->publishAuxJson(std::move(json));
+                    _uiFillsPending = false;
+                }
+            }
         }
     };
 
@@ -2014,6 +2090,21 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
         // Mark for refresh: trade affects risk/position, need to recompute ourMarket
         _needsRefresh = true;
+
+        // P1 UI: incremental trade hint (snapshot orders[] stays authoritative;
+        // events that race a reconnect are dropped by the seq watermark).
+        if (_uiBridge) {
+            wt_option::UiEventFrame ev;
+            ev.type = wt_option::UiEventType::Trade;
+            ev.seq = _batchCount;
+            ev.tsWallMs = wt_option::UiBridge::wallMsNow();
+            ev.id = localid;
+            ev.code = code;
+            ev.buy = isBuy;
+            ev.qty = vol;
+            ev.px = price;
+            _uiBridge->pushEvent(ev);
+        }
     };
 
     // Order callback
@@ -2104,6 +2195,22 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
         // Mark for refresh: order status change affects OQM state
         _needsRefresh = true;
+
+        // P1 UI: incremental order hint
+        if (_uiBridge) {
+            wt_option::UiEventFrame ev;
+            ev.type = wt_option::UiEventType::Order;
+            ev.seq = _batchCount;
+            ev.tsWallMs = wt_option::UiBridge::wallMsNow();
+            ev.id = localid;
+            ev.code = code;
+            ev.buy = isBuy;
+            ev.qty = totalQty;
+            ev.left = leftQty;
+            ev.px = price;
+            ev.canceled = isCanceled;
+            _uiBridge->pushEvent(ev);
+        }
     };
 
     // P1-1: entrust failure (worker thread).  WT sends NO terminal on_order
@@ -2149,6 +2256,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 "entrust failure for unowned localid={} (manual/hot order?)", localid);
         }
         _needsRefresh = true;
+
+        // P1 UI: entrust failure never produces a terminal on_order — the UI
+        // would otherwise show the phantom order forever.
+        if (_uiBridge) {
+            wt_option::UiEventFrame ev;
+            ev.type = wt_option::UiEventType::Reject;
+            ev.seq = _batchCount;
+            ev.tsWallMs = wt_option::UiBridge::wallMsNow();
+            ev.id = localid;
+            _uiBridge->pushEvent(ev);
+        }
     };
 
     // Timer callback - trigger SLOW compute + session scheduling
@@ -3328,7 +3446,32 @@ bool HftOptionStrategy::submitAsyncVolFit()
 
     std::vector<wt_option::VolFitExpirySnapshot> snapshots;
     for (const auto& [exp, ed] : _grid->expiries()) {
-        if (!ed || !ed->isForwardReady()) continue;
+        if (!ed || !ed->isForwardReady()) {
+            // TEMP diagnostic (live smoke 2026-11-16): the forwardReady gate
+            // is silent — surface WHY it never opens: how many option books
+            // actually have live bids.  Remove after the smoke.
+            static std::map<uint32_t, double> s_lastFitGateDbg;
+            double& lastT = s_lastFitGateDbg[exp];
+            if (now - lastT >= 30.0) {
+                lastT = now;
+                size_t withBid = 0, total = 0;
+                for (const auto& sd : _grid->getStrikesByExpiry(exp)) {
+                    if (!sd) continue;
+                    for (const auto* od : {sd->call().get(), sd->put().get()}) {
+                        if (!od) continue;
+                        ++total;
+                        if (od->getBid() > 0) ++withBid;
+                    }
+                }
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "FITGATE exp={} forwardReady={} fwdValid={} booksWithBid={}/{} "
+                    "underlyingPrice={}",
+                    exp, ed ? ed->isForwardReady() : false,
+                    ed ? ed->isUnderlyingPriceValid() : false,
+                    withBid, total, _grid->getUnderlyingPrice());
+            }
+            continue;
+        }
         const double fwd = ed->getForward();
         const double maturity = _blackPricer->getMaturity(exp);
         const double atmVol = _blackPricer->getATMVol(exp);
@@ -3864,4 +4007,167 @@ void HftOptionStrategy::applyHotParams()
         _hot.manual_order_counter++;
         // The ShareManager clears the string externally after reading
     }
+}
+
+// ============================================================================
+// P1 UI snapshot builder — worker thread only. Read-only on engine state;
+// the only writes are to the POD view handed to the UiBridge IO thread.
+// Fields the engine cannot source stay at their POD defaults and encode as
+// JSON null (see UiSnapshotBuilder::encode*).
+// ============================================================================
+void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
+{
+    using namespace wt_option;
+
+    v.seq = _batchCount;
+    v.tsWallMs = UiBridge::wallMsNow();
+
+    v.stateType = toString(_tstate.type);
+    v.stateReason = _tstate.reason;
+    v.channelReady = _tstate.channelReady;
+    v.underlyingReady = _tstate.underlyingReady;
+    v.enabled = _tstate.enabledFlag();
+    v.panicked = _tstate.panickedFlag();
+    v.tdate = _curSessionDate;
+
+    if (_risk) {
+        auto pg = _risk->getPositionGreeks();
+        if (pg) {
+            v.hasGreeks = true;
+            v.gDelta = pg->delta();
+            v.gGamma = pg->gamma();
+            v.gVega = pg->vega();
+            v.gVegaTW = pg->vegaTW();
+            v.gTheta = pg->theta();
+        }
+    }
+
+    // PnL mirrors the compute loop: options + hedge underlyings. Trackers are
+    // created lazily there every batch, so this read never allocates.
+    double cur = 0, realized = 0, turnover = 0;
+    if (_grid) {
+        for (const auto& od : _grid->getAllOptions()) {
+            if (!od) continue;
+            auto otd = od->getTradingData();
+            if (!otd) continue;
+            auto pt = otd->getPnlTracker();
+            if (!pt) continue;
+            cur += pt->getCurPnl();
+            realized += pt->getRealizedPnl();
+            turnover += pt->getCurTurnover();
+        }
+    }
+    if (_otg) {
+        for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
+            auto utd = pair.second;
+            if (!utd) continue;
+            auto pt = utd->getPnlTracker();
+            if (!pt) continue;
+            cur += pt->getCurPnl();
+            realized += pt->getRealizedPnl();
+            turnover += pt->getCurTurnover();
+        }
+    }
+    v.hasPnl = true;
+    v.pnlCur = cur;
+    v.pnlRealized = realized;
+    v.pnlTurnover = turnover;
+
+    // Risk / limits
+    v.limitsBreached = _limitsBreached.load(std::memory_order_relaxed);
+    v.tpsMax = _maxTPS;
+    v.tps = _ctg ? _ctg->getTransactionCount() : 0;
+    const auto ss = _quoteStats.getSessionSummary();
+    v.ordersSent = ss.totalOrders;
+    v.fills = ss.totalFills;
+    v.cancels = ss.totalCancels;
+    v.rejects = ss.totalRejects;
+    v.cancelRatio = ss.totalOrders ? static_cast<double>(ss.totalCancels) / ss.totalOrders : 0.0;
+    v.fillRatio = ss.totalOrders ? static_cast<double>(ss.totalFills) / ss.totalOrders : 0.0;
+
+    // Session stop countdown — best effort; null before the section table
+    // exists (first timer) or after the last section has ended.
+    {
+        const uint32_t curSec = static_cast<uint32_t>(wt_option::ctxTimeSeconds(_ctx));
+        for (const auto& sec : _secSecs) {
+            if (sec.second <= static_cast<uint32_t>(_stopLeadSeconds)) continue;
+            const uint32_t stopAt = sec.second - static_cast<uint32_t>(_stopLeadSeconds);
+            if (curSec < stopAt) {
+                v.hasSessionStop = true;
+                v.sessionStopInSec = static_cast<int32_t>(stopAt - curSec);
+                break;
+            }
+        }
+    }
+
+    // Health
+    v.batchP50 = _batchLatencyUs.p50();
+    v.batchP95 = _batchLatencyUs.p95();
+    v.batchP99 = _batchLatencyUs.p99();
+    v.aepEvents = _async ? _async->totalEvents() : 0;
+    v.queueDrops = _async ? _async->queueDrops() : 0;
+    v.mdOverflow = _async ? _async->mdOverflowDepth() : 0;
+    v.traderDepth = _async ? _async->traderDepth() : 0;
+    v.eventDrops = _uiBridge ? _uiBridge->eventDrops() : 0;
+    v.snapshotCoalesced = _uiBridge ? _uiBridge->snapshotCoalesced() : 0;
+
+    // Expiries (peek-only risk reads: never lazy-create expiry aggregates)
+    if (_grid && _pricer) {
+        for (const auto& kv : _grid->expiries()) {
+            const ExpiryData* ed = kv.second.get();
+            if (!ed) continue;
+            const double atmVol = _pricer->getATMVol(kv.first);
+            const double atmSprd = _pricer->getATMVolSprd(kv.first);
+            const OptionExpiryGreeks* eg = _risk ? _risk->peekExpiryGreeks(kv.first) : nullptr;
+            UiExpiryView ev;
+            UiSnapshotBuilder::buildExpiry(_grid->getStrikesByExpiry(kv.first),
+                                           *ed, atmVol, atmSprd, eg, ev);
+            v.expiries.push_back(std::move(ev));
+        }
+    }
+
+    // Live orders — the snapshot is the authority; events are hints.
+    for (const auto& kv : _orderRegistry.orders()) {
+        const auto& rec = kv.second;
+        if (rec.done || rec.rejected) continue;
+        UiOrderView o;
+        o.id = kv.first;
+        o.code = rec.code;
+        o.buy = rec.isBuy;
+        o.px = rec.issuePx;
+        o.qty = rec.totalQty;
+        o.filled = rec.filledQty;
+        o.t = rec.issuedTime;
+        v.orders.push_back(std::move(o));
+    }
+
+    // Contract meta for the frontend ticket
+    if (_grid) {
+        for (const auto& od : _grid->getAllOptions()) {
+            if (!od) continue;
+            v.contracts.emplace_back(od->getCode(),
+                std::make_pair(od->getMultiplier(), od->getTickSize()));
+        }
+    }
+}
+
+void HftOptionStrategy::collectUiFills(std::vector<wt_option::UiFillView>& out)
+{
+    out.clear();
+    for (const auto& kv : _orderRegistry.orders()) {
+        const auto& rec = kv.second;
+        for (const auto& f : rec.fills) {
+            wt_option::UiFillView fv;
+            fv.code = rec.code;
+            fv.buy = rec.isBuy;
+            fv.px = f.px;
+            fv.qty = f.qty;
+            fv.t = f.timeSim;   // strategy clock — consistent under replay
+            out.push_back(std::move(fv));
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const wt_option::UiFillView& a, const wt_option::UiFillView& b) { return a.t < b.t; });
+    if (out.size() > 500)
+        out.erase(out.begin(), out.end() - 500);   // most recent 500, chronological
 }
