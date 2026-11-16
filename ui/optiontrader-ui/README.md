@@ -54,6 +54,19 @@ ssh -L 8002:127.0.0.1:8002 ubuntu@129.211.5.54
 - `frontend/` — React19 + Vite + Tailwind（迁移自 quantbox optiontrader UI，
   协议层/平铺属性归一化已废弃，改为结构化快照 adapter）
 
+## 功能（三期已全量交付）
+
+- **Grid**：期权网格（市场价/theo/iv/delta/vshift/持仓/qmode 着色）、F1–F8 到期切换、
+  点价 Ticket、双击 pos 单码 qmode 切换、Ctrl+V vshift 列。
+- **Trades**：活跃订单（双击/✕ 撤单、Cancel All）+ 最近 500 笔成交。
+- **Analysis**：Vol smile（C/P 市场 iv + theo vol + atmVol 参考线）、PnL 曲线、
+  批延迟 p50/p95/p99 曲线（快照流环形缓冲 600 点）。
+- **状态**：TradingState 横幅（含 session 倒计时）、组合希腊/PnL 条、
+  到期 fit 就绪灯、健康卡（批延迟/AEP 计数/drop 计数/快照龄期）。
+- **命令**：refresh/STOP/RESUME/PANIC/QMODE(全网格)/QMODE_CODE(单码)/
+  ORDER/CANCEL/CANCEL_ORDER/CANCEL_ALL/SETPARAM(6 热参白名单)；
+  `readonly:true` 时仅 refresh，写命令需显式 `readonly:false` 并授权。
+
 ## 测试
 
 - C++：`src/build_all/WtOptionCore/test_uibridge`（单测 + 回环集成）。

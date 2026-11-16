@@ -8,6 +8,7 @@ import { ExpirySummary } from './components/ExpirySummary';
 import { UnderlierView } from './components/UnderlierView';
 import { OptionGridView } from './components/OptionGridView';
 import { TradesTab } from './components/TradesTab';
+import { AnalysisTab } from './components/AnalysisTab';
 import { CommandPanel } from './components/CommandPanel';
 import { Toast } from './components/Toast';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -17,7 +18,7 @@ interface ToastItem { id: number; message: string; type: 'info' | 'success' | 'e
 const Shell: React.FC = () => {
   const { snapshot } = useData();
   const [selectedExpiry, setSelectedExpiry] = useState<number | null>(null);
-  const [tab, setTab] = useState<'grid' | 'trades'>('grid');
+  const [tab, setTab] = useState<'grid' | 'trades' | 'analysis'>('grid');
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const notify = useCallback((message: string, type: 'info' | 'error') => {
@@ -56,12 +57,13 @@ const Shell: React.FC = () => {
       <div className="flex items-center gap-1 px-2 text-[11px] bg-white border-b border-gray-300">
         <button className={`px-3 py-1 ${tab === 'grid' ? 'border-b-2 border-blue-600 font-bold' : 'text-gray-500'}`} onClick={() => setTab('grid')}>Grid</button>
         <button className={`px-3 py-1 ${tab === 'trades' ? 'border-b-2 border-blue-600 font-bold' : 'text-gray-500'}`} onClick={() => setTab('trades')}>Trades</button>
+        <button className={`px-3 py-1 ${tab === 'analysis' ? 'border-b-2 border-blue-600 font-bold' : 'text-gray-500'}`} onClick={() => setTab('analysis')}>Analysis</button>
       </div>
 
       <div className="flex-1 overflow-hidden">
         {tab === 'grid'
           ? <OptionGridView selectedExpiry={selectedExpiry} onExpirySelectByIndex={selectByIndex} onNotify={notify} />
-          : <TradesTab />}
+          : tab === 'trades' ? <TradesTab /> : <AnalysisTab selectedExpiry={selectedExpiry} />}
       </div>
 
       <CommandPanel onNotify={notify} />

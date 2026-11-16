@@ -9,7 +9,6 @@ export const TradesTab: React.FC = () => {
   return (
     <div className="flex flex-col h-full gap-2 p-2 overflow-auto">
       <div className="bg-white border border-gray-200 rounded p-2">
-        <div className="text-xs font-bold text-gray-600 mb-1">Live orders (snapshot is authoritative)</div>
         <OrdersTable />
       </div>
       <div className="bg-white border border-gray-200 rounded p-2">

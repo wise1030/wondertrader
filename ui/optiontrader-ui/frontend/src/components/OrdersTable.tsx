@@ -10,8 +10,25 @@ export const OrdersTable: React.FC = () => {
     sendCommand(JSON.stringify({ cmd: 'cancel_order', id, cmdSeq: Date.now() % 100000 }));
   };
 
+  const cancelAll = () => {
+    if (readonly) return;
+    sendCommand(JSON.stringify({ cmd: 'cancel_all', cmdSeq: Date.now() % 100000 }));
+  };
+
   return (
-    <table className="w-full border-collapse text-[11px]">
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-bold text-gray-600">Live orders (snapshot is authoritative)</span>
+        {!readonly && (
+          <button
+            className="px-2 py-0.5 bg-red-600 hover:bg-red-500 text-white rounded text-[10px] font-bold"
+            onClick={cancelAll}
+          >
+            Cancel all
+          </button>
+        )}
+      </div>
+      <table className="w-full border-collapse text-[11px]">
       <thead>
         <tr className="bg-gray-200 text-gray-700">
           <th className="border border-gray-300 px-1 py-0.5 text-left">id</th>
@@ -56,5 +73,6 @@ export const OrdersTable: React.FC = () => {
         )}
       </tbody>
     </table>
+    </div>
   );
 };

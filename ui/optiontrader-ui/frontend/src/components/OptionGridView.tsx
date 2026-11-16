@@ -98,7 +98,7 @@ interface Props {
 }
 
 export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelectByIndex, onNotify }) => {
-  const { snapshot, readonly } = useData();
+  const { snapshot, readonly, sendCommand } = useData();
   const [vshiftVisible, setVshiftVisible] = useState(false);
   const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
   const [isTicketOpen, setIsTicketOpen] = useState(false);
@@ -121,14 +121,24 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
     setIsTicketOpen(true);
   }, []);
 
-  const handleCellClick = useCallback((_row: GridRow, _side: 'C' | 'P', type: string) => {
+  const handleCellClick = useCallback((row: GridRow, side: 'C' | 'P', type: string) => {
     if (type === 'pos_dbl') {
-      // P2: per-code qmode is not in the CommandBus (QMODE is grid-wide);
-      // the double-click only explains where the control lives.
-      onNotify('qmode is grid-wide in P2 — use the command bar buttons', 'info');
-      return;
+      const leg = side === 'C' ? row.call : row.put;
+      if (!leg) return;
+      if (readonly) {
+        onNotify('readonly mode — qmode toggle is gated', 'info');
+        return;
+      }
+      // P3: single-code qmode toggle (off <-> on), matching the original UI's
+      // double-click habit; grid-wide stays on the command bar.
+      const next = leg.qmode === -1 ? 'on' : 'off';
+      sendCommand(JSON.stringify({
+        cmd: 'qmode_code', code: leg.code, mode: next,
+        cmdSeq: Date.now() % 100000,
+      }));
+      onNotify(`${leg.code} qmode -> ${next}`, 'info');
     }
-  }, [onNotify]);
+  }, [readonly, sendCommand, onNotify]);
 
   // Qt keyboard shortcuts (navigation/toggles live; trading shortcuts gated by readonly)
   useEffect(() => {
