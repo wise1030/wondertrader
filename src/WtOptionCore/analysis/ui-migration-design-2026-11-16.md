@@ -584,7 +584,17 @@ P2 约 4–6 人日（命令/ack/Ticket/审计/SETPARAM 实测），P3 约 3–5
 - 8 个测试二进制全过（含 P3 新增断言）；golden 基线 + ui 场景双过（59 行结构集一致）。
 - 前端 `tsc+vite` 零错误构建。
 
-**至此 §11 三期全部交付**：P1 只读 MVP / P2 写命令 / P3 分析增强。
+### 14.8 服务器冒烟记录与两个真 bug（2026-11-17 深夜，重要）
+
+冒烟目标达成：WS 全链路（middleware→bridge）在实盘进程上拿到 1Hz 快照——`SessionStopped` 状态、5 到期 booksWithBid/Total、101 strikes、params 回显、age≈50ms 全部正确。**但过程暴露两个真 bug 与一个构建环境陷阱：**
+
+**Bug 1（决定性）：UI 快照尾块被锚进 `enabled/marketFresh` 守卫体内。** P1 集成时插入点上下文误判（`drainPendingQuotes` 恰为守卫体内最后一句），尾块落入 `if (_traderCtx && enabled && marketFresh)` 块内——实盘 `enabled=false` 时永不执行，快照恒空。回放 golden 全部通过是因为回放全程 `enabled=true`。**修复：尾块移到 lambda 顶层（守卫外），自带 `uiNow`。** 教训：插入点校验不能只看缩进——守卫体与 lambda 体同缩进层级时必须以 brace 配对核实；live-only 行为差异（enabled 门）不会出现在 replay 验证里。
+
+**Bug 2：静默实盘冻结策略时钟，快照节奏停摆。** 无 tick 时 `nowSeconds()` 冻结，`snapshotDue` 的间隔判断永不触发。修复：`snapshotDue` 增加墙钟回退（`wallMsNow() - lastWallMs >= interval`），回放中 sim 时钟领先墙钟故回退静默。
+
+**环境陷阱：`/mnt/d`（drvfs）时间戳不可靠导致 make 增量编译出现混合布局 .o**（类成员偏移跨 TU 不一致），现象是玄学级运行时行为（fprintf 不执行、_hot 指针路径异常、段错误）。排查耗费数小时。**纪律：发布构建一律用 Linux 原生文件系统的 out-of-tree build**（如 `cmake /mnt/d/.../src -B ~/build/xxx && make`——注意源码仍需 rsync 到原生盘才彻底免疫；改动头文件后全量重建）。
+
+**服务器状态**：已部署修复版 Release .so 与 ui 目录；冒烟进程按纪律清理（kill -9）。人工点单闭环（P2 写命令验证）待授权窗口。
 
 ---
 
