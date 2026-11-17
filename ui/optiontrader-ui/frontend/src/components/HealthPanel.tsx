@@ -1,14 +1,17 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
+import { useNowMs, liveAgeMs } from '../hooks/useNow';
 
 const fmt = (v: number | null | undefined, d = 0) => (v == null ? '-' : v.toFixed(d));
 
 export const HealthPanel: React.FC = () => {
-    const { snapshot, connectionStatus } = useData();
+    const { snapshot, snapshotArrivalMs, connectionStatus } = useData();
+    const nowMs = useNowMs(1000);
     const perf = snapshot?.perf;
     const risk = snapshot?.risk;
 
-    const age = snapshot?.snapshotAgeMs;
+    // Live age (audit batch B, H1) — >3s means the snapshot stream stalled.
+    const age = liveAgeMs(snapshot?.snapshotAgeMs, snapshotArrivalMs, nowMs);
 
     const Item: React.FC<{ k: string; v: React.ReactNode; warn?: boolean }> = ({ k, v, warn }) => (
         <div className="flex justify-between gap-2">

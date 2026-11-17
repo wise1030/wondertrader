@@ -36,15 +36,22 @@ UI_TOKEN = os.environ.get("WTOPTION_UI_TOKEN", "")              # empty = no aut
 
 upstream: WtOptionClient | None = None
 connected_websockets: set[WebSocket] = set()
+_last_hello: dict | None = None   # most recent hello frame — replayed to new
+                                  # browsers (audit batch B, M1: the bridge only
+                                  # emits hello on TCP accept/auth, so a browser
+                                  # refresh would otherwise stay readonly=true)
 _loop: asyncio.AbstractEventLoop | None = None
 
 
 def _broadcast(frame: dict):
     """Called from the upstream reader (any thread/loop context)."""
+    global _last_hello
     now_ms = int(time.time() * 1000)
     if frame.get("type") == "snapshot":
         ts = frame.get("ts")
         frame["snapshotAgeMs"] = (now_ms - ts) if isinstance(ts, (int, float)) else None
+    elif frame.get("type") == "hello":
+        _last_hello = frame
 
     async def _push():
         dead = []
@@ -117,6 +124,13 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=4401)
             return
     await websocket.accept()
+    if _last_hello:
+        # M1: replay the cached hello so a refreshed browser learns sid/readonly
+        # immediately (the bridge will not re-send it until upstream reconnects).
+        try:
+            await websocket.send_text(json.dumps(_last_hello))
+        except Exception:
+            return
     connected_websockets.add(websocket)
     logger.info(f"WS client connected (total {len(connected_websockets)})")
     if upstream:

@@ -12,9 +12,11 @@ interface DataState {
     connectionStatus: 'disconnected' | 'connecting' | 'connected';
     snapshot: Snapshot | null;
     lastSnapshotSeq: number;
+    snapshotArrivalMs: number;   // local Date.now() at frame arrival — live-age base (H1)
     orders: Record<number, OrderView>;
     fills: FillView[];
     msgLogs: MsgLog[];
+    lastSnapLogMs: number;      // snapshot-log throttle (design §7: no 1Hz flood)
     sid: string;
     readonly: boolean;
 }
@@ -32,9 +34,11 @@ const initialState: DataState = {
     connectionStatus: 'disconnected',
     snapshot: null,
     lastSnapshotSeq: 0,
+    snapshotArrivalMs: 0,
     orders: {},
     fills: [],
     msgLogs: [],
+    lastSnapLogMs: 0,
     sid: '',
     readonly: true,
 };
@@ -42,7 +46,7 @@ const initialState: DataState = {
 type Action =
     | { type: 'CONNECTION'; status: DataState['connectionStatus'] }
     | { type: 'HELLO'; sid: string; readonly: boolean }
-    | { type: 'SNAPSHOT'; snap: Snapshot }
+    | { type: 'SNAPSHOT'; snap: Snapshot; arrivalMs: number }
     | { type: 'ORDER'; ev: any }
     | { type: 'TRADE'; ev: any }
     | { type: 'REJECT'; ev: any }
@@ -58,17 +62,32 @@ function reducer(state: DataState, a: Action): DataState {
         case 'SNAPSHOT': {
             const orders: Record<number, OrderView> = {};
             for (const o of a.snap.orders) orders[o.id] = o;
+            // Live staleness (H1): snapshotAgeMs is injected by the middleware
+            // at forward time (clock-skew-free base); components add the local
+            // time elapsed since arrival via snapshotArrivalMs.
+            // Log policy (design §7 — "不引入洪水"): first frame, stale (>3s)
+            // or a 30s heartbeat line only; not one line per snapshot.
+            const stale = (a.snap.snapshotAgeMs ?? 0) > 3000;
+            const doLog = !state.snapshot || stale
+                || a.arrivalMs - state.lastSnapLogMs >= 30000;
             return {
                 ...state,
                 snapshot: a.snap,
                 lastSnapshotSeq: a.snap.seq,
+                snapshotArrivalMs: a.arrivalMs,
                 orders,
-                ...log(state, 'snapshot', `seq=${a.snap.seq} age=${a.snap.snapshotAgeMs ?? '?'}ms orders=${a.snap.orders.length}`),
+                lastSnapLogMs: doLog ? a.arrivalMs : state.lastSnapLogMs,
+                ...(doLog ? log(state, 'snapshot',
+                    `seq=${a.snap.seq} age=${a.snap.snapshotAgeMs ?? '?'}ms orders=${a.snap.orders.length}${stale ? ' STALE' : ''}`) : {}),
             };
         }
         case 'ORDER': {
             const ev = a.ev;
-            if (ev.seq <= state.lastSnapshotSeq) return state;   // stale — snapshot already newer
+            // `<` (not `<=`): an event may share the seq of the last published
+            // snapshot yet still be fresher than it (pushed between that
+            // batch's completion and the next) — only strictly older seqs are
+            // stale replay/backlog.
+            if (ev.seq < state.lastSnapshotSeq) return state;
             const orders = { ...state.orders };
             const done = ev.canceled || ev.left <= 0;
             if (done) delete orders[ev.id];
@@ -77,11 +96,14 @@ function reducer(state: DataState, a: Action): DataState {
         }
         case 'TRADE': {
             const ev = a.ev;
-            if (ev.seq <= state.lastSnapshotSeq) return state;
+            if (ev.seq < state.lastSnapshotSeq) return state;
             const fills = [...state.fills, { code: ev.code, buy: ev.buy, px: ev.px, qty: ev.qty, t: ev.ts / 1000 }];
             return { ...state, fills: fills.slice(-MAX_FILLS) };
         }
         case 'REJECT': {
+            // Same watermark discipline as ORDER/TRADE — a stale reject must
+            // not delete a live order from the authoritative view.
+            if (a.ev.seq < state.lastSnapshotSeq) return state;
             const orders = { ...state.orders };
             delete orders[a.ev.id];
             return { ...state, orders, ...log(state, 'reject', `id=${a.ev.id} (entrust failed)`) };
@@ -120,7 +142,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const offFrame = socketService.onFrame((frame) => {
             switch (frame?.type) {
                 case 'hello': pending.current.push({ type: 'HELLO', sid: frame.sid, readonly: frame.readonly }); break;
-                case 'snapshot': pending.current.push({ type: 'SNAPSHOT', snap: frame }); break;
+                case 'snapshot': pending.current.push({ type: 'SNAPSHOT', snap: frame, arrivalMs: Date.now() }); break;
                 case 'order': pending.current.push({ type: 'ORDER', ev: frame }); break;
                 case 'trade': pending.current.push({ type: 'TRADE', ev: frame }); break;
                 case 'reject': pending.current.push({ type: 'REJECT', ev: frame }); break;

@@ -34,9 +34,21 @@ const LineChart: React.FC<{
   const x = (i: number) => ML + (n <= 1 ? 0 : (i / (n - 1)) * (W - ML - MR));
   const y = (v: number) => MT + (1 - (v - yMin) / (yMax - yMin)) * (H - MT - MB);
 
-  const path = (pts: (number | null)[]) =>
-    pts.map((p, i) => (p == null ? null : `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(p).toFixed(1)}`))
-      .filter(Boolean).join(' ');
+  // Null (gap) breakpoints split the polyline: an uninitialized stretch must
+  // NOT be bridged by a straight line (audit batch B, M7 — misleading signal).
+  const path = (pts: (number | null)[]) => {
+    const segs: string[] = [];
+    let cur = '';
+    pts.forEach((p, i) => {
+      if (p == null) {
+        if (cur) { segs.push(cur); cur = ''; }
+        return;
+      }
+      cur += `${cur ? 'L' : 'M'}${x(i).toFixed(1)},${y(p).toFixed(1)}`;
+    });
+    if (cur) segs.push(cur);
+    return segs.join(' ');
+  };
 
   const yMid = (yMin + yMax) / 2;
   const fmt = yFmt ?? ((v: number) => v.toFixed(2));

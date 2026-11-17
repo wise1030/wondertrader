@@ -144,6 +144,14 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
   // Qt keyboard shortcuts (navigation/toggles live; trading shortcuts gated by readonly)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Escape closes the ticket even while typing in it.
+      if (e.key === 'Escape') {
+        if (isTicketOpen) { setIsTicketOpen(false); return; }
+      }
+      // Focus hygiene: never hijack keys while the user is typing — Ctrl+V
+      // must paste, digits/+/- must type (audit batch B, M8).
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (e.ctrlKey && e.key === 'v') { e.preventDefault(); setVshiftVisible(p => !p); return; }
       if (e.key.startsWith('F') && e.key.length <= 3) {
         const n = parseInt(e.key.substring(1));
@@ -153,10 +161,6 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
       if (selectedRowIdx === null || rows.length === 0) return;
       if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedRowIdx(p => (p !== null && p > 0 ? p - 1 : p)); return; }
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedRowIdx(p => (p !== null && p < rows.length - 1 ? p + 1 : p)); return; }
-      if (e.ctrlKey && ['=', '+', '-', '0', 'Backspace'].includes(e.key)) {
-        e.preventDefault();
-        onNotify(readonly ? 'readonly mode — qmode shortcuts are P2' : 'qmode shortcut', 'info');
-      }
       if (!e.ctrlKey && (e.key === '+' || e.key === '=')) {
         e.preventDefault();
         const leg = rows[selectedRowIdx]?.call;
@@ -169,7 +173,7 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedRowIdx, rows, readonly, onExpirySelectByIndex, openTicket, onNotify]);
+  }, [selectedRowIdx, rows, onExpirySelectByIndex, openTicket, isTicketOpen]);
 
   return (
     <div className="flex flex-col h-full bg-gray-50 text-[10px] overflow-hidden">

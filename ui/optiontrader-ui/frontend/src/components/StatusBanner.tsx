@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { useData } from '../context/DataContext';
+import { useNowMs, liveAgeMs } from '../hooks/useNow';
 
 const STATE_COLORS: Record<string, string> = {
     Normal: 'bg-green-600',
@@ -17,12 +18,12 @@ const Lamp: React.FC<{ label: string; on: boolean; okColor?: string }> = ({ labe
 );
 
 export const StatusBanner: React.FC = () => {
-    const { snapshot, connectionStatus } = useData();
-    const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
-    useEffect(() => {
-        const t = setInterval(() => setNowSec(Date.now() / 1000), 1000);
-        return () => clearInterval(t);
-    }, []);
+    const { snapshot, snapshotArrivalMs, connectionStatus } = useData();
+    // Live age (audit batch B, H1): recompute every second instead of showing
+    // the static per-frame snapshotAgeMs — a stalled upstream must turn the
+    // banner red, not freeze on the last healthy value.
+    const nowMs = useNowMs(1000);
+    const age = liveAgeMs(snapshot?.snapshotAgeMs, snapshotArrivalMs, nowMs);
 
     const st = snapshot?.state;
     const trading = st?.trading ?? '-';
@@ -48,7 +49,9 @@ export const StatusBanner: React.FC = () => {
                     {String(snapshot.risk.sessionStopInSec % 60).padStart(2, '0')}
                 </span>
             )}
-            <span className="ml-auto text-[10px] opacity-70">{nowSec && `age ${snapshot?.snapshotAgeMs ?? '?'}ms`}</span>
+            <span className={`ml-auto text-[10px] ${age != null && age > 3000 ? 'text-red-300 font-bold' : 'opacity-70'}`}>
+                {age != null ? `age ${age}ms` : 'age -'}
+            </span>
         </div>
     );
 };
