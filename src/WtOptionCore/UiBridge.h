@@ -147,6 +147,7 @@ private:
 
     // worker-side snapshot timing
     double _lastSnapshotSec = -1e9;
+    uint64_t _lastSnapshotWallMs = 0;
     bool _forceSnapshot = false;            // worker thread only
 
     // IO-thread state

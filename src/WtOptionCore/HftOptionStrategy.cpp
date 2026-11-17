@@ -1918,16 +1918,21 @@ void HftOptionStrategy::setupAsyncCallbacks()
             }
 
             if (_ctg) _ctg->drainPendingQuotes();
+        }
 
-            // P1 UI snapshot tail. Built unconditionally — no enabled/fit/channel
-            // gating (seeing the gates IS the point; smoke 2026-11-16 lesson).
-            // Worker only fills POD views; JSON encoding runs on the bridge IO
-            // thread, so batch p99 is untouched. Missing data is a null field.
-            if (_uiBridge && _uiBridge->snapshotDue(now)) {
+        // P1 UI snapshot tail — LAMBDA LEVEL, deliberately OUTSIDE the
+        // enabled/marketFresh guard above: the whole point of the UI is to
+        // SEE the gates (smoke 2026-11-17: tail trapped inside the guard
+        // produced zero live snapshots while enabled=false). Uses its own
+        // wall-clock-safe cadence via UiBridge::snapshotDue (live tick-less
+        // periods freeze the sim clock; the bridge falls back to wall time).
+        if (_uiBridge) {
+            const double uiNow = _timeService.nowSeconds(_ctx);
+            if (_uiBridge->snapshotDue(uiNow)) {
                 wt_option::UiSnapshotView view;
                 buildUiSnapshot(view);
                 _uiBridge->publishSnapshot(std::move(view));
-                _uiBridge->noteSnapshotSent(now);
+                _uiBridge->noteSnapshotSent(uiNow);
                 if (_uiFillsPending) {
                     std::vector<wt_option::UiFillView> fills;
                     collectUiFills(fills);

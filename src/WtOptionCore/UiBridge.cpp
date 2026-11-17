@@ -315,12 +315,20 @@ void UiBridge::stop()
 bool UiBridge::snapshotDue(double nowSec) const
 {
     if (_forceSnapshot) return true;
-    return (nowSec - _lastSnapshotSec) >= _cfg.snapshotIntervalSec;
+    // Sim-time interval (normal path: ticks advance the strategy clock)...
+    if ((nowSec - _lastSnapshotSec) >= _cfg.snapshotIntervalSec) return true;
+    // ...plus a wall-clock fallback: on a live tick-less market the strategy
+    // clock freezes (heartbeats carry no time), which would otherwise stall
+    // snapshots forever. In replay the sim clock runs ahead of wall time, so
+    // this fallback stays silent there.
+    return (wallMsNow() - _lastSnapshotWallMs) >=
+           static_cast<uint64_t>(_cfg.snapshotIntervalSec * 1000.0);
 }
 
 void UiBridge::noteSnapshotSent(double nowSec)
 {
     _lastSnapshotSec = nowSec;
+    _lastSnapshotWallMs = wallMsNow();
     _forceSnapshot = false;
 }
 
@@ -331,14 +339,12 @@ void UiBridge::clearForceSnapshot()
 
 void UiBridge::publishSnapshot(UiSnapshotView view)
 {
-    {
-        std::lock_guard<std::mutex> lk(_slotMtx);
-        if (_slotPending)
-            _snapshotCoalesced.fetch_add(1, std::memory_order_relaxed);
-        _slot = std::move(view);
-        ++_slotGen;
-        _slotPending = true;
-    }
+    std::lock_guard<std::mutex> lk(_slotMtx);
+    if (_slotPending)
+        _snapshotCoalesced.fetch_add(1, std::memory_order_relaxed);
+    _slot = std::move(view);
+    ++_slotGen;
+    _slotPending = true;
 }
 
 void UiBridge::pushEvent(const UiEventFrame& ev)
