@@ -69,12 +69,6 @@ export class SocketService {
 
     private notifyFrame(f: any) { this.frameHandlers.forEach(h => h(f)); }
     private notifyStatus(s: 'disconnected' | 'connecting' | 'connected') { this.statusHandlers.forEach(h => h(s)); }
-
-    getStatus(): 'disconnected' | 'connecting' | 'connected' {
-        if (this.isConnecting) return 'connecting';
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) return 'connected';
-        return 'disconnected';
-    }
 }
 
 export const socketService = new SocketService();

@@ -28,6 +28,7 @@ const qmodeClass = (q: number | null): string => {
   if (q === 0) return 'bg-blue-300 text-gray-900';
   if (q === 2) return 'bg-green-300 text-gray-900';
   if (q === -1) return 'bg-red-200 text-gray-900';
+  if (q === 3) return 'bg-yellow-200 text-gray-900';   // QM_FLAT (optioncoretypes.h)
   return '';
 };
 
@@ -185,9 +186,9 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
         <table className="w-full border-collapse text-[10px]">
           <thead className="sticky top-0 z-10 bg-white">
             <tr className="bg-gray-200 text-gray-700">
-              <th className="border border-gray-300 px-1 py-0.5" colSpan={7}>CALL</th>
+              <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 11 : 10}>CALL</th>
               <th className="border border-gray-300 px-1 py-0.5 bg-purple-200 text-purple-800">strike</th>
-              <th className="border border-gray-300 px-1 py-0.5" colSpan={7}>PUT</th>
+              <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 11 : 10}>PUT</th>
             </tr>
             <tr className="bg-gray-100 text-gray-600">
               {['bidSz', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
@@ -219,7 +220,7 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={26} className="text-center py-12 text-gray-600 bg-gray-50">
+                <td colSpan={vshiftVisible ? 23 : 21} className="text-center py-12 text-gray-600 bg-gray-50">
                   <div className="text-3xl mb-2">📊</div>
                   <div>No strikes for this expiry (check fit-gate: booksWithBid / fwdReady)</div>
                 </td>

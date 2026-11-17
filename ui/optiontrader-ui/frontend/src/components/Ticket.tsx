@@ -48,7 +48,7 @@ export const Ticket: React.FC<Props> = ({ buysell, leg, onClose, onNotify }) => 
         </div>
         {readonly && (
           <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded px-2 py-1 mb-3">
-            READONLY — order entry opens in P2 after the command path is audited.
+            READONLY — write commands are gated by the strategy (readonly: true).
           </div>
         )}
         <div className="flex justify-end gap-2">

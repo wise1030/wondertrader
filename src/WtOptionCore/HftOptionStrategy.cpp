@@ -3459,32 +3459,12 @@ bool HftOptionStrategy::submitAsyncVolFit()
 
     std::vector<wt_option::VolFitExpirySnapshot> snapshots;
     for (const auto& [exp, ed] : _grid->expiries()) {
-        if (!ed || !ed->isForwardReady()) {
-            // TEMP diagnostic (live smoke 2026-11-16): the forwardReady gate
-            // is silent — surface WHY it never opens: how many option books
-            // actually have live bids.  Remove after the smoke.
-            static std::map<uint32_t, double> s_lastFitGateDbg;
-            double& lastT = s_lastFitGateDbg[exp];
-            if (now - lastT >= 30.0) {
-                lastT = now;
-                size_t withBid = 0, total = 0;
-                for (const auto& sd : _grid->getStrikesByExpiry(exp)) {
-                    if (!sd) continue;
-                    for (const auto* od : {sd->call().get(), sd->put().get()}) {
-                        if (!od) continue;
-                        ++total;
-                        if (od->getBid() > 0) ++withBid;
-                    }
-                }
-                WTSLogger::log_by_cat("strategy", LL_WARN,
-                    "FITGATE exp={} forwardReady={} fwdValid={} booksWithBid={}/{} "
-                    "underlyingPrice={}",
-                    exp, ed ? ed->isForwardReady() : false,
-                    ed ? ed->isUnderlyingPriceValid() : false,
-                    withBid, total, _grid->getUnderlyingPrice());
-            }
+        // Fit-gate diagnostics (fwdReady / booksWithBid-vs-Total) retired from
+        // the log path: the UI snapshot now surfaces them live
+        // (UiSnapshotBuilder::buildExpiry — design §7 "Fit 就绪矩阵退休
+        // FITGATE 临时日志"; TEMP block removed per §14.4).
+        if (!ed || !ed->isForwardReady())
             continue;
-        }
         const double fwd = ed->getForward();
         const double maturity = _blackPricer->getMaturity(exp);
         const double atmVol = _blackPricer->getATMVol(exp);

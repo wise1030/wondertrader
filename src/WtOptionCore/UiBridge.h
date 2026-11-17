@@ -162,7 +162,9 @@ private:
     };
     std::vector<Client> _clients;           // IO thread only
     int _nextClientId = 1;                  // IO thread only
-    std::vector<int> _auxDue;               // client ids owed the aux message
+    // NOTE: no per-client aux (fills-history) debt list — late-attaching
+    // clients get fills via the middleware's refresh-on-connect instead, so a
+    // dead `_auxDue` member was removed (audit 2026-11-18 batch A).
 
     // stats
     std::atomic<uint64_t> _eventDrops{0};

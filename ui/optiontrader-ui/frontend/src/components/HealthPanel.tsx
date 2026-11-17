@@ -39,9 +39,3 @@ export const HealthPanel: React.FC = () => {
         </div>
     );
 };
-
-export const AgeText: React.FC = () => {
-    const { snapshot } = useData();
-    const age = snapshot?.snapshotAgeMs;
-    return <span className={age != null && age > 3000 ? 'text-red-600' : 'text-gray-500'}>{age != null ? `${age}ms` : '-'}</span>;
-};
