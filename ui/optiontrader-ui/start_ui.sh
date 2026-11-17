@@ -15,6 +15,11 @@ stop() {
     fi
 }
 
+# optional env: WTOPTION_LISTEN_HOST / WTOPTION_LISTEN_PORT / WTOPTION_UI_TOKEN
+if [ -f "$DIR/middleware.env" ]; then
+    set -a; . "$DIR/middleware.env"; set +a
+fi
+
 case "${1:-start}" in
     stop) stop; exit 0 ;;
     start) ;;
