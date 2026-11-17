@@ -2,6 +2,7 @@
 
 为 WtOptionCore 期权做市引擎提供的实时 Web 控制台（设计文档：
 `src/WtOptionCore/analysis/ui-migration-design-2026-11-16.md` v2.1）。
+**操作功能手册：[`docs/USER-MANUAL.md`](docs/USER-MANUAL.md)**（接入/布局/交互/协议/安全/排障）。
 
 ## 架构
 
@@ -40,13 +41,19 @@ cd ui/optiontrader-ui
 
 ## 访问
 
+开发/内网（无认证，仅回环）：
+
 ```bash
 ssh -L 8002:127.0.0.1:8002 ubuntu@129.211.5.54
 # 浏览器 http://localhost:8002
 ```
 
-防火墙不开公网；UiBridge 只绑回环。调试可用 `nc 127.0.0.1 8710` 直发
-`REFRESH` 或 JSON 行。
+**互联网直接访问（token 认证）**：在 `middleware.env` 里设
+`WTOPTION_LISTEN_HOST=0.0.0.0` + `WTOPTION_UI_TOKEN=<强随机串>`，云安全组放行
+TCP 8002。首次访问 `http://129.211.5.54:8002/?token=<串>`（种 cookie），之后
+直接开 `http://129.211.5.54:8002` 即可。无 token 时进程拒绝绑非回环地址。
+注意：HTTP 明文，token 仅防君子；更高要求请套 HTTPS/反向代理。UiBridge
+始终保持仅回环。
 
 ## 目录
 
