@@ -616,6 +616,14 @@ P2 约 4–6 人日（命令/ack/Ticket/审计/SETPARAM 实测），P3 约 3–5
 **唯一阻塞项**：真实成交（fill）路径——simnow 账号 `9999-048363` 因昨夜频繁重启触发 CTP「登录失败次数超限，登录被禁止」，TD 通道不可用（`channel:false` 在 UI 状态横幅可见）。恢复后（通常数小时）重试 ORDER@ask 1 手即可补齐；命令机制本身已被通道门响应证实。
 **恢复动作**：验证后 `readonly:true` 已恢复并重启确认（startup 日志 `readonly=1`；写命令实测拒答 `err:'readonly'`）。服务器现常驻只读运行 + middleware 在线，SSH 隧道即可查看。
 
+**2026-11-17 下午补充（成交路径收官）**：用户注册第二 simnow 账号 `049641`（旧账号 048363 因昨夜频繁重启触发"登录失败次数超限"禁令），切换 `tdtraders/tdparsers.yaml` 后 TD 登录成功。13:30 午后开盘策略进入 `Normal/enabled`，临时 `readonly:false` 完成最后闭环：
+
+- **被动单**：`ORDER B SHFE.cu2612.C.88000 @6666`（买一-3 tick 挂单价）→ ack ok → 出现在快照 `orders[]`（id 1384834450）→ `CANCELO` → 订单消失 ✔
+- **主动单**：`ORDER B @25386`（卖一+1 tick，1 手）→ ack ok → **trade 事件到达**（id 1384834451，1@25386）→ 快照持仓 `pos: 0→1` ✔
+- 验证后恢复 `readonly:true` 并重启确认。
+
+至此 §11 三期 + 冒烟 + 写命令闭环（含真实成交）**全部收官**。服务器部署状态：账号 049641、`readonly:true`、修复版 Release .so、middleware 常驻。遗留：UI 方案零剩余事项；1 手多头持仓为验证产物（simnow 仿真账户，可平可留）。
+
 ---
 
 **附：二轮复核的代码证据索引**
