@@ -562,7 +562,7 @@ P2 约 4–6 人日（命令/ack/Ticket/审计/SETPARAM 实测），P3 约 3–5
 
 ### 14.6 残余事项（P2 后）
 
-- 服务器授权窗口：开 `readonly:false` 人工点单闭环（ORDER→成交→CANCELO 撤单→SETPARAM 生效核对审计日志）——需实盘/仿真环境，无法在开发机完成。
+- ~~服务器授权窗口：开 `readonly:false` 人工点单闭环~~ —— **已于 2026-11-17 日盘执行**（见 §14.9）。
 - per-code qmode、Cancel All、回放期可视化：P3。
 
 ### 14.7 P3 实施记录（2026-11-17）
@@ -595,6 +595,26 @@ P2 约 4–6 人日（命令/ack/Ticket/审计/SETPARAM 实测），P3 约 3–5
 **环境陷阱：`/mnt/d`（drvfs）时间戳不可靠导致 make 增量编译出现混合布局 .o**（类成员偏移跨 TU 不一致），现象是玄学级运行时行为（fprintf 不执行、_hot 指针路径异常、段错误）。排查耗费数小时。**纪律：发布构建一律用 Linux 原生文件系统的 out-of-tree build**（如 `cmake /mnt/d/.../src -B ~/build/xxx && make`——注意源码仍需 rsync 到原生盘才彻底免疫；改动头文件后全量重建）。
 
 **服务器状态**：已部署修复版 Release .so 与 ui 目录；冒烟进程按纪律清理（kill -9）。人工点单闭环（P2 写命令验证）待授权窗口。
+
+### 14.9 P2 写命令闭环验证（2026-11-17 日盘）
+
+临时 `readonly:false` 在实盘进程执行 14 条写命令，**命令链路全部验证通过**：
+
+| # | 命令 | 结果 |
+|---|---|---|
+| 1-2 | SETPARAM wgt_vegaflow=0.45 / max_tps=25 | ok:true，**下帧快照 params 回显确认生效**（成员路径+applyHotParams 全链路） |
+| 3 | SETPARAM sticky_base | ok:false "key not hot-adjustable"（白名单拒） |
+| 4 | SETPARAM wgt_vegaflow=99 | ok:false "weight out of range [0,10]"（范围拒） |
+| 5/8 | QMODE off / on（全网格） | ok |
+| 6-7 | QMODES 单码 on / 未知码 | ok / ok:false "unknown code" |
+| 9-10 | STOP / RESUME | ok；channel 未就绪时 RESUME 保持 Disabled（状态机语义正确） |
+| 11 | ORDER | ok:false "order rejected (limits/channel)"——命令**穿透到下单网关**后被通道门拒（机制验证） |
+| 12 | CANCELO | ok:false "channel not ready"（同上） |
+| 13-14 | CANCELALL / CANCEL | ok |
+
+**审计**：14 条写命令全部落 `UI cmd: <线格式> -> <结果> (<耗时>us)` 审计日志。
+**唯一阻塞项**：真实成交（fill）路径——simnow 账号 `9999-048363` 因昨夜频繁重启触发 CTP「登录失败次数超限，登录被禁止」，TD 通道不可用（`channel:false` 在 UI 状态横幅可见）。恢复后（通常数小时）重试 ORDER@ask 1 手即可补齐；命令机制本身已被通道门响应证实。
+**恢复动作**：验证后 `readonly:true` 已恢复并重启确认（startup 日志 `readonly=1`；写命令实测拒答 `err:'readonly'`）。服务器现常驻只读运行 + middleware 在线，SSH 隧道即可查看。
 
 ---
 
