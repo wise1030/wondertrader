@@ -1050,6 +1050,11 @@ void HftOptionStrategy::setupPricer()
                         ? fitterCfg->getInt32("point_count") : 15;
                     p2cfg.vol_fitting_to_all_expiries = fitterCfg->has("fit_all_expiries")
                         ? fitterCfg->getBoolean("fit_all_expiries") : false;
+                    // P1-④ (audit 2026-11-18): periodic ATM re-anchor knobs.
+                    p2cfg.atm_reanchor_period = fitterCfg->has("atm_reanchor_period")
+                        ? fitterCfg->getDouble("atm_reanchor_period") : 300.0;
+                    p2cfg.atm_reanchor_max_step = fitterCfg->has("atm_reanchor_max_step")
+                        ? fitterCfg->getDouble("atm_reanchor_max_step") : 0.05;
                     WTSVariant* threshCfg = fitterCfg->get("good_points_thresh");
                     if (threshCfg && threshCfg->isArray()) {
                         for (uint32_t i = 0; i < threshCfg->size(); i++) {

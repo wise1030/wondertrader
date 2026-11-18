@@ -148,7 +148,14 @@ public:
     double deltaflow_window          = 120.0;
     double ema_sprd_vs_atmfwd_window = 120.0;
     double forward_spread_ema_window  = 120.0;
-    int    min_strikes_for_synthetic = 5;
+    // P0-① (audit 2026-11-18): was 5.  Both ExpiryData.h and the per-expiry
+    // config layer default this to 1 ("any single contributor" — quantbox
+    // semantics), but onAddOption forced 5 here, so an expiry whose option
+    // parity points are one-sided on simnow (e.g. 202612: future leg alive,
+    // booksWithBid 52/52) could never reach 5 contributors and stayed
+    // forwardReady=false forever — never fitted, never priced, whole month
+    // dead.  1 restores "option pair OR future mid alone is enough".
+    int    min_strikes_for_synthetic = 1;
 
     // compute cadence
     double slow_compute_interval   = 15.0;

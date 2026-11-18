@@ -50,7 +50,7 @@ public:
             { "pricer.blackCalc.volCurve", { "type","fitter","volcurve_weight","curve2_type","fallback" } },
             { "pricer.blackCalc.volCurve.fitter", { "start_time","end_time","period",
                           "decay_window","threshold","fit_all_expiries","good_points_thresh",
-                          "point_count" } },
+                          "point_count","mode","atm_reanchor_period","atm_reanchor_max_step" } },
             { "orderManager", { "option","future","riskFilters" } },
             { "orderManager.option", { "max_side_orders","max_position","time_in_force_ms",
                           "enable_quote_api","avoid_trade","check_potential_position",

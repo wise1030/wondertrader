@@ -110,16 +110,35 @@ void test_timer_survives_md_saturation_and_trader_requeue() {
 // Timers are control-class now (trader queue, never dropped) but the MD
 // overflow must still stay bounded while retaining the newest tick per
 // contract; fill it with ticks as production would.
+//
+// Perf note (2026-11-18): the fill used to be 65536 TICKS with distinct
+// codes — push_md_overflow linear-scans the queue per tick for a same-code
+// coalesce candidate, so that was O(n²) ≈ 2e9 string comparisons and this
+// test alone took 4+ minutes in Debug.  Non-tick events take the O(1)
+// capacity branch, so the queue is filled with Control events instead; the
+// coalesce/evict/drop assertions below exercise the SAME Tick semantics
+// (coalesce hit + no-coalesce evict) in milliseconds.
 void test_md_overflow_coalesces_ticks_by_code() {
     std::cout << "=== test_md_overflow_coalesces_ticks_by_code ===" << std::endl;
 
     OptionAsyncEventProcessor proc;
-    for (size_t i = 0; i < OptionAsyncEventProcessor::kMaxOverflow; ++i) {
+    // 65535 non-tick fillers (O(1) capacity branch each) + one keeper TICK
+    // at the end: the keeper exercises the "evict the oldest TICK" branch
+    // when the first new tick overflows, and the two ag2601 pushes below
+    // exercise the coalesce-hit branch.
+    for (size_t i = 0; i < OptionAsyncEventProcessor::kMaxOverflow - 1; ++i) {
         auto t = OptionAsyncEventProcessor::AsyncEvent::make_control();
-        t.type = OptionAsyncEventProcessor::AsyncEvent::Tick;
+        t.type = OptionAsyncEventProcessor::AsyncEvent::Custom;   // non-tick filler
         t.setCode(("SHFE.fill" + std::to_string(i)).c_str());
         t.tick.bid = static_cast<double>(i);
         proc.push_md_overflow(std::move(t));
+    }
+    {
+        auto keeper = OptionAsyncEventProcessor::AsyncEvent::make_control();
+        keeper.type = OptionAsyncEventProcessor::AsyncEvent::Tick;
+        keeper.setCode("SHFE.keeper");
+        keeper.tick.bid = 999.0;
+        proc.push_md_overflow(std::move(keeper));
     }
 
     ASSERT_EQ(proc._md_overflow.size(), OptionAsyncEventProcessor::kMaxOverflow);

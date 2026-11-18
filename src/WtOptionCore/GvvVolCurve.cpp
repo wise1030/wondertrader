@@ -148,6 +148,18 @@ double GvvVolCurve::eval(double x) const
     if (!m_bInitialized)
         return 1.0;
 
+    // P0-③ (audit 2026-11-18): flat extrapolation beyond the fitted strike
+    // window.  The fitted candidate set covers only the densest strikes near
+    // the forward (vol_fitting_point_count nearest points); beyond it the GVV
+    // parameters used to extrapolate freely — wing vol reached 0.4-0.6 against
+    // a market ATM of 0.19-0.21 (theo up to +1503% of mid) — or the Brent
+    // solve failed and silently fell back to 1.0.  Clamping to the edge value
+    // is the standard market-maker wing treatment.
+    if (m_xrangeSet) {
+        if (x < m_xlo) x = m_xlo;
+        else if (x > m_xhi) x = m_xhi;
+    }
+
     // R11: α=1 closed form. PriceError degenerates to
     //   f(v) = v² − (atmvol² + skew·x + kurt·x²)
     // whose root is exact — no Brent iteration needed on the hot path.
@@ -395,6 +407,19 @@ bool GvvVolCurve::fit(const IVolCurve::dataset_t& src_pts)
 
     // parameters updated upon every successful fit
     update_parameters(spotvol, rho, volvol, alpha);
+
+    // P0-③: record the fitted log-moneyness window for flat wing
+    // extrapolation.  points is sorted by strike offset (see above); the
+    // window edges are the extreme fitted strikes.  Requires a valid forward
+    // — the async worker gates s.forward > 0 before fit().
+    if (m_atmforward > 0.0) {
+        const double kLo = points.front().first + m_atmforward;
+        const double kHi = points.back().first + m_atmforward;
+        if (kLo > 0.0 && kHi > 0.0) {
+            setFitWindow(std::log(kLo / m_atmforward), std::log(kHi / m_atmforward));
+        }
+    }
+
     m_bInitialized = true;
     m_bLastFitOK = true;
     return true;

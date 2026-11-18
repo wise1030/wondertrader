@@ -428,7 +428,15 @@ OptionPricer2::__setupBlackCalculatorInfo(OptionData* option)
     bci->m_strike = option->getStrike();
     const ExpiryDataPtr& ed = option->getExpiryData();
     const ExpiryInfo& ei = *(bci->ei);
-    bci->m_forward = ei.m_atmforward + __forwardSpreadFor(option, ei.m_atmforward);
+    // P1-⑤ (audit 2026-11-18): price on the SAME forward the vol curve is
+    // fitted/looked-up on (ei.m_atmforward, the grid's weighted parity pool).
+    // The old per-strike parity spread (m_atmforward + __forwardSpreadFor)
+    // put the Black forward and the vol-lookup moneyness on two different
+    // coordinates that disagreed by 1700-4000 points on simnow's wide quotes
+    // (per-strike parity noise ±600-1300), mis-locating the skew per strike.
+    // The grid's own ema_sprd_vs_atmfwd signal keeps the per-strike parity
+    // information; __forwardSpreadFor stays available for diagnostics.
+    bci->m_forward = ei.m_atmforward;
     bci->m_discount   = ed ? ed->getDiscountFactor() : 1.0;
     bci->m_maturity   = ei.m_maturity;
     bci->m_settleFrac = ei.m_settleFrac;
@@ -525,6 +533,36 @@ bool OptionPricer2::computeImpliedValues(OptionGrid* grid)
 }
 
 // ----------------------------------------------------------------------------
+// P1-④ (audit 2026-11-18): shared ATM-IV bootstrap collector.  Collects the
+// implied vols of all legs within ±3% log-moneyness of the forward and returns
+// their median; NAN when fewer than 3 valid IVs are available.  Used by the
+// pre-first-fit scale bootstrap and by the periodic ATM re-anchor.
+// ----------------------------------------------------------------------------
+double OptionPricer2::__bootstrapMedianIV(const ExpiryDataPtr& ed, OptionGrid* grid)
+{
+    if (!ed || !grid) return NAN;
+    const double fwd = ed->getForward();
+    if (!(fwd > 0)) return NAN;
+
+    std::vector<double> atmIvs;
+    for (const auto& sd : grid->getStrikesByExpiry(ed->getExpiry()))
+    {
+        if (!sd) continue;
+        const double K = sd->getStrikePrice();
+        if (std::fabs(std::log(K / fwd)) > 0.03) continue;  // ±3% around forward
+        for (const OptionData* leg : {sd->call().get(), sd->put().get()})
+        {
+            if (!leg) continue;
+            const double iv = leg->values(getValuesIndex()).impliedVol();
+            if (iv > 0) atmIvs.push_back(iv);
+        }
+    }
+    if (atmIvs.size() < 3) return NAN;
+    std::sort(atmIvs.begin(), atmIvs.end());
+    return atmIvs[atmIvs.size() / 2];
+}
+
+// ----------------------------------------------------------------------------
 // initValuesCompute
 // ----------------------------------------------------------------------------
 bool OptionPricer2::initValuesCompute(OptionGrid* grid)
@@ -557,29 +595,53 @@ bool OptionPricer2::initValuesCompute(OptionGrid* grid)
         // the scale.
         if (getCurveVersion(ed->getExpiry()) == 0 && ed->isForwardReady())
         {
-            const double fwd = ed->getForward();
-            std::vector<double> atmIvs;
-            if (fwd > 0)
+            // Seed the scale from the market before the first accepted fit.
+            const double med = __bootstrapMedianIV(ed, grid);
+            if (!std::isnan(med) && med >= 0.03 && med <= 1.0
+                && std::fabs(med - ei->m_atmvol) > 1e-6)
+                setATMVol(ed->getExpiry(), med);
+        }
+        else if (getCurveVersion(ed->getExpiry()) > 0 && ed->isForwardReady()
+                 && config().atm_reanchor_period > 0)
+        {
+            // P1-④ (audit 2026-11-18): periodic ATM re-anchor.  The bootstrap
+            // above only ran while curveVersion==0 and publishFittedCurves
+            // writes the snapshot atmVol back verbatim, so the ATM scale froze
+            // at first-fit market level (observed: 2701/2702 medDev −2~−4.6%,
+            // wings −54~−79% while the market IV kept moving).  Every
+            // atm_reanchor_period seconds walk the anchor toward the fresh
+            // ±3% median market IV, capped at atm_reanchor_max_step (relative)
+            // per re-anchor — a fit/anchor race with the async fitter can then
+            // only step the anchor back by one bounded increment per publish
+            // and self-corrects on the next period.
+            const double now = grid ? grid->getComputeTime() : 0.0;
+            const uint32_t exp = ed->getExpiry();
+            auto it = m_lastReanchor.find(exp);
+            if (it == m_lastReanchor.end())
             {
-                for (const auto& sd : grid->getStrikesByExpiry(ed->getExpiry()))
+                // First sight after the first accepted fit: wait one full
+                // period before the first re-anchor.
+                m_lastReanchor[exp] = now;
+            }
+            else if (now - it->second >= config().atm_reanchor_period)
+            {
+                it->second = now;
+                const double med = __bootstrapMedianIV(ed, grid);
+                if (!std::isnan(med) && med >= 0.03 && med <= 1.0)
                 {
-                    if (!sd) continue;
-                    const double K = sd->getStrikePrice();
-                    if (std::fabs(std::log(K / fwd)) > 0.03) continue;  // ±3% around forward
-                    for (const OptionData* leg : {sd->call().get(), sd->put().get()})
+                    const double cur = ei->m_atmvol;
+                    const double delta = med - cur;
+                    const double step = config().atm_reanchor_max_step * std::fabs(cur);
+                    const double capped = (std::fabs(delta) > step)
+                        ? (delta > 0.0 ? step : -step) : delta;
+                    if (std::fabs(capped) > 1e-9)
                     {
-                        if (!leg) continue;
-                        const double iv = leg->values(getValuesIndex()).impliedVol();
-                        if (iv > 0) atmIvs.push_back(iv);
+                        setATMVol(exp, cur + capped);
+                        WTSLogger::log_by_cat("strategy", LL_INFO,
+                            "ATM re-anchor exp={} {:.4f} -> {:.4f} (med={:.4f})",
+                            exp, cur, cur + capped, med);
                     }
                 }
-            }
-            if (atmIvs.size() >= 3)
-            {
-                std::sort(atmIvs.begin(), atmIvs.end());
-                const double med = atmIvs[atmIvs.size() / 2];
-                if (med >= 0.03 && med <= 1.0 && std::fabs(med - ei->m_atmvol) > 1e-6)
-                    setATMVol(ed->getExpiry(), med);
             }
         }
     }
@@ -747,7 +809,11 @@ bool OptionPricer2::updateTheoreticalValues(OptionData* option)
         return false;
     }
 
-    double F = ei->m_atmforward + __forwardSpreadFor(option, ei->m_atmforward);
+    // P1-⑤ (audit 2026-11-18): FAST incremental path now uses the same
+    // single forward coordinate as the full reprice / vol-lookup (see
+    // __setupBlackCalculatorInfo).  The removed per-strike parity term was
+    // the second half of the two-coordinate discrepancy (1700-4000 pts).
+    double F = ei->m_atmforward;
     if (std::isnan(F) || EQ(F, 0)) return false;
     const double dF = F - values.forward();
     if (config().fast_full_reprice_forward_step > 0 &&

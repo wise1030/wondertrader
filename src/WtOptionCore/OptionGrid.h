@@ -120,6 +120,11 @@ public:
     bool hasExpiryOwnUnderlying(uint32_t expiry) const {
         return m_expiryOwnUnderlying.find(expiry) != m_expiryOwnUnderlying.end();
     }
+    /// P1-⑦ (audit 2026-11-18): true when this code is the front month's
+    /// underlying (own code of the front expiry, or the global code) — gates
+    /// the grid-level m_underlyingPrice against inter-month tick mixing.
+    /// Non-const: getFrontMonthExpiryData() may roll the front month.
+    bool isFrontUnderlyingCode(const std::string& stdCode);
     const std::string* expiryOwnUnderlying(uint32_t expiry) const {
         auto it = m_expiryOwnUnderlying.find(expiry);
         return it == m_expiryOwnUnderlying.end() ? nullptr : &it->second;

@@ -135,6 +135,14 @@ public:
     /// power → linear → constant(1.0) so pricing never dies on a bad
     /// snapshot.  Previous (good) curve still wins by curve versioning.
     bool    volcurve_fallback        = true;
+    /// P1-④ (audit 2026-11-18): the ATM vol bootstrap only ran while
+    /// curveVersion==0, and publishFittedCurves wrote the snapshot value
+    /// back verbatim — the ATM anchor froze at first-fit market level and
+    /// drifted from the market afterwards (2701/2702 medDev −2~−4.6% with
+    /// wings −54~−79%).  Re-anchor period (seconds, 0 = disabled) and the
+    /// max relative step applied per re-anchor toward the fresh median IV.
+    double  atm_reanchor_period      = 300.0;
+    double  atm_reanchor_max_step    = 0.05;
     bool    use_sprd_vs_atmfwd       = true;
     double  slow_compute_interval    = 0.1;   // seconds
     // FAST incremental update: second-order gamma correction is enabled by
@@ -275,6 +283,10 @@ private:
     /// parity synthetic forwards from the grid → this option's own EMA.
     /// Returns 0 when use_sprd_vs_atmfwd is disabled or nothing is available.
     double __forwardSpreadFor(OptionData* option, double atmForward) const;
+    /// P1-④ (audit 2026-11-18): median near-ATM (±3% moneyness) market IV
+    /// shared by the curveVersion==0 bootstrap and the periodic re-anchor.
+    /// Returns NAN when fewer than 3 valid IVs are available.
+    double __bootstrapMedianIV(const ExpiryDataPtr& ed, OptionGrid* grid);
     void __doImplied_imp(OptionData* od);
     void __doImplied(const OptionDataPtr& od);
     void __doImpliedStrikes(const StrikeDataPtr& sd);
@@ -292,6 +304,9 @@ private:
     OptionRisk*   m_spPositionRisk = nullptr;
     mutable std::map<uint32_t, ExpiryInfoPtr> m_expiryInfoTable;
     std::map<uint32_t, uint64_t> m_curveVersion;
+    /// P1-④: per-expiry last ATM re-anchor time (grid compute-time seconds;
+    /// absent entry = anchor at next check, i.e. wait one full period first).
+    std::map<uint32_t, double> m_lastReanchor;
     double m_defaultVolatility = 0.1;
     std::map<uint32_t, double> m_gvv_weight;
     double m_prop_atmsig = 0.0;

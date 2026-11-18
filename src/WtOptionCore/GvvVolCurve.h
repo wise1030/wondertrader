@@ -53,6 +53,9 @@ public:
     virtual double operator()(double diff) const;
     virtual bool fit(const IVolCurve::dataset_t& points);
     void setInitialized(bool b) { m_bInitialized = b; }
+    /// P0-③: flat-extrapolation window in log-moneyness.  fit() sets it from
+    /// the fitted strike range; exposed for tests and diagnostics.
+    void setFitWindow(double xlo, double xhi) { m_xlo = xlo; m_xhi = xhi; m_xrangeSet = true; }
     virtual bool isInitialized() const { return m_bInitialized && !std::isnan(m_atmforward) && !std::isnan(m_maturity) && !std::isnan(m_atmvol); }
     bool isLastFitOK() const { return m_bLastFitOK; }
     virtual const std::string getNameString() const { return "GvvVolCurve"; }
@@ -86,6 +89,14 @@ private:
     double m_chisq;
     bool m_bInitialized;
     bool m_bLastFitOK;
+
+    // P0-③ (audit 2026-11-18): fitted log-moneyness window.  Points outside
+    // it are evaluated flat at the window edge instead of letting the GVV
+    // parameters extrapolate (observed wing theos at +1503% / -99% of mid
+    // with market ATM IV ~0.20).  Set by fit(); disabled until first fit.
+    double m_xlo = 0.0;
+    double m_xhi = 0.0;
+    bool   m_xrangeSet = false;
 };
 
 using GvvVolCurvePtr = std::shared_ptr<GvvVolCurve>;

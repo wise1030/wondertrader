@@ -22,6 +22,15 @@
 
 namespace wt_option {
 
+// P0-② (audit 2026-11-18): tail month segment of a contract code, e.g.
+// "SHFE.cu.2612" → "2612".  Empty on parse failure (index codes / hot codes).
+static std::string contractMonthOf(const std::string& stdCode) {
+    auto pos = stdCode.rfind('.');
+    if (pos == std::string::npos || pos + 1 >= stdCode.size())
+        return "";
+    return stdCode.substr(pos + 1);
+}
+
 // Right mapping: OptionRight(OR_Call=0, OR_Put=1) → StrikeData Right(RT_CALL, RT_PUT)
 // StrikeData uses get(Right) / call() / put() — we'll use those directly
 
@@ -107,6 +116,25 @@ void OptionGrid::setExpiryUnderlying(uint32_t expiry, const std::string& code) {
         "OptionGrid: expiry {} underlying registered as '{}'", expiry, code);
 }
 
+// P1-⑦ (audit 2026-11-18): the grid-level m_underlyingPrice must follow only
+// the FRONT month's underlying.  With multi-expiry routing (202612 → cu2612,
+// 202701 → cu2701) both codes hit m_expiryUnderlyingMap, so every tick of
+// either future used to overwrite m_underlyingPrice (last-tick-won) and the
+// grid price oscillated across the ~2600-point inter-month spread (observed
+// 100900↔103580 in the 11/17 FITGATE log), polluting frontfut_skew / rollema
+// signals and every mkt.underlyingPrice fallback.
+bool OptionGrid::isFrontUnderlyingCode(const std::string& stdCode) {
+    if (stdCode.empty())
+        return false;
+    if (stdCode == m_underlyingCode)
+        return true;   // single-series / global underlying scenario
+    auto fed = getFrontMonthExpiryData();
+    if (!fed)
+        return false;
+    auto ownIt = m_expiryOwnUnderlying.find(fed->getExpiry());
+    return ownIt != m_expiryOwnUnderlying.end() && ownIt->second == stdCode;
+}
+
 // ============================================================================
 // onTick — tick-driven contract discovery + market update
 // ============================================================================
@@ -120,7 +148,9 @@ void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick
             auto ed = getExpiryData(exp);
             if (ed) ed->setUnderlyingPrice(tick->price());
         }
-        onUnderlyingTick(tick->price());
+        // P1-⑦: only the front month's underlying moves the grid-level price
+        if (isFrontUnderlyingCode(stdCode))
+            onUnderlyingTick(tick->price());
         return;
     }
 
@@ -208,7 +238,9 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
                 ed->setFutureMid(tick.price, futSpread);
             }
         }
-        onUnderlyingTick(tick.price, tick.updateTime);
+        // P1-⑦: only the front month's underlying moves the grid-level price
+        if (isFrontUnderlyingCode(stdCode))
+            onUnderlyingTick(tick.price, tick.updateTime);
         return;
     }
 
@@ -223,8 +255,17 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
         for (auto& [exp, ed] : m_expiries) {
             if (ed && ed->getIncludeFuture()
                 && m_expiryOwnUnderlying.find(exp) == m_expiryOwnUnderlying.end()) {
-                double futSpread = (tick.bid > 0 && tick.ask > 0) ? (tick.ask - tick.bid) : 0;
-                ed->setFutureMid(tick.price, futSpread);
+                // P0-②: same month-match gate as the fallback registration —
+                // the global MAIN-month tick must not overwrite a far month's
+                // futures leg (early-session window before the fallback
+                // registration exists).  No month segment (index/continuous
+                // code) keeps the old feed.
+                const std::string gm = contractMonthOf(stdCode);
+                const std::string em = std::to_string(exp).substr(2);   // YYYYMM → YYMM
+                if (gm.size() != 4 || gm == em) {
+                    double futSpread = (tick.bid > 0 && tick.ask > 0) ? (tick.ask - tick.bid) : 0;
+                    ed->setFutureMid(tick.price, futSpread);
+                }
             }
         }
         onUnderlyingTick(tick.price, tick.updateTime);
@@ -432,7 +473,21 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
             ed->setUnderlyingCode(m_underlyingCode);
             ed->setHedgeCode(m_underlyingCode);
             if (!m_underlyingCode.empty()) {
-                setExpiryUnderlying(expiry, m_underlyingCode);
+                // P0-② (audit 2026-11-18): only route the global underlying
+                // tick into this expiry when its contract month matches the
+                // expiry month.  The old behaviour registered the global MAIN
+                // month code (e.g. SHFE.cu.2612) for every unconfigured expiry
+                // (2702/2703/2704); its tick then carried ~97% of the weight
+                // in the parity pool (1/futSpread vs ~1/thousands for option
+                // parity points) and dragged the far-month synthetic forward
+                // to the front future's price (observed: 202704 fwd=103511 vs
+                // parity-implied 99430).  Index-type underlyings have no month
+                // segment — keep the old routing there.
+                const std::string gm = contractMonthOf(m_underlyingCode);
+                const std::string em = std::to_string(expiry).substr(2); // YYYYMM → YYMM
+                if (gm.size() != 4 || gm == em) {
+                    setExpiryUnderlying(expiry, m_underlyingCode);
+                }
             }
         }
     }

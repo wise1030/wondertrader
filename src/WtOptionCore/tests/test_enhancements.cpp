@@ -30,6 +30,7 @@
 #include "../LatencyHistogram.h"
 #include "../SingleFlightTaskRunner.h"
 #include "../AsyncVolFitter.h"
+#include "../CompositeOptionPricer.h"   // P0-① min_strikes_for_synthetic default
 #include "../PredictionEvaluator.h"
 #include "../CffexIOStrikeFinder.h"
 #include "../DceMOStrikeFinder.h"
@@ -1352,6 +1353,9 @@ void test_gvv_closed_form() {
         c.setParameter(GvvVolCurve::RHO, -0.5);
         c.setParameter(GvvVolCurve::VOLVOL, 1.2);
     }
+    // P0-③: pin the flat-extrapolation window so every identity-check point
+    // below stays INSIDE it (fit() records its own window from its points).
+    c.setFitWindow(-1.0, 0.9);
     // Force α=1 so the closed-form branch is exercised (post-fit α is
     // data-driven via BrentMinimize and rarely exactly 1).
     c.setParameter(GvvVolCurve::ALPHA, 1.0);
@@ -1371,8 +1375,10 @@ void test_gvv_closed_form() {
         double expect = std::sqrt(inner)/0.18;
         { auto got=c.eval(x); if (std::fabs(got-expect)>1e-10) std::cerr<<"DBG x="<<x<<" got="<<got<<" exp="<<expect<<" atmvol="<<atmvol<<" kurt="<<kurt<<" skew="<<skew<<std::endl; ASSERT_TRUE(std::fabs(got-expect)<1e-10); }
     }
-    // Wings clamp instead of collapsing
-    ASSERT_TRUE(std::fabs(c.eval(50.0) - GVV_MAXATMVOL/0.18) < 1e-9);
+    // Far wing flattens to the fitted window edge (P0-③): x=50 clamps to the
+    // top edge of the fitted log-moneyness window (+0.9) instead of the old
+    // free parametric extrapolation.
+    ASSERT_TRUE(std::fabs(c.eval(50.0) - c.eval(0.9)) < 1e-9);
     std::cout << "  PASS" << std::endl;
 }
 
@@ -2228,6 +2234,183 @@ void test_session_quotable_zone() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P0/P1 fixes (audit 2026-11-18) — regression tests
+// ============================================================================
+
+// P0-①: the pricer-layer minStrikes default must match the quantbox
+// "any single contributor" semantics (1), not 5 — with 5 the 202612 near
+// month (one-sided parity on simnow, future leg alive) could never reach
+// forwardReady and stayed unfitted/unpriced for the whole month.
+void test_p1_min_strikes_default() {
+    std::cout << "=== test_p1_min_strikes_default ===" << std::endl;
+    CompositeOptionPricerConfig cfg;
+    ASSERT_EQ(cfg.min_strikes_for_synthetic, 1);
+    ExpiryData ed(202612, "cu");
+    ASSERT_EQ(ed.getMinStrikesForSynthetic(), 1);
+    std::cout << "  PASS" << std::endl;
+}
+
+// P0-② + P1-⑦: (a) the global main-month code must NOT be routed into
+// far-month expiries whose own month differs (the ~97%-weight future-leg
+// pollution); (b) the grid-level m_underlyingPrice must follow the front
+// month only, not the last-tick-won mixture of both months.
+void test_p0_forward_month_routing() {
+    std::cout << "=== test_p0_forward_month_routing ===" << std::endl;
+    OptionGrid::TickDataRef opt;
+    opt.price = 100; opt.bid = 99; opt.ask = 101;
+
+    // global underlying = MAIN month 2607; two UNCONFIGURED expiries created
+    // by option ticks fall back to the global code (no own registration).
+    auto grid = std::make_shared<OptionGrid>("cu", "SHFE.cu.2607", nullptr, nullptr);
+    grid->onTick("SHFE.cu2607.C.100000", opt);   // creates 202607
+    grid->onTick("SHFE.cu2608.C.100000", opt);   // creates 202608
+    auto ed7 = grid->getExpiryData(202607);
+    auto ed8 = grid->getExpiryData(202608);
+    ASSERT_TRUE(ed7 != nullptr && ed8 != nullptr);
+    ASSERT_TRUE(!grid->hasExpiryOwnUnderlying(202607));
+    ASSERT_TRUE(!grid->hasExpiryOwnUnderlying(202608));
+
+    // main-month futures tick: 202607 matches its month → routed;
+    // 202608 is a different month → NOT routed (pre-fix: both got it).
+    OptionGrid::TickDataRef f7; f7.price = 71000; f7.bid = 70990; f7.ask = 71010;
+    grid->onTick("SHFE.cu.2607", f7);
+    ASSERT_TRUE(ed7->isUnderlyingPriceValid());
+    ASSERT_TRUE(std::fabs(ed7->getFutureMid() - 71000) < 1e-9);
+    ASSERT_TRUE(!ed8->isUnderlyingPriceValid());
+    ASSERT_TRUE(ed8->getFutureMid() == 0);
+
+    // grid-level price: front month (202607) → main tick moves it
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 71000) < 1e-9);
+
+    // far-month futures tick: NOT routed anywhere (P0-②) — the far expiry's
+    // month doesn't match the global code, so it stays parity-only and the
+    // main-month code never touches its futures leg (pre-fix: it did).
+    OptionGrid::TickDataRef f8; f8.price = 70000; f8.bid = 69990; f8.ask = 70010;
+    grid->onTick("SHFE.cu.2608", f8);
+    ASSERT_TRUE(!ed8->isUnderlyingPriceValid());
+    ASSERT_TRUE(ed8->getFutureMid() == 0);
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 71000) < 1e-9);  // P1-⑦
+
+    // front month still moves the grid price after a far-month tick
+    f7.price = 71010;
+    grid->onTick("SHFE.cu.2607", f7);
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 71010) < 1e-9);
+    std::cout << "  PASS" << std::endl;
+}
+
+// P0-③: outside the fitted strike window the GVV curve must be FLAT at the
+// window edge, not parametrically extrapolated (observed wing theos at
+// +1503% / −99% of mid against a market ATM IV of ~0.20).
+void test_p3_wing_flat_extrapolation() {
+    std::cout << "=== test_p3_wing_flat_extrapolation ===" << std::endl;
+    GvvVolCurve curve;
+    curve.setATMForward(100000.0);
+    curve.setATMVol(0.20);
+    curve.setMaturity(0.25);
+    curve.setInitialized(true);
+    // fitted window = strikes 99000..101000 on F=100000 (as fit() records it)
+    curve.setFitWindow(std::log(0.99), std::log(1.01));
+
+    // far outside the window: flat at the window-edge value
+    const double edgeLo = curve.eval(std::log(0.99));
+    const double edgeHi = curve.eval(std::log(1.01));
+    ASSERT_TRUE(std::fabs(curve.eval(std::log(0.95)) - edgeLo) < 1e-12);  // K=95000
+    ASSERT_TRUE(std::fabs(curve.eval(std::log(1.05)) - edgeHi) < 1e-12);  // K=105000
+    // in-window point passes through unchanged
+    ASSERT_TRUE(std::fabs(curve.eval(std::log(1.005)) - curve.eval(std::log(1.005))) < 1e-12);
+    std::cout << "  PASS" << std::endl;
+}
+
+// P1-④: after the first accepted fit the ATM anchor must re-anchor toward
+// the fresh median market IV, capped at atm_reanchor_max_step per period.
+void test_p4_atm_reanchor_cap() {
+    std::cout << "=== test_p4_atm_reanchor_cap ===" << std::endl;
+    auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+    wt_option::OptionPricer2Config cfg;
+    cfg.atm_reanchor_period = 100.0;    // short period for the test
+    cfg.atm_reanchor_max_step = 0.05;
+    wt_option::OptionPricer2 pricer(cfg, grid.get(), risk.get());
+
+    auto reg = [&](const char* code, double bid, double ask) {
+        OptionGrid::TickDataRef t;
+        t.bid = bid; t.ask = ask; t.price = (bid + ask) * 0.5;
+        t.updateTime = 1000;
+        grid->onTick(code, t);
+    };
+    reg("CFFEX.000300", 4199, 4201);
+    reg("CFFEX.IO2606.C.4100", 150, 160);
+    reg("CFFEX.IO2606.P.4100", 140, 150);
+    reg("CFFEX.IO2606.C.4200", 100, 110);
+    reg("CFFEX.IO2606.P.4200",  95, 105);
+    reg("CFFEX.IO2606.C.4300",  70,  80);
+    reg("CFFEX.IO2606.P.4300",  65,  75);
+
+    auto ed = grid->getExpiryData(202606);
+    ASSERT_TRUE(ed != nullptr);
+    ed->updateDaysToExpiration(20260603, 20260619);
+    ed->setForward(4200.0);
+    ed->setForwardReady(true);
+
+    auto setIv = [&](const char* code, double iv) {
+        grid->get(code)->values(0).setImpliedVol(iv);
+    };
+    setIv("CFFEX.IO2606.C.4100", 0.20); setIv("CFFEX.IO2606.P.4100", 0.21);
+    setIv("CFFEX.IO2606.C.4200", 0.22); setIv("CFFEX.IO2606.P.4200", 0.22);
+    setIv("CFFEX.IO2606.C.4300", 0.24); setIv("CFFEX.IO2606.P.4300", 0.23);
+
+    // pre-fit bootstrap seeds the scale from the market IVs (curveVersion==0)
+    pricer.initValuesCompute(grid.get());
+
+    // first accepted fit pins the scale (bootstrap median = 0.22)
+    AsyncVolFitter fitter("gvv");
+    VolFitExpirySnapshot s;
+    s.expiry = 202606;
+    s.forward = pricer.getATMForward(202606);
+    s.maturity = pricer.getMaturity(202606);
+    s.atmVol = pricer.getATMVol(202606);
+    s.version = 1;
+    for (double x : {-0.06, -0.03, 0.0, 0.03, 0.06})
+        s.points.push_back({x, 1.0});
+    ASSERT_TRUE(fitter.submit({s}));
+    for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(fitter.hasResult());
+    std::vector<uint32_t> published;
+    ASSERT_TRUE(fitter.tryPublish(pricer, &published));
+    const double fittedScale = pricer.getATMVol(202606);
+    ASSERT_TRUE(std::fabs(fittedScale - 0.22) < 1e-9);
+
+    // first compute after publish: anchor sighting only — no move yet
+    grid->setComputeTime(0.0);
+    pricer.initValuesCompute(grid.get());
+    ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - fittedScale) < 1e-12);
+
+    // market jumps to 0.40 across the board
+    setIv("CFFEX.IO2606.C.4100", 0.40); setIv("CFFEX.IO2606.P.4100", 0.40);
+    setIv("CFFEX.IO2606.C.4200", 0.40); setIv("CFFEX.IO2606.P.4200", 0.40);
+    setIv("CFFEX.IO2606.C.4300", 0.40); setIv("CFFEX.IO2606.P.4300", 0.40);
+
+    // before one full period: still frozen
+    grid->setComputeTime(50.0);
+    pricer.initValuesCompute(grid.get());
+    ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - fittedScale) < 1e-12);
+
+    // one period later: capped single step = 0.22 * 1.05 = 0.231
+    grid->setComputeTime(100.0);
+    pricer.initValuesCompute(grid.get());
+    ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - 0.22 * 1.05) < 1e-9);
+
+    // repeated periods converge to the market median
+    for (int i = 0; i < 30; ++i) {
+        grid->setComputeTime(100.0 + (i + 2) * 100.0);
+        pricer.initValuesCompute(grid.get());
+    }
+    ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - 0.40) < 1e-9);
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2275,6 +2458,10 @@ int main() {
     test_simul_combo_order();
     test_p0_1_disabled_cancels_hedge();
     test_p1_1_entrust_reject_clears_order();
+    test_p1_min_strikes_default();
+    test_p0_forward_month_routing();
+    test_p3_wing_flat_extrapolation();
+    test_p4_atm_reanchor_cap();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;
