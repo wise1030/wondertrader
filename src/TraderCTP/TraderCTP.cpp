@@ -19,6 +19,7 @@
 
 #include "../Share/decimal.h"
 #include "../Share/ModuleHelper.hpp"
+#include "../Share/CodeHelper.hpp"
 
 #include <boost/filesystem.hpp>
 
@@ -225,6 +226,26 @@ void TraderCTP::connect()
 				}
 
 				m_lastQryTime = TimeUtils::getLocalTimeNow();
+			}
+		}));
+	}
+
+	if (m_thrdPosQry == NULL)
+	{
+		// P1 (2026-11-18): periodic broker-position refresh. The framework
+		// queries positions only once at login (TraderAdapter::onLoginResult),
+		// leaving PositionGuard's broker snapshot to age out. Refresh every
+		// 30s so the breach gate's auto-re-enable (:138-142) has a snapshot
+		// source; the stale gate itself is disabled (staleFreezeSec=0), as
+		// td-disconnect is already covered by channel_lost -> Disabled.
+		// The 1/s query throttle (m_lastQryTime) absorbs this comfortably.
+		m_thrdPosQry.reset(new StdThread([this](){
+			while (!m_bStopped)
+			{
+				std::this_thread::sleep_for(std::chrono::seconds(30));
+				if (m_bStopped) break;
+				if (m_wrapperState == WS_ALLREADY && m_pUserAPI != NULL)
+					queryPositions();
 			}
 		}));
 	}
@@ -466,8 +487,32 @@ int TraderCTP::quoteInsert(WTSEntrust* bidEntrust, WTSEntrust* askEntrust)
 	wt_strcpy(req.BrokerID, m_strBroker.c_str(), m_strBroker.size());
 	wt_strcpy(req.InvestorID, m_strUser.c_str(), m_strUser.size());
 
-	wt_strcpy(req.InstrumentID, bidEntrust->getCode());
-	wt_strcpy(req.ExchangeID, bidEntrust->getExchg());
+	// P0 (2026-11-18): the paired-quote caller passes the WT stdCode
+	// ("SHFE.cu2701.P.104000") verbatim — not a valid CTP InstrumentID
+	// (rejected with 找不到合约(16)). Normalize through the base data
+	// manager, falling back to CodeHelper extraction on a miss — the same
+	// normalization doEntrust applies via TraderAdapter::getContract.
+	const char* rawCode = bidEntrust->getCode();
+	std::string nativeCode(rawCode);
+	std::string nativeExchg = bidEntrust->getExchg();
+	WTSContractInfo* quoteCt = m_bdMgr ? m_bdMgr->getContract(rawCode, bidEntrust->getExchg()) : NULL;
+	if (quoteCt != NULL)
+	{
+		nativeCode = quoteCt->getCode();
+		nativeExchg = quoteCt->getExchg();
+	}
+	else
+	{
+		CodeHelper::CodeInfo ci = CodeHelper::extractStdCode(rawCode, NULL);
+		if (strlen(ci._code) > 0)
+		{
+			nativeCode = ci._code;
+			nativeExchg = ci._exchg;
+		}
+	}
+
+	wt_strcpy(req.InstrumentID, nativeCode.c_str());
+	wt_strcpy(req.ExchangeID, nativeExchg.c_str());
 
 	if (strlen(bidEntrust->getUserTag()) == 0)
 	{

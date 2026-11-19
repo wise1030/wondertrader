@@ -228,6 +228,7 @@ protected:
 
 	bool					m_bStopped;
 	StdThreadPtr			m_thrdWorker;
+	StdThreadPtr			m_thrdPosQry;
 
 	std::string		m_strModule;
 	DllHandle		m_hInstCTP;
