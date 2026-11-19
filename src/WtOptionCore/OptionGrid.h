@@ -131,8 +131,9 @@ public:
     }
     /// P0-4: register forward-calculation config for an expiry that may not
     /// exist yet; applied when the ExpiryData is lazily created.
-    void setExpiryForwardConfig(uint32_t expiry, bool includeFuture, int minStrikes) {
-        m_expiryFwdCfg[expiry] = {includeFuture, minStrikes};
+    void setExpiryForwardConfig(uint32_t expiry, bool includeFuture, int minStrikes,
+                                const std::map<int32_t, double>& goodPointsTable = {}) {
+        m_expiryFwdCfg[expiry] = {includeFuture, minStrikes, goodPointsTable};
     }
     bool isExpiryUnderlying(const std::string& code) const {
         return m_expiryUnderlyingMap.find(code) != m_expiryUnderlyingMap.end();
@@ -254,8 +255,10 @@ private:
 
     // Per-expiry underlying: contract code -> list of expiries that use it as pricing underlying
     std::unordered_map<std::string, std::vector<uint32_t>> m_expiryUnderlyingMap;
-    // P0-4: pending per-expiry forward config {includeFuture, minStrikes}
-    std::map<uint32_t, std::pair<bool, int>> m_expiryFwdCfg;
+    // P0-4: pending per-expiry forward config {includeFuture, minStrikes};
+    // minStrikes < 0 links the gate to the vol-fit good-points table (third).
+    struct FwdCfg { bool includeFuture; int minStrikes; std::map<int32_t, double> goodPointsTable; };
+    std::map<uint32_t, FwdCfg> m_expiryFwdCfg;
     // P2/G3: expiries with an exclusive per-expiry pricing underlying
     std::map<uint32_t, std::string> m_expiryOwnUnderlying;
 

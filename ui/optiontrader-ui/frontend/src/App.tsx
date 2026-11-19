@@ -27,10 +27,12 @@ const Shell: React.FC = () => {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
   }, []);
 
-  // default selection: front month
+  // default selection: first QUOTING-enabled expiry (a disabled series would
+  // show an empty grid); fall back to the front month.
   useEffect(() => {
     if (selectedExpiry === null && snapshot && snapshot.expiries.length > 0) {
-      setSelectedExpiry(snapshot.expiries[0].expiry);
+      const first = snapshot.expiries.find(e => e.quoting !== false) ?? snapshot.expiries[0];
+      setSelectedExpiry(first.expiry);
     }
   }, [snapshot, selectedExpiry]);
 

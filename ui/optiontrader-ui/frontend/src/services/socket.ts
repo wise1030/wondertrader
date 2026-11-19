@@ -12,6 +12,12 @@ export class SocketService {
     private reconnectInterval = 3000;
     private shouldReconnect = true;
     private isConnecting = false;
+    // P1 fix (2026-11-18): the module-level singleton connects in its
+    // constructor, BEFORE React's useEffect subscribes onStatus — the
+    // 'connecting'/'connected' events were dropped and the UI stayed on the
+    // initial 'disconnected' forever (while data flowed fine). Keep the
+    // latest status and replay it to every new subscriber.
+    private currentStatus: 'disconnected' | 'connecting' | 'connected' = 'disconnected';
 
     constructor() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -26,35 +32,58 @@ export class SocketService {
         if (this.isConnecting || (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING))) return;
         this.shouldReconnect = true;
         this.isConnecting = true;
-        this.notifyStatus('connecting');
+        this.setStatus('connecting');
         try {
             const ws = new WebSocket(this.url);
             this.ws = ws;
+            // P1 (2026-11-19): if the handshake stalls (silent packet drop),
+            // isConnecting blocks every retry and the UI sits on 'connecting'
+            // for the browser's long internal timeout. Force a reset at 10s.
+            const connectTimer = setTimeout(() => {
+                if (this.ws === ws && ws.readyState === WebSocket.CONNECTING) {
+                    try { ws.close(); } catch { /* ignore */ }
+                    this.isConnecting = false;
+                    this.ws = null;
+                    this.setStatus('disconnected');
+                    if (this.shouldReconnect) setTimeout(() => this.connect(), this.reconnectInterval);
+                }
+            }, 10000);
             ws.onopen = () => {
+                clearTimeout(connectTimer);
                 if (this.ws !== ws) { ws.close(); return; }
                 this.isConnecting = false;
-                this.notifyStatus('connected');
+                this.setStatus('connected');
             };
             ws.onmessage = (event) => {
                 if (this.ws !== ws) return;
+                // P1 keepalive: answer middleware application pings so the
+                // uplink packets keep the NAT/firewall session alive. Match
+                // by parsed type — json.dumps output has spaces
+                // ('{"type": "ping", ...}') that a raw substring misses.
                 try {
-                    this.notifyFrame(JSON.parse(event.data));
+                    const frame = JSON.parse(event.data);
+                    if (frame && frame.type === 'ping') {
+                        this.send(JSON.stringify({ type: 'pong' }));
+                        return;
+                    }
+                    this.notifyFrame(frame);
                 } catch (e) {
                     console.error('[SocketService] bad frame:', e, event.data);
                 }
             };
             ws.onclose = () => {
+                clearTimeout(connectTimer);
                 if (this.ws !== ws) return;
                 this.isConnecting = false;
                 this.ws = null;
-                this.notifyStatus('disconnected');
+                this.setStatus('disconnected');
                 if (this.shouldReconnect) setTimeout(() => this.connect(), this.reconnectInterval);
             };
             ws.onerror = () => { /* onclose handles state */ };
         } catch (e) {
             this.isConnecting = false;
             this.ws = null;
-            this.notifyStatus('disconnected');
+            this.setStatus('disconnected');
             if (this.shouldReconnect) setTimeout(() => this.connect(), this.reconnectInterval);
         }
     }
@@ -65,8 +94,25 @@ export class SocketService {
     }
 
     onFrame(h: FrameHandler) { this.frameHandlers.add(h); return () => { this.frameHandlers.delete(h); }; }
-    onStatus(h: StatusHandler) { this.statusHandlers.add(h); return () => { this.statusHandlers.delete(h); }; }
+    // Subscribe AND replay the latest status — closes the constructor-race.
+    onStatus(h: StatusHandler) {
+        this.statusHandlers.add(h);
+        h(this.currentStatus);
+        return () => { this.statusHandlers.delete(h); };
+    }
 
+    private setStatus(s: 'disconnected' | 'connecting' | 'connected') {
+        if (s === this.currentStatus) return;   // diag: report transitions only
+        this.currentStatus = s;
+        this.notifyStatus(s);
+        // Diagnostic uplink: report connection-state transitions to the
+        // middleware log so support can see the browser-side state machine
+        // without asking the user for screenshots.
+        try {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN)
+                this.ws.send(JSON.stringify({ type: 'conn_state', status: s, url: this.url }));
+        } catch { /* never let diagnostics break the socket */ }
+    }
     private notifyFrame(f: any) { this.frameHandlers.forEach(h => h(f)); }
     private notifyStatus(s: 'disconnected' | 'connecting' | 'connected') { this.statusHandlers.forEach(h => h(s)); }
 }

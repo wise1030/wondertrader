@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useReducer, useRef, useCallback } from 'react';
 import { socketService } from '../services/socket';
+import { sound } from '../services/sound';
 import type { Snapshot, OrderView, FillView, AckEvent } from '../types';
 
 export interface MsgLog {
@@ -15,6 +16,8 @@ interface DataState {
     snapshotArrivalMs: number;   // local Date.now() at frame arrival — live-age base (H1)
     orders: Record<number, OrderView>;
     fills: FillView[];
+    flash: Record<string, number>;   // P1 batch-2: code -> Date.now() of latest fill (cell flash)
+    panicked: boolean;
     msgLogs: MsgLog[];
     lastSnapLogMs: number;      // snapshot-log throttle (design §7: no 1Hz flood)
     sid: string;
@@ -37,6 +40,8 @@ const initialState: DataState = {
     snapshotArrivalMs: 0,
     orders: {},
     fills: [],
+    flash: {},
+    panicked: false,
     msgLogs: [],
     lastSnapLogMs: 0,
     sid: '',
@@ -70,11 +75,14 @@ function reducer(state: DataState, a: Action): DataState {
             const stale = (a.snap.snapshotAgeMs ?? 0) > 3000;
             const doLog = !state.snapshot || stale
                 || a.arrivalMs - state.lastSnapLogMs >= 30000;
+            const panicked = !!a.snap?.state?.panicked;
+            if (panicked && !state.panicked) sound.panic();
             return {
                 ...state,
                 snapshot: a.snap,
                 lastSnapshotSeq: a.snap.seq,
                 snapshotArrivalMs: a.arrivalMs,
+                panicked,
                 orders,
                 lastSnapLogMs: doLog ? a.arrivalMs : state.lastSnapLogMs,
                 ...(doLog ? log(state, 'snapshot',
@@ -98,7 +106,9 @@ function reducer(state: DataState, a: Action): DataState {
             const ev = a.ev;
             if (ev.seq < state.lastSnapshotSeq) return state;
             const fills = [...state.fills, { code: ev.code, buy: ev.buy, px: ev.px, qty: ev.qty, t: ev.ts / 1000 }];
-            return { ...state, fills: fills.slice(-MAX_FILLS) };
+            sound.trade();
+            return { ...state, fills: fills.slice(-MAX_FILLS),
+                     flash: { ...state.flash, [ev.code]: Date.now() } };
         }
         case 'REJECT': {
             // Same watermark discipline as ORDER/TRADE — a stale reject must
@@ -110,8 +120,19 @@ function reducer(state: DataState, a: Action): DataState {
         }
         case 'ACK':
             return { ...state, ...log(state, a.ev.ok ? 'ack' : 'error', `ack cmdSeq=${a.ev.cmdSeq} ok=${a.ev.ok}${a.ev.err ? ' err=' + a.ev.err : ''}`) };
-        case 'FILLS':
-            return { ...state, fills: a.items.slice(-MAX_FILLS), ...log(state, 'fills', `history ${a.items.length} fills`) };
+        case 'FILLS': {
+            // P1 fix (2026-11-19): history used to REPLACE live fills — a
+            // history frame arriving right after reconnect raced with fresh
+            // trade events and erased them. Merge by dedup key (t+code+px+buy).
+            const key = (f: FillView) => `${f.t}|${f.code}|${f.px}|${f.buy ? 1 : 0}`;
+            const seen = new Set(state.fills.map(key));
+            const merged = [...state.fills];
+            for (const f of a.items) {
+                if (!seen.has(key(f))) merged.push(f);
+            }
+            merged.sort((x, y) => (x.t ?? 0) - (y.t ?? 0));
+            return { ...state, fills: merged.slice(-MAX_FILLS), ...log(state, 'fills', `history merged ${a.items.length}`) };
+        }
         default:
             return state;
     }
@@ -133,8 +154,14 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const batch = pending.current;
         if (batch.length === 0) return;
         pending.current = [];
-        // Fold the batch manually to avoid one re-render per event.
-        dispatch(batch.length === 1 ? batch[0] : ((s: DataState) => batch.reduce(reducer, s)) as any);
+        // P1 fix (2026-11-19): useReducer's dispatch does NOT execute a
+        // function action like useState's updater — a function lands in the
+        // reducer's switch and falls through `default`, silently dropping
+        // the WHOLE batch. That swallowed the CONNECTION action whenever it
+        // queued behind hello/snapshot in the same 100ms window (every page
+        // load), leaving conn stuck at 'disconnected' while data flowed.
+        // Dispatch one by one; React 18 auto-batches a single re-render.
+        for (const a of batch) dispatch(a);
     }, []);
 
     useEffect(() => {

@@ -18,12 +18,17 @@ export const Ticket: React.FC<Props> = ({ buysell, leg, onClose, onNotify }) => 
 
   const submit = () => {
     if (readonly) { onNotify('readonly mode — order entry is gated', 'info'); return; }
+    // P1 fix: reject empty/NaN instead of shipping JSON null downstream.
+    const px = parseFloat(price);
+    const q = parseInt(qty, 10);
+    if (!Number.isFinite(px) || px <= 0) { onNotify('invalid price', 'error'); return; }
+    if (!Number.isInteger(q) || q <= 0) { onNotify('invalid qty', 'error'); return; }
     sendCommand(JSON.stringify({
       cmd: 'order', code: leg.code,
-      side: buysell, price: parseFloat(price), qty: parseInt(qty, 10),
+      side: buysell, price: px, qty: q,
       cmdSeq: Date.now() % 100000,
     }));
-    onNotify(`${buysell} ${qty} ${leg.code} @ ${price} sent`, 'info');
+    onNotify(`${buysell} ${q} ${leg.code} @ ${px} sent`, 'info');
     onClose();
   };
 

@@ -96,6 +96,7 @@ private:
 
 GvvVolCurve::GvvVolCurve(const GvvVolCurve::Config& c)
     : m_beta(c.beta)
+    , m_vegaWeighted(c.vega_weighted)
     , m_atmforward(NAN)
     , m_maturity(NAN)
     , m_atmvol(GVV_MINATMVOL)
@@ -304,6 +305,25 @@ double GvvVolCurve::fitWithAlpha(double alpha,
 
         double y_i = vi * vi;
         double w_i = std::exp(-m_beta * xi * xi / m_atmvol / m_atmvol / m_maturity);
+        // P1 (2026-11-19): vega weighting — vol^2-space residuals under-weight
+        // low-vol (wing/OTM) points by construction (y = v^2 spans ~6x across
+        // the smile). Multiplying by Black vega converts the objective to
+        // ~price-space residuals, which is what "theo inside the market
+        // bid/ask band" actually measures. vega is relative (common factors
+        // cancel in WLS), so no normalisation is needed.
+        if (m_vegaWeighted) {
+            const double sqT = std::sqrt(std::max(m_maturity, 1e-12));
+            const double d1 = (std::log(m_atmforward / stki) + 0.5 * vi * vi * m_maturity)
+                            / std::max(vi * sqT, 1e-12);
+            const double vega = m_atmforward * std::exp(-0.5 * d1 * d1)
+                              * 0.3989422804014327 /* 1/sqrt(2pi) */ * sqT;
+            // Relative to the ATM vega, compressed by sqrt: at |x|=0.4 the
+            // raw vega ratio collapses to ~1/2000 and the WLS loses effective
+            // points (kurt blows past its range). sqrt keeps price-space
+            // emphasis while retaining the wings.
+            const double vegaRef = m_atmforward * 0.3989422804014327 * sqT;
+            w_i *= std::sqrt(std::max(vega, 1e-12) / std::max(vegaRef, 1e-12));
+        }
 
         // X row = [1, temp, temp²], weighted by w_i
         wls.add(temp, temp * temp, y_i, w_i);

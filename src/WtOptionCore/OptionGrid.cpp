@@ -498,8 +498,9 @@ ExpiryDataPtr OptionGrid::__getOrCreateExpiryData(uint32_t expiry) {
     {
         auto cfgIt = m_expiryFwdCfg.find(expiry);
         if (cfgIt != m_expiryFwdCfg.end()) {
-            ed->setIncludeFuture(cfgIt->second.first);
-            ed->setMinStrikesForSynthetic(cfgIt->second.second);
+            ed->setIncludeFuture(cfgIt->second.includeFuture);
+            ed->setMinStrikesForSynthetic(cfgIt->second.minStrikes);
+            ed->setGoodPointsTable(cfgIt->second.goodPointsTable);
         }
     }
 
@@ -842,7 +843,7 @@ double OptionGrid::__getBestSyntheticPrice(const ExpiryDataPtr& ed) {
     }
 
     // If enough valid contributors, use weighted average forward
-    if (validCount >= ed->getMinStrikesForSynthetic() && totalWgt > 1e-12) {
+    if (validCount >= ed->effectiveMinStrikes() && totalWgt > 1e-12) {
         double synFwd = sum / totalWgt;
         ed->setSyntheticForward(synFwd, underlyingPrice, time);
         ed->setForward(synFwd);

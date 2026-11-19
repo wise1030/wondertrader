@@ -170,4 +170,25 @@ void ExpiryData::setSyntheticForward(double synFwd, double underlyingPrice, doub
     }
 }
 
+// P1 (2026-11-18): synthetic-forward gate linked to the vol-fit good-points
+// gate. Same {days -> points} interpolation as
+// HftOptionStrategy::volFitGoodPointsNeeded — one shared quality parameter.
+int ExpiryData::effectiveMinStrikes() const
+{
+    if (m_minStrikesForSynthetic >= 0)
+        return m_minStrikesForSynthetic;
+    const int32_t days = daysToExpiry();
+    if (m_goodPointsTable.empty())
+        return 15;
+    auto it = m_goodPointsTable.lower_bound(days);
+    if (it == m_goodPointsTable.end())
+        return static_cast<int>(m_goodPointsTable.rbegin()->second);
+    if (it == m_goodPointsTable.begin())
+        return static_cast<int>(it->second);
+    auto lo = std::prev(it);
+    const double y = lo->second + (it->second - lo->second)
+                   * (days - lo->first) / double(it->first - lo->first);
+    return static_cast<int>(y);
+}
+
 } // namespace wt_option

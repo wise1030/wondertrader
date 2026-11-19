@@ -43,6 +43,8 @@ void UiSnapshotBuilder::buildLeg(const OptionData& od, double atmVol, UiLegView&
     const double delta = od.greeks().delta();
     if (delta != 0.0) { out.hasDelta = true; out.delta = delta; }
 
+    out.pos = od.getPosition();
+
     const double theoVol = od.activeValues().theoVol();
     if (theoVol > 0.0 && atmVol > 0.0) {
         out.hasVshift = true;
@@ -57,6 +59,26 @@ void UiSnapshotBuilder::buildLeg(const OptionData& od, double atmVol, UiLegView&
         out.qmode = static_cast<int32_t>(otd->getQuoteMode());
         auto pt = otd->getPnlTracker();
         if (pt) { out.hasPnl = true; out.pnl = pt->getCurPnl(); }
+
+        // P1 batch-2: our resting quote + queue position (quantbox bqpos/aqpos
+        // semantics, price-gap approximation — no book depth needed).
+        const MultiMarket& our = otd->multiMarket();
+        const double ourBid = our.getBestBid().px();
+        const double ourAsk = our.getBestAsk().px();
+        double tick = od.getTickSize();
+        if (tick <= 0) tick = 1.0;
+        if (ourBid > 0) {
+            out.hasOb = true; out.obid = ourBid;
+            if (mkt.ask > 0 && ourBid >= mkt.ask - tick * 0.5) out.bqp = -1;   // crossing
+            else if (mkt.bid > 0 && ourBid >= mkt.bid - tick * 0.5) out.bqp = 0; // at best
+            else if (mkt.bid > 0) out.bqp = (int32_t)std::ceil((mkt.bid - ourBid) / tick);
+        }
+        if (ourAsk > 0) {
+            out.hasOb = true; out.oask = ourAsk;
+            if (mkt.bid > 0 && ourAsk <= mkt.bid + tick * 0.5) out.aqp = -1;   // crossing
+            else if (mkt.ask > 0 && ourAsk <= mkt.ask + tick * 0.5) out.aqp = 0; // at best
+            else if (mkt.ask > 0) out.aqp = (int32_t)std::ceil((ourAsk - mkt.ask) / tick);
+        }
     }
 }
 
@@ -208,6 +230,10 @@ void writeLeg(JsonWriter& w, const UiLegView& leg)
     w.nullable("vshift", leg.hasVshift, leg.vshift);
     w.key("pos"); w.numOrNull(leg.pos);
     w.key("qmode"); if (leg.hasQmode) w.Int(leg.qmode); else w.Null();
+    if (leg.hasOb) { w.key("obid"); w.numOrNull(leg.obid); w.key("oask"); w.numOrNull(leg.oask); }
+    else { w.key("obid"); w.Null(); w.key("oask"); w.Null(); }
+    w.key("bqp"); w.Int(leg.bqp);
+    w.key("aqp"); w.Int(leg.aqp);
     w.nullable("pnl", leg.hasPnl, leg.pnl);
     w.EndObject();
 }
@@ -292,6 +318,7 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     for (const auto& e : v.expiries) {
         w.StartObject();
         w.key("expiry"); w.Uint(e.expiry);
+        w.key("quoting"); w.Bool(e.quoting);
         w.numOrNull("fwd", e.fwd);
         w.key("fwdReady"); w.Bool(e.fwdReady);
         w.key("fitReady"); w.Bool(e.fitReady);

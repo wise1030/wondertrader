@@ -33,10 +33,20 @@ struct UiLegView
     bool hasIv = false;     double iv = 0;
     bool hasDelta = false;  double delta = 0;
     bool hasVshift = false; double vshift = 0;   // theoVol - atmVol
+
     bool hasPnl = false;    double pnl = 0;
 
     double pos = 0;                          // net position (offsets applied)
     bool hasQmode = false; int32_t qmode = 0;
+
+    // P1 (2026-11-19) batch-2: our resting quote + queue position, ported
+    // from quantbox optiontrader bqpos/aqpos semantics:
+    //   qp == 0   our price is at the market best (or better)
+    //   qp > 0    ticks behind the market best (price-gap approximation)
+    //   qp < 0    crossing the spread (our bid >= market ask / vice versa)
+    //   9999      no resting quote on this side
+    bool hasOb = false;   double obid = 0, oask = 0;
+    int32_t bqp = 9999, aqp = 9999;
 };
 
 struct UiStrikeView
@@ -51,6 +61,10 @@ struct UiStrikeView
 struct UiExpiryView
 {
     uint32_t expiry = 0;
+
+    // P1 (2026-11-18): quoting enable from the expiry config — lets the UI
+    // grey out disabled series instead of showing them green.
+    bool quoting = false;
 
     double fwd = 0;
     bool fwdReady = false;

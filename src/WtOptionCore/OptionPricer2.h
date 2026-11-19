@@ -125,12 +125,20 @@ public:
     /// (GVV parametric smile × PowerVolCurve empirical wings), making
     /// volcurve_weight meaningful. Recommended: "power".
     /// Also selectable: "linear" | "constant" (P1-b wiring).
-    std::string curve2_type          = "gvv";
+    // P1 (2026-11-19): QB default is LinearVolCurve::Config
+    // (OptionPricer2Params.xml:19). Two GVV curves fit on the SAME points are
+    // numerically identical, making volcurve_weight a no-op (WT issue-log
+    // 2026-07-17). curve2 = linear gives the blend a real second curve.
+    std::string curve2_type          = "linear";
     /// P1-b: main vol-curve type. "gvv" (default) | "linear" | "constant".
     /// linear fits σ-multiplier linearly in K−F (robust for illiquid
     /// expiries where GVV's >=4-point fit fails); constant pins the
     /// σ-multiplier to 1 (cold-start for newly listed expiries).
     std::string volcurve_type        = "gvv";
+    // P1 (2026-11-18): WLS wing-weight decay (w = exp(-beta*x^2/(atmvol^2*T))).
+    // 0 = equal weights (legacy; deep-wing noise dominates the fit); ~1 lets
+    // the ATM neighbourhood drive skew and damps wings to ~0.4% at |x|=15%.
+    double      volcurve_beta        = 0.0;
     /// P1-b: when the main curve fit fails, walk the fallback chain
     /// power → linear → constant(1.0) so pricing never dies on a bad
     /// snapshot.  Previous (good) curve still wins by curve versioning.
@@ -152,7 +160,12 @@ public:
     double  fast_full_reprice_forward_step = 0.0; // 0 = disabled
     int32_t expire_greeks_window_bdays = 0;
     double  bid_offer_vol_spread_cap = 0.1;  // max IV bid-ask spread (10 vol points), matches quantbox default
-    double  volcurve_weight          = 0.0;
+    // P1 (2026-11-19): 1.0 = price on the GVV curve; the linear curve2 is
+    // the fallback/blend leg. (Was 0.0 which — with the old curve2="gvv" —
+    // happened to price on the numerically-identical second GVV; with the
+    // linear default that would have silently degraded pricing to linear
+    // interpolation.)
+    double  volcurve_weight          = 1.0;
 
     static const char* name() { return "BlackPricer"; }
 };
@@ -161,7 +174,8 @@ using OptionPricer2ConfigPtr = std::shared_ptr<OptionPricer2Config>;
 /// P1-b: curve factory shared by OptionPricer2 (initial curves) and
 /// AsyncVolFitter (fitted curves).  Unknown type falls back to GVV.
 /// powerParams selects the PowerVolCurve parameter set (SPOTVOL/RHO/...).
-IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams = 0);
+IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams = 0,
+                                  double gvvBeta = 0.0);
 
 // ----------------------------------------------------------------------------
 // OptionPricer2

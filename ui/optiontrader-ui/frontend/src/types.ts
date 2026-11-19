@@ -3,6 +3,12 @@
 
 export interface LegView {
   code: string;
+  // P1 batch-2: our resting quote + queue position (0=best, >0=ticks behind,
+  // -1=crossing, 9999=none) — bqp for our bid, aqp for our ask.
+  obid?: number | null;
+  oask?: number | null;
+  bqp?: number;
+  aqp?: number;
   bid: number | null;
   bidSz: number | null;
   ask: number | null;
@@ -37,6 +43,7 @@ export interface UndView {
 
 export interface ExpiryView {
   expiry: number;
+  quoting?: boolean;   // false = quoting disabled (config enable=false) — grey out
   fwd: number | null;
   fwdReady: boolean;
   fitReady: boolean;
@@ -131,6 +138,7 @@ export interface Snapshot {
     wgt_deltaflow: number;
     wgt_atmsig: number;
     wgt_rollema: number;
+    wgt_exp_ddelta?: number;
     max_tps: number;
   } | null;
 }

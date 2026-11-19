@@ -11,6 +11,7 @@
 
 #include "optioncoretypes.h"
 #include "OptionGreeks.h"
+#include <map>
 #include <memory>
 #include <string>
 #include <set>
@@ -84,6 +85,12 @@ public:
     // only needs 1 valid contributor (option pair OR future) to compute forward)
     void setMinStrikesForSynthetic(int n) { m_minStrikesForSynthetic = n; }
     int getMinStrikesForSynthetic() const { return m_minStrikesForSynthetic; }
+    /// P1 (2026-11-18): when m_minStrikesForSynthetic < 0 the synthetic-forward
+    /// gate LINKS to the vol-fit good-points gate (same {days: points} table),
+    /// so a 1-point forward can no longer race ahead of a 15-point fit and
+    /// price on the degenerate seed curve.
+    void setGoodPointsTable(const std::map<int32_t, double>& t) { m_goodPointsTable = t; }
+    int effectiveMinStrikes() const;
 
     // Include future mid in synthetic forward (quantbox design: SHFE/DCE/CZCE/INE = true)
     void setIncludeFuture(bool b) { m_includeFuture = b; }
@@ -223,7 +230,9 @@ private:
     // P1-c: per-strike parity synthetic forwards {strike, synForward}
     std::vector<std::pair<double, double>> m_synFwdPoints;
     EMAFilter m_emaForwardSpread;    // forward spread EMA (signal)
-    int m_minStrikesForSynthetic = 1; // min valid contributors (1 = any single source, matches quantbox)
+    int m_minStrikesForSynthetic = 1; // min valid contributors (1 = any single source, matches quantbox);
+                                      // < 0 links to the vol-fit good-points table (P1 2026-11-18)
+    std::map<int32_t, double> m_goodPointsTable;  // {days -> min fit points}, empty = default 15
 
     // Future market data for synthetic forward (quantbox: future mid participates in weighted avg)
     bool m_includeFuture = true;       // include future mid in forward calculation (default true for commodity options)

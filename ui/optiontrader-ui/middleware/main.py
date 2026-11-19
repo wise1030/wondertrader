@@ -73,10 +73,33 @@ async def lifespan(app: FastAPI):
     _loop = asyncio.get_running_loop()
     upstream = WtOptionClient(BRIDGE_HOST, BRIDGE_PORT, _broadcast)
     task = asyncio.create_task(upstream.connect())
+    # P1 (2026-11-18): application-layer keepalive. Public-path NAT/firewalls
+    # expire the WS session on downlink-only traffic (observed irregular
+    # drops every ~20s-2.5min on the browser path while the loopback upstream
+    # stayed up). A periodic ping that the frontend answers with a pong keeps
+    # uplink packets flowing and the middlebox session alive.
+    async def _ping_loop():
+        while True:
+            await asyncio.sleep(25)
+            if connected_websockets:
+                await _push_to_all({"type": "ping", "ts": int(time.time() * 1000)})
+    ping_task = asyncio.create_task(_ping_loop())
     logger.info(f"Upstream UiBridge: {BRIDGE_HOST}:{BRIDGE_PORT}, listening on {LISTEN_HOST}:{LISTEN_PORT}")
     yield
+    ping_task.cancel()
     await upstream.stop()
     task.cancel()
+
+
+async def _push_to_all(frame: dict):
+    dead = []
+    for ws in list(connected_websockets):
+        try:
+            await ws.send_json(frame)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        connected_websockets.discard(ws)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -139,6 +162,14 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
+            # P1 keepalive: swallow the frontend's pong replies instead of
+            # forwarding them upstream as commands.
+            if data.strip() == '{"type":"pong"}':
+                continue
+            # Diagnostic: browser-side connection-state transitions.
+            if '"conn_state"' in data:
+                logger.info(f"BrowserConn {websocket.client}: {data.strip()[:120]}")
+                continue
             if upstream:
                 await upstream.send(data)
     except WebSocketDisconnect:
@@ -151,6 +182,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
 frontend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "dist")
 if os.path.exists(frontend_path):
+    from fastapi.responses import FileResponse
+
+    # P1 (2026-11-18): StaticFiles sends NO Cache-Control, so browsers keep
+    # the html on a HEURISTIC cache and a plain refresh can silently reuse an
+    # OLD index.html (pointing at a stale hashed JS bundle — the conn-stuck
+    # bug lived on for days because of this). no-cache makes the browser
+    # revalidate the shell every time; the hashed /assets files stay
+    # long-cache safe (content change => new hash => new URL).
+    @app.get("/", include_in_schema=False)
+    async def index_no_cache():
+        resp = FileResponse(os.path.join(frontend_path, "index.html"))
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="static")
 else:
     logger.warning(f"frontend/dist not found at {frontend_path} — API-only mode")

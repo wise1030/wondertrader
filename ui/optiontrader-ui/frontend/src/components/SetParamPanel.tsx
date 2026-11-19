@@ -18,6 +18,7 @@ const ROWS: Row[] = [
   { key: 'wgt_deltaflow', label: 'wgt_deltaflow', get: p => p.wgt_deltaflow, min: 0, max: 10 },
   { key: 'wgt_atmsig', label: 'wgt_atmsig', get: p => p.wgt_atmsig, min: 0, max: 10 },
   { key: 'wgt_rollema', label: 'wgt_rollema', get: p => p.wgt_rollema, min: 0, max: 10 },
+  { key: 'wgt_exp_ddelta', label: 'wgt_exp_ddelta', get: p => p.wgt_exp_ddelta ?? 0, min: 0, max: 10 },
   { key: 'max_tps', label: 'max_tps', get: p => p.max_tps, min: 1, max: 10000 },
 ];
 
@@ -26,11 +27,27 @@ export const SetParamPanel: React.FC = () => {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   const params = snapshot?.params ?? null;
-  useEffect(() => setDrafts({}), [params?.wgt_vegaflow, params?.wgt_frontfut_skew,
-    params?.wgt_deltaflow, params?.wgt_atmsig, params?.wgt_rollema, params?.max_tps]);
+  // P1 fix (2026-11-19): the per-frame params echo used to wipe ALL drafts on
+  // every snapshot — typing in any row was interrupted and unrelated rows
+  // lost their edits. Drafts now survive echoes; committing clears only the
+  // committed row. A draft whose value matches the echoed param is also
+  // dropped (external change, e.g. another operator).
+  useEffect(() => {
+    setDrafts(d => {
+      const next: Record<string, string> = { ...d };
+      let dirty = false;
+      for (const r of ROWS) {
+        const v = params ? String(r.get(params)) : null;
+        if (v != null && d[r.key] === v) { delete next[r.key]; dirty = true; }
+      }
+      return dirty ? next : d;
+    });
+  }, [params]);
 
-  const apply = (key: string, value: number) =>
+  const apply = (key: string, value: number) => {
     sendCommand(JSON.stringify({ cmd: 'set_param', key, value, cmdSeq: Date.now() % 100000 }));
+    setDrafts(d => { const n = { ...d }; delete n[key]; return n; });
+  };
 
   return (
     <div className="flex items-center gap-3 flex-wrap text-[11px]">

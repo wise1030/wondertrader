@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, memo } from 'react';
 import { useData } from '../context/DataContext';
+import { useNowMs } from '../hooks/useNow';
 import type { LegView, StrikeView } from '../types';
 import { Ticket } from './Ticket';
 
@@ -18,6 +19,14 @@ interface GridRowProps {
   isCurrent: boolean;
   onRowClick: (idx: number) => void;
   readonly: boolean;
+  // P1 (2026-11-19): live orders keyed by stdCode, aggregated per side and
+  // rendered as TWO separate columns (ordBid = our resting bids, ordAsk =
+  // our resting asks) so both sides of the market-making quote are visible
+  // at a glance.
+  ordersByCode: Record<string, { B: string; S: string }>;
+  // P1 batch-2: latest-fill flash (code -> ms) + ticking clock for the fade
+  flash: Record<string, number>;
+  nowMs: number;
 }
 
 const fmtN = (v: number | null | undefined, d = 2) => (v == null ? '-' : v.toFixed(d));
@@ -32,13 +41,32 @@ const qmodeClass = (q: number | null): string => {
   return '';
 };
 
+// P1 batch-2: queue-position background, ported from quantbox OptionGridModel
+// quoteBackgroundFormatter: 0 = at best (lightest), >0 = ticks behind (light
+// tint), <0 = crossing (solid), 9999 = no quote (none).
+const qpBg = (qp: number | undefined, side: 'B' | 'S'): string => {
+    if (qp == null || qp >= 9999) return '';
+    if (qp < 0) return side === 'B' ? 'bg-green-500 text-white' : 'bg-red-500 text-white';
+    if (qp === 0) return side === 'B' ? 'bg-green-100' : 'bg-red-100';
+    return side === 'B' ? 'bg-green-200' : 'bg-red-200';
+};
+
+// sqrt-t fade over 3s (quantbox FadeTimer semantics)
+const flashOpacity = (flashMs: number | undefined, nowMs: number): number | null => {
+    if (!flashMs) return null;
+    const e = nowMs - flashMs;
+    if (e < 0 || e > 3000) return null;
+    return 1.0 - Math.sqrt(e / 3000);
+};
+
 const posClass = (pos: number | null | undefined): string => {
   if (!pos) return 'text-gray-700';
   return pos > 0 ? 'text-green-600 font-bold' : 'text-red-600 font-bold';
 };
 
 const MemoizedGridRow = memo(({
-  row, idx, vshiftVisible, onCellClick, onOpenTicket, isCurrent, onRowClick, readonly
+  row, idx, vshiftVisible, onCellClick, onOpenTicket, isCurrent, onRowClick, readonly, ordersByCode,
+  flash, nowMs
 }: GridRowProps) => {
   const cell = 'border border-gray-300 px-1 py-0.5 text-center text-xs';
 
@@ -50,21 +78,42 @@ const MemoizedGridRow = memo(({
           <td className={cell}>-</td><td className={cell}>-</td><td className={cell}>-</td>
           <td className={cell}>-</td><td className={cell}>-</td>
           {vshiftVisible && <td className={cell}>-</td>}
-          <td className={cell}>-</td><td className={cell}>-</td>
+          <td className={cell}>-</td><td className={cell}>-</td><td className={cell}>-</td><td className={cell}>-</td>
         </>
       );
     }
     const ticket = (bs: 'B' | 'S') => onOpenTicket(bs, leg);
     const qCls = qmodeClass(leg.qmode);
+    const ourOrd = ordersByCode[leg.code];
     return (
       <>
-        <td className={`${cell}`} onClick={() => ticket('S')}>{leg.bidSz ?? '-'}</td>
+        {(() => {
+          const fo = flashOpacity(flash[leg.code], nowMs);
+          return (
+            <td className={`${cell}`} onClick={() => ticket('S')}
+                style={fo != null ? { opacity: 0.3 + 0.7 * fo, backgroundColor: `rgba(59,130,246,${0.55 * fo})` } : undefined}>
+              {leg.bidSz ?? '-'}
+            </td>
+          );
+        })()}
+        {(() => (
+          <td className={`${cell} text-[9px] text-green-700 whitespace-pre ${qpBg(leg.bqp, 'B')}`}
+              title={`our bid ${leg.obid ?? '-'} · queue pos ${leg.bqp === 9999 ? 'none' : leg.bqp}${leg.bqp === 0 ? ' (best)' : leg.bqp != null && leg.bqp < 0 ? ' (crossing!)' : ''}`}>
+            {ourOrd?.B || (leg.obid ? `${leg.obid}` : '-')}
+          </td>
+        ))()}
         <td className={`${cell}`} onClick={() => ticket('S')}>{leg.bid ?? '-'}</td>
         <td className={`${cell} bg-gray-50`}>{leg.last ?? '-'}</td>
         <td className={`${cell} font-medium`} onClick={() => onCellClick(row, side, 'theo')}>{fmtN(leg.theo)}</td>
         <td className={`${cell} bg-gray-50`}>{fmtN(leg.iv, 4)}</td>
         <td className={`${cell}`} onClick={() => ticket('B')}>{leg.ask ?? '-'}</td>
         <td className={`${cell}`} onClick={() => ticket('B')}>{leg.askSz ?? '-'}</td>
+        {(() => (
+          <td className={`${cell} text-[9px] text-red-700 whitespace-pre ${qpBg(leg.aqp, 'S')}`}
+              title={`our ask ${leg.oask ?? '-'} · queue pos ${leg.aqp === 9999 ? 'none' : leg.aqp}${leg.aqp === 0 ? ' (best)' : leg.aqp != null && leg.aqp < 0 ? ' (crossing!)' : ''}`}>
+            {ourOrd?.S || (leg.oask ? `${leg.oask}` : '-')}
+          </td>
+        ))()}
         <td className={`${cell} text-blue-600`}>{fmtN(leg.delta, 4)}</td>
         {vshiftVisible && <td className={`${cell} text-gray-500`}>{fmtN(leg.vshift)}</td>}
         <td
@@ -99,7 +148,19 @@ interface Props {
 }
 
 export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelectByIndex, onNotify }) => {
-  const { snapshot, readonly, sendCommand } = useData();
+  const { snapshot, readonly, sendCommand, orders, flash } = useData();
+  const nowMs = useNowMs(250);   // P1 batch-2: drives the sqrt-t fill fade
+  // P1: aggregate live orders per contract: "B:qty@px" / "S:qty@px"
+  const ordersByCode = React.useMemo(() => {
+    const m: Record<string, { B: string; S: string }> = {};
+    for (const o of Object.values(orders)) {
+      const e = (m[o.code] ??= { B: '', S: '' });
+      const side = o.buy ? 'B' : 'S';
+      const txt = `${o.filled > 0 ? `${o.filled}/` : ''}${o.qty}@${o.px ?? '?'}`;
+      e[side] = e[side] ? e[side] + ' ' + txt : txt;
+    }
+    return m;
+  }, [orders]);
   const [vshiftVisible, setVshiftVisible] = useState(false);
   const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
   const [isTicketOpen, setIsTicketOpen] = useState(false);
@@ -117,7 +178,11 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
       .map(s => ({ strike: s.k, call: s.C.code ? s.C : undefined, put: s.P.code ? s.P : undefined }));
   }, [exp]);
 
+  // P1 fix: remember the last interacted leg side so the +/- shortcuts can
+  // open a PUT ticket too (previously both keys always targeted the call).
+  const [lastSide, setLastSide] = useState<'C' | 'P'>('C');
   const openTicket = useCallback((buysell: 'B' | 'S', leg: LegView) => {
+    setLastSide(leg.code.includes('.P.') ? 'P' : 'C');
     setTicketData({ buysell, leg });
     setIsTicketOpen(true);
   }, []);
@@ -163,17 +228,17 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedRowIdx(p => (p !== null && p < rows.length - 1 ? p + 1 : p)); return; }
       if (!e.ctrlKey && (e.key === '+' || e.key === '=')) {
         e.preventDefault();
-        const leg = rows[selectedRowIdx]?.call;
+        const leg = lastSide === 'P' ? rows[selectedRowIdx]?.put : rows[selectedRowIdx]?.call;
         if (leg) openTicket('B', leg);
       } else if (!e.ctrlKey && e.key === '-') {
         e.preventDefault();
-        const leg = rows[selectedRowIdx]?.call;
+        const leg = lastSide === 'P' ? rows[selectedRowIdx]?.put : rows[selectedRowIdx]?.call;
         if (leg) openTicket('S', leg);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedRowIdx, rows, onExpirySelectByIndex, openTicket, isTicketOpen]);
+  }, [selectedRowIdx, rows, onExpirySelectByIndex, openTicket, isTicketOpen, lastSide]);
 
   return (
     <div className="flex flex-col h-full bg-gray-50 text-[10px] overflow-hidden">
@@ -190,18 +255,18 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
         <table className="w-full border-collapse text-[10px]">
           <thead className="sticky top-0 z-10 bg-white">
             <tr className="bg-gray-200 text-gray-700">
-              <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 11 : 10}>CALL</th>
+              <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 13 : 12}>CALL</th>
               <th className="border border-gray-300 px-1 py-0.5 bg-purple-200 text-purple-800">strike</th>
-              <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 11 : 10}>PUT</th>
+              <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 13 : 12}>PUT</th>
             </tr>
             <tr className="bg-gray-100 text-gray-600">
-              {['bidSz', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
+              {['bidSz', 'ordBid', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'ordAsk', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
                 <React.Fragment key={h}>
                   <th className="border border-gray-300 px-1 py-0.5">{h}</th>
                 </React.Fragment>
               ))}
               <th />
-              {['bidSz', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
+              {['bidSz', 'ordBid', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'ordAsk', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
                 <React.Fragment key={h}>
                   <th className="border border-gray-300 px-1 py-0.5">{h}</th>
                 </React.Fragment>
@@ -211,6 +276,9 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
           <tbody>
             {rows.map((row, idx) => (
               <MemoizedGridRow
+                ordersByCode={ordersByCode}
+                flash={flash}
+                nowMs={nowMs}
                 key={row.strike}
                 row={row}
                 idx={idx}
@@ -224,7 +292,7 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={vshiftVisible ? 23 : 21} className="text-center py-12 text-gray-600 bg-gray-50">
+                <td colSpan={vshiftVisible ? 25 : 23} className="text-center py-12 text-gray-600 bg-gray-50">
                   <div className="text-3xl mb-2">📊</div>
                   <div>No strikes for this expiry (check fit-gate: booksWithBid / fwdReady)</div>
                 </td>
@@ -235,7 +303,11 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
       </div>
 
       {isTicketOpen && ticketData && (
+        // P1 fix: key by leg+side so switching targets while the ticket is
+        // open REMOUNTS it — without the key the stale price/qty of the
+        // previous contract survived the switch.
         <Ticket
+          key={`${ticketData.leg.code}:${ticketData.buysell}`}
           buysell={ticketData.buysell}
           leg={ticketData.leg}
           onClose={() => setIsTicketOpen(false)}

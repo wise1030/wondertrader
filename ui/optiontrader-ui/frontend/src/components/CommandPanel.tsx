@@ -30,8 +30,11 @@ export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
         {(['STOP', 'RESUME', 'PANIC'] as const).map(c => (
           <button
             key={c}
-            className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
-            onClick={() => readonly ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase(), cmdSeq: Date.now() % 100000 }))}
+            // P1 fix: PANIC is a kill switch — it must stay reachable in
+            // readonly monitoring mode (a read-only page is exactly where an
+            // operator watches for trouble). STOP/RESUME stay gated.
+            className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly && c !== 'PANIC' ? 'cursor-not-allowed opacity-40' : ''}`}
+            onClick={() => readonly && c !== 'PANIC' ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase(), cmdSeq: Date.now() % 100000 }))}
           >
             {c}
           </button>

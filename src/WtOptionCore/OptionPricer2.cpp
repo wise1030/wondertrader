@@ -92,7 +92,8 @@ OptionPricer2Config::OptionPricer2Config() = default;
 // ----------------------------------------------------------------------------
 // P1-b: shared curve factory (also used by AsyncVolFitter for fitted curves)
 // ----------------------------------------------------------------------------
-IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams)
+IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams,
+                                  double gvvBeta)
 {
     if (type == "linear")
         return std::make_shared<LinearVolCurve>();
@@ -100,7 +101,9 @@ IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams)
         return std::make_shared<ConstantVolCurve>(1.0);  // flat ATM multiplier
     if (type == "power")
         return std::make_shared<PowerVolCurve>(static_cast<GvvVolCurve::Parameter>(powerParams));
-    return std::make_shared<GvvVolCurve>();
+    GvvVolCurve::Config cfg;
+    cfg.beta = gvvBeta;
+    return std::make_shared<GvvVolCurve>(cfg);
 }
 
 // ----------------------------------------------------------------------------
@@ -230,11 +233,13 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
         // 创建波动率曲线 (与 quantbox 一致, 但不依赖 Lua config)
         // P1-b: honor volcurve_type for the initial main curve (fitted
         // replacement comes from AsyncVolFitter / PeriodicCurveFitter).
-        ei->m_spVolCurve  = createVolCurveByType(m_config.volcurve_type);
+        ei->m_spVolCurve  = createVolCurveByType(m_config.volcurve_type,
+                                                 0, m_config.volcurve_beta);
         // R2: restore the original GVV×Power dual-curve design. With the
         // migration-era default ("gvv") both curves are identical and
         // volcurve_weight degenerates to a no-op.
-        ei->m_spVolCurve2 = createVolCurveByType(m_config.curve2_type, GvvVolCurve::RHO);
+        ei->m_spVolCurve2 = createVolCurveByType(m_config.curve2_type,
+                                                 GvvVolCurve::RHO, m_config.volcurve_beta);
         // hardcode defaults (preserve original)
         ei->m_futsprd = 1.0;
         ei->m_atmvolsprd = 0.2;
@@ -593,7 +598,17 @@ bool OptionPricer2::initValuesCompute(OptionGrid* grid)
         // are market-scale until the first fit publishes.  Only runs while no
         // curve version has been accepted; afterwards the fitted atmVol owns
         // the scale.
-        if (getCurveVersion(ed->getExpiry()) == 0 && ed->isForwardReady())
+        // P1 (2026-11-18): the version==0 bootstrap window can be missed —
+        // the async fitter publishes a first curve (with the flat 0.1 default
+        // scale baked in) before any bootstrap pass lands, after which this
+        // branch never runs again and the re-anchor crawls at max_step for
+        // ~1h to reach the market (observed 09:57→10:55, 0.1000→0.1629 in
+        // eleven 5% steps, theo systematically cheap all morning). Seed
+        // whenever the scale is still at the default, regardless of version.
+        const bool stillDefaultScale =
+            std::fabs(ei->m_atmvol - m_defaultVolatility) < 1e-6;
+        if (ed->isForwardReady()
+            && (getCurveVersion(ed->getExpiry()) == 0 || stillDefaultScale))
         {
             // Seed the scale from the market before the first accepted fit.
             const double med = __bootstrapMedianIV(ed, grid);

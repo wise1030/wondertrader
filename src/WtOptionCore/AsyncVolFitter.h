@@ -56,6 +56,10 @@ public:
     /// the current dataset (port of PeriodicCurveFitter's decay_window).
     void setDecayWindow(double secs) { m_decayWindow = secs > 0 ? secs : 0.0; }
 
+    /// P1 (2026-11-18): WLS wing-weight decay for the GVV fit
+    /// (w = exp(-beta*x^2/(atmvol^2*T))); 0 = legacy equal weights.
+    void setBeta(double beta) { m_beta = beta >= 0.0 ? beta : 0.0; }
+
     /// Replace any queued snapshot set.  Single-flight: while a fit is running
     /// a duplicate submit returns false; caller may retry next period.
     bool submit(std::vector<VolFitExpirySnapshot> snapshots) {
@@ -161,7 +165,7 @@ private:
 
             IVolCurvePtr curve;
             const auto tryFit = [&](const std::string& type, int powerParams) -> IVolCurvePtr {
-                auto c = createVolCurveByType(type, powerParams);
+                auto c = createVolCurveByType(type, powerParams, m_beta);
                 c->setATMForward(s.forward);
                 c->setMaturity(s.maturity);
                 c->setATMVol(s.atmVol);
@@ -216,6 +220,7 @@ private:
     std::string m_curve2Type;
     bool m_fallback = true;
     double m_decayWindow = 0.0;
+    double m_beta = 0.0;
     mutable std::map<uint32_t, PrevFit> m_prev;   // decay-carry state (fit thread only)
 };
 

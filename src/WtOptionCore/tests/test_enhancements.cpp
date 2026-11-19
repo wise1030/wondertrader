@@ -1331,7 +1331,13 @@ void test_price_limit_checker() {
 // ============================================================================
 void test_gvv_closed_form() {
     std::cout << "=== test_gvv_closed_form ===" << std::endl;
-    GvvVolCurve::Config cfg;              // alpha_dn=0, alpha_up=2 → α=1.0
+    // The fit below only flips the initialized flag (every parameter is
+    // overwritten right after), so keep it on the legacy weighting — the
+    // vega-weighted path changes the optimum and can trip the rho range on
+    // this near-flat synthetic set (covered separately in
+    // test_gvv_vega_weighted).
+    GvvVolCurve::Config cfg;
+    cfg.vega_weighted = false;
     GvvVolCurve c(cfg);
     c.setMaturity(0.25);
     c.setATMForward(4000.0);
@@ -2411,6 +2417,151 @@ void test_p4_atm_reanchor_cap() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 (2026-11-18): shared hedge attribution — shared legs count ONCE at
+// portfolio level and are attributed to NO expiry; exclusive legs stay
+// strictly per-expiry.
+// ============================================================================
+void test_p1_shared_hedge_attribution() {
+    std::cout << "=== test_p1_shared_hedge_attribution ===" << std::endl;
+    using namespace wt_option;
+
+    auto grid = std::make_shared<OptionGrid>("TEST", "TEST.UNDER", nullptr, nullptr);
+    auto risk = std::make_shared<OptionRisk>(grid);
+
+    // exclusive leg for one expiry vs shared portfolio leg (CZCE-style)
+    auto hdEx = risk->registerHedgeInstrument("TEST.H1", 202612, 1.0);
+    auto hdSh = risk->registerHedgeInstrument("TEST.SHARED", 0, 5.0, /*shared=*/true);
+    ASSERT_TRUE(!hdEx->shared && hdEx->expiry == 202612);
+    ASSERT_TRUE(hdSh->shared && hdSh->expiry == 0);
+
+    risk->setHedgePosition("TEST.H1", +3);
+    risk->setHedgePosition("TEST.SHARED", -4);
+    risk->update();
+
+    // shared pool: real multiplier applied, exclusive legs excluded
+    ASSERT_TRUE(std::fabs(risk->getSharedHedgeDelta() - (-4.0 * 5.0)) < 1e-9);
+    // portfolio: option delta (0, no options) + exclusive once + shared once
+    ASSERT_TRUE(std::fabs(risk->getPortfolioDelta() - (3.0 - 20.0)) < 1e-9);
+
+    // same code registered under another expiry stays a distinct entry;
+    // re-registering the same triple is idempotent
+    auto hdEx2 = risk->registerHedgeInstrument("TEST.H1", 202701, 1.0);
+    ASSERT_TRUE(hdEx2 != hdEx && !hdEx2->shared && hdEx2->expiry == 202701);
+    ASSERT_TRUE(risk->registerHedgeInstrument("TEST.H1", 202612, 1.0) == hdEx);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// P1 (2026-11-18): multi-leg delta hedge — one exclusive leg per expiry
+// rebalances its own month; the shared leg hedges the portfolio residual
+// MINUS exclusive legs' in-flight targets (no double hedge).
+// ============================================================================
+void test_p1_multileg_hedge() {
+    std::cout << "=== test_p1_multileg_hedge ===" << std::endl;
+    using namespace wt_option;
+
+    DeltaHedgeExecutor::Config cfg;
+    cfg.thresholdDelta = 10.0;
+    cfg.targetDelta    = 0.0;
+    cfg.maxOrderSize   = 5;
+    cfg.cooldownSec    = 1.0;
+
+    OptionHedgeCoordinator coord;
+    std::vector<std::string> sent;
+    coord.configure(cfg, /*deltaPerLot=*/1.0, "",  // legacy single leg unused
+        [&](const std::string& code, bool isBuy, double, uint32_t qty) {
+            sent.push_back(code + (isBuy ? ":BUY" : ":SELL") + ":" + std::to_string(qty));
+            return std::vector<uint32_t>{100u + static_cast<uint32_t>(sent.size())};
+        },
+        [](const std::string&) { return 100.0; });
+
+    coord.setLegs({{202612, "H1"}, {202701, "H2"}});
+
+    // exclusive legs fire independently on their own month deltas
+    size_t fired = coord.checkMulti(1000.0,
+        [](uint32_t exp) { return exp == 202612 ? 30.0 : -25.0; },
+        [](uint32_t)   { return 5.0; });
+    ASSERT_TRUE(fired == 2);
+    ASSERT_TRUE(sent.size() == 2);
+    ASSERT_TRUE(sent[0] == "H1:SELL:5");   // +30 excess → sell (maxOrderSize cap)
+    ASSERT_TRUE(sent[1] == "H2:BUY:5");    // -25 excess → buy
+
+    // shared leg with in-flight exclusives: residual = portfolio − Σtargets
+    // = 5 − (−5 + 5) = 5 → below threshold, must NOT fire while legs in flight
+    coord.setSharedLeg("HS");
+    fired = coord.checkMulti(1002.0,
+        [](uint32_t) { return 0.0; },
+        [](uint32_t) { return 5.0; });
+    ASSERT_TRUE(fired == 0);
+
+    // terminal both legs → residual now hedged by shared leg
+    coord.onTerminal(101);
+    coord.onTerminal(102);
+    fired = coord.checkMulti(1003.0,
+        [](uint32_t) { return 0.0; },
+        [](uint32_t) { return 20.0; });   // residual +20 ≥ threshold
+    ASSERT_TRUE(fired == 1);
+    ASSERT_TRUE(sent.size() == 3);
+    ASSERT_TRUE(sent[2] == "HS:SELL:5");
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// P1 (2026-11-18): min_strikes_for_synthetic < 0 links the synthetic-forward
+// gate to the vol-fit good-points gate (one shared quality parameter).
+// ============================================================================
+void test_p1_min_strikes_linkage() {
+    std::cout << "=== test_p1_min_strikes_linkage ===" << std::endl;
+    using namespace wt_option;
+
+    auto ed = std::make_shared<ExpiryData>(202612, "TEST");
+    ed->setMinStrikesForSynthetic(5);
+    ASSERT_TRUE(ed->effectiveMinStrikes() == 5);   // explicit override wins
+
+    std::map<int32_t, double> table = {{7, 8}, {30, 20}};
+    ed->setMinStrikesForSynthetic(-1);             // linked mode
+    ed->setGoodPointsTable(table);
+    ed->updateDaysToExpiration(20261118, 20261215);  // 27 days
+    const int eff = ed->effectiveMinStrikes();
+    ASSERT_TRUE(eff >= 8 && eff <= 20);            // interpolation window
+    ed->updateDaysToExpiration(20261118, 20261125);  // 7 days
+    ASSERT_TRUE(ed->effectiveMinStrikes() == 8);   // exact low key
+    ed->updateDaysToExpiration(20261118, 20270120);  // > max key
+    ASSERT_TRUE(ed->effectiveMinStrikes() == 20);  // clamps to max
+
+    ed->setGoodPointsTable({});                    // empty table -> default 15
+    ASSERT_TRUE(ed->effectiveMinStrikes() == 15);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// P1 (2026-11-19): vega-weighted fit — must stay in-range on a realistic
+// downward smile (the weighting is active by default).
+// ============================================================================
+void test_gvv_vega_weighted() {
+    std::cout << "=== test_gvv_vega_weighted ===" << std::endl;
+    GvvVolCurve::Config cfg;   // vega_weighted defaults to true
+    GvvVolCurve c(cfg);
+    c.setMaturity(0.25);
+    c.setATMForward(4000.0);
+    c.setATMVol(0.20);
+    // datapoint semantics (fitWithAlpha): first = K - atmforward (ABSOLUTE
+    // price difference, NOT log-moneyness), second = vol/atmvol (multiple of
+    // atmvol). closed_form above passes raw x as `first`, which collapses
+    // every xi to ~0 — it only needs the initialized flag (params are
+    // overwritten), but here we exercise the real pipeline.
+    IVolCurve::dataset_t pts;
+    for (double x : {-0.4,-0.2,0.0,0.2,0.4})
+        pts.push_back({x * 4000.0, 1.0 + 0.5 * x * x + 0.2 * x});
+    ASSERT_TRUE(c.fit(pts));
+    ASSERT_TRUE(c.isInitialized());
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2462,6 +2613,10 @@ int main() {
     test_p0_forward_month_routing();
     test_p3_wing_flat_extrapolation();
     test_p4_atm_reanchor_cap();
+    test_p1_shared_hedge_attribution();
+    test_p1_multileg_hedge();
+    test_p1_min_strikes_linkage();
+    test_gvv_vega_weighted();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

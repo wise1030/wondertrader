@@ -18,6 +18,7 @@
  *  - PROFILE / PerfCounter -> elapsed-time accumulation on local doubles
  *  - TRACE(std::cout, N) -> simple guarded fmt::print / std::cout
  */
+#include "GvvVolCurve.h"
 #include "PeriodicCurveFitter.h"
 #include "OptionPricer2.h"
 #include "ExpiryData.h"
@@ -281,8 +282,21 @@ bool PeriodicCurveFitter::fitToExpiry(uint32_t exp)
         if (volcurve)  volcurve->fit(fd_new.stkvol_points);
         if (volcurve2) volcurve2->fit(fd_new.stkvol_points);
 
-        // GvvVolCurve post-fit check elided (curve type not migrated); the
-        // dynamic_pointer_cast would fail harmlessly if attempted.
+        // P1 (2026-11-19): restore the source-project gate (QB
+        // PeriodicCurveFitter.cc:318-323). GvvVolCurve::fit keeps the
+        // previous parameters on failure (it returns before applying), but
+        // this fitter must REPORT the failure so the caller's
+        // "both-initialized" fallback decides fitReady (QB's strictness when
+        // the second curve is not yet initialized) — and so a failed refit
+        // is visible in the log instead of silent.
+        if (auto gvv = std::dynamic_pointer_cast<GvvVolCurve>(volcurve)) {
+            if (!gvv->isLastFitOK()) {
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "PeriodicCurveFitter exp={} t={:.1f} GVV fit not ok, exit",
+                    exp, getTime());
+                return false;
+            }
+        }
 
         if (getTraceLevel() >= 1) {
             for (auto& p : stkvol_points) {

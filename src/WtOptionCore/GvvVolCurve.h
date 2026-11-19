@@ -38,6 +38,10 @@ public:
         double beta;
         double alpha_dn;
         double alpha_up;
+        // P1 (2026-11-19): weight fit residuals by Black vega so the WLS
+        // (which runs in vol^2 space) approximates PRICE-space residuals —
+        // the direct lever for keeping theo inside the market bid/ask band.
+        bool   vega_weighted = true;
     };
 
     enum Parameter { SPOTVOL, RHO, VOLVOL, ALPHA, ATMVOL };
@@ -73,6 +77,7 @@ private:
                         double* atmvol2, double* skew, double* kurt);
 
     double m_beta;
+    bool   m_vegaWeighted = true;
     double m_atmforward;
     double m_maturity;
     double m_atmvol;

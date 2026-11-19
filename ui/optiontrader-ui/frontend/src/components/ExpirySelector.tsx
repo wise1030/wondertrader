@@ -15,16 +15,18 @@ export const ExpirySelector: React.FC<Props> = ({ selected, onSelect }) => {
             <span className="text-[10px] text-gray-400 mr-1">expiry (F1-F8)</span>
             {expiries.map((e, i) => {
                 const active = e.expiry === selected;
+                const off = e.quoting === false;   // P1: grey out disabled series
                 return (
                     <button
                         key={e.expiry}
                         onClick={() => onSelect(e.expiry)}
                         className={`px-2 py-0.5 rounded text-[11px] font-mono border flex items-center gap-1
-                            ${active ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-50 hover:bg-gray-100 border-gray-300'}`}
-                        title={`fwdReady=${e.fwdReady} fitReady=${e.fitReady} books=${e.booksWithBid}/${e.booksTotal}`}
+                            ${off ? 'opacity-40 bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                                  : active ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-50 hover:bg-gray-100 border-gray-300'}`}
+                        title={`quoting=${e.quoting !== false} fwdReady=${e.fwdReady} fitReady=${e.fitReady} books=${e.booksWithBid}/${e.booksTotal}`}
                     >
                         <span>{i < 8 ? `F${i + 1} ` : ''}{e.expiry}</span>
-                        <span className={`w-1.5 h-1.5 rounded-full ${e.fitReady ? 'bg-green-400' : e.fwdReady ? 'bg-yellow-400' : 'bg-red-400'}`} />
+                        <span className={`w-1.5 h-1.5 rounded-full ${off ? 'bg-gray-300' : e.fitReady ? 'bg-green-400' : e.fwdReady ? 'bg-yellow-400' : 'bg-red-400'}`} />
                     </button>
                 );
             })}
