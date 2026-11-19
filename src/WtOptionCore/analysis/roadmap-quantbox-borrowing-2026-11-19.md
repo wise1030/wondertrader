@@ -136,21 +136,25 @@
 执行顺序（按当前痛点：持仓失控/撤单风暴优先）：**3.0 → 3.1 → 3.3 → 3.2 → 4 → 5/6 穿插**
 
 ### 批次 3（治失控）
-- **3.0 对冲速率参数（30 分钟，最先）**：config `delta_hedge.max_order_size: 2→10`、
+- **3.0 对冲速率参数（30 分钟，最先）**——✅ 已实施（max_order_size=10、
+  cooldown=1s、delta_per_lot=5，已上线）：config `delta_hedge.max_order_size: 2→10`、
   `cooldown_sec: 5→1`；`delta_per_lot` 显式配 5。依据：11-18 13:58 日志
   delta_excess=420、每 5s 2 手 = 0.4 delta/s << 累积 1 delta/s。
   验证：|Δ|超阈值后对冲追平 <2 分钟、无撤单风暴
-- **3.1 TradingState 仲裁层（2-3 天）**：新 `TradingStateArbiter.h/cpp` +
+- **3.1 TradingState 仲裁层（2-3 天）**——✅ 已实施（11-20，含 GetFlat 枚举、
+  按起点匹配的降级白名单、转换矩阵测试）：新 `TradingStateArbiter.h/cpp` +
   `HftOptionStrategy::setState/applyTradingState` 接入。收集 channelReady/
   stressBreach/pnlBreach/positionGuardBreach/sessionStopped/closeFlattenLead
   → 唯一模式，优先级 Disabled > Panic > SessionStopped > Recovering >
   GetFlat > Normal。**新增 GetFlat 立即档**（eraseBids+eraseAsks+只减仓）。
   验证：任意信号组合模式确定可追溯；GetFlat 只减仓不开仓
-- **3.2 TradingIntensity（2 天）**：新 `Signals/TradingIntensity.{h,cpp}`，
+- **3.2 TradingIntensity（2 天）**——✅ 已实施（11-20，intensity_enable 默认关；
+  平坦毒性语义修正）：新 `Signals/TradingIntensity.{h,cpp}`，
   源 `stratlib/TradingIntersity.cc`；每到期一估计器，成交 tick 从
   `:1541 onTradeTick` 流入；输出 k → spread 乘子 max(1,k/k0) 接入
   CompositeOptionPricer :899-903。验证：毒性流注入 spread 拉宽、静默回落
-- **3.3 OrderCounter 持久化（1 天）**：QuoteStatistics 扩展落盘
+- **3.3 OrderCounter 持久化（1 天）**——✅ 已实施（11-20，CSV 边车 +
+  同日恢复 + 跨日重置测试）：QuoteStatistics 扩展落盘
   `generated/quote_counters_<tdate>.json`（按日覆盖、启动读取、跨日重置），
   max_cancels_allowed 用持久值。验证：撤单后重启计数不重置
 
@@ -219,7 +223,7 @@
 |---|---|---|
 | 批次 1 GVV 四小修 | ✅ 完成（28%→37%，偏离 −70%→±1-3%） | 夜盘实测 |
 | 批次 2 UI P0 | ✅ 完成（qp 着色/闪烁/声音） | 待用户刷新目验 |
-| 批次 3 模式/执行 | ⬜ 未开始 | — |
+| 批次 3 模式/执行 | ✅ 完成（3.0 对冲参数/3.1 仲裁+GetFlat/3.2 AS 强度默认关/3.3 计数持久化） | 53 测试绿 |
 | 批次 4 健壮性 | ⬜ 未开始 | — |
 | 批次 5 UI P1/参数 | ⬜ 未开始 | — |
 | 批次 6 分析/复盘 | ⬜ 未开始 | — |
