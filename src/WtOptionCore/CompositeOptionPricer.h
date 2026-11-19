@@ -134,6 +134,12 @@ public:
     double wgt_deltaflow       = 0.0;
     double wgt_atmsig          = 0.0;
     double wgt_sizebias        = 0.0;
+    // P1 (2026-11-18): per-expiry net-delta quote skew. ddAdj =
+    // -coef * expiryNetDelta(incl. exclusive hedge legs) * sign(contractDelta)
+    // folded into the alpha application (:915-916). X>0 lifts bid+ask (more
+    // eager to BUY); the sign pattern makes every contract's quote incentivise
+    // closing its own month's net-delta gap. 0 = disabled (default).
+    double wgt_exp_ddelta      = 0.0;
 
     // sticky / teenie
     double sticky_base         = 0.0;

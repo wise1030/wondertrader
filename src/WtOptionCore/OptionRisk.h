@@ -127,10 +127,16 @@ public:
     double raw_delta() const       { return totalDelta(); }
 
     // ---- Hedge instrument registration (public for post-construction wiring) ----
+    // shared=true registers a portfolio-level leg: counted once in the
+    // portfolio hedge delta, attributed to NO single expiry (exp is ignored).
     HedgeDataPtr registerHedgeInstrument(const std::string& code, uint32_t exp,
-                                         double multiplier = 1.0);
+                                         double multiplier = 1.0,
+                                         bool shared = false);
     /// Update a hedge's position externally (replaces IPositionListener push).
     void setHedgePosition(const std::string& code, int32_t position);
+    /// Portfolio-level delta of shared hedge legs only (exclusive of
+    /// per-expiry attributed legs); for the shared-leg residual hedge path.
+    double getSharedHedgeDelta() const;
 
 private:
     OptionRiskDataPtr createOptionRiskData(const OptionDataPtr& od);

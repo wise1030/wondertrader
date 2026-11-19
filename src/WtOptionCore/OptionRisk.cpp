@@ -132,23 +132,38 @@ const OptionExpiryGreeksPtr& OptionRisk::getExpiryGreeks(uint32_t exp)
 
 OptionRisk::HedgeDataPtr OptionRisk::registerHedgeInstrument(const std::string& code,
                                                               uint32_t exp,
-                                                              double multiplier)
+                                                              double multiplier,
+                                                              bool shared)
 {
     for (const HedgeDataPtr& hd : m_hedgeDataList)
     {
-        if (hd->code == code && hd->expiry == exp)
+        if (hd->code == code && hd->expiry == exp && hd->shared == shared)
             return hd;
     }
     WTSLogger::log_by_cat("strategy", LL_INFO,
-        "OptionRisk::registerHedgeInstrument {} (exp={}, mult={})", code, exp, multiplier);
+        "OptionRisk::registerHedgeInstrument {} (exp={}, mult={}, shared={})",
+        code, exp, multiplier, shared);
     auto hd = std::make_shared<HedgeData>();
     hd->code          = code;
-    hd->expiry        = exp;
+    hd->expiry        = shared ? 0 : exp;
     hd->position      = 0;
     hd->deltaPosition = 0.0;
     hd->multiplier    = multiplier;   // B18: real contract multiplier (was hardcoded 1.0)
+    hd->shared        = shared;
     m_hedgeDataList.push_back(hd);
     return hd;
+}
+
+double OptionRisk::getSharedHedgeDelta() const
+{
+    double d = 0;
+    std::set<std::string> counted;
+    for (const HedgeDataPtr& hd : m_hedgeDataList) {
+        if (!hd || !hd->shared || hd->code.empty() || !counted.insert(hd->code).second)
+            continue;
+        d += hd->multiplier * hd->position;
+    }
+    return d;
 }
 
 void OptionRisk::setHedgePosition(const std::string& code, int32_t position)

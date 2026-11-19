@@ -364,7 +364,13 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
                 e->getBoolean("enable_auto_close"),
                 e->has("close_pos_thresh") ? e->getDouble("close_pos_thresh") : 0,
                 e->has("include_future") ? e->getBoolean("include_future") : true,
-                e->has("min_strikes_for_synthetic") ? static_cast<int>(e->getInt32("min_strikes_for_synthetic")) : 1
+                // P1 (2026-11-18): default -1 = link to the vol-fit good-points
+                // gate (volFitGoodPointsNeeded by days-to-expiry). A 1-point
+                // synthetic forward racing ahead of a 15-point fit gate left
+                // early-session pricing on the degenerate seed curve — the
+                // two quality gates now share one parameter unless an
+                // explicit value overrides here.
+                e->has("min_strikes_for_synthetic") ? static_cast<int>(e->getInt32("min_strikes_for_synthetic")) : -1
             };
             // B14: Parse secondary hedge codes
             if (e->has("secondaryHedgeCodes")) {
@@ -1103,6 +1109,8 @@ void HftOptionStrategy::setupPricer()
                         WTSLogger::log_by_cat("strategy", LL_WARN,
                             "pricer.blackCalc.volCurve.type '{}' invalid (use gvv|linear|constant)", t);
                 }
+                // P1 (2026-11-18): WLS wing-weight decay — same key as the fit.
+                p2cfg.volcurve_beta = vc->has("beta") ? vc->getDouble("beta") : 0.0;
                 if (vc->has("curve2_type")) {
                     std::string t = vc->getCString("curve2_type");
                     if (wt_option::isValidCurve2Type(t))
@@ -1123,6 +1131,7 @@ void HftOptionStrategy::setupPricer()
     _asyncVolFitter.setCurve2Type(p2cfg.curve2_type);
     _asyncVolFitter.setFallbackEnabled(p2cfg.volcurve_fallback);
     _asyncVolFitter.setDecayWindow(p2cfg.vol_fitting_decay_window);
+    _asyncVolFitter.setBeta(p2cfg.volcurve_beta);
 
     // Read pricer config from nested section
     WTSVariant* pCfg = cfgPtr_->get("pricer");
@@ -1204,6 +1213,9 @@ void HftOptionStrategy::setupPricer()
             (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_atmsig") : 0.0);
         copCfg.wgt_rollema       = pCfg->has("wgt_rollema") ? pCfg->getDouble("wgt_rollema") :
             (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_rollema") : 0.0);
+        // P1 (2026-11-18): per-expiry net-delta quote skew (0 = disabled).
+        copCfg.wgt_exp_ddelta    = pCfg->has("wgt_exp_ddelta") ? pCfg->getDouble("wgt_exp_ddelta") :
+            (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_exp_ddelta") : 0.0);
         copCfg.sticky_base       = pCfg->has("sticky_base") ? pCfg->getDouble("sticky_base") :
             (pCfg->has("quoting") ? pCfg->get("quoting")->getDouble("sticky_base") : 0.5);
         copCfg.improve_retreat_ratio = pCfg->has("improve_retreat_ratio") ? pCfg->getDouble("improve_retreat_ratio") :
@@ -1270,8 +1282,15 @@ void HftOptionStrategy::setupPricer()
         // P0-4: register forward-calculation config; ExpiryData is created
         // lazily on the first tick, so direct application at on_init time
         // used to be silently dropped.  The grid applies it on creation.
+        // P1 (2026-11-18): min_strikes_for_synthetic < 0 links the synthetic-
+        // forward gate to the vol-fit good-points gate (table passed along),
+        // so both quality thresholds share one parameter.
         _grid->setExpiryForwardConfig(exp, ec.include_future,
-                                      ec.min_strikes_for_synthetic);
+                                      ec.min_strikes_for_synthetic,
+                                      p2cfg.vol_fitting_good_points_thresh);
+        if (ec.min_strikes_for_synthetic < 0)
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "Expiry {} min_strikes linked to vol-fit good-points gate", exp);
         // Hedge override
         std::string hedgeCode = ec.hedgeCode.empty()
             ? (ec.underlyingCode.empty() ? _underlyingCode : ec.underlyingCode)
@@ -1281,6 +1300,10 @@ void HftOptionStrategy::setupPricer()
             // B18 primary hedge: register with the real multiplier before
             // OptionExpiryGreeks auto-registers the same code with 1.0.
             _risk->registerHedgeInstrument(hedgeCode, exp, hedgeMultiplier(hedgeCode));
+            // P1 (2026-11-18): build the multi-leg table — one exclusive leg
+            // per enabled expiry, each hedging its own month future.
+            if (ec.enable)
+                _hedgeLegs.push_back({exp, hedgeCode});
         }
         // B14: Register secondary hedge instruments with OptionRisk
         for (const auto& shc : ec.secondaryHedgeCodes) {
@@ -1290,6 +1313,29 @@ void HftOptionStrategy::setupPricer()
             _risk->registerHedgeInstrument(shc, exp, mult);
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "Secondary hedge registered: {} for expiry {} (mult={})", shc, exp, mult);
+        }
+    }
+
+    // P1 (2026-11-18): shared portfolio hedge legs (CZCE-style: one future
+    // hedging several series). Registered with shared=true — counted once at
+    // portfolio level, attributed to NO expiry. Only the FIRST is wired as
+    // the residual leg (v1); extras are logged and ignored for the residual.
+    if (cfgPtr_ && cfgPtr_->has("shared_hedge_codes")) {
+        WTSVariant* shc = cfgPtr_->get("shared_hedge_codes");
+        if (shc && shc->isArray()) {
+            for (uint32_t i = 0; i < shc->size(); ++i) {
+                std::string code = shc->get(i)->asString();
+                if (code.empty()) continue;
+                _risk->registerHedgeInstrument(code, 0, hedgeMultiplier(code), true);
+                _hedgeCodes.insert(code);
+                if (_sharedHedgeCode.empty()) {
+                    _sharedHedgeCode = code;
+                } else {
+                    WTSLogger::log_by_cat("strategy", LL_WARN,
+                        "shared_hedge_codes: {} registered but only the first ({}) "
+                        "is wired as the residual leg (v1)", code, _sharedHedgeCode);
+                }
+            }
         }
     }
 
@@ -1358,9 +1404,17 @@ void HftOptionStrategy::setupCTG()
             // P1-e: session resume must neither downgrade Recovering to
             // Normal before the underlying gate clears, nor clear a risk
             // panic.
-            setState(_tstate.underlyingReady ? wt_option::TradingStateType::Normal
-                                             : wt_option::TradingStateType::Recovering,
-                     "session_resume");
+            // P1 (2026-11-18): a resume landing on Normal must also activate
+            // trading (enableAll) — previously only the recovery path did so
+            // (:1559). A process started during the lunch break resumed via
+            // this branch with all OQMs still inactive, and quoting never
+            // started (silent 0-order incident, 2026-11-18 13:31).
+            const auto resumeState = _tstate.underlyingReady
+                ? wt_option::TradingStateType::Normal
+                : wt_option::TradingStateType::Recovering;
+            if (resumeState == wt_option::TradingStateType::Normal && _otg)
+                _otg->enableAll();
+            setState(resumeState, "session_resume");
         }
     });
 
@@ -1569,6 +1623,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _preCloseCache[code] = tick.preClose;   // P1-5: seed for next session begin
             if (_pnlPendingInit.count(code)) {
                 _pnlPendingInit.erase(code);
+                _pnlInited.insert(code);
                 double pos = _positions[code];
                 if (_otg) {
                     auto utd = _otg->getUnderlyingTradingData(code);
@@ -1814,11 +1869,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
                         }
                         // Per-expiry view (IO expiries can have different hedge
                         // forwards); aggregate risk can hide a single-expiry tail.
+                        // P1 (2026-11-18): use totalDelta() (option + the
+                        // month's EXCLUSIVE hedge legs) so a hedged expiry no
+                        // longer shows a phantom naked delta in stress.
                         for (const auto& [exp, ed] : _grid->expiries()) {
                             (void)ed;
                             auto eg = _risk->getExpiryGreeks(exp);
                             if (!eg) continue;
-                            auto ew = _stress.worst(spot, eg->delta(), eg->gamma(),
+                            auto ew = _stress.worst(spot, eg->totalDelta(), eg->gamma(),
                                                     eg->vega(), eg->theta());
                             WTSLogger::log_by_cat("strategy", LL_DEBUG,
                                 "STRESS_EXP {} worst={:.2f} scenario={} delta={:.2f}",
@@ -2323,6 +2381,19 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (_sessionInfo && _ctg && _traderCtx) {
             const uint32_t curSec = curSecOfDay;
 
+            // P1 (2026-11-19): drop STALE timer events. The payload clock is
+            // the ENQUEUE-time seconds-of-day; under load events queue up and
+            // are processed late and OUT OF ORDER. A level-triggered consumer
+            // must not run an old event after a newer one — observed 11:30:30:
+            // the close-stop event (curSec=41400) ran, then a backlogged
+            // 11:29:11 event (curSec=41351, still inside the quotable zone)
+            // immediately "resumed", flipping the state back out of
+            // SessionStopped. Skip anything not newer than what we handled.
+            if (curSec <= _b4LastCurSec) {
+                // stale; still keep the grid clock fresh above
+            } else {
+            _b4LastCurSec = curSec;
+
             const auto& sections = _sessionInfo->getTradingSections();
             // B4 (level-triggered): derive the desired quoting state from the
             // absolute time on EVERY timer event instead of detecting section
@@ -2405,6 +2476,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
                         "Close flatten disarmed: close passed, pulling unfilled orders");
                 }
             }
+            }   // P1: end of the stale-event else block
         }
 
         // Path 1: periodic vol-fit. async mode (default): build snapshots and
@@ -2685,7 +2757,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 rd->setPosition(static_cast<int32_t>(pos));
             _risk->setHedgePosition(code, static_cast<int32_t>(pos));
         }
-        _pnlPendingInit.insert(code);
+        // P1 (2026-11-18): only arm a pending-init when the tracker's basis has
+        // never been seeded — otherwise every broker snapshot (periodic pos
+        // refresh) would re-run initPosition and reset lastfillpx to preClose,
+        // making floating PnL jump into checkRiskLimitsEx (spurious panics).
+        if (!_pnlInited.count(code))
+            _pnlPendingInit.insert(code);
 
         // Enhancement: PositionGuard - consume the authoritative full snapshot
         auto git = _positionGuards.find(code);
@@ -2712,7 +2789,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _tstate.underlyingReady = false;
             _positionBook.clearAll();
             _positions.clear();
-            setState(wt_option::TradingStateType::Recovering, "channel_ready");
+            // P1 (2026-11-19): a mid-break startup reconciles to SessionStopped
+            // BEFORE the trading channel finishes logging in. channel_ready
+            // must NOT downgrade that back to Recovering — the UI would show
+            // "recovering" through the whole break (observed 12:37:49 stop →
+            // 12:37:53 channel_ready -> Recovering). Session scheduling owns
+            // the state while stopped; 13:30 session_resume hands it to
+            // Recovering and the first tick completes recovery as usual.
+            if (_tstate.type != wt_option::TradingStateType::SessionStopped)
+                setState(wt_option::TradingStateType::Recovering, "channel_ready");
             if (_ctx) {
                 _ctx->stra_cancel_all("");  // exchange-side recovery sweep
                 WTSLogger::log_by_cat("strategy", LL_WARN,
@@ -3950,6 +4035,11 @@ void HftOptionStrategy::checkDeltaHedge(double nowSec)
     }
     _hedgeCoord.setHedgeCode(_primaryHedgeCode);
     _hedgeCoord.setDeltaPerLot(_hedgeCfg.deltaPerLot);
+    // P1 (2026-11-18): multi-leg rebalancing — one exclusive leg per enabled
+    // expiry hedging totalDelta(exp) (option + that month's exclusive hedge
+    // legs; shared legs excluded), plus the optional shared residual leg.
+    _hedgeCoord.setLegs(_hedgeLegs);
+    _hedgeCoord.setSharedLeg(_sharedHedgeCode);
     if (_closeFlattenActive) {        // Close-phase flatten: half-lot deadband (excess >= 0.5 lot rounds up
         // to one lot), target 0, fast cooldown. Self-terminating because
         // getPortfolioDelta() includes the futures hedge leg (m_pfuDelta).
@@ -3981,7 +4071,14 @@ void HftOptionStrategy::checkDeltaHedge(double nowSec)
         _hedgeCoord.check(fcfg, nowSec, pd, px);
         return;
     }
-    _hedgeCoord.check(nowSec, _risk->getPortfolioDelta());
+    _hedgeCoord.checkMulti(nowSec,
+        [this](uint32_t exp) {
+            auto eg = _risk ? _risk->getExpiryGreeks(exp) : nullptr;
+            return eg ? eg->totalDelta() : 0.0;   // option + exclusive legs
+        },
+        [this](uint32_t) {
+            return _risk ? _risk->getPortfolioDelta() : 0.0;
+        });
 }
 
 // ============================================================================
@@ -4204,6 +4301,10 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
             UiExpiryView ev;
             UiSnapshotBuilder::buildExpiry(_grid->getStrikesByExpiry(kv.first),
                                            *ed, atmVol, atmSprd, eg, ev);
+            // P1 (2026-11-18): quoting enable from the expiry config so the UI
+            // can grey out disabled series.
+            auto ecIt = _expiryConfigs.find(kv.first);
+            ev.quoting = (ecIt != _expiryConfigs.end()) && ecIt->second.enable;
             v.expiries.push_back(std::move(ev));
         }
     }

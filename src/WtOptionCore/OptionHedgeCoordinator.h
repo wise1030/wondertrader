@@ -5,6 +5,14 @@
  * Extracted from HftOptionStrategy::checkDeltaHedge. The strategy keeps config
  * and price/order hooks; the coordinator owns the pure decision, cooldown,
  * in-flight suppression and terminal bookkeeping (unit-testable without WT).
+ *
+ * P1 (2026-11-18): multi-leg support. The coordinator can now hold one
+ * EXCLUSIVE leg per expiry (each expiry hedged by its own month future —
+ * strictly attributed, no double counting) plus one SHARED portfolio leg
+ * (e.g. a single CZCE future for several series) that hedges the residual
+ * after exclusive legs' targets. The legacy single-leg API (configure with
+ * a hedge code + check(portfolioDelta)) stays as the degenerate one-leg
+ * path and is used by the close-flatten mode.
  */
 #pragma once
 
@@ -14,7 +22,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace wt_option {
@@ -29,6 +37,9 @@ public:
                                                        uint32_t qty)>;
     using PriceFn = std::function<double(const std::string& code)>;
     using LogFn = std::function<void(const std::string& message)>;
+    /// P1: per-expiry net-delta source (option + exclusive legs), and the
+    /// portfolio net delta for the shared residual leg.
+    using ExpDeltaFn = std::function<double(uint32_t exp)>;
 
     void configure(const DeltaHedgeExecutor::Config& cfg, double deltaPerLot,
                    std::string hedgeCode, SendFn send, PriceFn price,
@@ -36,6 +47,20 @@ public:
     void setHedgeCode(std::string code);
     void setDeltaPerLot(double v);
     const DeltaHedgeExecutor::Config& config() const { return m_cfg; }
+
+    // ---- P1 multi-leg API ----
+    /// One exclusive leg per expiry; each leg hedges totalDelta(exp) with its
+    /// own month future. Empty vector = fall back to the legacy single leg.
+    struct Leg { uint32_t exp = 0; std::string code; };
+    void setLegs(std::vector<Leg> legs) { m_legs = std::move(legs); }
+    void setSharedLeg(std::string code) { m_sharedCode = std::move(code); }
+    /// Multi-leg check: every leg whose |net delta| breaches the threshold is
+    /// rebalanced independently; the shared leg (if configured) hedges
+    /// portfolioNetDelta MINUS the target delta of exclusive legs' in-flight
+    /// orders, so the two tiers never double-hedge the same gap.
+    /// Returns the number of legs that fired.
+    size_t checkMulti(double nowSec, const ExpDeltaFn& expDeltaFn,
+                      const ExpDeltaFn& portfolioNetFn);
 
     /// Returns true iff a hedge order was sent. `portfolioDelta` is the
     /// multiplier-scaled portfolio delta.
@@ -57,6 +82,10 @@ public:
     double lastFireTime() const { return m_lastFire; }
 
 private:
+    struct InflightRec { int legIdx; double targetDelta; };  // legIdx -1 = shared
+    bool fireLeg(int legIdx, const std::string& code, double netDelta,
+                 double nowSec, double priceOverride = 0);
+
     DeltaHedgeExecutor::Config m_cfg;
     std::string m_code;
     SendFn m_send;
@@ -64,8 +93,14 @@ private:
     LogFn m_log;
 
     mutable std::mutex m_mtx;
-    std::unordered_set<uint32_t> m_inflight;
+    std::unordered_map<uint32_t, InflightRec> m_inflight;
     double m_lastFire = -1e9;
+
+    // P1 multi-leg state
+    std::vector<Leg> m_legs;
+    std::string m_sharedCode;
+    std::vector<double> m_legLastFire;
+    double m_sharedLastFire = -1e9;
 };
 
 } // namespace wt_option

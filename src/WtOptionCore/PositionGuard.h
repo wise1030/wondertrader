@@ -20,8 +20,14 @@ public:
         double alertCooldownSec = 10.0;
         bool disableOnBreach = true;
         // C1: broker staleness — freeze new-opening trades when the broker
-        // position feed is older than this (0 = disabled)
-        double staleFreezeSec = 10.0;
+        // position feed is older than this (0 = disabled).
+        // P1 (2026-11-18): default 0. The stale gate assumed a pushing
+        // broker feed (ATP/Futu); CTP has no position push — snapshots only
+        // arrive via query — so "snapshot aging" is normal operation there,
+        // and td disconnect is already covered by channel_lost -> Disabled.
+        // The breach gate stays active; TraderCTP now refreshes snapshots
+        // every 30s (m_thrdPosQry) to feed its auto re-enable.
+        double staleFreezeSec = 0;
         // C1: clamp internal position to broker when |diff| exceeds this
         // (0 = disabled; broker wins, discrepancy still alerted)
         int32_t clampLimit = 0;

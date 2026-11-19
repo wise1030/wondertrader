@@ -60,6 +60,11 @@ struct HedgeData
     int32_t     position       = 0;
     double      deltaPosition  = 0.0;
     double      multiplier     = 1.0;
+    // P1 (2026-11-18): portfolio-level shared hedge (e.g. one CZCE future
+    // hedging several expiry series). Shared legs are counted ONCE at
+    // portfolio level and are NOT attributed to any single expiry's
+    // totalDelta() — per-expiry quoting must not double-respond to them.
+    bool        shared         = false;
 };
 using HedgeDataPtr     = std::shared_ptr<HedgeData>;
 using HedgeDataWeakPtr = std::weak_ptr<HedgeData>;

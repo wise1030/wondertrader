@@ -912,8 +912,20 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     }
 
     // floor by zero, apply alpha + adj
-    bid_spread = std::max(0.0, bid_spread - alpha_val - adj_val);
-    ask_spread = std::max(0.0, ask_spread + alpha_val + adj_val);
+    // P1 (2026-11-18): per-expiry net-delta quote skew. expNetDelta is
+    // exp_cxt.pos_delta = eg->totalDelta() (option + EXCLUSIVE hedge legs of
+    // this month only; shared portfolio legs are excluded so N expiries never
+    // double-respond to one position). sign(contractDelta) routes the
+    // incentive: a net-short-delta month lifts call quotes (eager to buy
+    // delta+) and drops put quotes (eager to sell delta+), and vice versa.
+    double ddAdj = 0.0;
+    if (config().wgt_exp_ddelta != 0.0) {
+        const double expNetDelta = cvcxt().exp_cxt[exp].pos_delta;
+        const double cDelta = black_values.greeks().delta();
+        ddAdj = -config().wgt_exp_ddelta * expNetDelta * (cDelta >= 0.0 ? 1.0 : -1.0);
+    }
+    bid_spread = std::max(0.0, bid_spread - alpha_val - adj_val - ddAdj);
+    ask_spread = std::max(0.0, ask_spread + alpha_val + adj_val + ddAdj);
 
     // bid/ask
     MultiMarket& multmkt = black_values.ourMarket();

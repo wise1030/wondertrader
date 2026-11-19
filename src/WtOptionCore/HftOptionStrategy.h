@@ -210,6 +210,12 @@ private:
     std::map<uint32_t, ExpiryConfig> _expiryConfigs;
     std::set<std::string> _hedgeCodes;  // distinct hedge codes (excluding underlying)
     std::set<std::string> _pnlPendingInit;  // codes awaiting PnL init (position known, waiting for preClose)
+    std::set<std::string> _pnlInited;       // P1 (2026-11-18): codes whose tracker has its cost basis —
+                                            // never re-init. Without this, every broker snapshot (now
+                                            // periodic via TraderCTP pos-refresh) re-ran initPosition,
+                                            // resetting lastfillpx to preClose and making floating PnL
+                                            // jump every cycle straight into checkRiskLimitsEx's
+                                            // pnlToday (spurious risk_signal panics, 2026-11-18).
     // P1-5: last seen preClose per code (worker thread).  Lets session-begin
     // seed carried positions immediately instead of leaving the trackers
     // flat until the first tick of the day (fills in that window realized 0).
@@ -248,6 +254,7 @@ private:
     // fire the session-stop state machine), so the first event only
     // reconciles a genuinely-stopped state instead of calling both ways.
     bool _b4Primed = false;
+    uint32_t _b4LastCurSec = 0;   // P1 (2026-11-19): stale timer-event guard (monotonic)
     /// Trading sections in normalized seconds-of-day; cross-midnight
     /// sections have end > 86400 (e.g. 2100-0100 -> [75600, 90000]).
     /// Built once from WTSSessionInfo on the first timer event.
@@ -406,6 +413,11 @@ private:
     std::string _primaryHedgeCode;
     wt_option::DeltaHedgeExecutor::Config _hedgeCfg;
     wt_option::OptionHedgeCoordinator _hedgeCoord;   // owns in-flight + cooldown
+    // P1 (2026-11-18): multi-leg delta hedge — one exclusive leg per enabled
+    // expiry (its own month future, strictly attributed) + one optional
+    // shared portfolio leg (residual tier). Empty legs = legacy single leg.
+    std::vector<wt_option::OptionHedgeCoordinator::Leg> _hedgeLegs;
+    std::string _sharedHedgeCode;
     bool _deltaHedgeLotWarned = false;
     void checkDeltaHedge(double nowSec);
     /// Resolve delta-per-lot from the hedge contract multiplier; <=0 means unknown.
