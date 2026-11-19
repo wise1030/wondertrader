@@ -160,12 +160,10 @@ public:
     double  fast_full_reprice_forward_step = 0.0; // 0 = disabled
     int32_t expire_greeks_window_bdays = 0;
     double  bid_offer_vol_spread_cap = 0.1;  // max IV bid-ask spread (10 vol points), matches quantbox default
-    // P1 (2026-11-19): 1.0 = price on the GVV curve; the linear curve2 is
-    // the fallback/blend leg. (Was 0.0 which — with the old curve2="gvv" —
-    // happened to price on the numerically-identical second GVV; with the
-    // linear default that would have silently degraded pricing to linear
-    // interpolation.)
-    double  volcurve_weight          = 1.0;
+    // P1 (2026-11-20): 0.0 = quantbox production default (curve2/linear is
+    // the baseline, GVV is an optional per-expiry smoothing layer). COP
+    // overwrites this per pass from its own config — keep both aligned.
+    double  volcurve_weight          = 0.0;
 
     static const char* name() { return "BlackPricer"; }
 };

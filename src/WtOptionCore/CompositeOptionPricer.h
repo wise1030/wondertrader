@@ -193,6 +193,15 @@ public:
     int32_t trace_level = 0;
 
     // GVV curve blend weight (0=use fitted curve only, 1=use GVV parametric only)
+    // P1 (2026-11-19/20): quantbox production semantics — default 0.0 =
+    // price on curve2 (LinearVolCurve, the interpolation baseline);
+    // GVV (curve1) is an OPTIONAL smoothing layer, raised per-expiry via
+    // m_prop_gvv_weight by the operator (OptionPricer2.cc:660-664; fit
+    // not-ready forces 0). Earlier 1.0 experiment measured WORSE on the
+    // out-of-band metric (23% vs 37%) since interpolation has zero residual
+    // at the fit points while GVV trades point-residual for smoothness.
+    // NOTE: initValuesCompute pushes this value to OP2::setGvvWeight EVERY
+    // pass — OP2's own default is irrelevant once COP is wired.
     double volcurve_weight = 0.0;
 
     /// B4: cross-expiry risk term switch (delta_risk2/vega_risk2 covariance
