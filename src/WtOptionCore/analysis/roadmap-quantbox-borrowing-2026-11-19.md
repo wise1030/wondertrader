@@ -36,7 +36,20 @@
 
 ## 3. 执行批次与验证口径
 
-### 批次 1：GVV 四小修（治 theo 出界）——优先级最高
+### 批次 1：GVV 四小修（治 theo 出界）——✅ 已实施（11-19 夜盘）
+
+实施复核记录：
+- 1.3 象限检查**实施前复核发现 WT 已有**（`PeriodicCurveFitter.cpp:256-260`，
+  调研漏检），跳过——roadmap 已修正
+- 1.4 vega 加权初版（裸 vega）致 kurt 爆炸：|x|=0.4 处权重比 ~1/2000 →
+  有效点数塌缩。改 √vega 压缩（比值 ~45:1）后正常
+- 测试语义勘误：datapoint.first = K−F（绝对价差）而非 log-moneyness、
+  second = vol/atmvol。closed_form 旧测试传 raw x（xi≈0，拟合退化解）
+  因只验 initialized 标志而通过——无害但已知
+- 实测：出界率 28%→37%，偏离幅度 −70%→±1-3%（残差与市场 spread
+  同量级，达 mid-IV 拟合固有水平）
+
+原内容（保留供溯源）：
 
 | # | 改动 | 文件 | 说明 |
 |---|---|---|---|
@@ -47,7 +60,16 @@
 
 验证：49 测试全绿 + `snap_outband.py` 出界率 ≥70%；re-anchor/播种行为不回归。
 
-### 批次 2：UI P0（盯盘核心）
+### 批次 2：UI P0（盯盘核心）——✅ 已实施（11-19 夜盘）
+
+实施复核记录：
+- bqpos 边界 bug 已修：市场该侧无盘（mkt.bid/ask≤0）而我方有挂单时
+  原显示 9999（无单），应为 0（我方即最优）
+- 已知限制：qp 为**价格差近似**（最优档对比）；真实队列位置（排第几
+  手）需订单簿五档数据——当前 OptionMarket 仅最优档，深度版 qp 需
+  扩展 tick 入库链（标注为后续增强，非本批次缺陷）
+
+原内容（保留供溯源）：
 
 | # | 改动 | 说明 |
 |---|---|---|
@@ -59,7 +81,7 @@
 
 | # | 改动 | 源 | 说明 |
 |---|---|---|---|
-| 3.1 | **TradingState 全局模式仲裁** | `multimarketmaker/TradingState.cc` | Stress/Panic/PositionGuard 信号收敛为统一模式机；GET_FLAT 分立即/定时两档 |
+| 3.1 | **TradingState 全局模式仲裁** | `multimarketmaker/TradingState.cc` | ⚠ 适配修正：WT 已有 TradingStateType 状态机 + **定时** close-flatten（`_closeFlattenActive`/`flatten_lead_seconds`）。增量 = 多信号（Stress/Panic/PositionGuard/PnL）**统一仲裁层** + GET_FLAT **立即档**（WT 只有定时档）。非从零移植 |
 | 3.2 | **TradingIntensity（AS 强度估计）** | `stratlib/TradingIntersity.cc` | 成交流在线估计被成交强度 → 报价宽度自适应 toxicity |
 | 3.3 | **OrderCounter 持久化** | `stratlib/OrderCounter.h` mmap 语义 | 撤单限额按自然日累计、重启不丢（今日 cancel-boundary 风暴正踩此坑） |
 
@@ -68,9 +90,9 @@
 | # | 改动 | 源 |
 |---|---|---|
 | 4.1 | CompositeMMPricer 评估（期货对冲腿专业报价） | `optioncore/CompositeMMPricer.*` 92KB |
-| 4.2 | Limits 事前整组报价验证（含潜在保证金） | `trading/Limits.cc` |
-| 4.3 | OrderHarmonizer 期望/实际挂单对账 + 订单 tag 归因 | `trading/OrderHarmonizer.h` |
-| 4.4 | risk 过滤器两档响应（reject→hard flat）+ MaxOpenOffsetFilter | `stratlib/risk/` |
+| 4.2 | Limits 事前整组报价验证（含潜在保证金） | `trading/Limits.cc` | ⚠ 适配修正：WT 已有 RiskFilterChain（链式过滤器）+ RiskLimitsEx（事后 Greeks/日亏损）。增量 = **整组 desired 报价**事前验证（一次 N 档报出前整体不越界）+ **保证金维度**；过滤器链本身不重复建设 |
+| 4.3 | 订单 tag 归因（策略/对冲/手动单分类统计） | `trading/OrderHarmonizer.h` | ⚠ 适配修正：OQM **已有** desired-vs-actual 增量对账核心（updateOrders diff），不重复。增量仅为**订单 tag 归因**（registerIssuedOrderIds 扩展 tag 维度 + 归因报表）——工作量大幅缩小 |
+| 4.4 | MaxOpenOffsetFilter（限开仓）+ reject/hard-flat 分级 | `stratlib/risk/` | ⚠ 适配修正：OQM 已有 `hard_flat_after_n_fills`（成交计数硬平仓）——增量 = 限**开仓**过滤器 + reject 模式与 hard-flat 模式显式分级 |
 
 ### 批次 5：UI P1 + 参数体系
 
@@ -79,7 +101,7 @@
 | 5.1 | 标的 hedge 面板升级：$Greeks、对冲信号背景色（\|Δ\|>阈值且 Γ≠0 染红）、到期红底、汇总行 | `FutureDataModel.py:117-263`（22 列） |
 | 5.2 | 到期摘要加希腊目标值（tgt Δ/tgt ν 与现值并排红绿） | `CompositeOptionPricer.cc:443-445` |
 | 5.3 | 参数面板优先级排序（enable/ready 置顶）+ 分到期过滤 | `OptionGridTab.py:82-137` lut |
-| 5.4 | 参数 SQLite 持久化（人工调参跨重启恢复） | `stratlib/PropertyManager.cc` |
+| 5.4 | 参数跨重启持久化验证/补充 | `stratlib/PropertyManager.cc` | ⚠ 适配修正：WT 已有 `sync_param`→ShareManager（WtShareHelper 共享内存，**跨进程热更新已通**）。磁盘持久化取决于 WtShareHelper 落盘配置——**先验证**，若重启丢失再补 SQLite（工作量降级为验证+条件补充） |
 | 5.5 | Alert 服务化报警（分级+限速+远程推送） | `clientcore/Alert.cc` |
 
 ### 批次 6：分析与复盘设施
@@ -91,6 +113,21 @@
 | 6.3 | TradesTab 归因复盘（sprd/delta/roll/gamma/vega/theta pnl + cum 切换 + 行标记） | `TradeViewer.py` |
 | 6.4 | PredictionEvaluator 信号持续打分（IC/命中率） | `stratlib/SampledPredictionEvaluator.cc` |
 | 6.5 | 回放设施（MarketUpdateLog/LoggedTransport 图案）+ MessagePerfMon 延迟分项 | `stratlib/MarketUpdateLog.*`、`io/MessagePerfMon.*` |
+
+## 3.5 遗漏补录（复核新增）
+
+- **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
+  落盘。前置任务：快照/拟合结果按到期落盘（可复用 AttributePublisher
+  管道加 CSV 边车），再谈分位数带
+- **出界率口径修正**（批次 1 后确立）：theo 是 mid-IV 拟合产物，残差
+  与市场 spread 同量级时出界 30-40% 是统计必然——**主质量指标改为
+  "theo vs mid 偏差中位数"**（dev_table 口径），出界率降为辅助指标
+- **CompositeMMPricer（4.1）评估前提**：先确认期货腿当前报价路径
+  （CompositeOptionPricer::updateOurMarketSideFuture）的实际缺陷
+  （报价档位/换仓/Flat 语义）再定移植范围，避免整体搬运 92KB
+- **五档深度数据链**：深度版队列位置 / 盘口意图分析均依赖——
+  OptionMarket 扩展存五档（tick 入库时 WTSTickData 的五档字段
+  存在但现只取最优档）——单独立项，批次 2 的价格差近似不阻塞
 
 ## 4. 已完成的关联修复（本路线图的上下文，勿重复）
 
@@ -108,8 +145,8 @@
 
 | 批次 | 状态 | 验证记录 |
 |---|---|---|
-| 批次 1 GVV 四小修 | ⬜ 未开始 | 出界率基线 28% |
-| 批次 2 UI P0 | ⬜ 未开始 | — |
+| 批次 1 GVV 四小修 | ✅ 完成（28%→37%，偏离 −70%→±1-3%） | 夜盘实测 |
+| 批次 2 UI P0 | ✅ 完成（qp 着色/闪烁/声音） | 待用户刷新目验 |
 | 批次 3 模式/执行 | ⬜ 未开始 | — |
 | 批次 4 健壮性 | ⬜ 未开始 | — |
 | 批次 5 UI P1/参数 | ⬜ 未开始 | — |
