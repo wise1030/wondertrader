@@ -131,6 +131,61 @@
 | 6.4 | PredictionEvaluator 信号持续打分（IC/命中率） | `stratlib/SampledPredictionEvaluator.cc` |
 | 6.5 | 回放设施（MarketUpdateLog/LoggedTransport 图案）+ MessagePerfMon 延迟分项 | `stratlib/MarketUpdateLog.*`、`io/MessagePerfMon.*` |
 
+## 3.4 批次 3-6 详细实施方案（11-20 批准版）
+
+执行顺序（按当前痛点：持仓失控/撤单风暴优先）：**3.0 → 3.1 → 3.3 → 3.2 → 4 → 5/6 穿插**
+
+### 批次 3（治失控）
+- **3.0 对冲速率参数（30 分钟，最先）**：config `delta_hedge.max_order_size: 2→10`、
+  `cooldown_sec: 5→1`；`delta_per_lot` 显式配 5。依据：11-18 13:58 日志
+  delta_excess=420、每 5s 2 手 = 0.4 delta/s << 累积 1 delta/s。
+  验证：|Δ|超阈值后对冲追平 <2 分钟、无撤单风暴
+- **3.1 TradingState 仲裁层（2-3 天）**：新 `TradingStateArbiter.h/cpp` +
+  `HftOptionStrategy::setState/applyTradingState` 接入。收集 channelReady/
+  stressBreach/pnlBreach/positionGuardBreach/sessionStopped/closeFlattenLead
+  → 唯一模式，优先级 Disabled > Panic > SessionStopped > Recovering >
+  GetFlat > Normal。**新增 GetFlat 立即档**（eraseBids+eraseAsks+只减仓）。
+  验证：任意信号组合模式确定可追溯；GetFlat 只减仓不开仓
+- **3.2 TradingIntensity（2 天）**：新 `Signals/TradingIntensity.{h,cpp}`，
+  源 `stratlib/TradingIntersity.cc`；每到期一估计器，成交 tick 从
+  `:1541 onTradeTick` 流入；输出 k → spread 乘子 max(1,k/k0) 接入
+  CompositeOptionPricer :899-903。验证：毒性流注入 spread 拉宽、静默回落
+- **3.3 OrderCounter 持久化（1 天）**：QuoteStatistics 扩展落盘
+  `generated/quote_counters_<tdate>.json`（按日覆盖、启动读取、跨日重置），
+  max_cancels_allowed 用持久值。验证：撤单后重启计数不重置
+
+### 批次 4（健壮性，约 3 天）
+- 4.1 期货腿报价评估（0.5 天，先评估不搬运）：读
+  updateOurMarketSideFuture（:1100/1255）记录实际缺陷再定移植范围
+- 4.2 整组报价事前验证（1.5 天）：CTG refresh 收集 desired 后、drain 前
+  validateBatch()（按到期聚合 delta/保证金，复用 RiskLimitsEx+MarginGuard）
+- 4.3 订单 tag 归因（1 天）：registerIssuedOrderIds 加 tag（MM/hedge/manual）
+  → OrderRegistry 分桶 → 快照统计 → TradesTab 过滤
+- 4.4 限开仓+分级（1 天）：RiskFilterChain 加 MaxOpenOffsetFilter（当日
+  开仓量限额 per-expiry）；OQM reject N1 → reject-only、N2 → hard-flat
+
+### 批次 5（UI P1 + 参数，约 3 天）
+- 5.1 hedge 面板：UnderlierView 升级表格（$Δ/$Γ/$Θ/$V、对冲信号色
+  |Δ|>阈值且 Γ≠0 红底、到期红底、分类汇总行）
+- 5.2 到期希腊目标：expiries[].targ_delta/targ_vega 配置 + 快照字段 +
+  ExpirySummary 现值/目标并排红绿
+- 5.3 参数面板 lut 排序（enable/ready 置顶）+ 到期过滤下拉
+- 5.4 参数持久化验证（改 hot param → 重启 → 值是否保留；若丢补
+  hot_params.json 落盘回放）
+- 5.5 Alert 远程推送（UiBridge alert 帧分级+2s 限速 → WS 转发 → 可选 webhook）
+
+### 批次 6（分析/复盘，约 4 天含前置）
+- 6.0 前置：AttributePublisher 加 CSV 边车（tdate/exp/atmvol/ts 分钟级）——vol 锥数据源
+- 6.1 smile 误差带：bid/ask 反解 IV 画带 + 多到期 DTE 渐变叠加
+- 6.2 vol 锥：6.0 历史 → 分位数带（MIN/10/25/50/75/90/MAX）+ 当前值
+- 6.3 归因复盘：fills 带 greeks-at-fill → sprd/delta/gamma/vega/theta pnl + cum 切换
+- 6.4 信号打分：scanner 信号后 N 秒 mid 变动 vs 预测，滚动 IC/命中率入 UiBridge
+- 6.5 回放设施：落盘扩展为可回放流 + replay 入口（借 WtBtCore tick 回放）
+
+### 独立项（不阻塞）
+- 五档深度数据链（深度版 qp 前提）
+- expiries[].volcurve_weight per-expiry 配置（GVV 运营旋钮）
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
