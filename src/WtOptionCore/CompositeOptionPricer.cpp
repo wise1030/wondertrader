@@ -899,6 +899,12 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     double our_cost = __getOptionCosts(option, mid);
     double widen = getRiskWidenFactorByCode(option->getCode());
     our_cost *= widen;
+    // P1 batch-3.2: toxic-flow adaptive widening (AS intensity estimate).
+    {
+        auto im = m_intensityMul.find(exp);
+        if (im != m_intensityMul.end() && im->second > 1.0)
+            our_cost *= im->second;
+    }
     double bid_spread = our_cost;
     double ask_spread = our_cost;
 

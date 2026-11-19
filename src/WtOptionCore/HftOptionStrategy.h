@@ -36,6 +36,7 @@
 #include "FillPriceChecker.h"
 #include "RiskLimitsEx.h"
 #include "QuoteStatistics.h"
+#include "Signals/TradingIntensity.h"
 #include "GammaScalpOptionPricer.h"
 #include "IssuedOrderRegistry.h"
 #include "TradingState.h"
@@ -295,6 +296,10 @@ private:
     std::unordered_map<std::string, wt_option::PositionGuardPtr> _positionGuards;  // Per-contract position guards
     std::unordered_map<std::string, wt_option::PositionOffsetMgrPtr> _positionOffsets; // Per-contract offset managers
     wt_option::QuoteStatistics _quoteStats;                          // Quote statistics (session-level)
+    // P1 batch-3.2: per-expiry fill-intensity estimator (AS decay fit) —
+    // spread widens when fills land far from the mid (toxic flow).
+    std::map<uint32_t, wt_option::TradingIntensity> _intensity;
+    bool _intensityEnable = false;
     uint64_t _tickTimestampUs = 0;                                   // Last tick arrival time (for latency measurement)
 
     // B2/3.3: single per-order registry — exchange-report anomaly protection

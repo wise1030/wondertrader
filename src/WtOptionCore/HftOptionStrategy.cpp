@@ -1218,6 +1218,8 @@ void HftOptionStrategy::setupPricer()
         // P1 (2026-11-18): per-expiry net-delta quote skew (0 = disabled).
         copCfg.wgt_exp_ddelta    = pCfg->has("wgt_exp_ddelta") ? pCfg->getDouble("wgt_exp_ddelta") :
             (pCfg->has("alpha") ? pCfg->get("alpha")->getDouble("wgt_exp_ddelta") : 0.0);
+        // P1 batch-3.2: AS fill-intensity adaptive spread (default off).
+        _intensityEnable = pCfg->has("intensity_enable") ? pCfg->getBoolean("intensity_enable") : false;
         copCfg.sticky_base       = pCfg->has("sticky_base") ? pCfg->getDouble("sticky_base") :
             (pCfg->has("quoting") ? pCfg->get("quoting")->getDouble("sticky_base") : 0.5);
         copCfg.improve_retreat_ratio = pCfg->has("improve_retreat_ratio") ? pCfg->getDouble("improve_retreat_ratio") :
@@ -1600,6 +1602,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     for (auto& sig : _compositePricer->getAlphaSignals()) {
                         sig->onTradeTick(code, tick.price, tick.tradeVolume, od.get());
                     }
+                    // P1 batch-3.2: feed the intensity estimator with the
+                    // fill's distance from the mid in ticks.
+                    if (_intensityEnable) {
+                        const double mid = od->getMid();
+                        double ts = od->getTickSize();
+                        if (ts <= 0) ts = 1.0;
+                        if (mid > 0)
+                            _intensity[od->getExpiry()].onFill(std::fabs(tick.price - mid) / ts);
+                    }
                 }
             }
 
@@ -1890,6 +1901,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
 
                 if (_compositePricer)
                     _compositePricer->setMarketTime(nowMs, _marketStaleTimeoutMs);
+                // P1 batch-3.2: push per-expiry intensity spread multipliers.
+                if (_intensityEnable && _compositePricer) {
+                    for (const auto& [exp, est] : _intensity)
+                        _compositePricer->setIntensityMultiplier(exp, est.spreadMultiplier());
+                }
                 _grid->computeValues(_pricer.get());
 
                 // Propagate pricer panic state to the CTG context.

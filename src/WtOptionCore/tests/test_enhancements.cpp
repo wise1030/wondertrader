@@ -25,6 +25,7 @@
 #include "../OptionRisk.h"
 #include "../TradingStateArbiter.h"
 #include "../QuoteStatistics.h"
+#include "../Signals/TradingIntensity.h"
 #include <cstdlib>
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
@@ -2647,6 +2648,50 @@ void test_quote_counter_persistence() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-3.2: AS fill-intensity — thin sample neutral, fast decay (k large)
+// tight, slow decay (toxic) widens, capped.
+// ============================================================================
+void test_trading_intensity() {
+    std::cout << "=== test_trading_intensity ===" << std::endl;
+    using namespace wt_option;
+
+    // thin sample -> neutral
+    TradingIntensity ti;
+    for (int i = 0; i < 5; ++i) ti.onFill(0.0);
+    ASSERT_TRUE(ti.spreadMultiplier() == 1.0);
+
+    // fast decay (all fills at the touch) -> k large -> multiplier 1 (tight)
+    TradingIntensity tight;
+    for (int i = 0; i < 200; ++i) tight.onFill(0.0);
+    ASSERT_TRUE(tight.sampleCount() == 200);
+    ASSERT_TRUE(tight.estimateK() < 0.0);        // single bucket -> cannot fit -> neutral
+    ASSERT_TRUE(tight.spreadMultiplier() == 1.0);
+
+    // slow decay: fills spread evenly across buckets 0..5 (toxic) -> small k
+    TradingIntensity toxic;
+    for (int i = 0; i < 300; ++i) toxic.onFill(i % 6);   // uniform across buckets
+    const double kToxic = toxic.estimateK();
+    ASSERT_TRUE(kToxic >= 0.0);
+
+    // steep decay: counts concentrated at bucket 0, long tail -> k large
+    TradingIntensity steep;
+    for (int i = 0; i < 300; ++i) {
+        if (i < 200) steep.onFill(0);
+        else if (i < 260) steep.onFill(1);
+        else if (i < 285) steep.onFill(2);
+        else steep.onFill(3);
+    }
+    const double kSteep = steep.estimateK();
+    ASSERT_TRUE(kSteep > kToxic);
+    // toxic (flatter) widens more than steep
+    ASSERT_TRUE(toxic.spreadMultiplier() >= steep.spreadMultiplier());
+    // multiplier capped by maxWiden
+    ASSERT_TRUE(toxic.spreadMultiplier() <= 3.0 + 1e-9);
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2704,6 +2749,7 @@ int main() {
     test_gvv_vega_weighted();
     test_trading_state_arbiter();
     test_quote_counter_persistence();
+    test_trading_intensity();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

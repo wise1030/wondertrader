@@ -347,6 +347,8 @@ public:
 
     // Fit interval config (fit triggered by OptionPricer2::triggerDoFit)
     void setFitInterval(double seconds) { m_fitInterval = seconds; }
+    /// P1 batch-3.2: per-expiry spread multiplier from the intensity estimator.
+    void setIntensityMultiplier(uint32_t exp, double m) { m_intensityMul[exp] = m; }
 
     // Signal management
     void setAlphaSignals(std::vector<IAlphaSignal::Ptr> sigs) { m_alphaSignals = std::move(sigs); }
@@ -503,6 +505,7 @@ private:
         int32_t numcxl = 0, numrej = 0, numpos = 0, numfil = 0;
     };
     std::map<uint32_t, ExpiryDataPub> m_prop_edpub;
+    std::map<uint32_t, double> m_intensityMul;   // P1 batch-3.2
 
     // Signals
     std::vector<IAlphaSignal::Ptr> m_alphaSignals;
