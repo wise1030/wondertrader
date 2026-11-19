@@ -111,6 +111,11 @@ public:
     void onCancel();
     void onReject();
 
+    /// P1 batch-3.3: restore persisted order counters (same trading day only).
+    void restoreCounters(uint32_t orders, uint32_t fills, uint32_t cancels, uint32_t rejects) {
+        _ordersSent = orders; _fills = fills; _cancels = cancels; _rejects = rejects;
+    }
+
     /// Quote latency (tick -> order confirmed)
     void onQuoteLatency(uint64_t latencyUs);
 
@@ -205,6 +210,15 @@ public:
     QuoteStatsResult getStats(const std::string& code) const;
     QuoteStatsResult getAggregate(const std::vector<std::string>& codes) const;
 
+    // ---- P1 batch-3.3: exchange cancel/order limits accrue per TRADING DAY,
+    // so a restart must not reset them (SimNow/CFFEX 撤单率风控按自然日)。
+    // CSV sidecar: generated/quote_counters_<tdate>.csv — written at most
+    // once every 5s on counter activity, plus on session end; loaded on
+    // session begin when the date matches.
+    void setPersistDir(const std::string& dir) { _persistDir = dir; }
+    void persistToDisk();
+    bool loadFromDisk(uint32_t date);
+
     /// Session summary
     struct SessionSummary {
         uint32_t date = 0;
@@ -230,6 +244,11 @@ private:
     uint32_t m_currentDate = 0;
     uint32_t m_lastTimeHHMM = 0;
     uint32_t m_lastSecInMin = 0;
+    // P1 batch-3.3 persistence
+    std::string _persistDir = "generated";
+    bool        _countersDirty = false;
+    double      _lastPersistSec = 0;
+    void        maybePersist();
 };
 
 using QuoteStatisticsPtr = std::shared_ptr<QuoteStatistics>;

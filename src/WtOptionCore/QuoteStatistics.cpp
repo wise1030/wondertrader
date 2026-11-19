@@ -9,6 +9,9 @@
  * - Weighted spread (tick units)
  * - All updates from OQM callbacks (no hot-path overhead)
  */
+#include <chrono>
+#include <fstream>
+#include <sstream>
 #include "QuoteStatistics.h"
 #include "WTSSessionInfo.hpp"
 #include "WTSLogger.h"
@@ -242,14 +245,24 @@ void QuoteStatistics::setSessionInfo(wtp::WTSSessionInfo* sessInfo) {
 
 void QuoteStatistics::onSessionBegin(uint32_t date) {
     m_currentDate = date;
-    for (auto& pair : m_stats) {
-        pair.second.onSessionStart();
+    // P1 batch-3.3: same-day restart restores the persisted counters so the
+    // exchange's per-day cancel/order limits keep accruing across restarts.
+    if (loadFromDisk(date)) {
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "QuoteStatistics: session begin date={} — counters restored from disk", date);
+    } else {
+        for (auto& pair : m_stats) {
+            pair.second.onSessionStart();
+        }
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "QuoteStatistics: session begin date={}", date);
     }
-    WTSLogger::log_by_cat("strategy", LL_INFO,
-        "QuoteStatistics: session begin date={}", date);
+    _countersDirty = false;
+    _lastPersistSec = 0;
 }
 
 void QuoteStatistics::onSessionEnd() {
+    persistToDisk();   // P1 batch-3.3: final counters before the break
     for (auto& pair : m_stats) {
         pair.second.onSessionEnd(m_lastTimeHHMM, m_lastSecInMin);
     }
@@ -281,18 +294,26 @@ const QuoteStats* QuoteStatistics::get(const std::string& code) const {
 }
 
 void QuoteStatistics::onOrderSent(const std::string& code) {
+    _countersDirty = true;   // P1 batch-3.3
+    maybePersist();
     getOrCreate(code).onOrderSent();
 }
 
 void QuoteStatistics::onFill(const std::string& code) {
+    _countersDirty = true;   // P1 batch-3.3
+    maybePersist();
     getOrCreate(code).onFill();
 }
 
 void QuoteStatistics::onCancel(const std::string& code) {
+    _countersDirty = true;   // P1 batch-3.3
+    maybePersist();
     getOrCreate(code).onCancel();
 }
 
 void QuoteStatistics::onReject(const std::string& code) {
+    _countersDirty = true;   // P1 batch-3.3
+    maybePersist();
     getOrCreate(code).onReject();
 }
 
@@ -403,6 +424,64 @@ QuoteStatistics::SessionSummary QuoteStatistics::getSessionSummary() const {
     }
 
     return summary;
+}
+
+// ============================================================================
+// P1 batch-3.3: per-trading-day counter persistence (CSV sidecar).
+// ============================================================================
+static double qs_nowSec() {
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::string qs_path(const std::string& dir, uint32_t date) {
+    return dir + "/quote_counters_" + std::to_string(date) + ".csv";
+}
+
+bool QuoteStatistics::loadFromDisk(uint32_t date) {
+    std::ifstream in(qs_path(_persistDir, date));
+    if (!in.is_open()) return false;
+    std::string line;
+    if (!std::getline(in, line)) return false;
+    if (line != "date," + std::to_string(date)) return false;   // stale file
+    size_t restored = 0;
+    while (std::getline(in, line)) {
+        std::stringstream ss(line);
+        std::string code, o, f, c, r;
+        if (!std::getline(ss, code, ',')) continue;
+        if (!std::getline(ss, o, ',')) continue;
+        if (!std::getline(ss, f, ',')) continue;
+        if (!std::getline(ss, c, ',')) continue;
+        if (!std::getline(ss, r, ',')) continue;
+        auto& st = getOrCreate(code);
+        st.restoreCounters((uint32_t)std::stoul(o), (uint32_t)std::stoul(f),
+                           (uint32_t)std::stoul(c), (uint32_t)std::stoul(r));
+        ++restored;
+    }
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "QuoteStatistics: restored counters for {} contracts (tdate={})", restored, date);
+    return restored > 0;
+}
+
+void QuoteStatistics::persistToDisk() {
+    if (m_currentDate == 0) return;
+    std::ofstream out(qs_path(_persistDir, m_currentDate), std::ios::trunc);
+    if (!out.is_open()) return;
+    out << "date," << m_currentDate << "\n";
+    for (const auto& [code, st] : m_stats) {
+        auto r = st.getResult();
+        out << code << ',' << r.ordersSent << ',' << r.fills << ','
+            << r.cancels << ',' << r.rejects << "\n";
+    }
+    _countersDirty = false;
+    _lastPersistSec = qs_nowSec();
+}
+
+void QuoteStatistics::maybePersist() {
+    if (!_countersDirty || m_currentDate == 0) return;
+    const double now = qs_nowSec();
+    if (now - _lastPersistSec < 5.0) return;   // at most one write per 5s
+    persistToDisk();
 }
 
 } // namespace wt_option

@@ -24,6 +24,8 @@
 #include "../OrderGateway.h"
 #include "../OptionRisk.h"
 #include "../TradingStateArbiter.h"
+#include "../QuoteStatistics.h"
+#include <cstdlib>
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
 #include "../PositionBook.h"
@@ -2598,6 +2600,53 @@ void test_trading_state_arbiter() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-3.3: per-trading-day counter persistence — restart restores
+// same-day counters, a new day resets.
+// ============================================================================
+void test_quote_counter_persistence() {
+    std::cout << "=== test_quote_counter_persistence ===" << std::endl;
+    using namespace wt_option;
+    const std::string dir = "/tmp/qs_persist_test";
+    ::system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+    {
+        QuoteStatistics qs;
+        qs.setPersistDir(dir);
+        qs.onSessionBegin(20261120);
+        for (int i = 0; i < 7; ++i) qs.onCancel("TEST.A");
+        for (int i = 0; i < 3; ++i) qs.onOrderSent("TEST.A");
+        qs.onFill("TEST.A");
+        qs.persistToDisk();
+        auto r = qs.getStats("TEST.A");
+        ASSERT_TRUE(r.cancels == 7 && r.ordersSent == 3 && r.fills == 1);
+    }
+    {
+        // same-day restart: counters restored, not reset
+        QuoteStatistics qs;
+        qs.setPersistDir(dir);
+        qs.onSessionBegin(20261120);
+        auto r = qs.getStats("TEST.A");
+        ASSERT_TRUE(r.cancels == 7 && r.ordersSent == 3 && r.fills == 1);
+        qs.onCancel("TEST.A");          // accrues on top of restored value
+        qs.persistToDisk();
+    }
+    {
+        QuoteStatistics qs;
+        qs.setPersistDir(dir);
+        qs.onSessionBegin(20261120);
+        ASSERT_TRUE(qs.getStats("TEST.A").cancels == 8);
+    }
+    {
+        // a NEW trading day must start from zero
+        QuoteStatistics qs;
+        qs.setPersistDir(dir);
+        qs.onSessionBegin(20261121);
+        ASSERT_TRUE(qs.getStats("TEST.A").cancels == 0);
+    }
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2654,6 +2703,7 @@ int main() {
     test_p1_min_strikes_linkage();
     test_gvv_vega_weighted();
     test_trading_state_arbiter();
+    test_quote_counter_persistence();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

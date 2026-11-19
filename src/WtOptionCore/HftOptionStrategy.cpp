@@ -1009,6 +1009,7 @@ void HftOptionStrategy::setupPricer()
     // Inject SessionInfo for QuoteStatistics (session-based time tracking)
     if (_sessionInfo)
         _quoteStats.setSessionInfo(_sessionInfo);
+        _quoteStats.setPersistDir("generated");   // P1 batch-3.3
 
     // Create shared theoretical pricer (OptionPricer2) — used by both strategies
     wt_option::OptionPricer2Config p2cfg;
