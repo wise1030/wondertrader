@@ -44,6 +44,7 @@
 #include "Signals/RiskSignals.h"
 #include "CffexIOStrikeFinder.h"
 #include "DceMOStrikeFinder.h"
+#include "TradingStateArbiter.h"
 #include "TradingState.h"
 #include "CommandBus.h"
 #include "DeltaHedgeExecutor.h"
@@ -2467,11 +2468,16 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 }
                 if (inArmZone && !_closeFlattenActive) {
                     _closeFlattenActive = true;
+                    // P1 batch-3.1: GetFlat is a first-class mode (reduce-only,
+                    // aggressive hedge leg) — the arbiter keeps Panic/Disabled
+                    // above it and blocks unrelated downgrades while active.
+                    setState(wt_option::TradingStateType::GetFlat, "close_flatten_armed");
                     WTSLogger::log_by_cat("strategy", LL_INFO,
                         "Close flatten armed: {}s before daily close (section end {}s), hedging portfolio delta to 0",
                         (uint32_t)_closeFlattenLead, windowClose);
                 } else if (!inArmZone && _closeFlattenActive) {
                     disarmCloseFlatten();
+                    setState(wt_option::TradingStateType::Normal, "close_flatten_disarmed");
                     WTSLogger::log_by_cat("strategy", LL_INFO,
                         "Close flatten disarmed: close passed, pulling unfilled orders");
                 }
@@ -3788,6 +3794,16 @@ bool HftOptionStrategy::_tradingStateEnabled() const
 void HftOptionStrategy::setState(wt_option::TradingStateType t, const std::string& reason)
 {
     const wt_option::TradingStateType prev = _tstate.type;
+
+    // P1 batch-3.1: arbitration guard — see TradingStateArbiter.h for the
+    // single deterministic downgrade policy (unit-tested).
+    if (!wt_option::shouldAllowTransition(prev, t, reason)) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "TradingStateArbiter: ignore downgrade {} -> {} (reason={})",
+            wt_option::toString(prev), wt_option::toString(t), reason);
+        return;
+    }
+
     _tstate.type = t;
     _tstate.reason = reason;
     applyTradingState();

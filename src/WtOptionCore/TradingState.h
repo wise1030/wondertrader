@@ -20,7 +20,9 @@ enum class TradingStateType : uint8_t {
     Recovering,         // channel ready; waiting for broker snapshot/fresh underlying
     Normal,             // quoting
     SessionStopped,     // B4 mid-day section pause (quotes pulled)
-    Panic               // risk-off: quotes cancelled, futures hedge kept alive
+    Panic,              // risk-off: quotes cancelled, futures hedge kept alive
+    GetFlat             // P1 batch-3.1: close-flatten active (timed or immediate) —
+                        // reduce-only, futures hedge leg aggressive
 };
 
 inline const char* toString(TradingStateType t) {
@@ -30,6 +32,7 @@ inline const char* toString(TradingStateType t) {
     case TradingStateType::Normal:         return "Normal";
     case TradingStateType::SessionStopped: return "SessionStopped";
     case TradingStateType::Panic:          return "Panic";
+    case TradingStateType::GetFlat:        return "GetFlat";
     }
     return "?";
 }
@@ -49,6 +52,7 @@ struct TradingState {
         case TradingStateType::Normal:         return channelReady && underlyingReady;
         case TradingStateType::Recovering:     return false;
         case TradingStateType::Panic:          return channelReady;
+        case TradingStateType::GetFlat:        return channelReady;   // reduce-only orders flow
         case TradingStateType::SessionStopped: return false;
         case TradingStateType::Disabled:       return false;
         }

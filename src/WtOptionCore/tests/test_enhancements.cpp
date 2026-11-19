@@ -23,6 +23,7 @@
 #include "../ControllableTradingGrid.h"
 #include "../OrderGateway.h"
 #include "../OptionRisk.h"
+#include "../TradingStateArbiter.h"
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
 #include "../PositionBook.h"
@@ -2562,6 +2563,41 @@ void test_gvv_vega_weighted() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-3.1: trading-state arbiter — deterministic priorities + guarded
+// downgrades (the generalised fix for the channel_ready/stale-event overwrites).
+// ============================================================================
+void test_trading_state_arbiter() {
+    std::cout << "=== test_trading_state_arbiter ===" << std::endl;
+    using namespace wt_option;
+
+    // pure evaluate(): priority Disabled > Panic > SessionStopped > Recovering > GetFlat > Normal
+    ASSERT_TRUE(evaluateTradingState({}).mode == ArbiterMode::Normal);
+    ASSERT_TRUE(evaluateTradingState({.getFlat = true}).mode == ArbiterMode::GetFlat);
+    ASSERT_TRUE(evaluateTradingState({.panicked = true, .getFlat = true}).mode == ArbiterMode::Panic);
+    ASSERT_TRUE(evaluateTradingState({.sessionStopped = true, .getFlat = true}).mode == ArbiterMode::SessionStopped);
+    ASSERT_TRUE(evaluateTradingState({.channelReady = false, .panicked = true}).mode == ArbiterMode::Disabled);
+    ASSERT_TRUE(evaluateTradingState({.recovering = true, .getFlat = true}).mode == ArbiterMode::Recovering);
+
+    using T = TradingStateType;
+    // upgrades always allowed
+    ASSERT_TRUE(shouldAllowTransition(T::Normal, T::Panic, "risk_signal"));
+    ASSERT_TRUE(shouldAllowTransition(T::Normal, T::GetFlat, "close_flatten_armed"));
+    ASSERT_TRUE(shouldAllowTransition(T::GetFlat, T::Panic, "risk_signal"));
+    // downgrades need whitelist
+    ASSERT_TRUE(!shouldAllowTransition(T::SessionStopped, T::Recovering, "channel_ready"));
+    ASSERT_TRUE(shouldAllowTransition(T::SessionStopped, T::Recovering, "session_resume"));
+    ASSERT_TRUE(!shouldAllowTransition(T::Panic, T::Normal, "some_random_reason"));
+    ASSERT_TRUE(shouldAllowTransition(T::Panic, T::Normal, "blackout_expired"));
+    ASSERT_TRUE(shouldAllowTransition(T::GetFlat, T::Normal, "close_flatten_disarmed"));
+    ASSERT_TRUE(!shouldAllowTransition(T::GetFlat, T::Normal, "session_resume"));
+    ASSERT_TRUE(shouldAllowTransition(T::Disabled, T::Recovering, "channel_ready"));
+    // same-rank transitions pass
+    ASSERT_TRUE(shouldAllowTransition(T::Normal, T::Normal, "whatever"));
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2617,6 +2653,7 @@ int main() {
     test_p1_multileg_hedge();
     test_p1_min_strikes_linkage();
     test_gvv_vega_weighted();
+    test_trading_state_arbiter();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;
