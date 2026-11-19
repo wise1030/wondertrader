@@ -72,12 +72,14 @@ void UiSnapshotBuilder::buildLeg(const OptionData& od, double atmVol, UiLegView&
             if (mkt.ask > 0 && ourBid >= mkt.ask - tick * 0.5) out.bqp = -1;   // crossing
             else if (mkt.bid > 0 && ourBid >= mkt.bid - tick * 0.5) out.bqp = 0; // at best
             else if (mkt.bid > 0) out.bqp = (int32_t)std::ceil((mkt.bid - ourBid) / tick);
+            else out.bqp = 0;   // no market bid — our quote IS the best
         }
         if (ourAsk > 0) {
             out.hasOb = true; out.oask = ourAsk;
             if (mkt.bid > 0 && ourAsk <= mkt.bid + tick * 0.5) out.aqp = -1;   // crossing
             else if (mkt.ask > 0 && ourAsk <= mkt.ask + tick * 0.5) out.aqp = 0; // at best
             else if (mkt.ask > 0) out.aqp = (int32_t)std::ceil((ourAsk - mkt.ask) / tick);
+            else out.aqp = 0;   // no market ask — our quote IS the best
         }
     }
 }
