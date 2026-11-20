@@ -982,7 +982,13 @@ void HftOptionStrategy::setupPricer()
             },
             [this](const std::string& code, bool isBuy,
                    double price, uint32_t qty) {
-                return executeOrderIds(code, isBuy, price, qty);
+                // P1 audit fix: the buy_sell quote style routes EVERY market
+                // quote through submitOrder -> this handler — with the
+                // default Unknown tag, so the UI showed MM quotes as
+                // "unknown".  The gateway's order leg is exclusively market
+                // making (hedge/scanner orders bypass it), so tag MM.
+                return executeOrderIds(code, isBuy, price, qty,
+                                       wt_option::OrderTag::MM);
             },
             [this](uint32_t localid) -> bool {
                 return executeCancel(localid);

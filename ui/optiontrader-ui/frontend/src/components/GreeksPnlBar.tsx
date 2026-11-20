@@ -21,9 +21,15 @@ export const GreeksPnlBar: React.FC = () => {
             <span>Θ <b>{fmt(g?.theta)}</b></span>
             <span className="w-px h-4 bg-gray-200" />
             <span className="font-semibold text-gray-500">PnL</span>
-            <span className={pnlColor(p?.cur)}>cur <b>{fmt(p?.cur)}</b></span>
-            <span className={pnlColor(p?.realized)}>real <b>{fmt(p?.realized)}</b></span>
-            <span className="text-gray-500">turn <b>{fmt(p?.turnover, 0)}</b></span>
+            {/* local mark = prev-settle basis + mid valuation; the exchange
+                window (CTP) additionally differs by today's fees and uses
+                opposite-side liquidation value */}
+            <span title="local mark: prev-settle basis, mid valuation, fee-adjusted fills — differs from the CTP position-pnl window by fees and valuation side">
+                <span className={pnlColor(p?.cur)}>cur <b>{fmt(p?.cur)}</b></span>
+                <span className={pnlColor(p?.realized)}> real <b>{fmt(p?.realized)}</b></span>
+                <span className="text-gray-500"> turn <b>{fmt(p?.turnover, 0)}</b></span>
+                <span className="ml-1 text-[9px] text-gray-400">(local mark)</span>
+            </span>
             {snapshot?.risk.limitsBreached && (
                 <span className="ml-auto bg-red-600 text-white px-2 rounded font-bold animate-pulse">LIMITS BREACHED</span>
             )}
