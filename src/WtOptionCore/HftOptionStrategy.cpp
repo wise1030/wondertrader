@@ -4362,8 +4362,15 @@ void HftOptionStrategy::registerCommands()
     // P3: cancel every live order. Channel check mirrors executeCancel; each
     // cancel goes through the same stra_cancel path as a single cancel.
     hooks.cancelAllLive = [this]() -> uint32_t {
-        if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire))
+        if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) {
+            // P1 follow-up: make the channel-fence skip VISIBLE — during a
+            // disconnect/SimNow daily-maintenance window CTP physically
+            // cannot cancel; the recovery sweep on reconnect covers it.
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "UI CANCELALL skipped: channel fence (not ready or down) — "
+                "recovery sweep will cancel all on reconnect");
             return 0;
+        }
         uint32_t n = 0;
         for (const auto& kv : _orderRegistry.orders()) {
             const auto& rec = kv.second;
@@ -4386,6 +4393,28 @@ void HftOptionStrategy::registerCommands()
             const bool off = (args[1] == "off" || args[1] == "OFF" || args[1] == "0");
             if (!on && !off) { err = "mode needs on|off"; return false; }
             return setExpiryEnabled(exp, on);
+        });
+    // P1 follow-up: per-expiry quote MODE — QMODEE,<expiry>,<on|off|close>
+    // (the grid-wide QMODE applies to every series; this scopes to one).
+    _cmdBus.registerCommand("QMODEE",
+        [this](const std::vector<std::string>& args, std::string& err) {
+            if (args.size() < 2) { err = "QMODEE needs <expiry>,<on|off|close>"; return false; }
+            const uint32_t exp = static_cast<uint32_t>(std::strtoul(args[0].c_str(), nullptr, 10));
+            if (exp == 0) { err = "bad expiry"; return false; }
+            const std::string& mode = args[1];
+            if (mode != "on" && mode != "off" && mode != "close") {
+                err = "mode needs on|off|close"; return false;
+            }
+            if (!_ctg || !_grid) { err = "not initialized"; return false; }
+            int n = 0;
+            for (const auto& od : _grid->getAllOptions()) {
+                if (!od || od->getExpiry() != exp) continue;
+                auto otd = od->getTradingData();
+                if (otd && _ctg->onSetQMode(od->getCode(), mode)) ++n;
+            }
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "QMODEE: expiry {} mode {} applied to {} contracts", exp, mode, n);
+            return true;
         });
 
     // P1 batch-5.4: replay operator-tuned hot params BEFORE sync_param

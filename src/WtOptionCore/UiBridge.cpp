@@ -124,6 +124,30 @@ bool translateCommand(const std::string& line, const std::string& verb,
         wire = "QMODES," + code + "," + mode;
         return true;
     }
+    if (verb == "qmode_expiry")
+    {
+        // P1 follow-up: per-expiry quote mode
+        auto it = doc.FindMember("expiry");
+        if (it == doc.MemberEnd() || !it->value.IsNumber())
+        {
+            err = "qmode_expiry needs expiry (YYYYMM)";
+            return false;
+        }
+        auto md = doc.FindMember("mode");
+        if (md == doc.MemberEnd() || !md->value.IsString())
+        {
+            err = "qmode_expiry needs mode=on|off|close";
+            return false;
+        }
+        std::string mode = md->value.GetString();
+        if (mode != "on" && mode != "off" && mode != "close")
+        {
+            err = "qmode_expiry mode needs on|off|close";
+            return false;
+        }
+        wire = fmt::format("QMODEE,{:.0f},{}", it->value.GetDouble(), mode);
+        return true;
+    }
     if (verb == "cancel_all")
     {
         wire = "CANCELALL";
