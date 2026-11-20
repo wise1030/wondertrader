@@ -323,7 +323,6 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.key("tps"); w.Int(v.tps);
     w.key("tpsMax"); w.Int(v.tpsMax);
     w.key("ordersSent"); w.Uint(v.ordersSent);
-    w.numOrNull("hedgeDeltaThreshold", v.hedgeDeltaThreshold);
     {   // P1 batch-4.3 per-source buckets
         w.key("liveByTag"); w.StartArray();
         for (int i = 0; i < 4; ++i) w.Uint(v.liveByTag[i]);
@@ -340,6 +339,10 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.key("sessionStopInSec"); if (v.hasSessionStop) w.Int(v.sessionStopInSec); else w.Null();
     w.EndObject();
 
+    // P1 batch-5.1: delta-hedge fire threshold for the hedge panel (TOP
+    // LEVEL — the frontend reads snapshot.hedgeDeltaThreshold; an earlier
+    // revision encoded it inside "risk" where nothing could see it).
+    w.numOrNull("hedgeDeltaThreshold", v.hedgeDeltaThreshold);
     w.key("pred"); w.StartObject();
     w.key("resolved"); w.Uint(v.predResolved);
     w.numOrNull("hitRate", v.predHitRate);

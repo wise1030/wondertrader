@@ -89,6 +89,7 @@ public:
                               "max_pos_fut","max_pos_stk","max_pos_opt","max_qsize",
                               "enable_auto_close","close_pos_thresh","include_future",
                               "min_strikes_for_synthetic",
+                              "targ_delta","targ_vega",   // P1 batch-5.2 (audit fix: was missing)
                               "volcurve_weight" } },   // P1 follow-up: per-expiry GVV blend
             { "orderManager.riskFilters.option", { "enabled","max_order_size","max_order_size_reject",
                               "min_sell_price","max_position","max_position_mode",
