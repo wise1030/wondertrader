@@ -1843,7 +1843,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _underlyingChanged = true;
         }
 
-        if (_traderCtx && _traderCtx->enabled && marketFresh) {
+        // P1 audit fix (UI pos): broker-restored positions must reach the
+        // OptionData objects UNCONDITIONALLY.  This loop used to sit inside
+        // the enabled&&marketFresh gate, so while trading was off (overnight,
+        // channel down, pre-recovery) the snapshot-restored _positions never
+        // reached od->setPosition() and the UI showed pos=0 for real
+        // holdings.  Position truth is not market-state dependent; the gate
+        // below keeps only the market-driven work.
+        if (_traderCtx) {
             for (const auto& [code, pos] : _positions) {
                 auto od = _grid->get(code);
                 if (od) {
@@ -1862,6 +1869,30 @@ void HftOptionStrategy::setupAsyncCallbacks()
                         utd->getQuoteManager()->setPosition(static_cast<int32_t>(pos));
                 }
             }
+        }
+
+        // P1 audit fix (UI pos, part 2): greek recompute must also run
+        // unconditionally — _risk->update() honours per-RiskData dirty flags
+        // (set by the broker-snapshot setPosition in on_position), so an
+        // out-of-gate call is a no-op when nothing changed.  Gating it here
+        // left the UI portfolio Δ/Γ/ν/Θ stale until the first fresh tick,
+        // same family as the gated od->setPosition above.
+        if (_risk) _risk->update();
+
+        // P1 audit fix (same family as the ungated pos sync): the three
+        // periodic risk checks used to sit inside the enabled&&marketFresh
+        // gate — exactly the window (channel down / overnight, positions
+        // just restored by broker snapshots) where a breach must still be
+        // caught.  All three carry their own input guards: checkMarginLimits
+        // bails on udlPx<=0, DeltaHedger orders die on !channelReady, and
+        // checkRiskLimitsEx runs off position greeks (fresh after the
+        // unconditional update above).
+        const double nowUngated = _timeService.nowSeconds(_ctx);
+        checkRiskLimitsEx();
+        checkMarginLimits(nowUngated);
+        checkDeltaHedge(nowUngated);
+
+        if (_traderCtx && _traderCtx->enabled && marketFresh) {
 
             // P5: Fuse multiple getAllOptions/getAllUnderlyingTradingData passes
             // into a single pass each. Previously 4+ separate loops.
@@ -1936,13 +1967,6 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _lastComputeTime = now;
                 _underlyingChanged = false;
                 _needsRefresh = false;
-
-                // Refresh position Greeks before computeValues so that
-                // risk_adjustment uses current-cycle position data (not stale).
-                // OptionRisk::update() recomputes portfolio greeks from dirty flags
-                // set by addFill/setHedgePosition. Without this, risk_adjustment
-                // uses previous-cycle greeks (1-cycle lag for fills).
-                if (_risk) _risk->update();
 
                 // Phase 2: periodic scenario stress on current portfolio Greeks.
                 if (_risk && now - _lastStressTime >= 60.0
@@ -2026,8 +2050,6 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 }
 
                 // A2: periodic Greeks / daily-loss limits (non-hot-path)
-                checkRiskLimitsEx();
-
                 // refresh() is auto-triggered by OptionGrid::__notifyComputeCompleted
                 // -> CTG::onComputeValuesCompleted -> refresh(). No explicit call needed.
             }
@@ -2037,12 +2059,6 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _attrPub->publish(now);
             }
 
-            // B1: estimated-margin guard (runs on its own throttle, even
-            // without compute, so a margin breach is caught in quiet markets)
-            checkMarginLimits(now);
-
-            // R10: delta hedge executor (own cooldown inside decide())
-            checkDeltaHedge(now);
             // R-P1: periodic accuracy report
             _predEvaluator.maybeReport(60.0);
             // P1 batch-6.0: analysis sidecars (self-throttled to 1 row/min)
