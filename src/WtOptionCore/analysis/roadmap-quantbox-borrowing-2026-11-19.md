@@ -472,6 +472,18 @@ spread 大时与可变现值有差），与"平今盈亏"含手续费口径亦�
 3. 遗留观察：翼部 put 多档挂单残留待日盘 recovery sweep 清理（重启
    后首个 channel_ready 自动撤全）
 
+## 3.4k 前端命令失效第二根因（11-21，CommandBus args 语义）
+
+UI 点击（cancel_all/qmode_expiry/EXPIRYENABLE）ACK ok=true 但零效果
+的第二根因：**CommandBus::dispatch 传给 handler 的是全 tokens
+（args[0]=verb 本身）**，而新命令（EXPIRYENABLE/QMODEE）按 args[0]
+=expiry 解析 → strtoul("QMODEE")=0 → "bad expiry" 静默失败（ACK
+ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无感）。
+修正 args 下标（args[1]=expiry/args[2]=mode）。
+**部署功能实测**：cancel_all 108 条残留 → 1；qmode_expiry 2701 off
+→ 该月 live 29 → 0；qmode on 恢复 ✓。旧 handler（CANCEL/QMODE 等）
+本就按全 tokens 写——不受影响。
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无

@@ -4386,11 +4386,12 @@ void HftOptionStrategy::registerCommands()
     // P1 follow-up: per-expiry quoting on/off — EXPIRYENABLE,<expiry>,<on|off>
     _cmdBus.registerCommand("EXPIRYENABLE",
         [this](const std::vector<std::string>& args, std::string& err) {
-            if (args.size() < 2) { err = "EXPIRYENABLE needs <expiry>,<on|off>"; return false; }
-            const uint32_t exp = static_cast<uint32_t>(std::strtoul(args[0].c_str(), nullptr, 10));
+            // CommandBus passes ALL tokens (args[0] = verb itself)
+            if (args.size() < 3) { err = "EXPIRYENABLE needs <expiry>,<on|off>"; return false; }
+            const uint32_t exp = static_cast<uint32_t>(std::strtoul(args[1].c_str(), nullptr, 10));
             if (exp == 0) { err = "bad expiry"; return false; }
-            const bool on = (args[1] == "on" || args[1] == "ON" || args[1] == "1");
-            const bool off = (args[1] == "off" || args[1] == "OFF" || args[1] == "0");
+            const bool on = (args[2] == "on" || args[2] == "ON" || args[2] == "1");
+            const bool off = (args[2] == "off" || args[2] == "OFF" || args[2] == "0");
             if (!on && !off) { err = "mode needs on|off"; return false; }
             return setExpiryEnabled(exp, on);
         });
@@ -4398,10 +4399,11 @@ void HftOptionStrategy::registerCommands()
     // (the grid-wide QMODE applies to every series; this scopes to one).
     _cmdBus.registerCommand("QMODEE",
         [this](const std::vector<std::string>& args, std::string& err) {
-            if (args.size() < 2) { err = "QMODEE needs <expiry>,<on|off|close>"; return false; }
-            const uint32_t exp = static_cast<uint32_t>(std::strtoul(args[0].c_str(), nullptr, 10));
+            // CommandBus passes ALL tokens (args[0] = verb itself)
+            if (args.size() < 3) { err = "QMODEE needs <expiry>,<on|off|close>"; return false; }
+            const uint32_t exp = static_cast<uint32_t>(std::strtoul(args[1].c_str(), nullptr, 10));
             if (exp == 0) { err = "bad expiry"; return false; }
-            const std::string& mode = args[1];
+            const std::string& mode = args[2];
             if (mode != "on" && mode != "off" && mode != "close") {
                 err = "mode needs on|off|close"; return false;
             }
