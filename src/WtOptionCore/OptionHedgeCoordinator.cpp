@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "OptionHedgeCoordinator.h"
 
 #include <cmath>
@@ -133,6 +134,13 @@ bool OptionHedgeCoordinator::check(const DeltaHedgeExecutor::Config& cfg,
     }
     if (!(cfg.deltaPerLot > 0)) return false;
 
+    // P1 follow-up: backoff gate (see onTerminal).  decide() still applies
+    // the base cooldown; this multiplies it by 2^rejectStreak (cap 32x).
+    {
+        const double factor = static_cast<double>(1 << std::min(m_rejectStreak, 5));
+        if (nowSec - m_lastFire < cfg.cooldownSec * factor) return false;
+    }
+
     HedgeDecision d = DeltaHedgeExecutor::decide(cfg, portfolioDelta,
                                                  nowSec, m_lastFire);
     if (!d.fire) return false;
@@ -164,10 +172,16 @@ bool OptionHedgeCoordinator::check(const DeltaHedgeExecutor::Config& cfg,
     return true;
 }
 
-void OptionHedgeCoordinator::onTerminal(uint32_t localid)
+void OptionHedgeCoordinator::onTerminal(uint32_t localid, bool rejected)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_inflight.erase(localid);
+    // P1 follow-up: exponential backoff on consecutive entrust rejects.
+    // check() multiplies the base cooldown by 2^streak (cap 32x): 3s base
+    // -> up to ~96s, so a dead account limit stops getting hammered and
+    // the UI alert stream stays readable.  A fill/cancel terminal resets.
+    if (rejected) ++m_rejectStreak;
+    else m_rejectStreak = 0;
 }
 
 bool OptionHedgeCoordinator::hasInflight() const

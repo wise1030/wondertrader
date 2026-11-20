@@ -2522,8 +2522,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
     // and the reject-retry mechanism never triggers.
     cbs.on_entrust = [this](uint32_t localid, bool success) {
         if (success) return;
-        // A rejected hedge order must not leave the in-flight latch stuck.
-        _hedgeCoord.onTerminal(localid);
+        // A rejected hedge order must not leave the in-flight latch stuck;
+        // rejected=true drives the coordinator's exponential fire backoff.
+        _hedgeCoord.onTerminal(localid, /*rejected=*/true);
         // 3.3: mark the registry record rejected (WT sends no terminal
         // on_order afterwards); late fills on it are classified unknown.
         _orderRegistry.onOrderRejected(localid);

@@ -76,7 +76,12 @@ public:
     std::vector<uint32_t> inflightIds() const;
 
     /// Terminal callback for any order id (cancel/reject/full fill).
-    void onTerminal(uint32_t localid);
+    /// P1 follow-up: `rejected=true` when the terminal report is an ENTRUST
+    /// REJECT (as opposed to a fill/cancel).  Consecutive rejects back off
+    /// the fire cadence exponentially (cooldown x 2^n, cap x32) so a dead
+    /// account limit doesn't get hammered every cooldown tick — and the UI
+    /// alert stream stays readable.  Any non-rejected terminal resets.
+    void onTerminal(uint32_t localid, bool rejected = false);
 
     bool hasInflight() const;
     double lastFireTime() const { return m_lastFire; }
@@ -95,6 +100,7 @@ private:
     mutable std::mutex m_mtx;
     std::unordered_map<uint32_t, InflightRec> m_inflight;
     double m_lastFire = -1e9;
+    int m_rejectStreak = 0;   // consecutive entrust rejects (backoff input)
 
     // P1 multi-leg state
     std::vector<Leg> m_legs;
