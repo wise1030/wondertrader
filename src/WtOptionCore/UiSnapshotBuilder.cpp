@@ -296,6 +296,14 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.key("tps"); w.Int(v.tps);
     w.key("tpsMax"); w.Int(v.tpsMax);
     w.key("ordersSent"); w.Uint(v.ordersSent);
+    {   // P1 batch-4.3 per-source buckets
+        w.key("liveByTag"); w.StartArray();
+        for (int i = 0; i < 4; ++i) w.Uint(v.liveByTag[i]);
+        w.EndArray();
+        w.key("fillsByTag"); w.StartArray();
+        for (int i = 0; i < 4; ++i) w.Uint(v.fillsByTag[i]);
+        w.EndArray();
+    }
     w.key("fills"); w.Uint(v.fills);
     w.key("cancels"); w.Uint(v.cancels);
     w.key("rejects"); w.Uint(v.rejects);
@@ -365,6 +373,7 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
         w.key("qty"); w.Uint(o.qty);
         w.key("filled"); w.Uint(o.filled);
         w.numOrNull("t", o.t);
+        if (o.tag) { w.key("tag"); w.Uint(o.tag); }
         w.EndObject();
     }
     w.EndArray();
@@ -414,6 +423,7 @@ void UiSnapshotBuilder::encodeFills(const std::vector<UiFillView>& fills,
         w.numOrNull("px", f.px);
         w.key("qty"); w.Uint(f.qty);
         w.numOrNull("t", f.t);
+        if (f.tag) { w.key("tag"); w.Uint(f.tag); }
         w.EndObject();
     }
     w.EndArray();
@@ -437,6 +447,7 @@ void UiSnapshotBuilder::encodeEvent(const UiEventFrame& ev, std::string& out)
         w.key("buy"); w.Bool(ev.buy);
         w.numOrNull("qty", ev.qty);
         w.numOrNull("px", ev.px);
+        if (ev.tag) { w.key("tag"); w.Uint(ev.tag); }
         break;
     case UiEventType::Order:
         w.key("type"); w.String("order");
@@ -449,6 +460,7 @@ void UiSnapshotBuilder::encodeEvent(const UiEventFrame& ev, std::string& out)
         w.numOrNull("left", ev.left);
         w.numOrNull("px", ev.px);
         w.key("canceled"); w.Bool(ev.canceled);
+        if (ev.tag) { w.key("tag"); w.Uint(ev.tag); }
         break;
     case UiEventType::Reject:
         w.key("type"); w.String("reject");

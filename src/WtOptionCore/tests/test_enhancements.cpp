@@ -27,6 +27,7 @@
 #include "../QuoteStatistics.h"
 #include "../Signals/TradingIntensity.h"
 #include "../BatchQuoteValidator.h"
+#include "../IssuedOrderRegistry.h"
 #include <cstdlib>
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
@@ -2795,6 +2796,51 @@ void test_batch_quote_validator() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-4.3: order source attribution — tag upgrade-only semantics (the
+// idempotent OQM mirror must never downgrade a concrete tag), fill bucketing.
+// ============================================================================
+void test_order_tag_attribution() {
+    std::cout << "=== test_order_tag_attribution ===" << std::endl;
+    using namespace wt_option;
+    IssuedOrderRegistry reg;
+
+    // mirror-first then primary: Unknown -> MM upgrades
+    auto& r1 = reg.ensureIssued(101, "A", 10, 20261120, OrderTag::Unknown);
+    ASSERT_TRUE(r1.tag == OrderTag::Unknown);
+    reg.ensureIssued(101, "A", 10, 20261120, OrderTag::MM);
+    ASSERT_TRUE(reg.get(101)->tag == OrderTag::MM);
+
+    // primary-first then mirror: MM stays MM (never downgrades)
+    reg.ensureIssued(102, "B", 5, 20261120, OrderTag::Hedge);
+    reg.ensureIssued(102, "B", 5, 20261120, OrderTag::Unknown);
+    ASSERT_TRUE(reg.get(102)->tag == OrderTag::Hedge);
+
+    // concrete never overwritten by another concrete
+    reg.ensureIssued(103, "C", 1, 20261120, OrderTag::Scanner);
+    reg.ensureIssued(103, "C", 1, 20261120, OrderTag::MM);
+    ASSERT_TRUE(reg.get(103)->tag == OrderTag::Scanner);
+
+    // onIssued wholesale path carries the tag
+    reg.onIssued(104, "D", 3, OrderTag::Hedge);
+    ASSERT_TRUE(reg.get(104)->tag == OrderTag::Hedge);
+
+    // fill bucketing: fills attribute to the parent record's tag
+    reg.onFill(101, 4, 100.0);   // MM
+    reg.onFill(101, 2, 100.0);   // MM
+    reg.onFill(102, 3, 50.0);    // Hedge
+    reg.onFill(104, 1, 25.0);    // Hedge
+    uint64_t mm, hg, sc, un;
+    reg.tagFillCounts(mm, hg, sc, un);
+    ASSERT_TRUE(mm == 6 && hg == 4 && sc == 0 && un == 0);
+    reg.onIssued(105, "E", 1);   // Unknown tag
+    reg.onFill(105, 5, 10.0);
+    reg.tagFillCounts(mm, hg, sc, un);
+    ASSERT_TRUE(un == 5);
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2854,6 +2900,7 @@ int main() {
     test_quote_counter_persistence();
     test_trading_intensity();
     test_batch_quote_validator();
+    test_order_tag_attribution();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

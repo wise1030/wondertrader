@@ -522,9 +522,15 @@ private:
     /// framework action policy.  Callers that track in-flight state (hedge,
     /// combo) must use this instead of the success-count wrapper below.
     OrderIDs executeOrderIds(const std::string& code, bool isBuy,
-                             double price, uint32_t qty);
+                             double price, uint32_t qty,
+                             wt_option::OrderTag tag = wt_option::OrderTag::Unknown);
+    /// P1 batch-4.3: `tag` attributes the order source (MM quote / hedge /
+    /// scanner) for UI bucketing; the registry upgrades Unknown -> concrete
+    /// but never downgrades, so the idempotent OQM mirror re-registration
+    /// cannot wipe a tag set by the primary path.
     void registerIssuedOrderIds(const std::string& code, const OrderIDs& ids,
-                                double price, uint32_t qty, bool isBuy);
+                                double price, uint32_t qty, bool isBuy,
+                                wt_option::OrderTag tag = wt_option::OrderTag::Unknown);
     /// 3.6: session-end export of fill_attribution.csv + aggregate log.
     void exportFillAttribution(uint32_t tdate);
     bool executeCancel(uint32_t localid);

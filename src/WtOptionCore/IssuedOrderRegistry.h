@@ -37,6 +37,27 @@
 
 namespace wt_option {
 
+/// P1 batch-4.3: order source attribution.  Set at registration (the source
+/// that issued the order knows why); the registry backfills only when the
+/// record is still Unknown so whichever of the primary/gateway paths
+/// registers first, the most specific tag wins and the idempotent mirror
+/// never downgrades it.
+enum class OrderTag : uint8_t {
+    Unknown = 0,
+    MM      = 1,   // market-making two-sided quote (executeQuoteIds)
+    Hedge   = 2,   // delta/gamma hedge leg (DeltaHedger, GammaScalp sender)
+    Scanner = 3,   // scanner combo order
+};
+
+inline const char* toString(OrderTag t) {
+    switch (t) {
+    case OrderTag::MM:      return "MM";
+    case OrderTag::Hedge:   return "Hedge";
+    case OrderTag::Scanner: return "Scanner";
+    default:                return "Unknown";
+    }
+}
+
 class IssuedOrderRegistry {
 public:
     using AlertFn = std::function<void(const std::string& msg)>;
@@ -76,6 +97,7 @@ public:
         bool isBuy = false;
         bool qtySplitUnknown = false;  // WT split one order into several ids;
                                        // totalQty is the WHOLE-order qty then
+        OrderTag tag = OrderTag::Unknown;   // P1 batch-4.3
         double issuePx = 0;
         double issuedTime = 0;      // seconds (strategy clock)
         double issueTimeSim = 0;    // same clock, captured at registration
@@ -106,7 +128,8 @@ public:
     /// Registration (test/legacy path): (re)initialize the record wholesale.
     /// Production callers use ensureIssued() so a duplicate registration
     /// never wipes fills/ctx accumulated by an earlier one.
-    Rec& onIssued(uint32_t localid, const std::string& code, uint32_t qty) {
+    Rec& onIssued(uint32_t localid, const std::string& code, uint32_t qty,
+                  OrderTag tag = OrderTag::Unknown) {
         if (localid == 0) {
             static Rec s_dummy;
             s_dummy = Rec{};
@@ -115,6 +138,7 @@ public:
         auto& rec = m_orders[localid];
         rec = Rec{};
         rec.code = code;
+        rec.tag = tag;
         rec.totalQty = qty;
         rec.issuedTime = nowSec();
         rec.issueTimeSim = rec.issuedTime;
@@ -125,7 +149,8 @@ public:
     /// initializes a MISSING record; for an existing one only backfills
     /// fields that are still empty — never clears fills/ctx/filledQty/done.
     Rec& ensureIssued(uint32_t localid, const std::string& code, uint32_t qty,
-                      uint32_t sessionDate = 0) {
+                      uint32_t sessionDate = 0,
+                      OrderTag tag = OrderTag::Unknown) {
         if (localid == 0) {
             static Rec s_dummy;
             s_dummy = Rec{};
@@ -137,10 +162,16 @@ public:
             if (r.code.empty()) r.code = code;
             if (r.totalQty == 0 && !r.qtySplitUnknown) r.totalQty = qty;
             if (r.sessionDate == 0) r.sessionDate = sessionDate;
+            // 4.3: the first registrant may be the generic OQM mirror
+            // (Unknown); a later primary registration with a concrete tag
+            // upgrades, never downgrades.
+            if (r.tag == OrderTag::Unknown && tag != OrderTag::Unknown)
+                r.tag = tag;
             return r;
         }
         auto& rec = m_orders[localid];
         rec.code = code;
+        rec.tag = tag;
         rec.totalQty = qty;
         rec.sessionDate = sessionDate;
         rec.issuedTime = nowSec();
@@ -222,6 +253,25 @@ public:
     }
     const std::unordered_map<uint32_t, Rec>& orders() const { return m_orders; }
     std::unordered_map<uint32_t, Rec>& orders() { return m_orders; }
+
+    /// P1 batch-4.3: today's fill count bucketed by order tag (registry
+    /// records carry their own sessionDate; cross-session fills of a record
+    /// are rare and attributed to the record's tag — good enough for UI).
+    void tagFillCounts(uint64_t& mm, uint64_t& hedge, uint64_t& scanner,
+                       uint64_t& unknown) const {
+        mm = hedge = scanner = unknown = 0;
+        for (const auto& kv : m_orders) {
+            const Rec& r = kv.second;
+            uint64_t* bucket = &unknown;
+            switch (r.tag) {
+            case OrderTag::MM:      bucket = &mm;      break;
+            case OrderTag::Hedge:   bucket = &hedge;   break;
+            case OrderTag::Scanner: bucket = &scanner; break;
+            default: break;
+            }
+            *bucket += r.filledQty;
+        }
+    }
 
     size_t unknownFillCount() const { return m_unknownFills; }
     size_t lateAfterDoneCount() const { return m_lateAfterDone; }

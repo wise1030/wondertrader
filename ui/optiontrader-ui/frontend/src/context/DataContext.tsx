@@ -99,13 +99,13 @@ function reducer(state: DataState, a: Action): DataState {
             const orders = { ...state.orders };
             const done = ev.canceled || ev.left <= 0;
             if (done) delete orders[ev.id];
-            else orders[ev.id] = { id: ev.id, code: ev.code, buy: ev.buy, px: ev.px, qty: ev.qty, filled: Math.max(0, ev.qty - ev.left), t: ev.ts / 1000 };
+            else orders[ev.id] = { id: ev.id, code: ev.code, buy: ev.buy, px: ev.px, qty: ev.qty, filled: Math.max(0, ev.qty - ev.left), t: ev.ts / 1000, tag: ev.tag };
             return { ...state, orders };
         }
         case 'TRADE': {
             const ev = a.ev;
             if (ev.seq < state.lastSnapshotSeq) return state;
-            const fills = [...state.fills, { code: ev.code, buy: ev.buy, px: ev.px, qty: ev.qty, t: ev.ts / 1000 }];
+            const fills = [...state.fills, { code: ev.code, buy: ev.buy, px: ev.px, qty: ev.qty, t: ev.ts / 1000, tag: ev.tag }];
             sound.trade();
             return { ...state, fills: fills.slice(-MAX_FILLS),
                      flash: { ...state.flash, [ev.code]: Date.now() } };

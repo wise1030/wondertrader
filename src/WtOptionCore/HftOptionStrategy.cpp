@@ -571,7 +571,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
         [this](const std::string& code, bool isBuy, double px, uint32_t qty) {
             // Hedge in-flight tracking requires the real framework localids,
             // not the executeOrder() success-count wrapper.
-            return executeOrderIds(code, isBuy, px, qty);
+            return executeOrderIds(code, isBuy, px, qty, wt_option::OrderTag::Hedge);
         },
         [this](const std::string& code) -> double {
             if (_otg && !code.empty()) {
@@ -1162,7 +1162,9 @@ void HftOptionStrategy::setupPricer()
         // Wire order execution for dynamic hedging
         _gammaPricer->setOrderSender([this](const std::string& code, bool isBuy,
                                              double price, int32_t qty) {
-            return executeOrderIds(code, isBuy, price, static_cast<uint32_t>(qty));
+            // Gamma-hedge leg — same attribution as the delta hedger.
+            return executeOrderIds(code, isBuy, price, static_cast<uint32_t>(qty),
+                                   wt_option::OrderTag::Hedge);
         });
         _gammaPricer->setTimeProvider([this]() {
             return _timeService.nowSeconds(_ctx);
@@ -2218,6 +2220,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
             ev.buy = isBuy;
             ev.qty = vol;
             ev.px = price;
+            if (const auto* rec = _orderRegistry.get(localid))
+                ev.tag = static_cast<uint8_t>(rec->tag);   // P1 batch-4.3
             _uiBridge->pushEvent(ev);
         }
     };
@@ -2324,6 +2328,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
             ev.left = leftQty;
             ev.px = price;
             ev.canceled = isCanceled;
+            if (const auto* rec = _orderRegistry.get(localid))
+                ev.tag = static_cast<uint8_t>(rec->tag);   // P1 batch-4.3
             _uiBridge->pushEvent(ev);
         }
     };
@@ -2936,7 +2942,8 @@ void HftOptionStrategy::setupScanners()
     _comboCtx.sendOrder = [this](const std::string& code, bool isBuy,
                                    double price, uint32_t qty) -> uint32_t {
         // Scanner orders now use the same gateway as market-making orders.
-        const auto ids = executeOrderIds(code, isBuy, price, qty);
+        const auto ids = executeOrderIds(code, isBuy, price, qty,
+                                         wt_option::OrderTag::Scanner);
         return ids.empty() ? 0 : ids[0];
     };
     _comboCtx.cancelOrder = [this](uint32_t localid) -> bool {
@@ -3262,7 +3269,8 @@ bool HftOptionStrategy::withinPriceLimits(const std::string& code, double price)
 void HftOptionStrategy::registerIssuedOrderIds(const std::string& code,
                                                 const OrderIDs& ids,
                                                 double price, uint32_t qty,
-                                                bool isBuy)
+                                                bool isBuy,
+                                                wt_option::OrderTag tag)
 {
     // B2/3.3: register EVERY framework localid into the single per-order
     // registry.  A split action policy can return multiple ids; tracking
@@ -3276,7 +3284,7 @@ void HftOptionStrategy::registerIssuedOrderIds(const std::string& code,
     const bool splitUnknown = ids.size() > 1;
     for (uint32_t id : ids) {
         if (id == 0) continue;
-        auto& rec = _orderRegistry.ensureIssued(id, code, qty, _curSessionDate);
+        auto& rec = _orderRegistry.ensureIssued(id, code, qty, _curSessionDate, tag);
         rec.isBuy = isBuy;
         rec.issuePx = price;
         if (splitUnknown) rec.qtySplitUnknown = true;
@@ -3325,9 +3333,11 @@ std::pair<uint32_t, uint32_t> HftOptionStrategy::executeQuoteIds(
         code, bidP, bidQ, askP, askQ, ids.first, ids.second);
 
     if (ids.first != 0)
-        registerIssuedOrderIds(code, {ids.first}, bidP, bidQ, true);
+        registerIssuedOrderIds(code, {ids.first}, bidP, bidQ, true,
+                               wt_option::OrderTag::MM);
     if (ids.second != 0)
-        registerIssuedOrderIds(code, {ids.second}, askP, askQ, false);
+        registerIssuedOrderIds(code, {ids.second}, askP, askQ, false,
+                               wt_option::OrderTag::MM);
     return ids;
 }
 
@@ -3339,7 +3349,8 @@ int32_t HftOptionStrategy::executeQuote(const std::string& code, double bidP, ui
 }
 
 OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
-                                             double price, uint32_t qty)
+                                             double price, uint32_t qty,
+                                             wt_option::OrderTag tag)
 {
     if (!_ctx || !_tstate.channelReady || _channelDown.load(std::memory_order_acquire)) return {};
     // R1
@@ -3349,7 +3360,7 @@ OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
         ? _ctx->stra_buy(code.c_str(), price, qty, "OptionMM")
         : _ctx->stra_sell(code.c_str(), price, qty, "OptionMM");
 
-    registerIssuedOrderIds(code, ids, price, qty, isBuy);
+    registerIssuedOrderIds(code, ids, price, qty, isBuy, tag);
     return ids;
 }
 
@@ -4375,7 +4386,17 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
         o.qty = rec.totalQty;
         o.filled = rec.filledQty;
         o.t = rec.issuedTime;
+        o.tag = static_cast<uint8_t>(rec.tag);          // P1 batch-4.3
+        ++v.liveByTag[o.tag & 3];
         v.orders.push_back(std::move(o));
+    }
+
+    // P1 batch-4.3: per-source fill buckets (registry-attributed)
+    {
+        uint64_t mm = 0, hg = 0, sc = 0, un = 0;
+        _orderRegistry.tagFillCounts(mm, hg, sc, un);
+        v.fillsByTag[0] = (uint32_t)un; v.fillsByTag[1] = (uint32_t)mm;
+        v.fillsByTag[2] = (uint32_t)hg; v.fillsByTag[3] = (uint32_t)sc;
     }
 
     // Contract meta for the frontend ticket
@@ -4409,6 +4430,7 @@ void HftOptionStrategy::collectUiFills(std::vector<wt_option::UiFillView>& out)
             fv.px = f.px;
             fv.qty = f.qty;
             fv.t = f.timeSim;   // strategy clock — consistent under replay
+            fv.tag = static_cast<uint8_t>(rec.tag);   // P1 batch-4.3
             out.push_back(std::move(fv));
         }
     }

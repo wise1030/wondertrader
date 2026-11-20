@@ -100,6 +100,7 @@ struct UiOrderView
     double px = 0;
     uint32_t qty = 0, filled = 0;
     double t = 0;            // strategy-clock issue seconds
+    uint8_t tag = 0;         // P1 batch-4.3: OrderTag (0=Unknown,1=MM,2=Hedge,3=Scanner)
 };
 
 struct UiFillView
@@ -109,6 +110,7 @@ struct UiFillView
     double px = 0;
     uint32_t qty = 0;
     double t = 0;            // strategy-clock (sim) seconds — replay-safe
+    uint8_t tag = 0;         // P1 batch-4.3: OrderTag of the parent order
 };
 
 // ---------------------------------------------------------------------------
@@ -141,6 +143,9 @@ struct UiSnapshotView
     int32_t tps = 0, tpsMax = 0;
     uint32_t ordersSent = 0, fills = 0, cancels = 0, rejects = 0;
     double cancelRatio = 0, fillRatio = 0;   // global: totals-derived
+    // P1 batch-4.3: per-source (OrderTag) buckets — 0=Unknown 1=MM 2=Hedge 3=Scanner
+    uint32_t liveByTag[4] = {0, 0, 0, 0};
+    uint32_t fillsByTag[4] = {0, 0, 0, 0};
     bool hasSessionStop = false;
     int32_t sessionStopInSec = 0;
 
@@ -182,6 +187,7 @@ struct UiEventFrame
 
     // order/trade/reject payload
     uint32_t id = 0;
+    uint8_t tag = 0;          // P1 batch-4.3: OrderTag of the parent order
     std::string code;
     bool buy = false;
     double qty = 0, px = 0;

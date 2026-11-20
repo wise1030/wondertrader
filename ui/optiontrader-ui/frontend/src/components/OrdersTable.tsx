@@ -1,5 +1,6 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
+import { tagLabel, tagClass } from './TradesTab';
 
 export const OrdersTable: React.FC = () => {
   const { orders, readonly, sendCommand } = useData();
@@ -33,6 +34,7 @@ export const OrdersTable: React.FC = () => {
         <tr className="bg-gray-200 text-gray-700">
           <th className="border border-gray-300 px-1 py-0.5 text-left">id</th>
           <th className="border border-gray-300 px-1 py-0.5 text-left">code</th>
+          <th className="border border-gray-300 px-1 py-0.5">src</th>
           <th className="border border-gray-300 px-1 py-0.5">dir</th>
           <th className="border border-gray-300 px-1 py-0.5">px</th>
           <th className="border border-gray-300 px-1 py-0.5">qty</th>
@@ -51,6 +53,7 @@ export const OrdersTable: React.FC = () => {
           >
             <td className="border border-gray-200 px-1 font-mono">{o.id}</td>
             <td className="border border-gray-200 px-1 font-mono">{o.code}</td>
+            <td className="border border-gray-200 px-1 text-center"><span className={`px-0.5 border rounded text-[9px] ${tagClass(o.tag)}`}>{tagLabel(o.tag)}</span></td>
             <td className={`border border-gray-200 px-1 text-center font-bold ${o.buy ? 'text-green-700' : 'text-red-700'}`}>{o.buy ? 'B' : 'S'}</td>
             <td className="border border-gray-200 px-1 text-right">{o.px ?? '-'}</td>
             <td className="border border-gray-200 px-1 text-right">{o.qty}</td>

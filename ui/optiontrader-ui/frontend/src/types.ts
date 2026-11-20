@@ -93,6 +93,8 @@ export interface RiskView {
   cancelRatio: number | null;
   fillRatio: number | null;
   sessionStopInSec: number | null;
+  liveByTag?: number[];    // per-source live orders (batch-4.3)
+  fillsByTag?: number[];   // per-source today's fills
 }
 
 export interface PerfView {
@@ -115,6 +117,7 @@ export interface OrderView {
   qty: number;
   filled: number;
   t: number | null;
+  tag?: number;   // 0/undefined=Unknown 1=MM 2=Hedge 3=Scanner (batch-4.3)
 }
 
 export interface Snapshot {
@@ -154,6 +157,7 @@ export interface OrderEvent {
   left: number;
   px: number;
   canceled: boolean;
+  tag?: number;
 }
 
 export interface TradeEvent {
@@ -165,6 +169,7 @@ export interface TradeEvent {
   buy: boolean;
   qty: number;
   px: number;
+  tag?: number;
 }
 
 export interface RejectEvent {
@@ -202,6 +207,7 @@ export interface FillView {
   px: number;
   qty: number;
   t: number;
+  tag?: number;   // OrderTag of the parent order (batch-4.3)
 }
 
 export type Frame =
