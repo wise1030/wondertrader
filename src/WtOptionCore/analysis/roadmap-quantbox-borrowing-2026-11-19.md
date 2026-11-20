@@ -159,14 +159,33 @@
   max_cancels_allowed 用持久值。验证：撤单后重启计数不重置
 
 ### 批次 4（健壮性，约 3 天）
-- 4.1 期货腿报价评估（0.5 天，先评估不搬运）：读
-  updateOurMarketSideFuture（:1100/1255）记录实际缺陷再定移植范围
-- 4.2 整组报价事前验证（1.5 天）：CTG refresh 收集 desired 后、drain 前
-  validateBatch()（按到期聚合 delta/保证金，复用 RiskLimitsEx+MarginGuard）
-- 4.3 订单 tag 归因（1 天）：registerIssuedOrderIds 加 tag（MM/hedge/manual）
-  → OrderRegistry 分桶 → 快照统计 → TradesTab 过滤
-- 4.4 限开仓+分级（1 天）：RiskFilterChain 加 MaxOpenOffsetFilter（当日
-  开仓量限额 per-expiry）；OQM reject N1 → reject-only、N2 → hard-flat
+- 4.1 期货腿报价评估（0.5 天，先评估不搬运）——✅ 评估完成（11-20），
+  **结论：不搬运 CompositeMMPricer 92KB**。实际缺陷清单（源码亲验）：
+  ① teenie 定价期货腿是空操作桩（`min(bid, bid+bts)`≡bid，
+  `max(ask, ask-ats)`≡ask），期权腿在 enable 时因空 book 永远 return
+  false——即 config 一旦打开 teenie 整个报价更新静默停摆；
+  ② 期货腿无 interesting/queue-ahead 检查（期权腿有
+  __compute_interesting）；
+  ③ 两腿均无对可见盘口的 cross 守卫（只有 EQ(bid,ask) 退化保护）；
+  ④ 期货腿库存倾斜只有 risk_adjustment_future（norm delta 共享通道），
+  无 quantbox 的 flat-target 语义。
+  决策：期货腿是 delta 对冲腿而非独立做市腿，quantbox 的
+  CompositeMMPricer 主要为独立期货做市设计，整体移植收益/风险比不
+  成立；缺陷①属激活即炸的暗雷但当前 config 未启用（留作独立项与
+  teenie 配置审计一起做），②③④在批次 2/3 的价格差近似与 delta
+  对冲架构下不构成生产痛点。**4.1 关闭，不搬运。**
+- 4.2 整组报价事前验证（1.5 天）——✅ 已实施（11-20，
+  BatchQuoteValidator：refresh 排序后 drain 前按到期聚合纯新开腿的
+  worst-case 成交冲击，超 max_exp_delta_add/max_exp_short_add/
+  max_portfolio_delta 时按 rank 低→高否决；默认关，pricer.batch_validate）
+- 4.3 订单 tag 归因（1 天）——✅ 已实施（11-20，OrderTag{MM,Hedge,
+  Scanner}；ensureIssued 只升级不降级防 OQM 镜像覆盖；快照/事件全链
+  透传；TradesTab 过滤 chips + OrdersTable src 列）
+- 4.4 限开仓+分级（1 天）——✅ 已实施（11-20，MaxOpenOffsetFilter
+  按到期限日开仓手数，risk_filter.option.max_open_per_expiry_day；
+  修正 MaxNewOrdersFilter hardFlat 只记日志不拒绝 + OQM
+  hard_flat_mode 置位无人消费两处半实现；reject 阶梯 N1 reject-only
+  → N2(hard_flat_after_n_new_orders) 双边撤单+闩锁）
 
 ### 批次 5（UI P1 + 参数，约 3 天）
 - 5.1 hedge 面板：UnderlierView 升级表格（$Δ/$Γ/$Θ/$V、对冲信号色
@@ -223,7 +242,8 @@
 |---|---|---|
 | 批次 1 GVV 四小修 | ✅ 完成（28%→37%，偏离 −70%→±1-3%） | 夜盘实测 |
 | 批次 2 UI P0 | ✅ 完成（qp 着色/闪烁/声音） | 待用户刷新目验 |
-| 批次 3 模式/执行 | ✅ 完成（3.0 对冲参数/3.1 仲裁+GetFlat/3.2 AS 强度默认关/3.3 计数持久化） | 53 测试绿 |
+| 批次 3 模式/执行 | ✅ 完成（3.0 对冲参数/3.1 仲裁+GetFlat/3.2 AS 强度默认关/3.3 计数持久化） | 53→56 测试绿 |
+| 批次 4 健壮性 | ✅ 完成（4.1 评估不搬运/4.2 整组验证/4.3 tag 归因/4.4 限开仓+分级） | 9/9 二进制绿，全部署 |
 | 批次 4 健壮性 | ⬜ 未开始 | — |
 | 批次 5 UI P1/参数 | ⬜ 未开始 | — |
 | 批次 6 分析/复盘 | ⬜ 未开始 | — |
