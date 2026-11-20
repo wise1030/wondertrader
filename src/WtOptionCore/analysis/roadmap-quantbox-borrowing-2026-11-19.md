@@ -235,18 +235,21 @@
 2. 批次 5.2 targ_delta/targ_vega 未入 ConfigValidator 白名单（启动
    WARN 噪音）。补齐（同上）
 
-**新诊断（记录在案，不立即动）**：
-3. TradingStateArbiter::evaluateTradingState 输入收集未接线——setState
-   实际只消费 shouldAllowTransition（转换守卫）；evaluate 是纯函数+
-   测试，属实施范围收缩后的残余（非 bug）
-4. OQM per-code 撤单计数（m_numCancel，max_cancels_allowed 门的输入）
-   重启即丢；当前 config 未启用该门（0=unlimited）。若启用需补持久化
-5. AnalysisRecorder 与项目原有 OptionValueWriter 构成双写设施（粒度
-   不同：到期级+组合级 vs 合约级 theo/iv）。未来可统一 recorder
-6. TradingIntensity（3.2）未接入既有 SignalFactory 可插拔框架
-   （signals.alpha[]/risk[]）——喂入路径与 alpha 信号并行。输出通道
-   不同（spread multiplier vs skew 权重）且默认关，迁移成本/收益不
-   划算，若扩 toxicity 信号族时再统一
+**新诊断处置（11-20 待办已实施 #3/#4/#5，commit 6d9f3540）**：
+3. ✅ 已清理：evaluateTradingState 输入收集移除（残余死代码，git 历史
+   保留设计记录）；生产生效的 shouldAllowTransition 守卫保留
+4. ✅ 已实施：OQM 计数同日重启恢复——发现项目原有 dumpCountersCsv
+   （C5 导出）只有导出一半；补 OQM::restoreCounters + OTG::
+   restoreCountersFrom（后写覆盖先写）+ session begin 接线；跨日无
+   文件自然归零=交易所按交易日口径。max_cancels_allowed 门启用拼图
+   完整（58 测试绿，新增 restore 语义测试）
+5. ✅ 已对齐：analysis.outputDir 配置项（AnalysisRecorder/
+   QstreamRecorder 与 optionValueWriter.outputDir 统一）；分工仍明确
+   （合约级 theo/iv vs 到期级+组合级分钟序列），不做类合并
+6. 记录在案：TradingIntensity 未接入 SignalFactory 可插拔框架——输出
+   通道不同且默认关，扩 toxicity 信号族时再统一（不迁移）
+7. 记录在案：OrderTag 未用框架 userTag 通道——registry tag 与镜像注册
+   /迟到 fill 归因同一事实源，保留；透传 userTag 记为后续优化
 7. 批次 4.3 OrderTag 未用框架 userTag 通道（on_order/on_trade 回调自带
    userTag，策略入队时丢弃）。registry tag 的优势：与镜像注册/迟到
    fill 归因同一事实源。记为后续优化（透传 userTag 更便宜）
