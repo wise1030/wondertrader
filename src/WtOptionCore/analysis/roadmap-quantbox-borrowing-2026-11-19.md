@@ -188,14 +188,20 @@
   → N2(hard_flat_after_n_new_orders) 双边撤单+闩锁）
 
 ### 批次 5（UI P1 + 参数，约 3 天）
-- 5.1 hedge 面板：UnderlierView 升级表格（$Δ/$Γ/$Θ/$V、对冲信号色
-  |Δ|>阈值且 Γ≠0 红底、到期红底、分类汇总行）
-- 5.2 到期希腊目标：expiries[].targ_delta/targ_vega 配置 + 快照字段 +
-  ExpirySummary 现值/目标并排红绿
-- 5.3 参数面板 lut 排序（enable/ready 置顶）+ 到期过滤下拉
-- 5.4 参数持久化验证（改 hot param → 重启 → 值是否保留；若丢补
-  hot_params.json 落盘回放）
-- 5.5 Alert 远程推送（UiBridge alert 帧分级+2s 限速 → WS 转发 → 可选 webhook）
+- 5.1 hedge 面板——✅ 已实施（11-20，HedgePanel：按到期 $Δ/$Γ/$Θ/$V
+  表 + TOTAL 汇总行；|$Δ|>hedgeDeltaThreshold 且 Γ≠0 红底；DTE≤2 琥珀底）
+- 5.2 到期希腊目标——✅ 已实施（11-20，expiries[].targ_delta/targ_vega；
+  修复 m_prop_exp_{delta,vega_tw}_targets 死输入接线；快照 gamma/theta
+  + targ 字段；ExpirySummary 绿/黄/红偏差着色）
+- 5.3 参数面板排序+过滤——✅ 已实施（11-20，ExpirySelector
+  enable+ready 置顶排序 + jump 下拉）
+- 5.4 参数持久化——✅ 已实施并验证（11-20，SETPARAM 白名单落盘
+  generated/hot_params.json；on_init 注册后/sync_param 前回放使持久值
+  成为框架默认；实测重启后 "1 params restored"；command/qmode/manual
+  排除防重启 footgun）
+- 5.5 Alert 远程推送——✅ 已实施（11-20，UiEventType::Alert 分级
+  0/1/2 + pushUiAlert 2s 限速；订单异常回调挂 level-2；前端 Toast；
+  中间件 WTOPTION_ALERT_WEBHOOK 可选推送 level≥1）
 
 ### 批次 6（分析/复盘，约 4 天含前置）
 - 6.0 前置：AttributePublisher 加 CSV 边车（tdate/exp/atmvol/ts 分钟级）——vol 锥数据源
@@ -244,6 +250,7 @@
 | 批次 2 UI P0 | ✅ 完成（qp 着色/闪烁/声音） | 待用户刷新目验 |
 | 批次 3 模式/执行 | ✅ 完成（3.0 对冲参数/3.1 仲裁+GetFlat/3.2 AS 强度默认关/3.3 计数持久化） | 53→56 测试绿 |
 | 批次 4 健壮性 | ✅ 完成（4.1 评估不搬运/4.2 整组验证/4.3 tag 归因/4.4 限开仓+分级） | 9/9 二进制绿，全部署 |
+| 批次 5 UI P1+参数 | ✅ 完成（5.1 hedge 面板/5.2 到期希腊目标/5.3 排序过滤/5.4 参数持久化实测/5.5 alert 推送） | 9/9 二进制绿，全部署 |
 | 批次 4 健壮性 | ⬜ 未开始 | — |
 | 批次 5 UI P1/参数 | ⬜ 未开始 | — |
 | 批次 6 分析/复盘 | ⬜ 未开始 | — |
