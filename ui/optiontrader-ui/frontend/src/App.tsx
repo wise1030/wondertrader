@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { DataProvider, useData } from './context/DataContext';
 import { StatusBanner } from './components/StatusBanner';
 import { GreeksPnlBar } from './components/GreeksPnlBar';
-import { HealthPanel } from './components/HealthPanel';
+import { StatusFooter } from './components/StatusFooter';
 import { ExpiryBoard } from './components/ExpiryBoard';
 import { ExpirySummary } from './components/ExpirySummary';
 import { OptionGridView } from './components/OptionGridView';
@@ -54,7 +54,6 @@ const Shell: React.FC = () => {
         <div className="flex gap-1">
           <div className="flex-1"><GreeksPnlBar /></div>
         </div>
-        <HealthPanel />
         <ExpiryBoard selected={selectedExpiry} onSelect={setSelectedExpiry} />
         <div className="flex gap-1 items-center flex-wrap">
           <ExpirySummary selected={selectedExpiry} />
@@ -74,6 +73,7 @@ const Shell: React.FC = () => {
       </div>
 
       <CommandPanel onNotify={notify} />
+      <StatusFooter />
 
       <div className="fixed bottom-2 right-2 z-50 flex flex-col">
         {toasts.map(t => <Toast key={t.id} message={t.message} type={t.type} onClose={() => setToasts(x => x.filter(y => y.id !== t.id))} />)}

@@ -63,6 +63,7 @@ export const ExpiryBoard: React.FC<{
             <th className="border border-gray-200 px-1 text-right">ν</th>
             <th className="border border-gray-200 px-1 text-right">futPos</th>
             <th className="border border-gray-200 px-1 text-center">Q</th>
+            <th className="border border-gray-200 px-1 text-center">qmode</th>
             <th className="border border-gray-200 px-1 text-center">books</th>
           </tr>
         </thead>
@@ -97,6 +98,30 @@ export const ExpiryBoard: React.FC<{
                   <span className={`inline-block w-2 h-2 rounded-full ${e.quoting === false ? 'bg-gray-300' : 'bg-green-500'}`}
                     title={`quoting=${e.quoting !== false}`} />
                 </td>
+                {/* qmode aggregation over the month's contracts — the visual
+                    feedback for the qmode off/close toggles (a point of
+                    confusion: off used to cancel quotes with no UI trace) */}
+                {(() => {
+                  const modes = new Set<number>();
+                  for (const st of e.strikes) {
+                    if (st.C?.qmode != null) modes.add(st.C.qmode);
+                    if (st.P?.qmode != null) modes.add(st.P.qmode);
+                  }
+                  let cls = 'bg-gray-300', lab = 'auto';
+                  if (modes.size === 1) {
+                    const m = [...modes][0];
+                    if (m === 1) { cls = 'bg-green-600'; lab = 'on'; }
+                    else if (m === -1) { cls = 'bg-red-500'; lab = 'off'; }
+                    else if (m === 2) { cls = 'bg-amber-500'; lab = 'close'; }
+                    else if (m === 3) { cls = 'bg-yellow-400'; lab = 'flat'; }
+                  } else if (modes.size > 1) { cls = 'bg-yellow-400'; lab = 'mix'; }
+                  return (
+                    <td className="border border-gray-200 px-1 text-center">
+                      <span className={`inline-block px-1 rounded text-[9px] text-white ${cls}`}
+                        title={`qmode aggregate over ${e.strikes.length} strikes (on=green off=red close=amber mix=yellow)`}>{lab}</span>
+                    </td>
+                  );
+                })()}
                 <td className={`border border-gray-200 px-1 text-center ${e.booksWithBid === 0 ? 'text-red-600' : ''}`}>
                   {e.booksWithBid}/{e.booksTotal}
                 </td>
@@ -116,7 +141,7 @@ export const ExpiryBoard: React.FC<{
                 <td className="border border-gray-200 px-1 text-right">{fmt(sG, 3)}</td>
                 <td className="border border-gray-200 px-1 text-right">{fmt(sT)}</td>
                 <td className="border border-gray-200 px-1 text-right">{fmt(sV)}</td>
-                <td className="border border-gray-200 px-1" colSpan={3} />
+                <td className="border border-gray-200 px-1" colSpan={4} />
               </tr>
             );
           })()}

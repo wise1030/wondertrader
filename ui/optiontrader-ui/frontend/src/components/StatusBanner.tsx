@@ -1,6 +1,5 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
-import { useNowMs, liveAgeMs } from '../hooks/useNow';
 
 const STATE_COLORS: Record<string, string> = {
     Normal: 'bg-green-600',
@@ -22,9 +21,6 @@ export const StatusBanner: React.FC = () => {
     // Live age (audit batch B, H1): recompute every second instead of showing
     // the static per-frame snapshotAgeMs — a stalled upstream must turn the
     // banner red, not freeze on the last healthy value.
-    const nowMs = useNowMs(1000);
-    const age = liveAgeMs(snapshot?.snapshotAgeMs, snapshotArrivalMs, nowMs);
-
     const st = snapshot?.state;
     const trading = st?.trading ?? '-';
     const color = STATE_COLORS[trading] ?? 'bg-gray-600';
@@ -49,8 +45,11 @@ export const StatusBanner: React.FC = () => {
                     {String(snapshot.risk.sessionStopInSec % 60).padStart(2, '0')}
                 </span>
             )}
-            <span className={`ml-auto text-[10px] ${age != null && age > 3000 ? 'text-red-300 font-bold' : 'opacity-70'}`}>
-                {age != null ? `age ${age}ms` : 'age -'}
+            {/* P1 UI redesign: conn/age moved to the bottom StatusFooter
+                (one compact status line) — this banner keeps only the
+                trading state and alert information. */}
+            <span className="ml-auto text-[10px] opacity-80">
+                {snapshot?.sid ?? ''}
             </span>
         </div>
     );
