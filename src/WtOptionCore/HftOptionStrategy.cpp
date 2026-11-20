@@ -2751,6 +2751,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // MaxNewOrders / hard_flat thresholds permanently lock all quoting
             if (_otg) _otg->onSessionBegin();
 
+            // P1 audit fix: re-ingest the same day's analysis series so the
+            // truncate-rewrite flush keeps pre-restart history (append mode
+            // used to duplicate every pre-restart minute).
+            if (_analysisEnable && _curSessionDate != 0) {
+                const size_t nSeeded = _analysisRecorder.loadDay(_curSessionDate);
+                if (nSeeded > 0)
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "AnalysisRecorder: {} rows re-ingested for {} (same-day restart)",
+                        nSeeded, _curSessionDate);
+            }
+
             // P1 follow-up (audit #4): same-day restart restores the OQM
             // counters the session-end dump wrote (dumpCountersCsv exported
             // them all along; only the restore half was missing).  Cross-day
@@ -4070,7 +4081,11 @@ void HftOptionStrategy::pushUiAlert(uint8_t level, const std::string& msg) {
     ev.seq = _batchCount;
     ev.tsWallMs = wt_option::UiBridge::wallMsNow();
     ev.level = level;
-    ev.msg = msg;
+    // surface the rate-limit pressure: how many alerts the 2s window absorbed
+    ev.msg = _uiAlertsSuppressed > 0
+        ? msg + " [+" + std::to_string(_uiAlertsSuppressed) + " suppressed]"
+        : msg;
+    _uiAlertsSuppressed = 0;
     _uiBridge->pushEvent(ev);
 }
 

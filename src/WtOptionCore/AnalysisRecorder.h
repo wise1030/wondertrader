@@ -25,10 +25,12 @@
  */
 #pragma once
 
+#include <cstdio>
 #include <cstdint>
 #include <fstream>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace wt_option {
 
@@ -46,6 +48,55 @@ public:
         auto& s = m_vol[expiry];
         s.atmvol = atmvol; s.fwd = fwd; s.dte = dte;
         m_volDirty = true;
+    }
+
+    /// P1 audit fix: load an existing day file (same trading day restart)
+    /// into the in-memory series so the truncate-rewrite flush keeps
+    /// history.  Returns rows loaded.
+    size_t loadDay(uint32_t tdate) {
+        if (tdate == 0) return 0;
+        m_volSeries.clear();
+        m_pfSeries.clear();
+        size_t n = 0;
+        {
+            std::ifstream in(volPath(tdate));
+            std::string line;
+            std::getline(in, line);   // header
+            while (std::getline(in, line)) {
+                double ts, av, fw; int32_t exp, dte;
+                if (sscanf(line.c_str(), "%lf,%d,%lf,%lf,%d",
+                           &ts, &exp, &av, &fw, &dte) == 5) {
+                    m_volSeries.push_back({ts, (uint32_t)exp, av, fw, dte});
+                    ++n;
+                }
+            }
+        }
+        {
+            std::ifstream in(pfPath(tdate));
+            std::string line;
+            std::getline(in, line);
+            while (std::getline(in, line)) {
+                double ts, d, g, v, t, pnl, sp, av;
+                if (sscanf(line.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+                           &ts, &d, &g, &v, &t, &pnl, &sp, &av) == 8) {
+                    m_pfSeries.push_back({ts, d, g, v, t, pnl, sp, av});
+                    ++n;
+                }
+            }
+        }
+        return n;
+    }
+
+    /// P1 audit fix: ingest a PREVIOUS run's rows for the same trading day
+    /// so the full-rewrite flush below keeps history across restarts
+    /// (append mode used to duplicate every pre-restart minute).
+    void seedVolRows(double nowSec, uint32_t expiry,
+                     double atmvol, double fwd, int32_t dte) {
+        m_volSeries.push_back(VolRec{nowSec, expiry, atmvol, fwd, dte});
+    }
+    void seedPfRows(double nowSec, double d, double g, double v, double t,
+                    double pnl, double spot, double atmvol) {
+        m_pfSeries.push_back(PfRec{nowSec, d, g, v, t, pnl, spot, atmvol});
     }
 
     /// Portfolio greeks sample (overwrites the pending row — latest wins).
@@ -70,6 +121,14 @@ public:
 private:
     struct VolRow { double atmvol = 0, fwd = 0; int32_t dte = 0; };
     struct PfRow   { double d = 0, g = 0, v = 0, t = 0, pnl = 0, spot = 0, atmvol = 0; };
+    // Full-day series kept in memory: the flush REWRITES the day file
+    // (truncate) instead of appending — an append after an intraday restart
+    // duplicated every pre-restart minute and skewed the vol-cone
+    // percentiles.  Day scale is tiny (~2k rows/file), rewrite is trivial.
+    struct VolRec { double ts; uint32_t expiry; double atmvol, fwd; int32_t dte; };
+    struct PfRec  { double ts; double d, g, v, t, pnl, spot, atmvol; };
+    std::vector<VolRec> m_volSeries;
+    std::vector<PfRec>  m_pfSeries;
 
     std::string volPath(uint32_t tdate) const {
         return m_dir + "/volseries_" + std::to_string(tdate) + ".csv";
@@ -103,30 +162,36 @@ inline size_t AnalysisRecorder::flush(double nowSec, uint32_t tdate) {
     if (tdate == 0) return 0;
     size_t rows = 0;
 
-    // Day rollover: nothing to do explicitly — the path embeds tdate.
+    // P1 audit fix: full-day REWRITE (truncate) — history continuity across
+    // restarts comes from seedVolRows/seedPfRows ingesting the previous
+    // run's file at startup.
     if (m_volDirty && !m_vol.empty()) {
+        // fold the pending latest-per-expiry values into the series
+        for (const auto& [exp, s] : m_vol)
+            m_volSeries.push_back(VolRec{nowSec, exp, s.atmvol, s.fwd, s.dte});
         const std::string path = volPath(tdate);
-        const bool exists = std::ifstream(path).good();
-        std::ofstream out(path, std::ios::app);
+        std::ofstream out(path, std::ios::trunc);
         if (out.is_open()) {
-            if (!exists) out << "ts,expiry,atmvol,fwd,dte\n";
-            for (const auto& [exp, s] : m_vol)
-                out << (uint64_t)nowSec << ',' << exp << ','
-                    << s.atmvol << ',' << s.fwd << ',' << s.dte << '\n';
+            out << "ts,expiry,atmvol,fwd,dte\n";
+            for (const auto& r : m_volSeries)
+                out << (uint64_t)r.ts << ',' << r.expiry << ','
+                    << r.atmvol << ',' << r.fwd << ',' << r.dte << '\n';
             ++rows;
         }
         m_volDirty = false;
     }
 
     if (m_pfDirty) {
+        m_pfSeries.push_back(PfRec{nowSec, m_pf.d, m_pf.g, m_pf.v, m_pf.t,
+                                m_pf.pnl, m_pf.spot, m_pf.atmvol});
         const std::string path = pfPath(tdate);
-        const bool exists = std::ifstream(path).good();
-        std::ofstream out(path, std::ios::app);
+        std::ofstream out(path, std::ios::trunc);
         if (out.is_open()) {
-            if (!exists) out << "ts,delta,gamma,vega,theta,pnl,spot,atmvol\n";
-            out << (uint64_t)nowSec << ',' << m_pf.d << ',' << m_pf.g << ','
-                << m_pf.v << ',' << m_pf.t << ',' << m_pf.pnl << ','
-                << m_pf.spot << ',' << m_pf.atmvol << '\n';
+            out << "ts,delta,gamma,vega,theta,pnl,spot,atmvol\n";
+            for (const auto& r : m_pfSeries)
+                out << (uint64_t)r.ts << ',' << r.d << ',' << r.g << ','
+                    << r.v << ',' << r.t << ',' << r.pnl << ','
+                    << r.spot << ',' << r.atmvol << '\n';
             ++rows;
         }
         m_pfDirty = false;

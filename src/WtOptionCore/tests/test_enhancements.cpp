@@ -2959,6 +2959,21 @@ void test_analysis_recorder() {
         std::stringstream ss; ss << in.rdbuf();
         ASSERT_TRUE(ss.str().find("1234.5") != std::string::npos);
     }
+    // same-day restart: loadDay re-ingests history, flush REWRITES the file
+    // keeping pre-restart rows (append mode used to duplicate minutes)
+    {
+        AnalysisRecorder ar(60.0);
+        ar.setDir(dir);
+        ASSERT_TRUE(ar.loadDay(20261120) > 0);   // rows from the earlier flush
+        ar.recordVol(2612, 0.22, 3655.0, 28);
+        ASSERT_TRUE(ar.maybeFlush(3000.0, 20261120));
+        std::ifstream in(dir + "/volseries_20261120.csv");
+        std::stringstream ss; ss << in.rdbuf();
+        const std::string txt = ss.str();
+        ASSERT_TRUE(txt.find("2612,0.19,3650,30") != std::string::npos);   // pre-restart row kept
+        ASSERT_TRUE(txt.find("2612,0.22,3655,28") != std::string::npos);   // post-restart row added
+        ASSERT_TRUE(txt.find("2612,0.19,3650,30\n2612,0.19,3650,30") == std::string::npos);  // no duplication
+    }
     // day rollover keys a new file
     {
         AnalysisRecorder ar(60.0);

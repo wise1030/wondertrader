@@ -84,9 +84,6 @@ export const SmileBand: React.FC<{ snapshot: Snapshot | null; expiry: number | n
 // ---------------------------------------------------------------------------
 export const VolCone: React.FC<{ tdate: number }> = ({ tdate }) => {
   const [resp, setResp] = useState<{ rows: number[][]; days: number } | null>(null);
-  const { snapshot } = useData();
-  const exp = snapshot?.expiries.find(e => e.expiry === snapshot.expiries[0]?.expiry);
-
   useEffect(() => {
     let live = true;
     const load = () => fetchSeries('vol', tdate > 0 ? tdate : 0)
@@ -162,14 +159,17 @@ export const Attribution: React.FC<{ tdate: number }> = ({ tdate }) => {
     return () => { live = false; clearInterval(timer); };
   }, [tdate]);
 
-  // per-fill edge (spread capture vs issue-time theo); sign by side
+  // per-fill edge (spread capture vs issue-time theo); sign by side.
+  // Audit fix (11-20): px/theo are per-lot premium quotes — money needs the
+  // contract multiplier from snapshot.meta.contracts (cu volscale=5 was
+  // under-reporting edges 5x).
   const edges = useMemo(() => fills
     .filter(f => f.ctx?.theo != null)
     .map(f => {
-      const mult = 1;
+      const mult = snapshot?.meta?.contracts?.[f.code]?.mult ?? 1;
       const raw = (f.buy ? -1 : 1) * (f.px - f.ctx!.theo!) * f.qty * mult;
       return { t: f.t, code: f.code, edge: raw, buy: f.buy };
-    }), [fills]);
+    }), [fills, snapshot]);
 
   const cumCurve = useMemo(() => {
     let s = 0;
@@ -189,7 +189,10 @@ export const Attribution: React.FC<{ tdate: number }> = ({ tdate }) => {
       dPnL.push(p[1] * dS);
       gPnL.push(0.5 * p[2] * dS * dS);
       vPnL.push(p[3] * dv);
-      tPnL.push(p[4] * (dtsec / 86400.0) * -1);   // theta quoted per day
+      // Audit fix (11-20): engine theta (BlackCalc::thetaPerDay) is NEGATIVE
+      // for time decay, so pnl += theta * dt_days directly — the extra -1
+      // sign flip turned every decay into a phantom gain.
+      tPnL.push(p[4] * (dtsec / 86400.0));
     }
     const cumul = (a: number[]) => { let s = 0; return a.map(v => (s += v)); };
     return {
