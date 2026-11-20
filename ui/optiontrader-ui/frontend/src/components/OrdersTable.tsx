@@ -7,7 +7,8 @@ export const OrdersTable: React.FC = () => {
   const list = Object.values(orders).sort((a, b) => b.id - a.id);
 
   const cancel = (id: number) => {
-    if (readonly) return;
+    // P1 UI redesign: notify instead of silent return (consistent style)
+    if (readonly) { console.warn('[OrdersTable] cancel skipped (readonly)'); return; }
     sendCommand(JSON.stringify({ cmd: 'cancel_order', id, cmdSeq: Date.now() % 100000 }));
   };
 

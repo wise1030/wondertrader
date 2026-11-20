@@ -3,10 +3,8 @@ import { DataProvider, useData } from './context/DataContext';
 import { StatusBanner } from './components/StatusBanner';
 import { GreeksPnlBar } from './components/GreeksPnlBar';
 import { HealthPanel } from './components/HealthPanel';
-import { ExpirySelector } from './components/ExpirySelector';
+import { ExpiryBoard } from './components/ExpiryBoard';
 import { ExpirySummary } from './components/ExpirySummary';
-import { UnderlierView } from './components/UnderlierView';
-import { HedgePanel } from './components/HedgePanel';
 import { OptionGridView } from './components/OptionGridView';
 import { TradesTab } from './components/TradesTab';
 import { AnalysisTab } from './components/AnalysisTab';
@@ -57,11 +55,9 @@ const Shell: React.FC = () => {
           <div className="flex-1"><GreeksPnlBar /></div>
         </div>
         <HealthPanel />
+        <ExpiryBoard selected={selectedExpiry} onSelect={setSelectedExpiry} />
         <div className="flex gap-1 items-center flex-wrap">
-          <ExpirySelector selected={selectedExpiry} onSelect={setSelectedExpiry} />
           <ExpirySummary selected={selectedExpiry} />
-          <UnderlierView selected={selectedExpiry} />
-          <HedgePanel />
         </div>
       </div>
 

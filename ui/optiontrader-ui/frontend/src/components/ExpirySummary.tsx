@@ -24,17 +24,17 @@ export const ExpirySummaryView: React.FC<{ expiry: ExpiryView | null }> = ({ exp
         <span className={`px-1 rounded text-[9px] font-bold ${on ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}`}>{label}</span>
     );
 
+    // P1 UI redesign: detail strip — only diagnostics NOT on the BOARD row
+    // (sprd / targets / readiness chips / books).  DTE/fwd/atmVol/Δ/ν live
+    // on the row now.
     return (
         <div className="flex items-center gap-4 px-3 py-1 bg-white border border-gray-200 rounded text-[11px] flex-wrap">
             <span className="font-bold font-mono">{e.expiry}</span>
-            <span>DTE <b>{e.daysToExpiry}</b></span>
-            <span>fwd <b>{fmt(e.fwd)}</b></span>
-            <span>atmVol <b>{fmt(e.atmVol, 4)}</b></span>
             <span>sprd <b>{fmt(e.atmVolSprd, 4)}</b></span>
             {/* batch-5.2: current vs greek target, side by side */}
-            <span>Δ <TargetCell cur={e.greeks.delta} targ={e.targDelta} />
+            <span>Δtarg <TargetCell cur={e.greeks.delta} targ={e.targDelta} />
                 {e.targDelta != null && <span className="text-gray-400">→{fmt(e.targDelta, 0)}</span>}</span>
-            <span>ν <TargetCell cur={e.greeks.vega} targ={e.targVega} />
+            <span>νtarg <TargetCell cur={e.greeks.vega} targ={e.targVega} />
                 {e.targVega != null && <span className="text-gray-400">→{fmt(e.targVega, 0)}</span>}</span>
             <span className="text-gray-500">books <b className={e.booksWithBid === 0 ? 'text-red-600' : ''}>{e.booksWithBid}/{e.booksTotal}</b></span>
             <span className="flex gap-1">

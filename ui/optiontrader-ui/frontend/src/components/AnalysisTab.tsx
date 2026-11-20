@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Attribution, PredChips, SmileBand, VolCone } from './AnalysisPanels';
+import { HealthPanel } from './HealthPanel';
 import { useData } from '../context/DataContext';
 import type { Snapshot } from '../types';
 
@@ -158,6 +159,10 @@ export const AnalysisTab: React.FC<{ selectedExpiry: number | null }> = ({ selec
       <div className="bg-white border border-gray-200 rounded p-2 xl:col-span-2">
         <div className="text-xs font-bold text-gray-600 mb-1">Batch latency</div>
         <LatencyChart />
+      </div>
+      <div className="bg-white border border-gray-200 rounded p-2 xl:col-span-2">
+        <div className="text-xs font-bold text-gray-600 mb-1">Health (full grid)</div>
+        <HealthPanel />
       </div>
     </div>
   );

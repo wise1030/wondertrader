@@ -1,7 +1,7 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
 import { SetParamPanel } from './SetParamPanel';
-import { ExpiryEnableRow } from './ExpiryEnableRow';
+import { ConfirmButton } from './ConfirmButton';
 
 interface Props {
   onNotify: (msg: string, type: 'info' | 'error') => void;
@@ -29,29 +29,27 @@ export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
         </button>
         <span className="text-gray-300">|</span>
         {(['STOP', 'RESUME', 'PANIC'] as const).map(c => (
-          <button
-            key={c}
-            // P1 fix: PANIC is a kill switch — it must stay reachable in
-            // readonly monitoring mode (a read-only page is exactly where an
-            // operator watches for trouble). STOP/RESUME stay gated.
-            className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly && c !== 'PANIC' ? 'cursor-not-allowed opacity-40' : ''}`}
-            onClick={() => readonly && c !== 'PANIC' ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase(), cmdSeq: Date.now() % 100000 }))}
-          >
-            {c}
-          </button>
+          // P1 UI redesign: STOP gets a two-tap confirm (full strategy halt);
+          // PANIC stays zero-friction (kill switch); RESUME is recovery.
+          c === 'STOP' ? (
+            <ConfirmButton key={c} label="STOP" confirmLabel="confirm STOP?"
+              disabled={readonly}
+              title="halt the whole strategy (cancels all quotes)"
+              className={`px-2 py-0.5 rounded text-white bg-gray-600 hover:bg-gray-500 ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
+              onConfirm={() => sendCommand(JSON.stringify({ cmd: 'stop', cmdSeq: Date.now() % 100000 }))} />
+          ) : (
+            <button key={c}
+              className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly && c !== 'PANIC' ? 'cursor-not-allowed opacity-40' : ''}`}
+              onClick={() => readonly && c !== 'PANIC' ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase(), cmdSeq: Date.now() % 100000 }))}
+            >
+              {c}
+            </button>
+          )
         ))}
-        {(['on', 'off', 'close'] as const).map(m => (
-          <button
-            key={m}
-            className={`px-2 py-0.5 rounded bg-gray-600 hover:bg-gray-500 text-white ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
-            onClick={() => readonly ? p2(`qmode ${m}`) : sendCommand(JSON.stringify({ cmd: 'qmode', mode: m, cmdSeq: Date.now() % 100000 }))}
-          >
-            qmode {m}
-          </button>
-        ))}
+        {/* P1 UI redesign: grid-wide qmode moved to the EXPIRY BOARD ctrl
+            strip (ALL scope) — one control surface per scope. */}
       </div>
       <SetParamPanel />
-      <ExpiryEnableRow readonly={readonly} sendCommand={sendCommand} />
       <div className="h-20 overflow-y-auto bg-gray-50 border border-gray-200 rounded px-2 py-0.5 text-[10px] font-mono">
         {msgLogs.slice().reverse().map((l, i) => (
           <div key={i} className={l.type === 'error' || l.type === 'reject' ? 'text-red-600' : 'text-gray-600'}>
