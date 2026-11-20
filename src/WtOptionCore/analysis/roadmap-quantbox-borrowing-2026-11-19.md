@@ -437,6 +437,27 @@ spread 大时与可变现值有差），与"平今盈亏"含手续费口径亦�
    [687803.47](31)"——SimNow 账户缺口约 69 万（错误码 31 在该
    环境即资金不足变体）。需要用户充值 SimNow 或降仓位规模
 
+## 3.4i UI 四问题检修（11-21 凌晨，f79f490e + 后续）
+
+1. **RESUME 不能恢复（根因修复，端到端实证）**：shouldAllowTransition
+   的 per-origin switch 覆盖全部枚举 → 末尾 hotcmd_ 前缀放行不可达
+   → RESUME(Disabled→Normal) 被拦。修复：hotcmd_ 前缀统一前置放行
+   （操作员命令优先于一切状态）。实测 STOP→Disabled、RESUME→
+   Normal enabled=True ✓
+2. **per-expiry 报价热开关（新功能）**：EXPIRYENABLE,<expiry>,<on|off>
+   全链（UiBridge 翻译 → CommandBus → setExpiryEnabled → COP）；
+   热关=报价 size 归零撤单、热开=冷 expiry 完整初始配置；前端
+   CommandPanel per-expiry ON/OFF 开关行（2702/2703/2704 可热开，
+   SimNow 资金不足期开多了会加拒单——量力）
+3. **同合约多条挂单显示（定性）**：配置为每 side 单笔（无多
+   ladder）。单帧去重后多数 code=2 条（bid+ask 正常）；12 个翼部
+   put code 残留 4-10 条=REJECT-ONLY 冻结期未撤旧单（跨调价档）+
+   SimNow cancel 回报丢失的 registry 残留。即时清理：UI cancel_all
+   或重启（recovery sweep 撤全）。REJECT-ONLY 进入时撤双边已修
+   （f79f490e，防新增残留）。后续项：registry vs OQM 对账清理
+4. **readonly → 可操作**：ui.readonly 配置硬门已切 false（快照实证
+   readonly 不在 snapshot、hello 下发 false），前端刷新生效
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
