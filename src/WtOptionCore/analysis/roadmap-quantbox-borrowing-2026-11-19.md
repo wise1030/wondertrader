@@ -313,6 +313,62 @@ contracts.json 期权链预建 grid（后续项，当前 basefiles 无期权链�
 **验证路径**：夜盘开盘后 UI 应出现合约行且 pos 显示恢复持仓（enabled
 与否无关）。9/9 测试绿。
 
+## 3.4e 全项目深度审计报告（11-20，含前端 UI）
+
+**范围**：后端 29,779 行 C++（WtOptionCore 38 文件）+ 前端 2,351 行
+（React19 SPA 21 文件）+ Python middleware + 部署配置。
+
+**一、架构总评**
+线程模型三段清晰且边界经多轮实战验证：trader 回调（async 入队，SPSC
+ring+溢出合并）→ 单 worker（定价/风控/落盘/快照 POD 填充）→ IO 线程
+（UiBridge socket，持锁不跨调用）。UI 快照 POD 视图（无锁跨线程）+
+中间件 WS 广播的分层是本系统最成熟的部分。策略→CTG→OTG/OQM→OQM
+的执行链职责分明。
+
+**二、重复/冗余功能清单（定性）**
+1. Signals/ 可插拔框架（824 行）vs COP 内嵌 alpha——**双路径设计**：
+   computeValue 分支"configured→插件 / 未配置→内嵌 fallback"。生产
+   无 signals 段 → 插件层按设计休眠（已在 SignalFactory.h 头注固化）。
+   非重复 bug，但 824 行休眠代码是维护面，迁移/删除留待信号族扩展时
+   决策
+2. AnalysisRecorder（到期级+组合级分钟序列）vs OptionValueWriter
+   （合约级 theo/iv）——粒度互补，outputDir 已对齐（#5），不合并
+3. QuoteStatistics（3.3 持久化）vs OQM counters（#4 恢复）——两套
+   计数器语义不同（聚合统计 vs 交易所限额门输入），各自持久化合理
+4. TradingIntensity vs Signals/VegaFlow 等——毒性度量 vs flow 信号，
+   通道不同（spread multiplier vs skew 权重）
+5. DeltaHedgeExecutor（执行）vs OptionHedgeCoordinator（决策+多腿）
+   ——职责分层，无重叠
+
+**三、孤立/未接入组件（本轮处置）**
+1. **死配置 key 实锤**：orderManager option/future 段的
+   cancel_timeout_ms/max_orders_per_code/ttl_ms/stp_enabled/
+   hard_flat_after_n_fills(future)/leave_outer_orders(future)——
+   loader 全部不读（FutuCore 模板抄入）。已从服务器 config 删除 12 行
+   （备份 config.yaml.bak_deadkeys）。注意：stp_enabled 无效意味着
+   跨合约自成交防护不存在，仅 OQM 无条件 self-cross STP（双边互扫）
+   生效——功能足够（做市双边报价场景）
+2. **白名单缺失实锤**：expiries[].enable、volCurve.beta（loader 真读
+   但白名单缺 → 每次启动 UNKNOWN WARN 刷屏 240 条）——已补，
+   实测启动噪音 240 → 0
+3. order_delay_ms：loader 读但显式 WARN "not implemented"——显式
+   声明，保留
+4. 前端：无孤立组件（21 文件全部可达）；types 与快照编码双向对照
+   无孤儿字段；hooks/sound 全部消费
+
+**四、最优路径判定**
+- 修既有半实现 > 造新轮子：本路线 8 处"半实现补完"（hardFlat 双处/
+  targets 死输入/teenie/深度断链/计数恢复/theta 语义等）持续验证
+  该原则
+- 灰度默认关（batch_validate/intensity/qstream/targ/max_open）+
+  实测后启用——运营安全
+- 剩余大件（WtDataWriter 原生 dsb 录流、开盘前合约骨架预建、
+  Signals 迁移决策）均已入档为后续项，无隐性债务
+
+**五、实测基线（本轮审计收尾时）**
+夜盘开盘：enabled=true options=202 strikes=101 underlying=95,290、
+启动 ConfigValidator 噪音 0、9/9 测试绿（58 用例）、tsc 0 错误。
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
