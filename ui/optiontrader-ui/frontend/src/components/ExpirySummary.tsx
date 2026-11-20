@@ -4,6 +4,19 @@ import type { ExpiryView } from '../types';
 
 const fmt = (v: number | null | undefined, d = 2) => (v == null ? '-' : v.toFixed(d));
 
+// batch-5.2: current-vs-target cell — green when within tolerance of the
+// target, red when beyond 2x tolerance (or wrong sign for delta).
+const TargetCell: React.FC<{ cur: number | null; targ: number | null | undefined; tol?: number }> =
+({ cur, targ, tol = 0.15 }) => {
+    if (cur == null) return <b>-</b>;
+    if (targ == null) return <b>{fmt(cur)}</b>;
+    const dev = Math.abs(cur - targ);
+    const cls = dev <= Math.max(Math.abs(targ) * tol, 1.0) ? 'text-green-700'
+              : dev <= Math.max(Math.abs(targ) * 2 * tol, 2.0) ? 'text-yellow-600'
+              : 'text-red-600 font-bold';
+    return <b className={cls} title={`cur=${fmt(cur)} targ=${fmt(targ)} dev=${fmt(dev)}`}>{fmt(cur)}</b>;
+};
+
 export const ExpirySummaryView: React.FC<{ expiry: ExpiryView | null }> = ({ expiry: e }) => {
     if (!e) return <div className="text-[11px] text-gray-400 px-2 py-1">no expiry selected</div>;
 
@@ -18,8 +31,11 @@ export const ExpirySummaryView: React.FC<{ expiry: ExpiryView | null }> = ({ exp
             <span>fwd <b>{fmt(e.fwd)}</b></span>
             <span>atmVol <b>{fmt(e.atmVol, 4)}</b></span>
             <span>sprd <b>{fmt(e.atmVolSprd, 4)}</b></span>
-            <span>Δ <b>{fmt(e.greeks.delta)}</b></span>
-            <span>ν <b>{fmt(e.greeks.vega)}</b></span>
+            {/* batch-5.2: current vs greek target, side by side */}
+            <span>Δ <TargetCell cur={e.greeks.delta} targ={e.targDelta} />
+                {e.targDelta != null && <span className="text-gray-400">→{fmt(e.targDelta, 0)}</span>}</span>
+            <span>ν <TargetCell cur={e.greeks.vega} targ={e.targVega} />
+                {e.targVega != null && <span className="text-gray-400">→{fmt(e.targVega, 0)}</span>}</span>
             <span className="text-gray-500">books <b className={e.booksWithBid === 0 ? 'text-red-600' : ''}>{e.booksWithBid}/{e.booksTotal}</b></span>
             <span className="flex gap-1">
                 <Chip label="fwd" on={e.fwdReady} />

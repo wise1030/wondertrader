@@ -45,6 +45,12 @@
 #include "CffexIOStrikeFinder.h"
 #include "DceMOStrikeFinder.h"
 #include "TradingStateArbiter.h"
+
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
+#include <fstream>
+#include <sstream>
 #include "TradingState.h"
 #include "CommandBus.h"
 #include "DeltaHedgeExecutor.h"
@@ -353,6 +359,8 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             if (expiry == 0) continue;
             _expiryConfigs[expiry] = {
                 e->getBoolean("enable"),
+                e->has("targ_delta") ? e->getDouble("targ_delta") : 0.0,
+                e->has("targ_vega") ? e->getDouble("targ_vega") : 0.0,
                 e->has("underlyingCode") ? e->getCString("underlyingCode") : "",
                 e->has("hedgeCode") ? e->getCString("hedgeCode") : "",
                 {},  // secondaryHedgeCodes filled below
@@ -650,8 +658,9 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     });
-    _orderRegistry.setAlertCallback([](const std::string& msg) {
+    _orderRegistry.setAlertCallback([this](const std::string& msg) {
         WTSLogger::log_by_cat("strategy", LL_ERROR, "OrderAnomaly: {}", msg);
+        pushUiAlert(2, "OrderAnomaly: " + msg);   // P1 batch-5.5
     });
 
     // R-P1: prediction accuracy loop closure + R9 command bus
@@ -1260,6 +1269,9 @@ void HftOptionStrategy::setupPricer()
                 _compositePricer->setExpiryCloseParams(exp, ec.enable_auto_close,
                     static_cast<int32_t>(ec.close_pos_thresh));
             }
+            // P1 batch-5.2: greek targets feed the risk-shift normalization
+            // (delta/vega buckets skew quotes toward the target book).
+            _compositePricer->setExpiryTargets(exp, ec.targ_delta, ec.targ_vega);
         }
 
         _pricer = _compositePricer;
@@ -3918,6 +3930,99 @@ void HftOptionStrategy::setState(wt_option::TradingStateType t, const std::strin
 // ============================================================================
 // R9: hot-command bus registration
 // ============================================================================
+// ============================================================================
+// P1 batch-5.5: graded UI alert, 2s global rate limit.
+// ============================================================================
+void HftOptionStrategy::pushUiAlert(uint8_t level, const std::string& msg) {
+    if (!_uiBridge) return;
+    const double now = _ctx ? _timeService.nowSeconds(_ctx) : 0.0;
+    if (now - _lastUiAlertSec < 2.0) {
+        ++_uiAlertsSuppressed;
+        return;
+    }
+    _lastUiAlertSec = now;
+    wt_option::UiEventFrame ev;
+    ev.type = wt_option::UiEventType::Alert;
+    ev.seq = _batchCount;
+    ev.tsWallMs = wt_option::UiBridge::wallMsNow();
+    ev.level = level;
+    ev.msg = msg;
+    _uiBridge->pushEvent(ev);
+}
+
+// ============================================================================
+// P1 batch-5.4: hot-param persistence (see header comment).
+// ============================================================================
+static bool isPersistableHotParam(const std::string& key) {
+    static const std::set<std::string> kKeys = {
+        "wgt_vegaflow", "wgt_frontfut_skew", "wgt_deltaflow", "wgt_atmsig",
+        "wgt_rollema", "sticky_base", "improve_retreat_ratio",
+        "trade_shock_ticks", "max_tps",
+    };
+    return kKeys.count(key) > 0;
+}
+
+void HftOptionStrategy::persistHotParam(const std::string& key, double value) {
+    if (!isPersistableHotParam(key)) return;
+    // Full-file rewrite: SETPARAM is an operator action (seconds apart at
+    // most), not a hot-path event.
+    const std::string path = "generated/hot_params.json";
+    std::map<std::string, double> params;
+    {   // merge with the existing file (other keys may live there)
+        std::ifstream in(path);
+        if (in.is_open()) {
+            std::stringstream ss; ss << in.rdbuf();
+            rapidjson::Document d;
+            if (!d.Parse(ss.str().c_str()).HasParseError() && d.IsObject()
+                && d.HasMember("params") && d["params"].IsObject()) {
+                for (auto it = d["params"].MemberBegin(); it != d["params"].MemberEnd(); ++it)
+                    if (it->value.IsNumber()) params[it->name.GetString()] = it->value.GetDouble();
+            }
+        }
+    }
+    params[key] = value;
+    rapidjson::StringBuffer sb;
+    rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+    w.StartObject();
+    w.Key("tdate"); w.Uint(_curSessionDate ? _curSessionDate : 0);
+    w.Key("params"); w.StartObject();
+    for (const auto& [k, v] : params) { w.Key(k.c_str()); w.Double(v); }
+    w.EndObject();
+    w.EndObject();
+    std::ofstream out(path, std::ios::trunc);
+    if (out.is_open()) out << sb.GetString();
+}
+
+size_t HftOptionStrategy::replayHotParams() {
+    std::ifstream in("generated/hot_params.json");
+    if (!in.is_open()) return 0;
+    std::stringstream ss; ss << in.rdbuf();
+    rapidjson::Document d;
+    if (d.Parse(ss.str().c_str()).HasParseError() || !d.IsObject()
+        || !d.HasMember("params") || !d["params"].IsObject()) return 0;
+
+    // The setHotParam hook writes the member when the shm pointer is not yet
+    // bound — replay BEFORE sync_param (:751) so the member value becomes the
+    // framework-registered default.  registerCommands runs in that window.
+    size_t applied = 0;
+    for (auto it = d["params"].MemberBegin(); it != d["params"].MemberEnd(); ++it) {
+        if (!it->value.IsNumber()) continue;
+        const std::string key = it->name.GetString();
+        if (!isPersistableHotParam(key)) continue;
+        std::string err;
+        // _cmdHandlers exposes the same hooks the UI SETPARAM uses.
+        if (_cmdHandlers.setHotParam(key, it->value.GetDouble(), err)) {
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "hot-param replayed from disk: {} = {}", key, it->value.GetDouble());
+            ++applied;
+        } else {
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "hot-param replay FAILED: {} = {} ({})", key, it->value.GetDouble(), err);
+        }
+    }
+    return applied;
+}
+
 void HftOptionStrategy::registerCommands()
 {
     wt_option::OptionCommandHandlers::Hooks hooks;
@@ -3998,6 +4103,7 @@ void HftOptionStrategy::registerCommands()
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "UI SETPARAM: {} = {} ({} path)", key, value,
             ptrPath ? "shm-ptr" : "member");
+        persistHotParam(key, value);   // P1 batch-5.4
         return true;
     };
     // P3: single-code quote mode — same CTG entry the grid-wide hook uses.
@@ -4029,6 +4135,16 @@ void HftOptionStrategy::registerCommands()
         return n;
     };
     _cmdHandlers.registerAll(_cmdBus, std::move(hooks));
+
+    // P1 batch-5.4: replay operator-tuned hot params BEFORE sync_param
+    // registration (see replayHotParams).  Runs after registerAll so the
+    // handler is live; still inside on_init's pre-sync_param window.
+    {
+        const size_t n = replayHotParams();
+        if (n > 0)
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "hot-param persistence: {} params restored from generated/hot_params.json", n);
+    }
 }
 
 // ============================================================================
@@ -4312,6 +4428,7 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
     v.seq = _batchCount;
     v.tsWallMs = UiBridge::wallMsNow();
 
+    v.hedgeDeltaThreshold = _hedgeCfg.thresholdDelta;   // P1 batch-5.1
     v.stateType = toString(_tstate.type);
     v.stateReason = _tstate.reason;
     v.channelReady = _tstate.channelReady;
@@ -4416,6 +4533,17 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
             // can grey out disabled series.
             auto ecIt = _expiryConfigs.find(kv.first);
             ev.quoting = (ecIt != _expiryConfigs.end()) && ecIt->second.enable;
+            if (ecIt != _expiryConfigs.end()) {
+                // P1 batch-5.2: current-vs-target display in the UI.
+                if (ecIt->second.targ_delta != 0.0) {
+                    ev.hasTargDelta = true;
+                    ev.targDelta = ecIt->second.targ_delta;
+                }
+                if (ecIt->second.targ_vega != 0.0) {
+                    ev.hasTargVega = true;
+                    ev.targVega = ecIt->second.targ_vega;
+                }
+            }
             v.expiries.push_back(std::move(ev));
         }
     }

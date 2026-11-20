@@ -350,6 +350,14 @@ public:
     /// P1 batch-3.2: per-expiry spread multiplier from the intensity estimator.
     void setIntensityMultiplier(uint32_t exp, double m) { m_intensityMul[exp] = m; }
 
+    /// P1 batch-5.2: per-expiry greek targets (expiries[].targ_delta/targ_vega).
+    /// Feeds the risk-shift normalization (m_prop_exp_{delta,vega_tw}_targets)
+    /// — both maps existed but had no config wiring before this.
+    void setExpiryTargets(uint32_t exp, double targDelta, double targVegaTW) {
+        m_prop_exp_delta_targets[exp] = targDelta;
+        m_prop_exp_vega_tw_targets[exp] = targVegaTW;
+    }
+
     // Signal management
     void setAlphaSignals(std::vector<IAlphaSignal::Ptr> sigs) { m_alphaSignals = std::move(sigs); }
     void setRiskSignals(std::vector<IRiskSignal::Ptr> sigs) { m_riskSignals = std::move(sigs); }

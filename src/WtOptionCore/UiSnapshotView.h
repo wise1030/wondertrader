@@ -80,6 +80,11 @@ struct UiExpiryView
     int32_t booksWithBid = 0, booksTotal = 0;
 
     bool hasGreeks = false; double greeksDelta = 0, greeksVega = 0;
+    // P1 batch-5.2: full expiry greeks for the hedge panel + greek targets.
+    // Gamma/theta ride the same hasGreeks flag (expGreeks is all-or-nothing).
+    double greeksGamma = 0, greeksTheta = 0;
+    bool hasTargDelta = false; double targDelta = 0;
+    bool hasTargVega  = false; double targVega  = 0;
 
     bool hasUnd = false;
     std::string undCode;
@@ -141,6 +146,10 @@ struct UiSnapshotView
     // Risk / limits
     bool limitsBreached = false;
     int32_t tps = 0, tpsMax = 0;
+    // P1 batch-5.1: delta-hedge fire threshold — the hedge panel colours a
+    // row red when |$Δ| exceeds it while Γ≠0 (a gamma-active expiry that the
+    // hedger cannot neutralise passively).
+    double hedgeDeltaThreshold = 0;
     uint32_t ordersSent = 0, fills = 0, cancels = 0, rejects = 0;
     double cancelRatio = 0, fillRatio = 0;   // global: totals-derived
     // P1 batch-4.3: per-source (OrderTag) buckets — 0=Unknown 1=MM 2=Hedge 3=Scanner
@@ -177,6 +186,7 @@ enum class UiEventType : uint8_t
     Trade = 1,
     Reject = 2,
     Ack = 3,
+    Alert = 4,   // P1 batch-5.5: graded alert (order anomaly / panic / risk)
 };
 
 struct UiEventFrame
@@ -198,6 +208,11 @@ struct UiEventFrame
     uint64_t cmdSeq = 0;
     bool ok = false;
     std::string err;
+
+    // P1 batch-5.5: alert payload.  level 0=info 1=warn 2=error; msg rides in
+    // the dedicated field (code stays empty for alerts).
+    uint8_t level = 0;
+    std::string msg;
 };
 
 } // namespace wt_option

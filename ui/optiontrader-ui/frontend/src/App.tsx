@@ -6,6 +6,7 @@ import { HealthPanel } from './components/HealthPanel';
 import { ExpirySelector } from './components/ExpirySelector';
 import { ExpirySummary } from './components/ExpirySummary';
 import { UnderlierView } from './components/UnderlierView';
+import { HedgePanel } from './components/HedgePanel';
 import { OptionGridView } from './components/OptionGridView';
 import { TradesTab } from './components/TradesTab';
 import { AnalysisTab } from './components/AnalysisTab';
@@ -16,7 +17,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 interface ToastItem { id: number; message: string; type: 'info' | 'success' | 'error'; }
 
 const Shell: React.FC = () => {
-  const { snapshot } = useData();
+  const { snapshot, lastAlert } = useData();
   const [selectedExpiry, setSelectedExpiry] = useState<number | null>(null);
   const [tab, setTab] = useState<'grid' | 'trades' | 'analysis'>('grid');
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -26,6 +27,13 @@ const Shell: React.FC = () => {
     setToasts(t => [...t, { id, message, type }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
   }, []);
+
+  // P1 batch-5.5: graded alerts toast (order anomalies, risk events pushed
+  // through the UiBridge alert frame; strategy-side 2s rate limit).
+  useEffect(() => {
+    if (!lastAlert) return;
+    notify(lastAlert.msg, lastAlert.level >= 2 ? 'error' : 'info');
+  }, [lastAlert, notify]);
 
   // default selection: first QUOTING-enabled expiry (a disabled series would
   // show an empty grid); fall back to the front month.
@@ -53,6 +61,7 @@ const Shell: React.FC = () => {
           <ExpirySelector selected={selectedExpiry} onSelect={setSelectedExpiry} />
           <ExpirySummary selected={selectedExpiry} />
           <UnderlierView selected={selectedExpiry} />
+          <HedgePanel />
         </div>
       </div>
 

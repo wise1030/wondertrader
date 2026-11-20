@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useData } from '../context/DataContext';
 
 interface Props {
@@ -8,11 +8,37 @@ interface Props {
 
 export const ExpirySelector: React.FC<Props> = ({ selected, onSelect }) => {
     const { snapshot } = useData();
-    const expiries = snapshot?.expiries ?? [];
+    // batch-5.3: enable+ready series first (quoting on AND fitReady), then
+    // enabled-but-not-ready, then disabled; original expiry order within each
+    // tier so the F1..Fn hotkeys still map to the visible order.
+    const expiries = useMemo(() => {
+        const list = [...(snapshot?.expiries ?? [])];
+        const tier = (e: (typeof list)[number]) =>
+            e.quoting !== false && e.fitReady ? 0
+          : e.quoting !== false ? 1
+          : 2;
+        return list.sort((a, b) => tier(a) - tier(b) || a.expiry - b.expiry);
+    }, [snapshot?.expiries]);
 
     return (
         <div className="flex items-center gap-1.5 flex-wrap px-2 py-1 bg-white border border-gray-200 rounded">
             <span className="text-[10px] text-gray-400 mr-1">expiry (F1-F8)</span>
+            {/* batch-5.3: compact dropdown jump/filter — the sorted button row
+                stays the primary control; the select is the keyboard-free path
+                when many series are configured. */}
+            <select
+                className="border border-gray-300 rounded text-[10px] px-1 py-0.5 bg-gray-50"
+                value={selected ?? ''}
+                onChange={ev => ev.target.value && onSelect(Number(ev.target.value))}
+                title="jump to expiry"
+            >
+                <option value="">jump…</option>
+                {expiries.map(e => (
+                    <option key={e.expiry} value={e.expiry}>
+                        {e.expiry}{e.quoting === false ? ' (off)' : e.fitReady ? ' ✓' : ''}
+                    </option>
+                ))}
+            </select>
             {expiries.map((e, i) => {
                 const active = e.expiry === selected;
                 const off = e.quoting === false;   // P1: grey out disabled series

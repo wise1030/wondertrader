@@ -32,6 +32,8 @@ export interface StrikeView {
 export interface ExpiryGreeksView {
   delta: number | null;
   vega: number | null;
+  gamma?: number | null;   // batch-5.2 hedge panel
+  theta?: number | null;
 }
 
 export interface UndView {
@@ -54,6 +56,8 @@ export interface ExpiryView {
   booksWithBid: number;
   booksTotal: number;
   greeks: ExpiryGreeksView;
+  targDelta?: number | null;   // batch-5.2 greek targets (absent = no target)
+  targVega?: number | null;
   und: UndView | null;
   strikes: StrikeView[];
 }
@@ -134,6 +138,7 @@ export interface Snapshot {
   perf: PerfView;
   expiries: ExpiryView[];
   orders: OrderView[];
+  hedgeDeltaThreshold?: number;   // batch-5.1 hedge-panel signal threshold
   meta: { contracts: Record<string, { mult: number | null; priceTick: number | null }> };
   params?: {
     wgt_vegaflow: number;
@@ -187,6 +192,14 @@ export interface AckEvent {
   err: string;
 }
 
+export interface AlertEvent {
+  type: 'alert';
+  seq: number;
+  ts: number;
+  level: number;   // 0=info 1=warn 2=error
+  msg: string;
+}
+
 export interface FillsMessage {
   type: 'fills';
   sid: string;
@@ -217,5 +230,6 @@ export type Frame =
   | RejectEvent
   | AckEvent
   | FillsMessage
+  | AlertEvent
   | HelloMessage
   | { type: string;[k: string]: any };

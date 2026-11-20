@@ -196,6 +196,10 @@ private:
     RiskFilterConfig _futureFilterCfg;
     wt_option::RiskFilterChainPtr _optionFilterChain;
     wt_option::RiskFilterChainPtr _futureFilterChain;
+    // P1 batch-5.5: alert throttle (strategy clock seconds).
+    double _lastUiAlertSec = 0;
+    uint64_t _uiAlertsSuppressed = 0;
+
     // P1 batch-4.4: per-expiry daily OPENED lots (fills that increased the
     // book's absolute position); feeds MaxOpenOffsetFilter.  Reset at
     // session begin — the exchange counts per trading day.
@@ -204,6 +208,10 @@ private:
     // Expiry configs
     struct ExpiryConfig {
         bool enable = true;
+        // P1 batch-5.2: per-expiry greek targets for the risk-shift
+        // normalization + UI current-vs-target display (0 = no target).
+        double targ_delta = 0;
+        double targ_vega = 0;
         std::string underlyingCode;  // per-expiry pricing underlying (empty=use global)
         std::string hedgeCode;       // tradeable hedge (empty=same as underlyingCode)
         std::vector<std::string> secondaryHedgeCodes;
@@ -540,6 +548,23 @@ private:
                                 wt_option::OrderTag tag = wt_option::OrderTag::Unknown);
     /// 3.6: session-end export of fill_attribution.csv + aggregate log.
     void exportFillAttribution(uint32_t tdate);
+
+    /// P1 batch-5.4: hot-param persistence.  SETPARAM only wrote through the
+    /// hot pointers — a restart reverted every tuned weight to the config
+    /// default (the shm path survives via the framework, the member path did
+    /// not).  Every successful value-like SETPARAM is dumped to
+    /// generated/hot_params.json and replayed at startup BEFORE sync_param
+    /// registration, so the persisted value becomes the framework-registered
+    /// default.  Keys: value-like params only — command/qmode_override/
+    /// manual_order are explicitly excluded (replaying a STOP/PANIC at
+    /// startup would be a footgun).
+    /// P1 batch-5.5: graded UI alert with a 2s global rate limit (the
+    /// registry can raise anomalies in bursts — e.g. one per unknown fill —
+    /// and without the limit one incident spams hundreds of WS frames).
+    void pushUiAlert(uint8_t level, const std::string& msg);
+
+    void persistHotParam(const std::string& key, double value);
+    size_t replayHotParams();   // returns number of params applied
     bool executeCancel(uint32_t localid);
     int32_t executeCancel(const std::string& code);
 };

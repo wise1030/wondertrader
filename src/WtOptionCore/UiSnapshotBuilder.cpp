@@ -113,6 +113,8 @@ void UiSnapshotBuilder::buildExpiry(const std::vector<StrikeDataPtr>& strikes,
         out.hasGreeks = true;
         out.greeksDelta = expGreeks->delta();
         out.greeksVega = expGreeks->vega();
+        out.greeksGamma = expGreeks->gamma();   // P1 batch-5.2
+        out.greeksTheta = expGreeks->theta();
     }
 
     out.strikes.reserve(strikes.size());
@@ -296,6 +298,7 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.key("tps"); w.Int(v.tps);
     w.key("tpsMax"); w.Int(v.tpsMax);
     w.key("ordersSent"); w.Uint(v.ordersSent);
+    w.numOrNull("hedgeDeltaThreshold", v.hedgeDeltaThreshold);
     {   // P1 batch-4.3 per-source buckets
         w.key("liveByTag"); w.StartArray();
         for (int i = 0; i < 4; ++i) w.Uint(v.liveByTag[i]);
@@ -341,7 +344,11 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
         w.key("greeks"); w.StartObject();
         w.nullable("delta", e.hasGreeks, e.greeksDelta);
         w.nullable("vega", e.hasGreeks, e.greeksVega);
+        w.nullable("gamma", e.hasGreeks, e.greeksGamma);   // P1 batch-5.2
+        w.nullable("theta", e.hasGreeks, e.greeksTheta);
         w.EndObject();
+        w.nullable("targDelta", e.hasTargDelta, e.targDelta);
+        w.nullable("targVega", e.hasTargVega, e.targVega);
         w.key("und"); if (e.hasUnd) {
             w.StartObject();
             w.key("code"); w.String(e.undCode.c_str());
@@ -461,6 +468,13 @@ void UiSnapshotBuilder::encodeEvent(const UiEventFrame& ev, std::string& out)
         w.numOrNull("px", ev.px);
         w.key("canceled"); w.Bool(ev.canceled);
         if (ev.tag) { w.key("tag"); w.Uint(ev.tag); }
+        break;
+    case UiEventType::Alert:
+        w.key("type"); w.String("alert");
+        w.key("seq"); w.Uint64(ev.seq);
+        w.key("ts"); w.Uint64(ev.tsWallMs);
+        w.key("level"); w.Uint(ev.level);
+        w.key("msg"); w.String(ev.msg.c_str());
         break;
     case UiEventType::Reject:
         w.key("type"); w.String("reject");
