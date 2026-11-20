@@ -98,6 +98,11 @@ struct UiExpiryView
     std::string undCode;
     double undBid = 0, undAsk = 0;
     double undPos = 0;
+    // P1 UI: futures-leg market AND our market-making orders — the option
+    // legs show both in the Grid (ordBid/ordAsk); the futures leg had
+    // neither in the UI after UnderlierView was folded into the BOARD.
+    bool hasUndOur = false;
+    double undOurBid = 0, undOurAsk = 0, undOurBidSz = 0, undOurAskSz = 0;
 
     std::vector<UiStrikeView> strikes;
 };

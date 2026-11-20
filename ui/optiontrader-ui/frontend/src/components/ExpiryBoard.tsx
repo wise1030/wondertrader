@@ -65,6 +65,8 @@ export const ExpiryBoard: React.FC<{
             <th className="border border-gray-200 px-1 text-center">Q</th>
             <th className="border border-gray-200 px-1 text-center">qmode</th>
             <th className="border border-gray-200 px-1 text-center">books</th>
+            <th className="border border-gray-200 px-1 text-right">und mkt</th>
+            <th className="border border-gray-200 px-1 text-right">und ord</th>
           </tr>
         </thead>
         <tbody>
@@ -125,6 +127,21 @@ export const ExpiryBoard: React.FC<{
                 <td className={`border border-gray-200 px-1 text-center ${e.booksWithBid === 0 ? 'text-red-600' : ''}`}>
                   {e.booksWithBid}/{e.booksTotal}
                 </td>
+                {/* futures-leg MARKET bid/ask (was tooltip-only after the
+                    UnderlierView fold — the operator asked for it direct) */}
+                <td className="border border-gray-200 px-1 text-right font-mono"
+                    title={und ? `${und.code} market` : 'no hedge leg'}>
+                  {und && und.bid != null && und.ask != null
+                    ? <span>{fmt(und.bid, 0)}<span className="text-gray-400">/</span>{fmt(und.ask, 0)}</span>
+                    : '-'}
+                </td>
+                {/* our futures-leg quotes — symmetric to ordBid/ordAsk */}
+                <td className="border border-gray-200 px-1 text-right font-mono"
+                    title={und?.ourBid != null ? `our ${fmt(und.ourBid)}x${fmt(und.ourBidSz, 0)} / ${fmt(und.ourAsk)}x${fmt(und.ourAskSz, 0)}` : 'no live futures quote'}>
+                  {und && und.ourBid != null
+                    ? <span className="text-blue-700 font-bold">{fmt(und.ourBid, 0)}<span className="text-gray-400">/</span>{fmt(und.ourAsk ?? 0, 0)}</span>
+                    : '-'}
+                </td>
               </tr>
             );
           })}
@@ -141,7 +158,7 @@ export const ExpiryBoard: React.FC<{
                 <td className="border border-gray-200 px-1 text-right">{fmt(sG, 3)}</td>
                 <td className="border border-gray-200 px-1 text-right">{fmt(sT)}</td>
                 <td className="border border-gray-200 px-1 text-right">{fmt(sV)}</td>
-                <td className="border border-gray-200 px-1" colSpan={4} />
+                <td className="border border-gray-200 px-1" colSpan={6} />
               </tr>
             );
           })()}
@@ -174,14 +191,19 @@ const ControlStrip: React.FC<{
       ) : (
         <>
           <span className="font-mono text-gray-600">{selected}</span>
-          {/* quoting OFF is dangerous (cancels the month) -> confirm; ON is recovery -> direct */}
-          <ConfirmButton
-            label={on ? 'quoting OFF' : 'quoting ON'}
-            confirmLabel="confirm cancel+stop?"
-            disabled={readonly}
-            title={`hot: ${on ? 'stop quoting this month and cancel its quotes' : 'start quoting this month'}`}
-            className={`${btnBase} ${readonly ? 'opacity-40 cursor-not-allowed' : on ? 'bg-gray-200 text-gray-700 border-gray-300' : 'bg-green-700 text-white border-green-700'}`}
-            onConfirm={() => sendCommand(JSON.stringify({ cmd: 'expiry_enable', expiry: selected, enable: !on, cmdSeq: Date.now() % 100000 }))} />
+          {/* P1 UI: runtime stop/cancel is qmode off's job — the quoting
+              toggle was a duplicate control surface.  EXPIRYENABLE stays in
+              the backend (config enable=false cold months), surfaced here
+              ONLY as the cold-month bring-up button (ON when quoting=false). */}
+          {!on && (
+            <button
+              disabled={readonly}
+              title={`hot: bring up quoting for this cold month (EXPIRYENABLE)`}
+              onClick={() => sendCommand(JSON.stringify({ cmd: 'expiry_enable', expiry: selected, enable: true, cmdSeq: Date.now() % 100000 }))}
+              className={`${btnBase} bg-green-700 text-white border-green-700 ${readonly ? 'opacity-40 cursor-not-allowed' : ''}`}>
+              quoting ON (cold start)
+            </button>
+          )}
           {/* qmode off/close are dangerous (stop/cancel), on is recovery */}
           <span className="text-gray-400">qmode</span>
           <button disabled={readonly}

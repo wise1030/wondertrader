@@ -122,6 +122,13 @@ void UiSnapshotBuilder::buildExpiry(const std::vector<StrikeDataPtr>& strikes,
         out.undBid = utd->getBid();
         out.undAsk = utd->getAsk();
         out.undPos = utd->getPosition();
+        // P1 UI: our futures-leg quotes (symmetric to the option legs'
+        // ordBid/ordAsk)
+        const auto& our = utd->ourMarket();
+        const auto& ob = our.getBestBid();
+        const auto& oa = our.getBestAsk();
+        if (!ob.empty()) { out.hasUndOur = true; out.undOurBid = ob.px(); out.undOurBidSz = ob.sz(); }
+        if (!oa.empty()) { out.hasUndOur = true; out.undOurAsk = oa.px(); out.undOurAskSz = oa.sz(); }
     }
 
     if (expGreeks) {
@@ -391,6 +398,12 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
             w.numOrNull("bid", e.undBid);
             w.numOrNull("ask", e.undAsk);
             w.numOrNull("pos", e.undPos);
+            if (e.hasUndOur) {   // P1 UI: our futures-leg quotes
+                w.numOrNull("ourBid", e.undOurBid);
+                w.numOrNull("ourAsk", e.undOurAsk);
+                w.numOrNull("ourBidSz", e.undOurBidSz);
+                w.numOrNull("ourAskSz", e.undOurAskSz);
+            }
             w.EndObject();
         } else w.Null();
         w.key("strikes"); w.StartArray();
