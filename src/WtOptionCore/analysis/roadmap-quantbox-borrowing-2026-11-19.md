@@ -458,6 +458,20 @@ spread 大时与可变现值有差），与"平今盈亏"含手续费口径亦�
 4. **readonly → 可操作**：ui.readonly 配置硬门已切 false（快照实证
    readonly 不在 snapshot、hello 下发 false），前端刷新生效
 
+## 3.4j 第二轮 UI 检修（11-21，8491f7e2）
+
+1. **cancel_all"不起作用"还原**：操作时点命中两层窗口——①旧版
+   readonly 拦截；② 23:59:51 用户自行 STOP（Disabled）+ 00:00 起
+   SimNow 日切停服（CTP 物理不可撤）。cancelAllLive 的通道 fence
+   早退加 WARN 可见化（重连后 recovery sweep 补撤）。通道正常时
+   cancel_all 端到端实测 ACK ok=true
+2. **per-expiry qmode 热控（新功能）**：QMODEE,<expiry>,<on|off|close>
+   全链（复用 CTG::onSetQMode 单合约能力）；前端 expiry ctrl 行每
+   expiry 一组 [quoting ON/OFF + qmode on/off/close] 三键组——
+   到期维度独立控制报价启停与模式
+3. 遗留观察：翼部 put 多档挂单残留待日盘 recovery sweep 清理（重启
+   后首个 channel_ready 自动撤全）
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
