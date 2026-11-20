@@ -399,6 +399,28 @@ cu2612C104000 pos=84 等全部可见）、REJECT-ONLY 仅 4 次（真实拒单
 "持仓盈亏"（昨结算盯市）基准已对齐，但估值价仍为 mid（期权
 spread 大时与可变现值有差），与"平今盈亏"含手续费口径亦有差。
 
+## 3.4g HEDGE 拒单告警落地与退避三连修（11-20 深夜，446c6094）
+
+**告警工作正常**（用户在 UI 收到 HEDGE order rejected——hedge 单
+不经 OQM ladder，此告警是裸 delta 的唯一可见通道）。
+
+**根因**：SimNow 账户限仓/资金——累计开空到限后期货 open 10 手
+全部被 CTP 拒（错误码 31 空消息），裸 delta 500-850 吨。需用户
+处理 SimNow 账户，或调低 delta_hedge.max_order_size / 期权报价量。
+
+**退避三连修**（告警风暴与 CTP 轰炸的治理，实测数据）：
+1. 单腿 check() 的退避门被多腿路径绕过（生产 checkMulti→fireLeg）
+   → 门移至 fireLeg
+2. 期权 OQM terminal（每次调价的撤单/成交终态，每秒数十个）与
+   hedge terminal 共用回调分支，onTerminal(false) 高频清零 streak
+   → 三态 TermAction{Reject/Reset/Ignore}：Reject=entrust 拒单
+   streak++；Reset=hedge 单正常终态；Ignore=无关单不动
+3. 双回报桥：insert-reject 同时走 on_entrust(false) 与
+   on_order(canceled)——_hedgeRejectedIds set 桥接防 streak 被清
+**部署实测**：streak 单调增长 1→10 不再清零；fire 间隔 1s → 稳定
+32s（1s×2^5 cap）；entrust 拒单 130/分钟 → 4-7/分钟（-95%）。
+附带：fire 日志带 backoff=2^N 诊断后缀；streak 轨迹 DEBUG 日志。
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
