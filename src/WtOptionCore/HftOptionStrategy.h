@@ -199,6 +199,13 @@ private:
     wt_option::RiskFilterChainPtr _futureFilterChain;
     // P1 batch-6.0: analysis sidecars (vol cone + attribution data source).
     wt_option::AnalysisRecorder _analysisRecorder;
+    // P1 follow-up: hedge localids rejected at the entrust stage.  SimNow
+    // reports an insert-reject on BOTH on_entrust(false) and a terminal
+    // on_order(canceled); the on_order terminal used to clear the hedge
+    // backoff streak (onTerminal(rejected=false)) right after on_entrust
+    // incremented it, neutralising the backoff entirely.  The set bridges
+    // the two reports.
+    std::set<uint32_t> _hedgeRejectedIds;
     wt_option::QstreamRecorder _qstreamRecorder;   // P1 batch-6.5 (default off)
     bool _analysisEnable = true;
 
