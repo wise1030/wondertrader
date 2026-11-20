@@ -1,3 +1,4 @@
+#include "WTSLogger.h"
 #include <algorithm>
 #include "OptionHedgeCoordinator.h"
 
@@ -179,21 +180,35 @@ bool OptionHedgeCoordinator::check(const DeltaHedgeExecutor::Config& cfg,
     if (m_log) {
         m_log("DeltaHedger fired: " + m_code + (d.isBuy ? " BUY " : " SELL ")
               + std::to_string(d.qty) + "@" + std::to_string(px)
-              + " (" + d.reason + ") ids=" + std::to_string(ids.size()));
+              + " (" + d.reason + ") ids=" + std::to_string(ids.size())
+              + " backoff=2^" + std::to_string(m_rejectStreak));
     }
     return true;
 }
 
-void OptionHedgeCoordinator::onTerminal(uint32_t localid, bool rejected)
+void OptionHedgeCoordinator::onTerminal(uint32_t localid, TermAction action)
 {
     std::lock_guard<std::mutex> lk(m_mtx);
     m_inflight.erase(localid);
-    // P1 follow-up: exponential backoff on consecutive entrust rejects.
-    // check() multiplies the base cooldown by 2^streak (cap 32x): 3s base
-    // -> up to ~96s, so a dead account limit stops getting hammered and
-    // the UI alert stream stays readable.  A fill/cancel terminal resets.
-    if (rejected) ++m_rejectStreak;
-    else m_rejectStreak = 0;
+    // P1 follow-up: exponential backoff on consecutive hedge-order entrust
+    // rejects (see header).  Option OQM terminals are Ignore — they used to
+    // reset the streak on every reprice, neutralising the backoff.
+    switch (action) {
+    case TermAction::Reject:
+        ++m_rejectStreak;
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "HedgeCoordinator: reject streak -> {}", m_rejectStreak);
+        break;
+    case TermAction::Reset:
+        if (m_rejectStreak != 0) {
+            WTSLogger::log_by_cat("strategy", LL_DEBUG,
+                "HedgeCoordinator: streak reset (hedge order terminal)");
+            m_rejectStreak = 0;
+        }
+        break;
+    case TermAction::Ignore:
+        break;
+    }
 }
 
 bool OptionHedgeCoordinator::hasInflight() const

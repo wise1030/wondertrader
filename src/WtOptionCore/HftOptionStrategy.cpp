@@ -2412,11 +2412,22 @@ void HftOptionStrategy::setupAsyncCallbacks()
                            double totalQty, double leftQty, double price, bool isCanceled) {
         // Delta-hedge in-flight bookkeeping: release the slot on terminal state.
         if (isCanceled || leftQty <= 0) {
-            // P1 follow-up: an insert-rejected hedge order arrives here as a
-            // canceled terminal too — treat it as a reject for the backoff
-            // streak (see _hedgeRejectedIds comment).
+            // P1 follow-up (three-tier terminal): a bridged insert-reject
+            // counts as Reject; a hedge order's normal terminal resets the
+            // streak; an unrelated option terminal must NOT touch it (it
+            // fires on every reprice and used to neutralise the backoff).
             const bool wasRejected = _hedgeRejectedIds.erase(localid) > 0;
-            _hedgeCoord.onTerminal(localid, wasRejected);
+            using TA = wt_option::OptionHedgeCoordinator::TermAction;
+            const TA action = wasRejected ? TA::Reject : TA::Ignore;
+            if (wasRejected) {
+                _hedgeCoord.onTerminal(localid, action);
+            } else {
+                const auto* rec = _orderRegistry.get(localid);
+                if (rec && rec->tag == wt_option::OrderTag::Hedge)
+                    _hedgeCoord.onTerminal(localid, TA::Reset);
+                else
+                    _hedgeCoord.onTerminal(localid, TA::Ignore);
+            }
             if (_gammaPricer) _gammaPricer->onOrderTerminal(localid);
         }
         // Combo terminal routing: a canceled leg must reach the combo state
@@ -2527,8 +2538,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_entrust = [this](uint32_t localid, bool success) {
         if (success) return;
         // A rejected hedge order must not leave the in-flight latch stuck;
-        // rejected=true drives the coordinator's exponential fire backoff.
-        _hedgeCoord.onTerminal(localid, /*rejected=*/true);
+        // Reject drives the coordinator's exponential fire backoff.
+        _hedgeCoord.onTerminal(localid, wt_option::OptionHedgeCoordinator::TermAction::Reject);
         // Bridge the double report: the terminal on_order(canceled) that
         // follows an insert-reject would otherwise clear the backoff streak
         // right after this call incremented it (audit 11-20 night).

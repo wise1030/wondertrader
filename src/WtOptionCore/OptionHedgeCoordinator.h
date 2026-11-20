@@ -76,12 +76,18 @@ public:
     std::vector<uint32_t> inflightIds() const;
 
     /// Terminal callback for any order id (cancel/reject/full fill).
-    /// P1 follow-up: `rejected=true` when the terminal report is an ENTRUST
-    /// REJECT (as opposed to a fill/cancel).  Consecutive rejects back off
-    /// the fire cadence exponentially (cooldown x 2^n, cap x32) so a dead
-    /// account limit doesn't get hammered every cooldown tick — and the UI
-    /// alert stream stays readable.  Any non-rejected terminal resets.
-    void onTerminal(uint32_t localid, bool rejected = false);
+    /// P1 follow-up: backoff-aware terminal report.
+    ///  Reject — entrust rejection of a hedge order: streak++ (backoff
+    ///         cooldown x 2^streak, cap 32x).
+    ///  Reset  — hedge order terminal WITHOUT a reject (filled/canceled
+    ///         normally): streak = 0.
+    ///  Ignore — terminal of an unrelated order (option OQM terminals ride
+    ///         the same strategy callback): leaves the streak alone.
+    /// The Ignore tier exists because option OQM terminals (every reprice
+    /// cancel/fill) arrive on the same callback and used to reset the
+    /// streak dozens of times per second, neutralising the backoff.
+    enum class TermAction { Ignore, Reset, Reject };
+    void onTerminal(uint32_t localid, TermAction action = TermAction::Ignore);
 
     bool hasInflight() const;
     double lastFireTime() const { return m_lastFire; }
