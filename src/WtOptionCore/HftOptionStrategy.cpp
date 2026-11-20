@@ -1410,7 +1410,20 @@ void HftOptionStrategy::setupCTG()
             bvc.maxExpShortAdd = pBv->getUInt32("max_exp_short_add");
             bvc.maxPortfolioDelta = pBv->getDouble("max_portfolio_delta");
         }
-        auto validator = std::make_shared<wt_option::BatchQuoteValidator>(
+        // P1 batch-6.0: analysis sidecars (default on; cheap: one CSV row/min).
+    {
+        WTSVariant* pAn = cfgPtr_ ? cfgPtr_->get("analysis") : nullptr;
+        _analysisEnable = pAn ? (pAn->has("enable") ? pAn->getBoolean("enable") : true) : true;
+        const double interval = pAn && pAn->has("interval_sec") ? pAn->getDouble("interval_sec") : 60.0;
+        _analysisRecorder = wt_option::AnalysisRecorder(interval > 0 ? interval : 60.0);
+        _analysisRecorder.setDir("generated");
+        // P1 batch-6.5: replayable quote stream (0 = off — ~70MB/day at 1s).
+        const double qsSec = pAn && pAn->has("qstream_sec") ? pAn->getDouble("qstream_sec") : 0.0;
+        _qstreamRecorder = wt_option::QstreamRecorder(qsSec);
+        _qstreamRecorder.setDir("generated");
+    }
+
+    auto validator = std::make_shared<wt_option::BatchQuoteValidator>(
             bvc, [this]() { return _risk ? _risk->totalDelta() : 0.0; });
         _ctg->setBatchValidator(validator);
         if (bvc.enable)
@@ -2012,6 +2025,61 @@ void HftOptionStrategy::setupAsyncCallbacks()
             checkDeltaHedge(now);
             // R-P1: periodic accuracy report
             _predEvaluator.maybeReport(60.0);
+            // P1 batch-6.0: analysis sidecars (self-throttled to 1 row/min)
+            if (_analysisEnable && _grid) {
+                for (const auto& kv : _grid->expiries()) {
+                    const auto atmVol = _pricer ? _pricer->getATMVol(kv.first) : 0.0;
+                    if (atmVol > 0 && kv.second)
+                        _analysisRecorder.recordVol(kv.first, atmVol,
+                            kv.second->getForward(), kv.second->daysToExpiry());
+                }
+                if (_risk) {
+                    if (auto pg = _risk->getPositionGreeks()) {
+                        double atmFront = 0;
+                        for (const auto& kv : _grid->expiries()) {
+                            if (!_pricer) break;
+                            const auto atmVol = _pricer->getATMVol(kv.first);
+                            if (atmVol > 0) { atmFront = atmVol; break; }
+                        }
+                        // PnL mirrors the compute loop / buildUiSnapshot sum
+                        double pnl = 0;
+                        for (const auto& od : _grid->getAllOptions()) {
+                            if (!od) continue;
+                            auto otd = od->getTradingData();
+                            if (!otd) continue;
+                            auto pt = otd->getPnlTracker();
+                            if (pt) pnl += pt->getCurPnl();
+                        }
+                        const double spot = _grid->getUnderlyingPrice();
+                        _analysisRecorder.recordPf(pg->delta(), pg->gamma(),
+                            pg->vega(), pg->theta(), pnl, spot, atmFront);
+                    }
+                }
+                _analysisRecorder.maybeFlush(now, _curSessionDate);
+            }
+
+            // P1 batch-6.5: quote stream capture (default off; own cadence)
+            if (_qstreamRecorder.enabled() && _grid) {
+                for (const auto& od : _grid->getAllOptions()) {
+                    if (!od) continue;
+                    const auto& m = od->getMarket();
+                    const double iv = od->getImpliedVol();
+                    _qstreamRecorder.record(od->getCode(), m.bid, m.ask, m.last,
+                                            iv > 0 ? iv : 0.0);
+                }
+                _qstreamRecorder.maybeFlush(now, _curSessionDate);
+            }
+
+            // P1 batch-6.4: resolve due scanner predictions against the ATM mid
+            if (_grid) {
+                for (const auto& kv : _grid->expiries()) {
+                    const auto atm = _grid->getAtmStrike(kv.first);
+                    if (atm && atm->call()) {
+                        const double mid = atm->call()->getMid();
+                        if (mid > 0) { _predEvaluator.onScannerMid(mid); break; }
+                    }
+                }
+            }
 
             // B10: Write option values to CSV if configured
             if (_valWriter && _grid) {
@@ -2783,6 +2851,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_valWriter) _valWriter->close();
             // QuoteStatistics: print session summary
             _quoteStats.onSessionEnd();
+            _analysisRecorder.flush(_timeService.nowSeconds(_ctx), _curSessionDate);   // P1 batch-6.0
             // P2: quoting-duty — enabled sim-seconds (pipeline running, panic
             // included by design) vs the session's tick-active window
             // (first→last timer payload time).  Low duty WITH visible risk
@@ -3142,6 +3211,14 @@ void HftOptionStrategy::setupScanners()
                 WTSLogger::log_by_cat("strategy", LL_INFO,
                     "Scanner simultaneous combo sent: {} legs={} edge={:.4f}",
                     event.reason, event.legs.size(), event.signal);
+                // P1 batch-6.4: score the convergence prediction
+                // (primary-leg mid moves toward theo over the next 30s).
+                if (event.option) {
+                    const double mid = event.option->getMid();
+                    const double theo = event.option->values(0).theo();
+                    if (mid > 0 && theo > 0)
+                        _predEvaluator.onScannerSignal(theo - mid, mid, 30.0);
+                }
             }
             return;
         }
@@ -4508,6 +4585,14 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
     }
 
     // Health
+    // P1 batch-6.4: prediction accuracy into the UI
+    v.predResolved = _predEvaluator.resolvedCount();
+    v.predHitRate = _predEvaluator.hitRate();
+    v.predMae = _predEvaluator.meanAbsError();
+    v.scanResolved = _predEvaluator.scanResolvedCount();
+    v.scanHitRate = _predEvaluator.scanHitRate();
+    v.scanIc = _predEvaluator.scanIC();
+
     v.batchP50 = _batchLatencyUs.p50();
     v.batchP95 = _batchLatencyUs.p95();
     v.batchP99 = _batchLatencyUs.p99();
@@ -4605,6 +4690,16 @@ void HftOptionStrategy::collectUiFills(std::vector<wt_option::UiFillView>& out)
             fv.qty = f.qty;
             fv.t = f.timeSim;   // strategy clock — consistent under replay
             fv.tag = static_cast<uint8_t>(rec.tag);   // P1 batch-4.3
+            if (rec.ctx.valid) {                       // P1 batch-6.3
+                fv.hasCtx = true;
+                fv.theo = rec.ctx.theo;
+                fv.midAtIssue = rec.ctx.mid;
+                fv.iv = rec.ctx.iv;
+                fv.delta = rec.ctx.delta;
+                fv.gamma = rec.ctx.gamma;
+                fv.vega = rec.ctx.vega;
+                fv.theta = rec.ctx.theta;
+            }
             out.push_back(std::move(fv));
         }
     }

@@ -13,8 +13,10 @@
  */
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <utility>
 #include <string>
 #include <functional>
 
@@ -75,12 +77,68 @@ public:
 
     uint32_t resolvedCount() const { return m_resolved; }
     double meanAbsError() const { return m_resolved ? m_sumAbsErr / m_resolved : 0.0; }
+    double hitRate() const { return m_resolved ? 100.0 * m_hits / m_resolved : 0.0; }
+
+    // ---- P1 batch-6.4: scanner-signal scoring --------------------------
+    // Each scanner combo predicts its primary leg's mid converges toward
+    // theo (predMove = theo - mid at hit time).  onScannerMid() resolves
+    // due entries against the live mid; the rolling window keeps the last
+    // `kWindow` (predMove, realizedMove) pairs for the IC.
+    void onScannerSignal(double predMove, double midNow, double horizonSec) {
+        if (horizonSec <= 0 || midNow <= 0) return;
+        ScanEntry e;
+        e.dueTime = now() + horizonSec;
+        e.baseMid = midNow;
+        e.predMove = predMove;
+        m_scanPending.push_back(e);
+    }
+
+    void onScannerMid(double midNow) {
+        if (midNow <= 0) return;
+        const double nowT = now();
+        while (!m_scanPending.empty() && m_scanPending.front().dueTime <= nowT) {
+            const ScanEntry e = m_scanPending.front();
+            m_scanPending.pop_front();
+            const double realized = midNow - e.baseMid;
+            ++m_scanResolved;
+            if ((e.predMove >= 0 && realized >= 0) || (e.predMove <= 0 && realized <= 0))
+                ++m_scanHits;
+            m_window.emplace_back(e.predMove, realized);
+            if (m_window.size() > kWindow) m_window.pop_front();
+        }
+    }
+
+    uint32_t scanResolvedCount() const { return m_scanResolved; }
+    double scanHitRate() const { return m_scanResolved ? 100.0 * m_scanHits / m_scanResolved : 0.0; }
+
+    /// Pearson IC over the rolling window; 0 when fewer than 5 pairs.
+    double scanIC() const {
+        const size_t n = m_window.size();
+        if (n < 5) return 0.0;
+        double sp = 0, sr = 0;
+        for (const auto& pr : m_window) { sp += pr.first; sr += pr.second; }
+        const double mp = sp / n, mr = sr / n;
+        double cov = 0, vp = 0, vr = 0;
+        for (const auto& pr : m_window) {
+            const double dp = pr.first - mp, dr = pr.second - mr;
+            cov += dp * dr; vp += dp * dp; vr += dr * dr;
+        }
+        const double denom = std::sqrt(vp * vr);
+        return denom > 0 ? cov / denom : 0.0;
+    }
 
 private:
+    static constexpr size_t kWindow = 100;
+
     struct Entry {
         double predicted = 0;
         double baseRealized = 0;
         double dueTime = 0;
+    };
+    struct ScanEntry {
+        double dueTime = 0;
+        double baseMid = 0;
+        double predMove = 0;
     };
 
     double now() const { return m_getTime ? m_getTime() : 0.0; }
@@ -92,6 +150,12 @@ private:
     double   m_lastRealized = 0;
     double   m_lastReport = 0;
     std::function<double()> m_getTime;
+
+    // P1 batch-6.4 scanner-signal state
+    std::deque<ScanEntry> m_scanPending;
+    uint32_t m_scanResolved = 0;
+    uint32_t m_scanHits = 0;
+    std::deque<std::pair<double, double>> m_window;   // (predMove, realized)
 };
 
 } // namespace wt_option

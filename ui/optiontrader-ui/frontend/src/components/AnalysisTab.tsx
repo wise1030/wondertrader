@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Attribution, PredChips, SmileBand, VolCone } from './AnalysisPanels';
 import { useData } from '../context/DataContext';
 import type { Snapshot } from '../types';
 
@@ -14,7 +15,7 @@ interface Series {
   points: (number | null)[];
 }
 
-const LineChart: React.FC<{
+export const LineChart: React.FC<{
   series: Series[];
   height?: number;
   yFmt?: (v: number) => string;
@@ -79,45 +80,6 @@ const LineChart: React.FC<{
 };
 
 // ---------------------------------------------------------------------------
-// Vol smile: strike -> iv (market) and theo vol (atmVol + vshift), per side
-// ---------------------------------------------------------------------------
-const VolSmile: React.FC<{ snapshot: Snapshot | null; expiry: number | null }> = ({ snapshot, expiry }) => {
-  const exp = snapshot?.expiries.find(e => e.expiry === expiry) ?? null;
-  const data = useMemo(() => {
-    if (!exp) return null;
-    const strikes = [...exp.strikes].sort((a, b) => a.k - b.k);
-    const atm = exp.atmVol ?? null;
-    const cIv = strikes.map(s => s.C.iv);
-    const pIv = strikes.map(s => s.P.iv);
-    const cTheo = strikes.map(s => (s.C.vshift != null && atm != null) ? atm + s.C.vshift : null);
-    const pTheo = strikes.map(s => (s.P.vshift != null && atm != null) ? atm + s.P.vshift : null);
-    return { strikes, atm, cIv, pIv, cTheo, pTheo };
-  }, [exp]);
-
-  if (!data) return <div className="text-gray-400 text-[11px] p-4">no expiry data</div>;
-  const ks = data.strikes.map(s => s.k);
-  const volFmt = (v: number) => (v * 100).toFixed(1) + '%';
-
-  return (
-    <div>
-      <LineChart
-        yFmt={volFmt}
-        series={[
-          { name: 'C iv', color: '#2563eb', points: data.cIv },
-          { name: 'P iv', color: '#ea580c', points: data.pIv },
-          { name: 'C theo', color: '#93c5fd', dashed: true, points: data.cTheo },
-          { name: 'P theo', color: '#fdba74', dashed: true, points: data.pTheo },
-          ...(data.atm != null ? [{ name: 'atm', color: '#111827', dashed: true, points: data.strikes.map(() => data.atm!) }] : []),
-        ]}
-      />
-      <div className="text-[10px] text-gray-400 mt-0.5">
-        strikes {ks.length > 0 ? `${ks[0]} .. ${ks[ks.length - 1]}` : '-'} · atmVol {data.atm != null ? volFmt(data.atm) : '-'} · theo = atm + vshift
-      </div>
-    </div>
-  );
-};
-
-// ---------------------------------------------------------------------------
 // Time-series rings fed by the snapshot stream
 // ---------------------------------------------------------------------------
 function useRing<T>(pick: (s: Snapshot) => T): T[] {
@@ -170,15 +132,28 @@ const LatencyChart: React.FC = () => {
 
 export const AnalysisTab: React.FC<{ selectedExpiry: number | null }> = ({ selectedExpiry }) => {
   const { snapshot } = useData();
+  const tdate = snapshot?.state?.tdate ?? 0;
   return (
     <div className="h-full overflow-auto p-2 grid grid-cols-1 xl:grid-cols-2 gap-2">
       <div className="bg-white border border-gray-200 rounded p-2">
-        <div className="text-xs font-bold text-gray-600 mb-1">Vol smile {selectedExpiry ?? ''}</div>
-        <VolSmile snapshot={snapshot} expiry={selectedExpiry} />
+        <div className="text-xs font-bold text-gray-600 mb-1">Vol smile {selectedExpiry ?? ''} · bid/ask band</div>
+        <SmileBand snapshot={snapshot} expiry={selectedExpiry} />
+      </div>
+      <div className="bg-white border border-gray-200 rounded p-2">
+        <div className="text-xs font-bold text-gray-600 mb-1">Vol cone</div>
+        <VolCone tdate={tdate} />
+      </div>
+      <div className="bg-white border border-gray-200 rounded p-2 xl:col-span-2">
+        <div className="text-xs font-bold text-gray-600 mb-1">Attribution review</div>
+        <Attribution tdate={tdate} />
       </div>
       <div className="bg-white border border-gray-200 rounded p-2">
         <div className="text-xs font-bold text-gray-600 mb-1">PnL</div>
         <PnlChart />
+      </div>
+      <div className="bg-white border border-gray-200 rounded p-2">
+        <div className="text-xs font-bold text-gray-600 mb-1">Prediction accuracy</div>
+        <PredChips />
       </div>
       <div className="bg-white border border-gray-200 rounded p-2 xl:col-span-2">
         <div className="text-xs font-bold text-gray-600 mb-1">Batch latency</div>

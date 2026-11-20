@@ -35,6 +35,7 @@
 #include "PositionGuard.h"
 #include "FillPriceChecker.h"
 #include "RiskLimitsEx.h"
+#include "AnalysisRecorder.h"
 #include "QuoteStatistics.h"
 #include "Signals/TradingIntensity.h"
 #include "GammaScalpOptionPricer.h"
@@ -196,6 +197,11 @@ private:
     RiskFilterConfig _futureFilterCfg;
     wt_option::RiskFilterChainPtr _optionFilterChain;
     wt_option::RiskFilterChainPtr _futureFilterChain;
+    // P1 batch-6.0: analysis sidecars (vol cone + attribution data source).
+    wt_option::AnalysisRecorder _analysisRecorder;
+    wt_option::QstreamRecorder _qstreamRecorder;   // P1 batch-6.5 (default off)
+    bool _analysisEnable = true;
+
     // P1 batch-5.5: alert throttle (strategy clock seconds).
     double _lastUiAlertSec = 0;
     uint64_t _uiAlertsSuppressed = 0;

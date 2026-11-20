@@ -26,8 +26,8 @@
 #include "../TradingStateArbiter.h"
 #include "../QuoteStatistics.h"
 #include "../Signals/TradingIntensity.h"
+#include "../AnalysisRecorder.h"
 #include "../BatchQuoteValidator.h"
-#include "../IssuedOrderRegistry.h"
 #include <cstdlib>
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
@@ -2927,6 +2927,84 @@ void test_max_open_offset_filter() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-6.0/6.5: analysis sidecars — vol/pf minute series + qstream
+// (throttled flush, day-keyed files, headers on creation).
+// ============================================================================
+void test_analysis_recorder() {
+    std::cout << "=== test_analysis_recorder ===" << std::endl;
+    using namespace wt_option;
+    const std::string dir = "/tmp/ar_test";
+    ::system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+    // throttle: 60s interval — first flush immediate, second within window no-ops
+    {
+        AnalysisRecorder ar(60.0);
+        ar.setDir(dir);
+        ar.recordVol(2612, 0.19, 3650.0, 30);
+        ar.recordVol(2701, 0.21, 3660.0, 60);
+        ar.recordPf(5.0, -0.1, 20.0, -3.0, 1234.5, 3650.0, 0.19);
+        ASSERT_TRUE(ar.maybeFlush(1000.0, 20261120));       // first flush
+        ar.recordPf(6.0, -0.1, 21.0, -3.0, 1300.0, 3650.0, 0.19);  // pending again
+        ASSERT_TRUE(!ar.maybeFlush(1010.0, 20261120));      // throttled: stays pending
+        ASSERT_TRUE(ar.maybeFlush(1070.0, 20261120));       // window elapsed -> flushes
+    }
+    {
+        std::ifstream in(dir + "/volseries_20261120.csv");
+        ASSERT_TRUE(in.is_open());
+        std::stringstream ss; ss << in.rdbuf();
+        const std::string txt = ss.str();
+        ASSERT_TRUE(txt.find("ts,expiry,atmvol,fwd,dte") != std::string::npos);
+        ASSERT_TRUE(txt.find("2612,0.19,3650,30") != std::string::npos);
+        ASSERT_TRUE(txt.find("2701,0.21,3660,60") != std::string::npos);
+    }
+    {
+        std::ifstream in(dir + "/pfseries_20261120.csv");
+        ASSERT_TRUE(in.is_open());
+        std::stringstream ss; ss << in.rdbuf();
+        ASSERT_TRUE(ss.str().find("1234.5") != std::string::npos);
+    }
+    // day rollover keys a new file
+    {
+        AnalysisRecorder ar(60.0);
+        ar.setDir(dir);
+        ar.recordVol(2612, 0.20, 3651.0, 29);
+        ASSERT_TRUE(ar.maybeFlush(2000.0, 20261121));
+        std::ifstream in(dir + "/volseries_20261121.csv");
+        ASSERT_TRUE(in.is_open());
+    }
+
+    // qstream: latest-wins per code within a flush window; own cadence
+    {
+        QstreamRecorder qr(5.0);
+        qr.setDir(dir);
+        ASSERT_TRUE(qr.enabled());
+        qr.record("A.C100", 10, 12, 11, 0.19);
+        qr.record("A.C100", 10.5, 12.5, 11, 0.195);   // latest wins
+        qr.record("A.P100", 5, 6, 5.5, 0.21);
+        ASSERT_TRUE(qr.maybeFlush(3000.0, 20261120));
+        ASSERT_TRUE(!qr.maybeFlush(3001.0, 20261120));  // throttled
+        std::ifstream in(dir + "/qstream_20261120.csv");
+        ASSERT_TRUE(in.is_open());
+        std::stringstream ss; ss << in.rdbuf();
+        const std::string txt = ss.str();
+        ASSERT_TRUE(txt.find("ts,code,bid,ask,last,iv") != std::string::npos);
+        ASSERT_TRUE(txt.find("A.C100,10.5,12.5,11,0.195") != std::string::npos);
+        ASSERT_TRUE(txt.find("A.P100,5,6,5.5,0.21") != std::string::npos);
+        ASSERT_TRUE(txt.find("10,12,") == std::string::npos);   // overwritten
+    }
+    // disabled qstream no-ops
+    {
+        QstreamRecorder qr(0.0);
+        qr.setDir(dir);
+        ASSERT_TRUE(!qr.enabled());
+        qr.record("X", 1, 2, 1.5, 0.2);
+        ASSERT_TRUE(!qr.maybeFlush(4000.0, 20261120));
+    }
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2988,6 +3066,7 @@ int main() {
     test_batch_quote_validator();
     test_order_tag_attribution();
     test_max_open_offset_filter();
+    test_analysis_recorder();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

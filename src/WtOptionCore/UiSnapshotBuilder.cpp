@@ -315,6 +315,14 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.key("sessionStopInSec"); if (v.hasSessionStop) w.Int(v.sessionStopInSec); else w.Null();
     w.EndObject();
 
+    w.key("pred"); w.StartObject();
+    w.key("resolved"); w.Uint(v.predResolved);
+    w.numOrNull("hitRate", v.predHitRate);
+    w.numOrNull("mae", v.predMae);
+    w.key("scanResolved"); w.Uint(v.scanResolved);
+    w.numOrNull("scanHitRate", v.scanHitRate);
+    w.numOrNull("scanIc", v.scanIc);
+    w.EndObject();
     w.key("perf"); w.StartObject();
     w.key("batchP50"); w.numOrNull(v.batchP50);
     w.key("batchP95"); w.numOrNull(v.batchP95);
@@ -431,6 +439,17 @@ void UiSnapshotBuilder::encodeFills(const std::vector<UiFillView>& fills,
         w.key("qty"); w.Uint(f.qty);
         w.numOrNull("t", f.t);
         if (f.tag) { w.key("tag"); w.Uint(f.tag); }
+        if (f.hasCtx) {   // P1 batch-6.3
+            w.key("ctx"); w.StartObject();
+            w.numOrNull("theo", f.theo);
+            w.numOrNull("mid", f.midAtIssue);
+            w.numOrNull("iv", f.iv);
+            w.numOrNull("delta", f.delta);
+            w.numOrNull("gamma", f.gamma);
+            w.numOrNull("vega", f.vega);
+            w.numOrNull("theta", f.theta);
+            w.EndObject();
+        }
         w.EndObject();
     }
     w.EndArray();

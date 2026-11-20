@@ -116,6 +116,12 @@ struct UiFillView
     uint32_t qty = 0;
     double t = 0;            // strategy-clock (sim) seconds — replay-safe
     uint8_t tag = 0;         // P1 batch-4.3: OrderTag of the parent order
+
+    // P1 batch-6.3: issue-time pricing context for the attribution review.
+    // Only present when fillAttribution capture is on (rec.ctx.valid).
+    bool hasCtx = false;
+    double theo = 0, midAtIssue = 0, iv = 0;
+    double delta = 0, gamma = 0, vega = 0, theta = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -157,6 +163,10 @@ struct UiSnapshotView
     uint32_t fillsByTag[4] = {0, 0, 0, 0};
     bool hasSessionStop = false;
     int32_t sessionStopInSec = 0;
+
+    // P1 batch-6.4: prediction accuracy (forward 30s + scanner convergence)
+    uint32_t predResolved = 0, scanResolved = 0;
+    double predHitRate = 0, predMae = 0, scanHitRate = 0, scanIc = 0;
 
     // Health
     double batchP50 = 0, batchP95 = 0, batchP99 = 0;   // microseconds

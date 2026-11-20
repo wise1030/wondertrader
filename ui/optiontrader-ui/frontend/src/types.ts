@@ -101,6 +101,15 @@ export interface RiskView {
   fillsByTag?: number[];   // per-source today's fills
 }
 
+export interface PredView {
+  resolved: number;
+  hitRate: number | null;
+  mae: number | null;
+  scanResolved: number;
+  scanHitRate: number | null;
+  scanIc: number | null;
+}
+
 export interface PerfView {
   batchP50: number | null;
   batchP95: number | null;
@@ -134,6 +143,7 @@ export interface Snapshot {
   state: StateView;
   greeks: GreeksView;
   pnl: PnlView;
+  pred?: PredView;   // batch-6.4 prediction accuracy
   risk: RiskView;
   perf: PerfView;
   expiries: ExpiryView[];
@@ -214,6 +224,16 @@ export interface HelloMessage {
   readonly: boolean;
 }
 
+export interface FillCtxView {
+  theo: number | null;
+  mid: number | null;
+  iv: number | null;
+  delta: number | null;
+  gamma: number | null;
+  vega: number | null;
+  theta: number | null;
+}
+
 export interface FillView {
   code: string;
   buy: boolean;
@@ -221,6 +241,7 @@ export interface FillView {
   qty: number;
   t: number;
   tag?: number;   // OrderTag of the parent order (batch-4.3)
+  ctx?: FillCtxView;   // batch-6.3 issue-time greeks (fillAttribution on)
 }
 
 export type Frame =

@@ -220,6 +220,55 @@ if os.path.exists(frontend_path):
         resp.headers["Cache-Control"] = "no-cache, must-revalidate"
         return resp
 
+    # ------------------------------------------------------------------
+    # P1 batch-6.2/6.3: analysis series API — the strategy's AnalysisRecorder
+    # sidecars (generated/volseries_<tdate>.csv + pfseries_<tdate>.csv) as
+    # JSON for the vol-cone and attribution panels.  Auth-gated by the same
+    # token middleware as everything else.
+    # ------------------------------------------------------------------
+    SERIES_DIR = os.environ.get(
+        "WTOPTION_SERIES_DIR",
+        "/home/ubuntu/projects/wondertrader/dist/WtRunnerOption/generated")
+
+    def _read_series_csv(name: str, tdate: str) -> list[list[float]]:
+        import csv
+        import glob
+        if tdate == "recent":
+            # multi-day history for the vol cone: newest N day files merged
+            paths = sorted(glob.glob(os.path.join(SERIES_DIR, f"{name}_*.csv")),
+                           reverse=True)[:15]
+        else:
+            paths = [os.path.join(SERIES_DIR, f"{name}_{tdate}.csv")]
+        rows: list[list[float]] = []
+        for path in paths:
+            try:
+                with open(path, newline="") as fh:
+                    for row in csv.DictReader(fh):
+                        try:
+                            rows.append([float(v) for v in row.values()])
+                        except (TypeError, ValueError):
+                            continue
+            except OSError:
+                continue
+        rows.sort(key=lambda r: r[0])   # by ts — cone percentiles need no order,
+        return rows                     # but charts read better chronological
+
+    @app.get("/api/series")
+    async def series(tdate: str, kind: str = "vol"):
+        """kind=vol -> volseries rows [ts,expiry,atmvol,fwd,dte];
+        kind=pf  -> pfseries rows [ts,delta,gamma,vega,theta,pnl,spot,atmvol].
+        Returns {"columns": [...], "rows": [...]} — empty rows before the
+        first recorded minute."""
+        cols = {
+            "vol": ["ts", "expiry", "atmvol", "fwd", "dte"],
+            "pf": ["ts", "delta", "gamma", "vega", "theta", "pnl", "spot", "atmvol"],
+        }
+        if kind not in cols:
+            return PlainTextResponse("kind must be vol|pf", status_code=400)
+        rows = _read_series_csv("volseries" if kind == "vol" else "pfseries", tdate)
+
+        return {"columns": cols[kind], "rows": rows}
+
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="static")
 else:
     logger.warning(f"frontend/dist not found at {frontend_path} — API-only mode")
