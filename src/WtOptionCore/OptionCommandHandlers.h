@@ -50,6 +50,14 @@ public:
 
     void registerAll(CommandBus& bus, Hooks hooks);
 
+    /// P1 batch-5.4: startup replay of persisted hot params goes through the
+    /// same handler the UI SETPARAM command uses (member write when the shm
+    /// pointer is not yet bound).
+    bool setHotParam(const std::string& key, double value, std::string& err) {
+        if (!m_hooks.setHotParam) { err = "handler not wired"; return false; }
+        return m_hooks.setHotParam(key, value, err);
+    }
+
 private:
     Hooks m_hooks;
 };

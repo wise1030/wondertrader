@@ -22,6 +22,8 @@ interface DataState {
     lastSnapLogMs: number;      // snapshot-log throttle (design §7: no 1Hz flood)
     sid: string;
     readonly: boolean;
+    // P1 batch-5.5: latest graded alert — App toasts on change.
+    lastAlert: { level: number; msg: string; ms: number } | null;
 }
 
 const MAX_LOGS = 200;
@@ -46,6 +48,7 @@ const initialState: DataState = {
     lastSnapLogMs: 0,
     sid: '',
     readonly: true,
+    lastAlert: null,
 };
 
 type Action =
@@ -56,7 +59,8 @@ type Action =
     | { type: 'TRADE'; ev: any }
     | { type: 'REJECT'; ev: any }
     | { type: 'ACK'; ev: AckEvent }
-    | { type: 'FILLS'; items: FillView[] };
+    | { type: 'FILLS'; items: FillView[] }
+    | { type: 'ALERT'; level: number; msg: string; ms: number };
 
 function reducer(state: DataState, a: Action): DataState {
     switch (a.type) {
@@ -133,6 +137,11 @@ function reducer(state: DataState, a: Action): DataState {
             merged.sort((x, y) => (x.t ?? 0) - (y.t ?? 0));
             return { ...state, fills: merged.slice(-MAX_FILLS), ...log(state, 'fills', `history merged ${a.items.length}`) };
         }
+        case 'ALERT': {
+            // graded: level>=2 surfaces as an error line + toast trigger
+            return { ...state, lastAlert: { level: a.level, msg: a.msg, ms: a.ms },
+                     ...log(state, a.level >= 2 ? 'error' : 'info', `alert[${a.level}]: ${a.msg}`) };
+        }
         default:
             return state;
     }
@@ -175,6 +184,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 case 'reject': pending.current.push({ type: 'REJECT', ev: frame }); break;
                 case 'ack': pending.current.push({ type: 'ACK', ev: frame }); break;
                 case 'fills': pending.current.push({ type: 'FILLS', items: frame.items ?? [] }); break;
+                case 'alert': pending.current.push({ type: 'ALERT', level: frame.level ?? 0, msg: frame.msg ?? '', ms: Date.now() }); break;
                 default: break;
             }
         });

@@ -34,6 +34,12 @@ LISTEN_HOST = os.environ.get("WTOPTION_LISTEN_HOST", "127.0.0.1")   # 0.0.0.0 = 
 LISTEN_PORT = int(os.environ.get("WTOPTION_LISTEN_PORT", "8002"))
 UI_TOKEN = os.environ.get("WTOPTION_UI_TOKEN", "")              # empty = no auth (loopback only!)
 
+# P1 batch-5.5: optional alert webhook.  Strategy-side alerts (order
+# anomalies, risk events — already 2s rate-limited) are POSTed as JSON to
+# this URL when set; empty = disabled.  Only warn/error levels (>=1) fire.
+ALERT_WEBHOOK_URL = os.environ.get("WTOPTION_ALERT_WEBHOOK", "")
+ALERT_WEBHOOK_MIN_LEVEL = int(os.environ.get("WTOPTION_ALERT_WEBHOOK_MIN_LEVEL", "1"))
+
 upstream: WtOptionClient | None = None
 connected_websockets: set[WebSocket] = set()
 _last_hello: dict | None = None   # most recent hello frame — replayed to new
@@ -41,6 +47,16 @@ _last_hello: dict | None = None   # most recent hello frame — replayed to new
                                   # emits hello on TCP accept/auth, so a browser
                                   # refresh would otherwise stay readonly=true)
 _loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _post_alert_webhook(frame: dict):
+    """Fire-and-forget POST of a graded alert to the operator webhook."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(ALERT_WEBHOOK_URL, json=frame)
+    except Exception as exc:
+        logger.warning("alert webhook POST failed: %s", exc)
 
 
 def _broadcast(frame: dict):
@@ -52,6 +68,14 @@ def _broadcast(frame: dict):
         frame["snapshotAgeMs"] = (now_ms - ts) if isinstance(ts, (int, float)) else None
     elif frame.get("type") == "hello":
         _last_hello = frame
+    elif frame.get("type") == "alert" and ALERT_WEBHOOK_URL:
+        # batch-5.5: remote push — warn/error levels only, off by default
+        try:
+            if int(frame.get("level", 0)) >= ALERT_WEBHOOK_MIN_LEVEL and _loop and _loop.is_running():
+                _loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(_post_alert_webhook(frame)))
+        except (TypeError, ValueError):
+            pass
 
     async def _push():
         dead = []
