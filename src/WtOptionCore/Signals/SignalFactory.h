@@ -1,5 +1,19 @@
 #pragma once
 
+/*!
+ * \file SignalFactory.h
+ * \brief PLUGGABLE signal layer — NOT the production alpha path.
+ *
+ * Design audit (2026-11-20 deep review): this factory + Signals/* family is
+ * a config-driven pluggable alternative (pricer.signals.alpha[]/risk[]).
+ * PRODUCTION runs the hardcoded alpha inside CompositeOptionPricer
+ * (m_ema_vegaflow / m_prop_* weights, fed by wgt_* params) — no `signals`
+ * section exists in the deployed config, so this whole layer is dormant by
+ * design.  computeValue() branches: signals configured -> plugin values;
+ * otherwise -> built-in fallback.  Keep both in sync if the built-in
+ * signals ever migrate here.
+ */
+
 #include "ISignal.h"
 #include <functional>
 #include <map>
