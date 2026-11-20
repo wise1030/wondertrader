@@ -204,12 +204,12 @@
   中间件 WTOPTION_ALERT_WEBHOOK 可选推送 level≥1）
 
 ### 批次 6（分析/复盘，约 4 天含前置）
-- 6.0 前置：AttributePublisher 加 CSV 边车（tdate/exp/atmvol/ts 分钟级）——vol 锥数据源
-- 6.1 smile 误差带：bid/ask 反解 IV 画带 + 多到期 DTE 渐变叠加
-- 6.2 vol 锥：6.0 历史 → 分位数带（MIN/10/25/50/75/90/MAX）+ 当前值
-- 6.3 归因复盘：fills 带 greeks-at-fill → sprd/delta/gamma/vega/theta pnl + cum 切换
-- 6.4 信号打分：scanner 信号后 N 秒 mid 变动 vs 预测，滚动 IC/命中率入 UiBridge
-- 6.5 回放设施：落盘扩展为可回放流 + replay 入口（借 WtBtCore tick 回放）
+- 6.0 前置——✅ 已实施（11-20，AnalysisRecorder：volseries/pfseries 分钟级 CSV 边车，按日分文件，60s 节流；analysis.{enable,interval_sec}）
+- 6.1 smile 误差带——✅ 已实施（11-20，前端 Black-76 二分反解 bid/ask IV 画带 + fitted theo + DTE 渐变多到期叠加）
+- 6.2 vol 锥——✅ 已实施（11-20，/api/series?tdate=recent 多历史 + 按到期分位带表 + 当前值；API 实测联通）
+- 6.3 归因复盘——✅ 已实施（11-20，fills 携带 issue 时刻 greeks（registry ctx 透传）；per-fill edge + cum 切换；pfseries 组合希腊分解 Δ/Γ/ν/Θ 累计 vs 实际 pnl）
+- 6.4 信号打分——✅ 已实施（11-20，PredictionEvaluator 加 scanner 收敛打分（theo-mid 方向 30s 验证，滚动 100 窗 Pearson IC）+ fwd30s hitRate 访问器；快照 pred 对象；前端 PredChips）
+- 6.5 回放设施——✅ 部分实施（11-20，QstreamRecorder 可回放报价流 qstream_<tdate>.csv（默认关，analysis.qstream_sec）+ analysis/qstream_check.py 离线回放校验。引擎级 tick 回放（WtBtCore ParserX 数据源自举）留作后续项）
 
 ### 独立项（不阻塞）
 - 五档深度数据链（深度版 qp 前提）
@@ -251,6 +251,7 @@
 | 批次 3 模式/执行 | ✅ 完成（3.0 对冲参数/3.1 仲裁+GetFlat/3.2 AS 强度默认关/3.3 计数持久化） | 53→56 测试绿 |
 | 批次 4 健壮性 | ✅ 完成（4.1 评估不搬运/4.2 整组验证/4.3 tag 归因/4.4 限开仓+分级） | 9/9 二进制绿，全部署 |
 | 批次 5 UI P1+参数 | ✅ 完成（5.1 hedge 面板/5.2 到期希腊目标/5.3 排序过滤/5.4 参数持久化实测/5.5 alert 推送） | 9/9 二进制绿，全部署 |
+| 批次 6 分析复盘 | ✅ 完成（6.0 vol/pf 边车/6.1 smile 带/6.2 vol 锥/6.3 归因/6.4 信号打分/6.5 可回放流+离线校验；引擎级回放留后续） | 57 测试绿，9/9 二进制绿，API 实测 |
 | 批次 4 健壮性 | ⬜ 未开始 | — |
 | 批次 5 UI P1/参数 | ⬜ 未开始 | — |
 | 批次 6 分析/复盘 | ⬜ 未开始 | — |
