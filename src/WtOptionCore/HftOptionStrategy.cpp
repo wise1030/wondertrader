@@ -2529,6 +2529,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
         _orderRegistry.onOrderRejected(localid);
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "HftOptionStrategy entrust failed: id={}", localid);
+        // P1 follow-up: a rejected HEDGE leg leaves naked delta on the book
+        // (observed 2026-11-20 night: SimNow rejects every futures open once
+        // the account's position/fund limit is hit — delta_excess stayed at
+        // 500-850 tons).  Hedge orders bypass the OQM ladder entirely, so
+        // without this alert the nakedness was invisible outside log grep.
+        if (const auto* rec = _orderRegistry.get(localid);
+            rec && rec->tag == wt_option::OrderTag::Hedge) {
+            pushUiAlert(2, fmt::format(
+                "HEDGE order rejected: {} {} id={} — naked delta, check account limits",
+                rec->code, rec->isBuy ? "buy" : "sell", localid));
+        }
         // P1-d/W5: rejected combo legs go terminal in the audit records too.
         for (auto& combo : _activeCombos)
             combo->legOrderTerminal(localid, true);

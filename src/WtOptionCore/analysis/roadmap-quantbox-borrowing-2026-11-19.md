@@ -369,6 +369,36 @@ ring+溢出合并）→ 单 worker（定价/风控/落盘/快照 POD 填充）�
 夜盘开盘：enabled=true options=202 strikes=101 underlying=95,290、
 启动 ConfigValidator 噪音 0、9/9 测试绿（58 用例）、tsc 0 错误。
 
+## 3.4f 夜盘运行事故复盘（11-20 晚，commits f78d08a1 + 部署验证）
+
+**事故**：夜盘开盘 45s 后 58 个 OQM 集体 REJECT-ONLY、冻结报价被
+逆向选择吃掉（21:45:56-21:46:01 连续 8+ 笔 10 手成交）、pnl 异常。
+
+**根因链（三层）**：
+1. 【代码，已修】REJECT 阶梯语义错配——输入用 m_numNewOrders（每笔
+   新委托递增，做市调价即计数）而非 m_numReject（entrust 拒绝）。
+   reject_max_new_orders=3 → 每合约 3 笔新单即冻结。纠正为
+   m_numReject（quantbox 原意"连续 N 笔委托被拒"）；
+   MaxNewOrdersFilter 同步纠正 + FilterContext.numReject 新字段
+2. 【代码，已修】pnl 基准 preClose ≠ 交易所昨结算——initPosition
+   种子改 preSettle（TickData 新增字段），preClose/preSettle 每日
+   偏离 × 持仓 × 乘数 = UI pnl 与 CTP 的固定偏移
+3. 【环境，需用户处理】SimNow 账户限仓/资金：累计开空到限后期货
+   对冲单全部被 CTP 拒（错误码 31 空消息）→ 裸 delta 500-850 吨
+   持续裸露、期权开仓也大量被拒。**策略侧兜底已验证**：REJECT-ONLY
+   按设计止损报价；新增 HEDGE 拒单 UI 告警（registry tag 归因，
+   hedge 单不经 OQM ladder 原本不可见）。用户侧可做：SimNow 资金/
+   限仓调整，或降低 delta_hedge.max_order_size / 期权报价量
+
+**验证**：修复后重启——PnlTracker 以 preSettle 基准恢复（84 手
+cu2612C104000 pos=84 等全部可见）、REJECT-ONLY 仅 4 次（真实拒单
+兜底）、成交恢复正常节奏、9/9 测试绿。
+
+**pnl 口径说明（现状，非 bug）**：UI pnl = 本地盯市
+（preSettle 种子 + mid 估值 + FIFO/加权成本辅助），与 CTP
+"持仓盈亏"（昨结算盯市）基准已对齐，但估值价仍为 mid（期权
+spread 大时与可变现值有差），与"平今盈亏"含手续费口径亦有差。
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
