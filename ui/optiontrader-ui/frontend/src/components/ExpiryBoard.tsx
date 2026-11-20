@@ -131,7 +131,7 @@ export const ExpiryBoard: React.FC<{
                     UnderlierView fold — the operator asked for it direct) */}
                 <td className="border border-gray-200 px-1 text-right font-mono"
                     title={und ? `${und.code} market` : 'no hedge leg'}>
-                  {und && und.bid != null && und.ask != null
+                  {und && (und.bid ?? 0) > 0 && (und.ask ?? 0) > 0
                     ? <span>{fmt(und.bid, 0)}<span className="text-gray-400">/</span>{fmt(und.ask, 0)}</span>
                     : '-'}
                 </td>
