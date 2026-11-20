@@ -1380,6 +1380,27 @@ void HftOptionStrategy::setupCTG()
     _ctg = std::make_shared<wt_option::ControllableTradingGrid>(_grid, _traderCtx);
     _ctg->setOTG(_otg.get());
     _ctg->setMaxTransactionsPerSec(_maxTPS);
+
+    // P1 batch-4.2: whole-batch pre-send validation (default disabled).
+    // Config lives in the `pricer` section alongside the other risk knobs.
+    {
+        wt_option::BatchValidateConfig bvc;
+        WTSVariant* pPr = cfgPtr_ ? cfgPtr_->get("pricer") : nullptr;
+        WTSVariant* pBv = pPr ? pPr->get("batch_validate") : nullptr;
+        if (pBv) {
+            bvc.enable = pBv->getBoolean("enable");
+            bvc.maxExpDeltaAdd = pBv->getDouble("max_exp_delta_add");
+            bvc.maxExpShortAdd = pBv->getUInt32("max_exp_short_add");
+            bvc.maxPortfolioDelta = pBv->getDouble("max_portfolio_delta");
+        }
+        auto validator = std::make_shared<wt_option::BatchQuoteValidator>(
+            bvc, [this]() { return _risk ? _risk->totalDelta() : 0.0; });
+        _ctg->setBatchValidator(validator);
+        if (bvc.enable)
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "BatchValidate: enable=true expDeltaAdd={} expShortAdd={} pfDelta={}",
+                bvc.maxExpDeltaAdd, bvc.maxExpShortAdd, bvc.maxPortfolioDelta);
+    }
     // Market-readiness needs no CTG-side filter: the pricer marks options
     // priced=false while an expiry has no accepted fit (ExpiryData::isFitReady),
     // and refresh() already gates quoting on od->values(0).isPriced().

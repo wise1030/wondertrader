@@ -398,6 +398,10 @@ void ControllableTradingGrid::refresh() {
         m_lastTransactionUpdateTime = now;
         m_txCount = 0;
     }
+
+    // P1 batch-4.2: veto whole-batch risk BEFORE anything is sent.  Runs on
+    // the ranked batch; only pure-NEW open legs are candidates.
+    applyBatchValidation();
 }
 
 // ============================================================================
@@ -525,6 +529,93 @@ int32_t ControllableTradingGrid::rankFuture(
 
 void ControllableTradingGrid::onRefresh() {
     refresh();
+}
+
+// ============================================================================
+// P1 batch-4.2: applyBatchValidation — whole-batch pre-send risk veto.
+//
+// Runs after refresh() has ranked the batch.  For every pending quote that
+// would OPEN a new order (no live order on that side), the leg's worst-case
+// fill impact (per-expiry delta add / short add, optionally portfolio delta)
+// is aggregated; the validator drops lowest-priority legs until the batch
+// fits.  A dropped leg is erased from the instrument's desired market (so
+// OQM never sends it) and cleared in the PendingQuote (so the TPS accounting
+// and the cancel-only path see the true shape).  Cancels and updates to
+// orders already live are never touched — the guard only removes risk.
+// ============================================================================
+void ControllableTradingGrid::applyBatchValidation() {
+    if (!m_batchValidator) return;
+
+    std::vector<BatchLeg> legs;
+    legs.reserve(m_pendingQuotes.size() * 2);
+
+    for (const auto& pq : m_pendingQuotes) {
+        if (pq.isCancel) continue;
+
+        uint32_t exp = 0;
+        double deltaPerLot = 1.0;
+        bool sideOpen[2] = { false, false };   // [0]=bid [1]=ask
+
+        if (pq.isFuture) {
+            if (!m_otg) continue;
+            auto utd = m_otg->getUnderlyingTradingData(pq.code);
+            if (!utd) continue;
+            exp = utd->getExpiry();
+            deltaPerLot = 1.0;
+            const MultiMarket& cur = utd->getCurrentMarket();
+            sideOpen[0] = pq.bidP > 0 && cur.getBestBid().empty();
+            sideOpen[1] = pq.askP > 0 && cur.getBestAsk().empty();
+        } else {
+            auto od = m_grid->get(pq.code);
+            if (!od) continue;
+            exp = od->getExpiry();
+            deltaPerLot = std::fabs(od->values(0).greeks().delta());
+            if (deltaPerLot <= 0) deltaPerLot = 0.5;   // deep wing: be conservative
+            auto otd = od->getTradingData();
+            const MultiMarket* cur = otd ? &otd->getCurrentMarket() : nullptr;
+            sideOpen[0] = pq.bidP > 0 && cur && cur->getBestBid().empty();
+            sideOpen[1] = pq.askP > 0 && cur && cur->getBestAsk().empty();
+        }
+
+        if (sideOpen[0])
+            legs.push_back({ pq.code, exp, deltaPerLot, true,
+                             pq.bidQ, pq.rank });
+        if (sideOpen[1])
+            legs.push_back({ pq.code, exp, deltaPerLot, false,
+                             pq.askQ, pq.rank });
+    }
+
+    if (legs.empty()) return;
+
+    auto res = m_batchValidator->validate(legs);
+    if (!res.anyDropped()) return;
+
+    m_batchVetoCount += res.dropped.size();
+
+    for (size_t k = 0; k < res.dropped.size(); ++k) {
+        const BatchLeg& L = legs[res.dropped[k]];
+        // Locate the pending quote for this leg (codes are unique per batch).
+        for (auto& pq : m_pendingQuotes) {
+            if (pq.code != L.code) continue;
+            if (pq.isFuture) {
+                if (!m_otg) break;
+                auto utd = m_otg->getUnderlyingTradingData(pq.code);
+                if (!utd) break;
+                if (L.isBuy) { pq.bidP = 0; pq.bidQ = 0; utd->multiMarket().eraseBids(); }
+                else         { pq.askP = 0; pq.askQ = 0; utd->multiMarket().eraseAsks(); }
+            } else {
+                auto od = m_grid->get(pq.code);
+                auto otd = od ? od->getTradingData() : nullptr;
+                if (!otd) break;
+                if (L.isBuy) { pq.bidP = 0; pq.bidQ = 0; otd->multiMarket().eraseBids(); }
+                else         { pq.askP = 0; pq.askQ = 0; otd->multiMarket().eraseAsks(); }
+            }
+            break;
+        }
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "BatchValidate: veto {} {} (rank={} qty={} {})",
+            L.code, L.isBuy ? "bid" : "ask", L.rank, L.qty, res.reasons[k]);
+    }
 }
 
 // ============================================================================

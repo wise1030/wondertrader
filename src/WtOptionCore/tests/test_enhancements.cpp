@@ -26,6 +26,7 @@
 #include "../TradingStateArbiter.h"
 #include "../QuoteStatistics.h"
 #include "../Signals/TradingIntensity.h"
+#include "../BatchQuoteValidator.h"
 #include <cstdlib>
 #include "../ExpiryData.h"
 #include "../OptionTimeService.h"
@@ -2692,6 +2693,108 @@ void test_trading_intensity() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-4.2: whole-batch pre-send validation — per-expiry delta/short add
+// caps and portfolio cap veto lowest-rank legs deterministically; disabled =
+// no-op.
+// ============================================================================
+void test_batch_quote_validator() {
+    std::cout << "=== test_batch_quote_validator ===" << std::endl;
+    using namespace wt_option;
+
+    auto bid = [](const char* c, uint32_t e, double d, uint32_t q, int32_t r) {
+        BatchLeg L; L.code = c; L.expiry = e; L.deltaPerLot = d; L.isBuy = true;
+        L.qty = q; L.rank = r; return L;
+    };
+    auto ask = [&bid](const char* c, uint32_t e, double d, uint32_t q, int32_t r) {
+        BatchLeg L = bid(c, e, d, q, r); L.isBuy = false; return L;
+    };
+
+    // 1) disabled -> no-op
+    {
+        BatchQuoteValidator v(BatchValidateConfig{});
+        std::vector<BatchLeg> legs { bid("A", 1, 0.5, 10, 100), ask("B", 1, 0.5, 10, 90) };
+        ASSERT_TRUE(v.validate(legs).dropped.empty());
+    }
+    // 2) per-expiry delta add cap: two bids 0.5 x qty5 = +5.0; cap 6 -> fits
+    {
+        BatchValidateConfig c; c.enable = true; c.maxExpDeltaAdd = 6.0;
+        BatchQuoteValidator v(c);
+        std::vector<BatchLeg> legs { bid("A", 1, 0.5, 5, 100), bid("B", 1, 0.5, 5, 90) };
+        ASSERT_TRUE(v.validate(legs).dropped.empty());
+    }
+    // 3) cap 7.0 -> aggregate +10.0 breaches; lowest rank (B,90) dropped first,
+    //    then aggregate +5.0 fits -> exactly one drop, A survives
+    {
+        BatchValidateConfig c; c.enable = true; c.maxExpDeltaAdd = 7.0;
+        BatchQuoteValidator v(c);
+        std::vector<BatchLeg> legs { bid("A", 1, 0.5, 10, 100), bid("B", 1, 0.5, 10, 90) };
+        auto res = v.validate(legs);
+        ASSERT_TRUE(res.dropped.size() == 1);
+        ASSERT_TRUE(legs[res.dropped[0]].code == "B");
+    }
+    // 4) short add cap: asks (sells) count; bids never count toward shorts
+    {
+        BatchValidateConfig c; c.enable = true; c.maxExpShortAdd = 5;
+        BatchQuoteValidator v(c);
+        std::vector<BatchLeg> legs { ask("A", 1, 0.5, 4, 100), ask("B", 1, 0.5, 4, 90) };
+        auto res = v.validate(legs);
+        ASSERT_TRUE(res.dropped.size() == 1 && legs[res.dropped[0]].code == "B");
+    }
+    // 5) expiry isolation: breach in exp 1 must not veto exp 2 legs
+    {
+        BatchValidateConfig c; c.enable = true; c.maxExpDeltaAdd = 7.0;
+        BatchQuoteValidator v(c);
+        std::vector<BatchLeg> legs {
+            bid("A", 1, 0.5, 10, 100), bid("B", 1, 0.5, 10, 90),   // exp1: +10.0 breach
+            bid("C", 2, 0.5, 10, 80),                             // exp2: +5.0 ok
+        };
+        auto res = v.validate(legs);
+        ASSERT_TRUE(res.dropped.size() == 1 && legs[res.dropped[0]].code == "B");
+    }
+    // 6) portfolio cap uses the provider and drops lowest rank across expiries
+    {
+        double pf = 8.0;
+        BatchValidateConfig c; c.enable = true; c.maxPortfolioDelta = 10.0;
+        BatchQuoteValidator v(c, [&]() { return pf; });
+        std::vector<BatchLeg> legs {
+            bid("A", 1, 0.5, 6, 100),     // +3
+            bid("B", 2, 0.5, 6, 90),      // +3 -> after = 14 > 10
+        };
+        auto res = v.validate(legs);
+        // per-expiry caps off; portfolio check drops lowest-rank (B) -> 8+3=11 still >10
+        // -> then drops A as well -> both dropped... verify exact behaviour:
+        // after dropping B: add=+3 -> 8+3=11 > 10 -> drop A too.
+        ASSERT_TRUE(res.dropped.size() == 2);
+    }
+    // 7) portfolio cap with room: nothing dropped
+    {
+        double pf = 2.0;
+        BatchValidateConfig c; c.enable = true; c.maxPortfolioDelta = 10.0;
+        BatchQuoteValidator v(c, [&]() { return pf; });
+        std::vector<BatchLeg> legs { bid("A", 1, 0.5, 6, 100), bid("B", 2, 0.5, 6, 90) };
+        ASSERT_TRUE(v.validate(legs).dropped.empty());
+    }
+    // 8) determinism
+    {
+        BatchValidateConfig c; c.enable = true; c.maxExpDeltaAdd = 4.0;
+        BatchQuoteValidator v(c);
+        std::vector<BatchLeg> legs { bid("A", 1, 0.5, 10, 100), bid("B", 1, 0.5, 10, 90) };
+        auto r1 = v.validate(legs); auto r2 = v.validate(legs);
+        ASSERT_TRUE(r1.dropped == r2.dropped && r1.reasons == r2.reasons);
+    }
+    // 9) futures legs: deltaPerLot=1, bid adds +qty, ask adds -qty (offset)
+    {
+        BatchValidateConfig c; c.enable = true; c.maxExpDeltaAdd = 12.0;
+        BatchQuoteValidator v(c);
+        std::vector<BatchLeg> legs { bid("F", 1, 1.0, 10, 100), ask("G", 1, 1.0, 10, 90) };
+        // net add = +10 -10 = 0 -> fits even though gross is 20
+        ASSERT_TRUE(v.validate(legs).dropped.empty());
+    }
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2750,6 +2853,7 @@ int main() {
     test_trading_state_arbiter();
     test_quote_counter_persistence();
     test_trading_intensity();
+    test_batch_quote_validator();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

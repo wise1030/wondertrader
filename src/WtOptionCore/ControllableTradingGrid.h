@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "BatchQuoteValidator.h"
 #include "optioncoretypes.h"
 #include "IOptionGridListener.h"
 #include "check_markets.h"
@@ -102,6 +103,11 @@ public:
     // Main refresh loop — called on each compute cycle
     void refresh();
 
+    /// P1 batch-4.2: whole-batch pre-send validation. Wired by the strategy
+    /// (config `batch_validate`); null/disabled = no-op.
+    void setBatchValidator(std::shared_ptr<BatchQuoteValidator> v) { m_batchValidator = std::move(v); }
+    uint64_t batchVetoCount() const { return m_batchVetoCount; }
+
     // GridListener interface
     virtual void onComputeValuesCompleted(const IOptionGrid* grid) override;
     virtual void onAddOption(const OptionDataPtr& od) override;
@@ -134,6 +140,10 @@ public:
     OptionTradingGrid* getOTG() const { return m_otg; }
 
     // Executors
+    std::shared_ptr<BatchQuoteValidator> m_batchValidator;   // P1 batch-4.2
+    uint64_t m_batchVetoCount = 0;
+    void applyBatchValidation();                             // P1 batch-4.2
+
     OrderExecutor m_orderExec;
     CancelExecutor m_cancelExec;
     QuoteExecutor m_quoteExec;
