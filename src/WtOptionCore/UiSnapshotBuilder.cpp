@@ -121,6 +121,8 @@ void UiSnapshotBuilder::buildExpiry(const std::vector<StrikeDataPtr>& strikes,
         out.undCode = ed.getHedgeCode();
         out.undBid = utd->getBid();
         out.undAsk = utd->getAsk();
+        out.undBidSz = utd->getBidSize();
+        out.undAskSz = utd->getAskSize();
         out.undPos = utd->getPosition();
         // P1 UI: our futures-leg quotes (symmetric to the option legs'
         // ordBid/ordAsk)
@@ -397,6 +399,8 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
             w.key("code"); w.String(e.undCode.c_str());
             w.numOrNull("bid", e.undBid);
             w.numOrNull("ask", e.undAsk);
+            w.numOrNull("bidSz", e.undBidSz);
+            w.numOrNull("askSz", e.undAskSz);
             w.numOrNull("pos", e.undPos);
             if (e.hasUndOur) {   // P1 UI: our futures-leg quotes
                 w.numOrNull("ourBid", e.undOurBid);

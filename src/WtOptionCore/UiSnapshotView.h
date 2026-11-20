@@ -97,6 +97,7 @@ struct UiExpiryView
     bool hasUnd = false;
     std::string undCode;
     double undBid = 0, undAsk = 0;
+    double undBidSz = 0, undAskSz = 0;   // P1 UI: market depth
     double undPos = 0;
     // P1 UI: futures-leg market AND our market-making orders — the option
     // legs show both in the Grid (ordBid/ordAsk); the futures leg had

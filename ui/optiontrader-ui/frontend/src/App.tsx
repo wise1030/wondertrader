@@ -4,6 +4,7 @@ import { StatusBanner } from './components/StatusBanner';
 import { GreeksPnlBar } from './components/GreeksPnlBar';
 import { StatusFooter } from './components/StatusFooter';
 import { ExpiryBoard } from './components/ExpiryBoard';
+import { UnderlierCard } from './components/UnderlierCard';
 import { ExpirySummary } from './components/ExpirySummary';
 import { OptionGridView } from './components/OptionGridView';
 import { TradesTab } from './components/TradesTab';
@@ -57,6 +58,7 @@ const Shell: React.FC = () => {
         <ExpiryBoard selected={selectedExpiry} onSelect={setSelectedExpiry} />
         <div className="flex gap-1 items-center flex-wrap">
           <ExpirySummary selected={selectedExpiry} />
+          <UnderlierCard selected={selectedExpiry} />
         </div>
       </div>
 

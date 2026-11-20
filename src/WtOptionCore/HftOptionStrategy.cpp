@@ -1645,7 +1645,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
         if (_otg) {
             auto utd = _otg->getUnderlyingTradingData(code);
             if (utd) {
-                utd->setMarket(tick.bid, tick.ask, tick.updateTime);
+                // P1 UI: pass book sizes for the futures-leg card
+                utd->setMarket(tick.bid, tick.ask, tick.bidQty, tick.askQty, tick.updateTime);
                 isHedge = true;
             }
         }

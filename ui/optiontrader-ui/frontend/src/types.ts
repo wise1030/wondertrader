@@ -44,6 +44,8 @@ export interface UndView {
   code: string;
   bid: number | null;
   ask: number | null;
+  bidSz?: number | null;
+  askSz?: number | null;
   pos: number | null;
   // P1 UI: our futures-leg quotes (symmetric to ordBid/ordAsk on options)
   ourBid?: number | null;

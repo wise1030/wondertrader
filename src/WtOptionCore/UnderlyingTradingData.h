@@ -124,8 +124,15 @@ public:
     // Market access (replaces InstrumentMDContext / IBook)
     double getBid() const { return m_bid; }
     double getAsk() const { return m_ask; }
+    double getBidSize() const { return m_bidSz; }
+    double getAskSize() const { return m_askSz; }
     double getMid() const { return (m_bid > 0 && m_ask > 0) ? (m_bid + m_ask) * 0.5 : 0.0; }
     void setMarket(double bid, double ask) { m_bid = bid; m_ask = ask; }
+    /// P1 UI: size-aware variant (futures-leg card shows market depth).
+    void setMarket(double bid, double ask, double bidSz, double askSz, uint64_t updateTime) {
+        m_bid = bid; m_ask = ask; m_bidSz = bidSz; m_askSz = askSz;
+        if (updateTime != 0) m_marketUpdateTime = updateTime;
+    }
     void setMarket(double bid, double ask, uint64_t updateTime) {
         m_bid = bid; m_ask = ask;
         if (updateTime != 0) m_marketUpdateTime = updateTime;
@@ -178,6 +185,7 @@ protected:
 
     // Market (replaces InstrumentMDContext / IBook)
     double m_bid = 0;
+    double m_bidSz = 0, m_askSz = 0;   // P1 UI: market depth for the futures card
     double m_ask = 0;
     uint64_t m_marketUpdateTime = 0;  // epoch ms, 0 = unknown
     double m_contractSize = 1.0;
