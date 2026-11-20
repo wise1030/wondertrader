@@ -225,6 +225,37 @@
   34.6 万 tick 铜期权日回放 enabled=true options=36 underlying=106620；
   操作手册 analysis/replay.md）
 
+## 3.4b 六批次全面复核记录（11-20 深度审计）
+
+**方法**：逐批次对照项目原有设施，查重复造轮子/次优路径/遗漏。
+
+**修复（本轮已修+部署）**：
+1. 批次 5.1 hedgeDeltaThreshold 编码错位——被编码在 risk 对象内而前端
+   在顶层读取，红底判定静默退化为 thr=0。移至顶层（commit 835fb4d4）
+2. 批次 5.2 targ_delta/targ_vega 未入 ConfigValidator 白名单（启动
+   WARN 噪音）。补齐（同上）
+
+**新诊断（记录在案，不立即动）**：
+3. TradingStateArbiter::evaluateTradingState 输入收集未接线——setState
+   实际只消费 shouldAllowTransition（转换守卫）；evaluate 是纯函数+
+   测试，属实施范围收缩后的残余（非 bug）
+4. OQM per-code 撤单计数（m_numCancel，max_cancels_allowed 门的输入）
+   重启即丢；当前 config 未启用该门（0=unlimited）。若启用需补持久化
+5. AnalysisRecorder 与项目原有 OptionValueWriter 构成双写设施（粒度
+   不同：到期级+组合级 vs 合约级 theo/iv）。未来可统一 recorder
+6. TradingIntensity（3.2）未接入既有 SignalFactory 可插拔框架
+   （signals.alpha[]/risk[]）——喂入路径与 alpha 信号并行。输出通道
+   不同（spread multiplier vs skew 权重）且默认关，迁移成本/收益不
+   划算，若扩 toxicity 信号族时再统一
+7. 批次 4.3 OrderTag 未用框架 userTag 通道（on_order/on_trade 回调自带
+   userTag，策略入队时丢弃）。registry tag 的优势：与镜像注册/迟到
+   fill 归因同一事实源。记为后续优化（透传 userTag 更便宜）
+
+**合理性结论**：无真正重复造轮子。4.4/5.2/teenie/五档深度/引擎回放
+均为"补完项目既有半实现或断链"；4.2 批量验证是逐单风控的真实新
+维度；3.3/5.4 持久化补的是框架不管的状态恢复。两处编码/白名单
+错误已修。实施路径（修既有→补维度→配置灰度→实测）符合最小侵入。
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
