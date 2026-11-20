@@ -484,6 +484,21 @@ ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无
 → 该月 live 29 → 0；qmode on 恢复 ✓。旧 handler（CANCEL/QMODE 等）
 本就按全 tokens 写——不受影响。
 
+## 3.4l UI 架构重组落地（11-21，ac4cd35d——EXPIRY BOARD）
+
+按深度审计方案落地（纯前端，后端零改动）：
+- **ExpiryBoard** 取代 ExpirySelector/ExpiryEnableRow/UnderlierView/
+  HedgePanel 四组件：行序=配置序（F1-Fn 固定绑定，回退排序漂移）、
+  全行可选可看（off 月不再禁点——查看与控制解耦）、列含 $Δ/$Γ/$Θ/ν
+  /futPos、TOTAL 汇总、红/琥珀行级着色、und 入行 tooltip
+- 选中行控制条（单实例）：quoting ON/OFF + qmode 三键 + ALL；
+  ConfirmButton 两击确认覆盖 OFF/off/close 类危险动作，PANIC 零摩擦
+- ExpirySummary 瘦身为详情条（books/flags/sprd/targets）
+- HealthPanel 拆分：HealthBar 3 项 + Analysis 完整 12 项网格
+- readonly 双模式定稿：监控模式禁用灰可见、操作模式全功能
+- 全局 qmode 按钮移除（ctrl 条 ALL 取代）；OrdersTable 静默返回改提示
+- 后端零改动；9/9 测试 rc=0；build ✓ 已部署
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
