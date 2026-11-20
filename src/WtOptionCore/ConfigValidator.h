@@ -81,6 +81,7 @@ public:
                           "maxShortCallPerSymbol","maxShortPutPerSymbol",
                           "maxStressLoss" } },
             { "optionValueWriter", { "enable","outputDir","startTime","endTime","outputPeriod" } },
+            { "analysis", { "enable","interval_sec","outputDir","qstream_sec" } },
             { "delta_hedge", { "enable","threshold_delta","target_delta","max_order_size",
                                "cooldown_sec","delta_per_lot","minHedgeQty",
                                "flatten_lead_seconds","flatten_aggr_ticks" } },

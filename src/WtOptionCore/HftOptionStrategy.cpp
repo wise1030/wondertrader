@@ -1419,11 +1419,16 @@ void HftOptionStrategy::setupCTG()
         _analysisEnable = pAn ? (pAn->has("enable") ? pAn->getBoolean("enable") : true) : true;
         const double interval = pAn && pAn->has("interval_sec") ? pAn->getDouble("interval_sec") : 60.0;
         _analysisRecorder = wt_option::AnalysisRecorder(interval > 0 ? interval : 60.0);
-        _analysisRecorder.setDir("generated");
+        // P1 follow-up (audit #5): analysis.outputDir aligns with
+        // optionValueWriter.outputDir — one place controls every CSV the
+        // strategy writes (both recorders + counter sidecars).
+        const std::string aDir = (pAn && pAn->has("outputDir"))
+            ? pAn->getCString("outputDir") : "generated";
+        _analysisRecorder.setDir(aDir);
         // P1 batch-6.5: replayable quote stream (0 = off — ~70MB/day at 1s).
         const double qsSec = pAn && pAn->has("qstream_sec") ? pAn->getDouble("qstream_sec") : 0.0;
         _qstreamRecorder = wt_option::QstreamRecorder(qsSec);
-        _qstreamRecorder.setDir("generated");
+        _qstreamRecorder.setDir(aDir);
     }
 
     auto validator = std::make_shared<wt_option::BatchQuoteValidator>(
@@ -2745,6 +2750,21 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // B07 fix: reset OQM lifetime counters — without this, MaxCancel /
             // MaxNewOrders / hard_flat thresholds permanently lock all quoting
             if (_otg) _otg->onSessionBegin();
+
+            // P1 follow-up (audit #4): same-day restart restores the OQM
+            // counters the session-end dump wrote (dumpCountersCsv exported
+            // them all along; only the restore half was missing).  Cross-day
+            // starts find no file and begin at zero — the exchange counts
+            // per trading day, so that is exactly right.
+            if (_otg && _curSessionDate != 0) {
+                std::string oqmPath = fmt::format(
+                    "outputs_option/oqm_counters_{}.csv", _curSessionDate);
+                const size_t n = _otg->restoreCountersFrom(oqmPath);
+                if (n > 0)
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "OQM counters restored from {} ({} codes, same-day restart)",
+                        oqmPath, n);
+            }
 
             // B20b: reset per-instrument PnL ledgers at the session boundary.
             // Signal latches alone are not enough; otherwise a long-running

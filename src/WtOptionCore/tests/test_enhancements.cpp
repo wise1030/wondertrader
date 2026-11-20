@@ -27,6 +27,7 @@
 #include "../QuoteStatistics.h"
 #include "../Signals/TradingIntensity.h"
 #include "../AnalysisRecorder.h"
+#include "../OptionQuoteManager.h"
 #include "../BatchQuoteValidator.h"
 #include <cstdlib>
 #include "../ExpiryData.h"
@@ -2569,20 +2570,14 @@ void test_gvv_vega_weighted() {
 }
 
 // ============================================================================
-// P1 batch-3.1: trading-state arbiter — deterministic priorities + guarded
-// downgrades (the generalised fix for the channel_ready/stale-event overwrites).
+// P1 batch-3.1: trading-state downgrade guard — guarded downgrades (the
+// generalised fix for the channel_ready/stale-event overwrites).  The
+// input-collector half of the original design was never wired and was
+// removed in the 11-20 audit cleanup; this matrix covers the live guard.
 // ============================================================================
 void test_trading_state_arbiter() {
     std::cout << "=== test_trading_state_arbiter ===" << std::endl;
     using namespace wt_option;
-
-    // pure evaluate(): priority Disabled > Panic > SessionStopped > Recovering > GetFlat > Normal
-    ASSERT_TRUE(evaluateTradingState({}).mode == ArbiterMode::Normal);
-    ASSERT_TRUE(evaluateTradingState({.getFlat = true}).mode == ArbiterMode::GetFlat);
-    ASSERT_TRUE(evaluateTradingState({.panicked = true, .getFlat = true}).mode == ArbiterMode::Panic);
-    ASSERT_TRUE(evaluateTradingState({.sessionStopped = true, .getFlat = true}).mode == ArbiterMode::SessionStopped);
-    ASSERT_TRUE(evaluateTradingState({.channelReady = false, .panicked = true}).mode == ArbiterMode::Disabled);
-    ASSERT_TRUE(evaluateTradingState({.recovering = true, .getFlat = true}).mode == ArbiterMode::Recovering);
 
     using T = TradingStateType;
     // upgrades always allowed
@@ -3005,6 +3000,34 @@ void test_analysis_recorder() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 follow-up (audit #4): OQM counter restore — same-day restart must
+// resume the cancel/new-order accrual instead of starting at zero.
+// ============================================================================
+void test_oqm_counter_restore() {
+    std::cout << "=== test_oqm_counter_restore ===" << std::endl;
+    using namespace wt_option;
+    OptionQuoteManager::Config cfg;
+    OptionQuoteManager qm("TEST.C100", cfg);
+
+    // fresh OQM starts at zero
+    ASSERT_TRUE(qm.getNumCancel() == 0 && qm.getNumNewOrders() == 0);
+
+    // restore what the session-end dump wrote (dumpCountersCsv format)
+    qm.restoreCounters(41, 17, 5, 2, 1);
+    ASSERT_TRUE(qm.getNumCancel() == 41);
+    ASSERT_TRUE(qm.getNumNewOrders() == 17);
+    ASSERT_TRUE(qm.getNumFill() == 5);
+    ASSERT_TRUE(qm.getNumReject() == 2);
+    ASSERT_TRUE(qm.getNumLateFills() == 1);
+
+    // session begin resets; a no-file restore leaves zeros
+    qm.resetCounters();
+    ASSERT_TRUE(qm.getNumCancel() == 0 && qm.getNumLateFills() == 0);
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -3067,6 +3090,7 @@ int main() {
     test_order_tag_attribution();
     test_max_open_offset_filter();
     test_analysis_recorder();
+    test_oqm_counter_restore();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

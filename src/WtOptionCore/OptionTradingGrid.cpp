@@ -6,6 +6,11 @@
  * Key method: onAddOption creates OTD + binds executors + binds RiskData.
  */
 #include "OptionTradingGrid.h"
+
+#include <array>
+#include <fstream>
+#include <map>
+#include <sstream>
 #include "OptionQuoteManager.h"
 #include "OptionRisk.h"
 #include "OptionRiskData.h"
@@ -479,6 +484,56 @@ void OptionTradingGrid::dumpCountersCsv(const std::string& path) const
         if (otd && otd->getQuoteManager())
             otd->getQuoteManager()->dumpCountersCsv(path);
     }
+}
+
+// ============================================================================
+// P1 follow-up (audit #4): restoreCountersFrom — read a session-end counter
+// dump (code,cancels,newOrders,fills,rejects,lateFills,position) and feed
+// every known OQM.  Later rows overwrite earlier ones (dump is append-only;
+// the last dump of the day carries the highest counts).  Codes absent from
+// the grid (e.g. contracts not yet re-discovered) are skipped.
+// ============================================================================
+size_t OptionTradingGrid::restoreCountersFrom(const std::string& path)
+{
+    std::ifstream in(path);
+    if (!in.is_open()) return 0;
+
+    std::map<std::string, std::array<int32_t, 5>> last;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::stringstream ss(line);
+        std::string code;
+        if (!std::getline(ss, code, ',')) continue;
+        std::array<int32_t, 5> v{};
+        for (int i = 0; i < 5; ++i) {
+            std::string tok;
+            if (!std::getline(ss, tok, ',')) break;
+            try { v[i] = std::stoi(tok); } catch (...) { v[i] = 0; }
+        }
+        last[code] = v;   // later rows win
+    }
+    if (last.empty()) return 0;
+
+    size_t restored = 0;
+    auto apply = [&last, &restored](const std::string& code,
+                                    const wt_option::OptionQuoteManagerPtr& qm) {
+        if (!qm) return;
+        auto it = last.find(code);
+        if (it == last.end()) return;
+        const auto& v = it->second;
+        qm->restoreCounters(v[0], v[1], v[2], v[3], v[4]);
+        ++restored;
+    };
+    for (auto& pair : m_tblUnderlyingTradingData) {
+        if (pair.second) apply(pair.first, pair.second->getQuoteManager());
+    }
+    for (const auto& od : m_spGrid->getAllOptions()) {
+        if (!od) continue;
+        auto otd = od->getTradingData();
+        if (otd) apply(od->getCode(), otd->getQuoteManager());
+    }
+    return restored;
 }
 
 } // namespace wt_option

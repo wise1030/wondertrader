@@ -119,6 +119,12 @@ public:
     /// C5: dump all OQM lifetime counters to CSV (call on session end)
     void dumpCountersCsv(const std::string& path) const;
 
+    /// P1 follow-up (audit #4): inverse of dumpCountersCsv — restore every
+    /// OQM's counters from the session-end dump of the SAME trading day
+    /// (later rows win; the dump appends, so a restarted day's file can
+    /// hold more than one row per code).  Returns restored codes.
+    size_t restoreCountersFrom(const std::string& path);
+
     // --- OptionRisk ---
     const OptionRiskPtr& getPositionRisk() const { return m_spPositionRisk; }
     void setPositionRisk(OptionRiskPtr risk) { m_spPositionRisk = std::move(risk); }

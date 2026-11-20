@@ -172,6 +172,16 @@ public:
     int32_t getNumFill() const { return m_numFill; }
     int32_t getNumNewOrders() const { return m_numNewOrders; }
     int32_t getNumLateFills() const { return m_numLateFills; }
+
+    /// P1 follow-up (audit #4): restore persisted per-day counters after
+    /// session-begin resetCounters(), so an intraday restart keeps accruing
+    /// toward the exchange cancel limits (dumpCountersCsv already exported
+    /// these values at session end — only the restore half was missing).
+    void restoreCounters(int32_t cancels, int32_t newOrders, int32_t fills,
+                         int32_t rejects, int32_t lateFills) {
+        m_numCancel = cancels; m_numNewOrders = newOrders; m_numFill = fills;
+        m_numReject = rejects; m_numLateFills = lateFills;
+    }
     bool isHardFlatMode() const { return m_hardFlatMode; }
     /// P1 batch-4.4: first tier of the reject ladder (reject-only entered).
     bool isRejectOnlyMode() const { return m_rejectOnlyMode; }
