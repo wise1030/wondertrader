@@ -1731,13 +1731,21 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 double pos = _positions[code];
                 if (_otg) {
                     auto utd = _otg->getUnderlyingTradingData(code);
-                    if (utd) utd->getPnlTracker()->initPosition(pos, tick.preClose);
+                    // P1 fix (pnl basis): the exchange marks carried
+                    // positions against the PREV SETTLE, not prev close —
+                    // preClose/preSettle diverge daily on cu, and the gap
+                    // scaled by position x multiplier showed up as a
+                    // permanent offset between UI pnl and the CTP window.
+                    const double basis = tick.preSettle > 0 ? tick.preSettle
+                                                            : tick.preClose;
+                    if (utd) utd->getPnlTracker()->initPosition(pos, basis);
                     auto otd = _otg->getTradingData(code);
-                    if (otd) otd->getPnlTracker()->initPosition(pos, tick.preClose);
+                    if (otd) otd->getPnlTracker()->initPosition(pos, basis);
                 }
                 if (pos != 0) {
                     WTSLogger::log_by_cat("strategy", LL_INFO,
-                        "PnlTracker init {} pos={} preClose={}", code, pos, tick.preClose);
+                        "PnlTracker init {} pos={} basis(preSettle)={}",
+                        code, pos, tick.preSettle);
                 }
             }
         }

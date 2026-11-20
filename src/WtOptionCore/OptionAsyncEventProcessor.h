@@ -41,6 +41,7 @@ struct TickData {
     double bidQty = 0;
     double askQty = 0;
     double preClose = 0;
+    double preSettle = 0;   // P1 fix: exchange margin-mark basis (prev settle)
     double tradeVolume = 0;
     uint32_t actionTime = 0;
     uint64_t updateTime = 0;

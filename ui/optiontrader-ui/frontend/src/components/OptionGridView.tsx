@@ -268,13 +268,13 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
               <th className="border border-gray-300 px-1 py-0.5" colSpan={vshiftVisible ? 13 : 12}>PUT</th>
             </tr>
             <tr className="bg-gray-100 text-gray-600">
-              {['bidSz', 'ordBid', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'ordAsk', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
+              {['ordBid', 'bidSz', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'ordAsk', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
                 <React.Fragment key={h}>
                   <th className="border border-gray-300 px-1 py-0.5">{h}</th>
                 </React.Fragment>
               ))}
               <th />
-              {['bidSz', 'ordBid', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'ordAsk', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
+              {['ordBid', 'bidSz', 'bid', 'last', 'theo', 'iv', 'ask', 'askSz', 'ordAsk', 'delta', ...(vshiftVisible ? ['vshift'] : []), 'pos', 'pnl'].map(h => (
                 <React.Fragment key={h}>
                   <th className="border border-gray-300 px-1 py-0.5">{h}</th>
                 </React.Fragment>

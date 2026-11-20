@@ -158,30 +158,37 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
         }
     }
 
-    // P1 batch-4.4: graded reject ladder.
-    //  Tier 2 (hard flat): newOrders >= hard_flat_after_n_new_orders ->
+    // P1 batch-4.4, SEMANTICS CORRECTED (audit 11-20 night session): the
+    // ladder originally keyed on m_numNewOrders — the count of EVERY new
+    // order sent.  A market maker reprices constantly, so with
+    // reject_max_new_orders=3 every contract froze into REJECT-ONLY 45s
+    // after open and stale quotes got filled adversely (58 OQMs hit on
+    // 2026-11-20).  quantbox intent is "stop re-quoting after N ENTRUST
+    // REJECTS" — key the ladder on m_numReject (entrust failures only;
+    // normal repricing never increments it).
+    //  Tier 2 (hard flat): rejects >= hard_flat_after_n_new_orders ->
     //    cancel BOTH sides and latch hard-flat — only cancel_only calls do
     //    anything until resetCounters() (session begin).
-    //  Tier 1 (reject-only): newOrders >= reject_max_new_orders -> silently
-    //    skip new/changed orders (cancels still flow via the cancel_only
-    //    path above); logged ONCE on entry so a stuck ladder is visible.
+    //  Tier 1 (reject-only): rejects >= reject_max_new_orders -> skip
+    //    new/changed orders (cancels still flow via the cancel_only path
+    //    above); logged ONCE on entry so a stuck ladder is visible.
     if (m_cfg.hard_flat_after_n_new_orders > 0
-        && m_numNewOrders >= m_cfg.hard_flat_after_n_new_orders) {
+        && m_numReject >= m_cfg.hard_flat_after_n_new_orders) {
         if (!m_hardFlatMode) {
             m_hardFlatMode = true;
             WTSLogger::log_by_cat("strategy", LL_ERROR,
-                "OQM: {} HARD FLAT after {} new orders — cancelling both sides",
-                m_code, m_numNewOrders);
+                "OQM: {} HARD FLAT after {} entrust rejects — cancelling both sides",
+                m_code, m_numReject);
         }
         return cancelSide(true) + cancelSide(false);
     }
     if (m_hardFlatMode) return 0;   // latched until session reset
-    if (m_cfg.reject_max_new_orders >= 0 && m_numNewOrders >= m_cfg.reject_max_new_orders) {
+    if (m_cfg.reject_max_new_orders >= 0 && m_numReject >= m_cfg.reject_max_new_orders) {
         if (!m_rejectOnlyLogged) {
             m_rejectOnlyLogged = true;
             WTSLogger::log_by_cat("strategy", LL_WARN,
-                "OQM: {} REJECT-ONLY entered (newOrders={} >= {}); new orders suppressed",
-                m_code, m_numNewOrders, m_cfg.reject_max_new_orders);
+                "OQM: {} REJECT-ONLY entered (entrust rejects={} >= {}); new orders suppressed",
+                m_code, m_numReject, m_cfg.reject_max_new_orders);
         }
         m_rejectOnlyMode = true;
         return 0;
@@ -237,6 +244,7 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
             fctx.potentialPosition = potentialPos;  // B34a: pass computed potential, not raw current
             fctx.numCancels = m_numCancel;
             fctx.numNewOrders = m_numNewOrders;
+            fctx.numReject = m_numReject;
             fctx.numFills = m_numFill;
             fctx.rightFlag = m_cfg.right_flag;      // B3
             if (m_filterChain->execute(fctx) == FilterResult::REJECTED) {
@@ -255,6 +263,7 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
             fctx.potentialPosition = potentialPos;  // B34a
             fctx.numCancels = m_numCancel;
             fctx.numNewOrders = m_numNewOrders;
+            fctx.numReject = m_numReject;
             fctx.numFills = m_numFill;
             fctx.rightFlag = m_cfg.right_flag;      // B3
             if (m_filterChain->execute(fctx) == FilterResult::REJECTED) {

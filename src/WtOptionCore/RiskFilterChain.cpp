@@ -107,8 +107,8 @@ FilterResult MaxCancelFilter::process(FilterContext& ctx) {
 
 // === MaxNewOrdersFilter ===
 FilterResult MaxNewOrdersFilter::process(FilterContext& ctx) {
-    if (m_rejectLimit > 0 && ctx.numNewOrders >= m_rejectLimit) {
-        ctx.rejectReason = "new orders " + std::to_string(ctx.numNewOrders)
+    if (m_rejectLimit > 0 && ctx.numReject >= m_rejectLimit) {
+        ctx.rejectReason = "entrust rejects " + std::to_string(ctx.numReject)
             + " >= reject limit " + std::to_string(m_rejectLimit);
         return FilterResult::REJECTED;
     }
@@ -116,14 +116,14 @@ FilterResult MaxNewOrdersFilter::process(FilterContext& ctx) {
     // old code only logged and returned APPROVED, so the "hard" tier was a
     // no-op.  REJECTED routes to cancelSide in OQM (risk-reducing), and the
     // once-log makes the escalation traceable.
-    if (m_hardFlatLimit > 0 && ctx.numNewOrders >= m_hardFlatLimit) {
+    if (m_hardFlatLimit > 0 && ctx.numReject >= m_hardFlatLimit) {
         if (!m_hardFlatLogged) {
             m_hardFlatLogged = true;
             WTSLogger::log_by_cat("strategy", LL_ERROR,
-                "MaxNewOrders HARD FLAT: {} newOrders={} — rejecting all new orders",
-                ctx.code, ctx.numNewOrders);
+                "MaxNewOrders HARD FLAT: {} entrust rejects={} — rejecting all new orders",
+                ctx.code, ctx.numReject);
         }
-        ctx.rejectReason = "HARD FLAT newOrders=" + std::to_string(ctx.numNewOrders);
+        ctx.rejectReason = "HARD FLAT entrust rejects=" + std::to_string(ctx.numReject);
         return FilterResult::REJECTED;
     }
     return FilterResult::APPROVED;

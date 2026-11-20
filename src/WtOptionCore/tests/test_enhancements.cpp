@@ -2908,14 +2908,16 @@ void test_max_open_offset_filter() {
         ASSERT_TRUE(f.process(c) == FilterResult::APPROVED);
     }
 
-    // MaxNewOrdersFilter: hard-flat tier now rejects (was log-only APPROVED)
+    // MaxNewOrdersFilter: keyed on ENTRUST REJECTS (audit 11-20 — the old
+    // numNewOrders key froze every contract after 3 reprices) and the
+    // hard-flat tier now rejects (was log-only APPROVED)
     {
         MaxNewOrdersFilter f(10, 5);   // hardFlat=10, reject=5
-        FilterContext c; c.code = "X"; c.numNewOrders = 6;
+        FilterContext c; c.code = "X"; c.numReject = 6;
         ASSERT_TRUE(f.process(c) == FilterResult::REJECTED);   // reject tier
-        FilterContext c2; c2.code = "X"; c2.numNewOrders = 11;
+        FilterContext c2; c2.code = "X"; c2.numReject = 11;
         ASSERT_TRUE(f.process(c2) == FilterResult::REJECTED);  // hard-flat tier
-        FilterContext c3; c3.code = "X"; c3.numNewOrders = 4;
+        FilterContext c3; c3.code = "X"; c3.numReject = 4;
         ASSERT_TRUE(f.process(c3) == FilterResult::APPROVED);
     }
 

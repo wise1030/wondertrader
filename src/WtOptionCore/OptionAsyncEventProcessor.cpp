@@ -29,6 +29,7 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     ev.tick.bidQty = t->bidqty(0);
     ev.tick.askQty = t->askqty(0);
     ev.tick.preClose = t->preclose();
+    ev.tick.preSettle = t->presettle();   // P1 fix
     ev.tick.tradeVolume = t->volume();
     ev.tick.actionTime = t->actiontime();
     // Epoch milliseconds are used only for market freshness checks; duration

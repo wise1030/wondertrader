@@ -21,6 +21,7 @@ struct FilterContext {
     int32_t potentialPosition = 0;
     int32_t numCancels = 0;
     int32_t numNewOrders = 0;
+    int32_t numReject = 0;   // P1 audit: entrust-reject count (ladder input)
     int32_t numFills = 0;
 
     uint8_t rightFlag = 2;   // B3: 0=Put, 1=Call, 2=N/A(future)
