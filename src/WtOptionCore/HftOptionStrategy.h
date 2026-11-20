@@ -581,6 +581,12 @@ private:
 
     void persistHotParam(const std::string& key, double value);
     size_t replayHotParams();   // returns number of params applied
+
+    /// P1 follow-up: runtime per-expiry quoting on/off (hot command
+    /// EXPIRYENABLE,<expiry>,<on|off>).  Hot-off stages cancels for the
+    /// expiry's live quotes; hot-on re-runs the initial per-expiry pricer
+    /// configuration for expiries that started disabled.
+    bool setExpiryEnabled(uint32_t exp, bool enable);
     bool executeCancel(uint32_t localid);
     int32_t executeCancel(const std::string& code);
 };

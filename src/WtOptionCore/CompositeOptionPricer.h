@@ -360,6 +360,17 @@ public:
     /// Falls back to config().volcurve_weight for expiries not listed.
     void setGvvWeightPerExpiry(uint32_t exp, double w) { m_gvvWeightOverride[exp] = w; }
 
+    /// P1 follow-up: runtime per-expiry quoting switch (hot command
+    /// EXPIRYENABLE).  enable=false zeroes every quote size for the expiry
+    /// (updateOurMarketSide's valid check), which stages cancels for the
+    /// live quotes on the next refresh — the on/off counterpart of
+    /// enableExpiry without touching its configured parameters.
+    void setExpiryEnabled(uint32_t exp, bool enable) {
+        auto it = m_mapExpiryRiskConfig.find(exp);
+        if (it != m_mapExpiryRiskConfig.end())
+            it->second.enable = enable;
+    }
+
     /// P1 batch-5.2: per-expiry greek targets (expiries[].targ_delta/targ_vega).
     /// Feeds the risk-shift normalization (m_prop_exp_{delta,vega_tw}_targets)
     /// — both maps existed but had no config wiring before this.

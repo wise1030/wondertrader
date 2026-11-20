@@ -1,6 +1,7 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
 import { SetParamPanel } from './SetParamPanel';
+import { ExpiryEnableRow } from './ExpiryEnableRow';
 
 interface Props {
   onNotify: (msg: string, type: 'info' | 'error') => void;
@@ -50,6 +51,7 @@ export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
         ))}
       </div>
       <SetParamPanel />
+      <ExpiryEnableRow readonly={readonly} sendCommand={sendCommand} />
       <div className="h-20 overflow-y-auto bg-gray-50 border border-gray-200 rounded px-2 py-0.5 text-[10px] font-mono">
         {msgLogs.slice().reverse().map((l, i) => (
           <div key={i} className={l.type === 'error' || l.type === 'reject' ? 'text-red-600' : 'text-gray-600'}>

@@ -35,6 +35,11 @@ inline int tradingModeRank(TradingStateType m) {
 inline bool shouldAllowTransition(TradingStateType prev, TradingStateType next,
                                   const std::string& reason) {
     if (tradingModeRank(next) >= tradingModeRank(prev)) return true;  // upgrade/same
+    // Operator hot-commands are ALWAYS honoured regardless of origin — the
+    // switch below must never swallow them.  (Bug fixed 11-20: the per-origin
+    // switch made this trailing check unreachable, so RESUME after a STOP
+    // stayed Disabled forever — observed live in the night session.)
+    if (reason.rfind("hotcmd_", 0) == 0) return true;
     // Downgrades are matched on (origin, reason) — a reason that is a legal
     // recovery from ONE mode must not unlock an unrelated downgrade from
     // another (e.g. "channel_ready" is Disabled->Recovering only; it must

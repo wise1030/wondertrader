@@ -4225,6 +4225,44 @@ size_t HftOptionStrategy::replayHotParams() {
     return applied;
 }
 
+// ============================================================================
+// P1 follow-up: runtime per-expiry quoting switch.
+// ============================================================================
+bool HftOptionStrategy::setExpiryEnabled(uint32_t exp, bool enable) {
+    auto it = _expiryConfigs.find(exp);
+    if (it == _expiryConfigs.end()) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "EXPIRYENABLE: expiry {} not configured", exp);
+        return false;
+    }
+    auto& ec = it->second;
+    if (ec.enable == enable) {
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "EXPIRYENABLE: expiry {} already {}", exp, enable ? "on" : "off");
+        return true;
+    }
+    ec.enable = enable;
+    if (!_compositePricer) return false;
+
+    if (enable) {
+        // Full initial configuration (mirrors the setupPricer loop) — a
+        // cold expiry has no erc entry yet.
+        _compositePricer->enableExpiry(exp, ec.delta_min, ec.delta_max);
+        _compositePricer->setMaxPosQty(exp, ec.max_qsize, ec.max_pos_stk, ec.max_pos_opt);
+        _compositePricer->setExpiryCloseParams(exp, ec.enable_auto_close,
+            static_cast<int32_t>(ec.close_pos_thresh));
+        _compositePricer->setExpiryTargets(exp, ec.targ_delta, ec.targ_vega);
+        if (ec.volcurve_weight >= 0.0)
+            _compositePricer->setGvvWeightPerExpiry(exp, ec.volcurve_weight);
+    } else {
+        _compositePricer->setExpiryEnabled(exp, false);
+    }
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "EXPIRYENABLE: expiry {} quoting -> {} (hot)", exp, enable ? "ON" : "OFF");
+    _needsRefresh = true;
+    return true;
+}
+
 void HftOptionStrategy::registerCommands()
 {
     wt_option::OptionCommandHandlers::Hooks hooks;
@@ -4337,6 +4375,18 @@ void HftOptionStrategy::registerCommands()
         return n;
     };
     _cmdHandlers.registerAll(_cmdBus, std::move(hooks));
+
+    // P1 follow-up: per-expiry quoting on/off — EXPIRYENABLE,<expiry>,<on|off>
+    _cmdBus.registerCommand("EXPIRYENABLE",
+        [this](const std::vector<std::string>& args, std::string& err) {
+            if (args.size() < 2) { err = "EXPIRYENABLE needs <expiry>,<on|off>"; return false; }
+            const uint32_t exp = static_cast<uint32_t>(std::strtoul(args[0].c_str(), nullptr, 10));
+            if (exp == 0) { err = "bad expiry"; return false; }
+            const bool on = (args[1] == "on" || args[1] == "ON" || args[1] == "1");
+            const bool off = (args[1] == "off" || args[1] == "OFF" || args[1] == "0");
+            if (!on && !off) { err = "mode needs on|off"; return false; }
+            return setExpiryEnabled(exp, on);
+        });
 
     // P1 batch-5.4: replay operator-tuned hot params BEFORE sync_param
     // registration (see replayHotParams).  Runs after registerAll so the
