@@ -421,6 +421,22 @@ spread 大时与可变现值有差），与"平今盈亏"含手续费口径亦�
 32s（1s×2^5 cap）；entrust 拒单 130/分钟 → 4-7/分钟（-95%）。
 附带：fire 日志带 backoff=2^N 诊断后缀；streak 轨迹 DEBUG 日志。
 
+## 3.4h 运行复核三修（11-21 凌晨，MM tag 断链/readonly/pnl 口径）
+
+1. **MM tag 断链（实锤修复）**：quote_style=buy_sell 时全部做市
+   报价走 sendSingle → OrderGateway → executeOrderIds（默认
+   Unknown）——MM 标记的双边路径从未被走到。gateway order leg
+   显式传 OrderTag::MM。部署实证：快照 orders tag=1
+2. **readonly 切换**：ui.readonly 配置硬门（hello 帧下发）——服务
+   器 config 已切 false（用户要求可操作），前端刷新生效
+3. **pnl 口径标注**：GreeksPnlBar 加 (local mark) + tooltip（昨结
+   算基准/mid 估值/含费）。"不准确"的三层定性：真实亏损（报价冻结
+   事故，已修根因）/ 基准偏移（preSettle 已修）/ 口径残差（估值侧
+   与手续费，标注说明）
+4. **资金不足实锤**：CTP 拒单消息解码 = "资金不足，合约缺少资金
+   [687803.47](31)"——SimNow 账户缺口约 69 万（错误码 31 在该
+   环境即资金不足变体）。需要用户充值 SimNow 或降仓位规模
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
