@@ -39,6 +39,18 @@ bool OptionHedgeCoordinator::fireLeg(int legIdx, const std::string& code,
     if (!m_send || !m_price || code.empty()) return false;
     if (!(m_cfg.deltaPerLot > 0)) return false;
 
+    // P1 follow-up: reject-streak backoff gate (audit 11-20 night session).
+    // The MULTI-LEG path (fireLeg) bypassed the gate placed in check() —
+    // production runs multi-leg, so the gate never fired and a dead account
+    // limit got hammered every cooldown tick (518 fires / 12 min observed).
+    // Backoff multiplies the base cooldown by 2^rejectStreak (cap 32x,
+    // 3s-ish base -> ~96s), reset by any fill/cancel terminal.
+    {
+        const double factor = static_cast<double>(1 << std::min(m_rejectStreak, 5));
+        const double lastFire = legIdx < 0 ? m_sharedLastFire : m_legLastFire[legIdx];
+        if (nowSec - lastFire < m_cfg.cooldownSec * factor) return false;
+    }
+
     HedgeDecision d = DeltaHedgeExecutor::decide(m_cfg, netDelta, nowSec,
                                                  legIdx < 0 ? m_sharedLastFire
                                                             : m_legLastFire[legIdx]);

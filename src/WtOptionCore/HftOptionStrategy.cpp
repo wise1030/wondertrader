@@ -2412,7 +2412,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
                            double totalQty, double leftQty, double price, bool isCanceled) {
         // Delta-hedge in-flight bookkeeping: release the slot on terminal state.
         if (isCanceled || leftQty <= 0) {
-            _hedgeCoord.onTerminal(localid);
+            // P1 follow-up: an insert-rejected hedge order arrives here as a
+            // canceled terminal too — treat it as a reject for the backoff
+            // streak (see _hedgeRejectedIds comment).
+            const bool wasRejected = _hedgeRejectedIds.erase(localid) > 0;
+            _hedgeCoord.onTerminal(localid, wasRejected);
             if (_gammaPricer) _gammaPricer->onOrderTerminal(localid);
         }
         // Combo terminal routing: a canceled leg must reach the combo state
@@ -2525,6 +2529,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // A rejected hedge order must not leave the in-flight latch stuck;
         // rejected=true drives the coordinator's exponential fire backoff.
         _hedgeCoord.onTerminal(localid, /*rejected=*/true);
+        // Bridge the double report: the terminal on_order(canceled) that
+        // follows an insert-reject would otherwise clear the backoff streak
+        // right after this call incremented it (audit 11-20 night).
+        if (const auto* rec = _orderRegistry.get(localid);
+            rec && rec->tag == wt_option::OrderTag::Hedge)
+            _hedgeRejectedIds.insert(localid);
         // 3.3: mark the registry record rejected (WT sends no terminal
         // on_order afterwards); late fills on it are classified unknown.
         _orderRegistry.onOrderRejected(localid);
@@ -2535,12 +2545,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // the account's position/fund limit is hit — delta_excess stayed at
         // 500-850 tons).  Hedge orders bypass the OQM ladder entirely, so
         // without this alert the nakedness was invisible outside log grep.
-        if (const auto* rec = _orderRegistry.get(localid);
-            rec && rec->tag == wt_option::OrderTag::Hedge) {
+        if (const auto* rec = _orderRegistry.get(localid); rec && rec->tag == wt_option::OrderTag::Hedge) {
             pushUiAlert(2, fmt::format(
                 "HEDGE order rejected: {} {} id={} — naked delta, check account limits",
                 rec->code, rec->isBuy ? "buy" : "sell", localid));
         }
+
         // P1-d/W5: rejected combo legs go terminal in the audit records too.
         for (auto& combo : _activeCombos)
             combo->legOrderTerminal(localid, true);
