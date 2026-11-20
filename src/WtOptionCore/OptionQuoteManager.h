@@ -57,6 +57,11 @@ public:
         int32_t cancel_soft_max = 0;           // soft limit (warn only)
         int32_t hard_flat_after_n_fills = 0;
         int32_t reject_max_new_orders = -1;
+        // P1 batch-4.4: second-tier response for the reject counter.
+        // 0 = off.  When newOrders >= this, OQM cancels BOTH sides and locks
+        // (hard-flat latch) until resetCounters() — reject-only is the first
+        // tier (reject_max_new_orders).
+        int32_t hard_flat_after_n_new_orders = 0;
 
         // --- 增强 (借鉴 DefaultOrderManager) ---
         double min_intra_update_period_ms = 0; // min ms between updateOrders (0=no limit)
@@ -168,6 +173,8 @@ public:
     int32_t getNumNewOrders() const { return m_numNewOrders; }
     int32_t getNumLateFills() const { return m_numLateFills; }
     bool isHardFlatMode() const { return m_hardFlatMode; }
+    /// P1 batch-4.4: first tier of the reject ladder (reject-only entered).
+    bool isRejectOnlyMode() const { return m_rejectOnlyMode; }
     /// True when cancel retries exhausted without a terminal callback; new
     /// orders on this instrument are suppressed until the order goes terminal.
     bool isCancelStuck() const { return m_cancelStuck; }
@@ -253,6 +260,8 @@ private:
     double m_lastUpdateTime = 0;
     static constexpr double LATE_FILL_THRESHOLD = 1.0;
     bool m_hardFlatMode = false;
+    bool m_rejectOnlyMode = false;   // P1 batch-4.4
+    bool m_rejectOnlyLogged = false;
     bool m_cancelStuck = false;
     double m_lastCancelStuckLog = 0;
 

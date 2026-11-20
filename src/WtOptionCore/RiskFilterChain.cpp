@@ -112,9 +112,45 @@ FilterResult MaxNewOrdersFilter::process(FilterContext& ctx) {
             + " >= reject limit " + std::to_string(m_rejectLimit);
         return FilterResult::REJECTED;
     }
+    // P1 batch-4.4: the hard-flat level must actually STOP the order — the
+    // old code only logged and returned APPROVED, so the "hard" tier was a
+    // no-op.  REJECTED routes to cancelSide in OQM (risk-reducing), and the
+    // once-log makes the escalation traceable.
     if (m_hardFlatLimit > 0 && ctx.numNewOrders >= m_hardFlatLimit) {
-        WTSLogger::log_by_cat("strategy", LL_WARN,
-            "MaxNewOrders HARD FLAT: {} newOrders={}", ctx.code, ctx.numNewOrders);
+        if (!m_hardFlatLogged) {
+            m_hardFlatLogged = true;
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "MaxNewOrders HARD FLAT: {} newOrders={} — rejecting all new orders",
+                ctx.code, ctx.numNewOrders);
+        }
+        ctx.rejectReason = "HARD FLAT newOrders=" + std::to_string(ctx.numNewOrders);
+        return FilterResult::REJECTED;
+    }
+    return FilterResult::APPROVED;
+}
+
+// === MaxOpenOffsetFilter (P1 batch-4.4) ===
+FilterResult MaxOpenOffsetFilter::process(FilterContext& ctx) {
+    if (m_limit <= 0 || !m_expProvider) return FilterResult::APPROVED;
+
+    uint32_t expiry = 0;
+    if (!m_expProvider(ctx.code, expiry)) return FilterResult::APPROVED;
+
+    const int64_t cur = ctx.currentPosition;
+    const int64_t pot = ctx.potentialPosition;
+    int64_t openAdd;
+    if (cur == 0 || (cur > 0 && pot > 0) || (cur < 0 && pot < 0))
+        openAdd = std::llabs(pot) - std::llabs(cur);   // same direction: incremental
+    else
+        openAdd = std::llabs(pot);                     // flip: whole new side opens
+    if (openAdd <= 0) return FilterResult::APPROVED;   // pure close/reduce
+
+    const int64_t opened = m_openedProvider ? m_openedProvider(expiry) : 0;
+    if (opened + openAdd > m_limit) {
+        ctx.rejectReason = "exp " + std::to_string(expiry) + " daily open "
+            + std::to_string(opened) + "+" + std::to_string(openAdd)
+            + " > limit " + std::to_string(m_limit);
+        return FilterResult::REJECTED;
     }
     return FilterResult::APPROVED;
 }

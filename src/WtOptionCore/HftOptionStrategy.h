@@ -188,11 +188,18 @@ private:
         int32_t max_cancel_hard = 200;
         int32_t max_new_orders_hard_flat = 100;
         int32_t max_new_orders_reject = 200;
+        // P1 batch-4.4: cap daily OPENED lots per expiry (0 = off).
+        // Option chain only — hedge futures must never be blocked.
+        uint32_t max_open_per_expiry_day = 0;
     };
     RiskFilterConfig _optionFilterCfg;
     RiskFilterConfig _futureFilterCfg;
     wt_option::RiskFilterChainPtr _optionFilterChain;
     wt_option::RiskFilterChainPtr _futureFilterChain;
+    // P1 batch-4.4: per-expiry daily OPENED lots (fills that increased the
+    // book's absolute position); feeds MaxOpenOffsetFilter.  Reset at
+    // session begin — the exchange counts per trading day.
+    std::map<uint32_t, int64_t> _dailyOpenByExp;
 
     // Expiry configs
     struct ExpiryConfig {

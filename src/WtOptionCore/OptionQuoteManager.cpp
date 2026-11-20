@@ -158,12 +158,35 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
         }
     }
 
-    // Reject after N new orders
+    // P1 batch-4.4: graded reject ladder.
+    //  Tier 2 (hard flat): newOrders >= hard_flat_after_n_new_orders ->
+    //    cancel BOTH sides and latch hard-flat — only cancel_only calls do
+    //    anything until resetCounters() (session begin).
+    //  Tier 1 (reject-only): newOrders >= reject_max_new_orders -> silently
+    //    skip new/changed orders (cancels still flow via the cancel_only
+    //    path above); logged ONCE on entry so a stuck ladder is visible.
+    if (m_cfg.hard_flat_after_n_new_orders > 0
+        && m_numNewOrders >= m_cfg.hard_flat_after_n_new_orders) {
+        if (!m_hardFlatMode) {
+            m_hardFlatMode = true;
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "OQM: {} HARD FLAT after {} new orders — cancelling both sides",
+                m_code, m_numNewOrders);
+        }
+        return cancelSide(true) + cancelSide(false);
+    }
+    if (m_hardFlatMode) return 0;   // latched until session reset
     if (m_cfg.reject_max_new_orders >= 0 && m_numNewOrders >= m_cfg.reject_max_new_orders) {
-        WTSLogger::log_by_cat("strategy", LL_WARN,
-            "OQM: {} order rejected (newOrders={})", m_code, m_numNewOrders);
+        if (!m_rejectOnlyLogged) {
+            m_rejectOnlyLogged = true;
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "OQM: {} REJECT-ONLY entered (newOrders={} >= {}); new orders suppressed",
+                m_code, m_numNewOrders, m_cfg.reject_max_new_orders);
+        }
+        m_rejectOnlyMode = true;
         return 0;
     }
+    m_rejectOnlyMode = false;
 
     // Enhancement: Cancel throttle - soft warn
     if (isCancelSoftWarn()) {
@@ -684,6 +707,8 @@ void OptionQuoteManager::resetCounters() {
     m_numReject = 0;
     m_numLateFills = 0;
     m_hardFlatMode = false;
+    m_rejectOnlyMode = false;
+    m_rejectOnlyLogged = false;
     m_rejectRetryCount = 0;
     m_retryPending = false;
     WTSLogger::log_by_cat("strategy", LL_INFO,

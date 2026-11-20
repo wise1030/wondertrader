@@ -99,6 +99,7 @@ public:
 private:
     int32_t m_hardFlatLimit;
     int32_t m_rejectLimit;
+    bool m_hardFlatLogged = false;   // P1 batch-4.4: log the escalation once
 };
 
 /// B3 (absorbed from quantbox TdOptionsRiskControl): cap the NET SHORT count
@@ -121,6 +122,32 @@ private:
     int32_t m_maxShortCall;   // <=0 disables
     int32_t m_maxShortPut;
     NetShortProvider m_provider;
+};
+
+/// P1 batch-4.4: cap the daily OPENED lots per expiry.  "Opened" = the part
+/// of a fill that increases the book's absolute position (a flip counts the
+/// whole new side as opening).  The pre-trade worst case is derived from
+/// currentPosition -> potentialPosition already carried by FilterContext.
+/// Providers keep the filter decoupled from the grid/risk (same pattern as
+/// OptionsShortLimitFilter).  Wired into the OPTION chain only — hedge-leg
+/// futures must never be blocked by an opening cap.
+class MaxOpenOffsetFilter : public IRiskFilter {
+public:
+    using ExpiryProvider  = std::function<bool(const std::string& code, uint32_t& expiry)>;
+    using OpenedProvider  = std::function<int64_t(uint32_t expiry)>;
+
+    MaxOpenOffsetFilter(uint32_t maxOpenPerExpiryDay, ExpiryProvider expProvider,
+                        OpenedProvider openedProvider)
+        : m_limit(maxOpenPerExpiryDay), m_expProvider(std::move(expProvider)),
+          m_openedProvider(std::move(openedProvider)) {}
+
+    FilterResult process(FilterContext& ctx) override;
+    const char* name() const override { return "MaxOpenOffset"; }
+
+private:
+    uint32_t m_limit;                 // 0 = disabled
+    ExpiryProvider m_expProvider;
+    OpenedProvider m_openedProvider;
 };
 
 using RiskFilterChainPtr = std::shared_ptr<RiskFilterChain>;

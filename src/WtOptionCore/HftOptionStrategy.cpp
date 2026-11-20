@@ -243,6 +243,7 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             optionOqmCfg.cancel_buffer = optOm->has("cancel_buffer") ? optOm->getInt32("cancel_buffer") : 0;
             optionOqmCfg.cancel_soft_max = optOm->has("cancel_soft_max") ? optOm->getInt32("cancel_soft_max") : 0;
             optionOqmCfg.reject_max_new_orders = optOm->has("reject_max_new_orders") ? optOm->getInt32("reject_max_new_orders") : -1;
+            optionOqmCfg.hard_flat_after_n_new_orders = optOm->has("hard_flat_after_n_new_orders") ? optOm->getInt32("hard_flat_after_n_new_orders") : 0;
             optionOqmCfg.enable_ioc = optOm->has("enable_ioc") ? optOm->getBoolean("enable_ioc") : false;
             // order_delay_ms is validated but has no OQM consumer yet — carry
             // the value and warn once instead of dropping it silently.
@@ -278,6 +279,7 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             futureOqmCfg.cancel_buffer = futOm->has("cancel_buffer") ? futOm->getInt32("cancel_buffer") : 0;
             futureOqmCfg.cancel_soft_max = futOm->has("cancel_soft_max") ? futOm->getInt32("cancel_soft_max") : 0;
             futureOqmCfg.reject_max_new_orders = futOm->has("reject_max_new_orders") ? futOm->getInt32("reject_max_new_orders") : -1;
+            futureOqmCfg.hard_flat_after_n_new_orders = futOm->has("hard_flat_after_n_new_orders") ? futOm->getInt32("hard_flat_after_n_new_orders") : 0;
             futureOqmCfg.enable_ioc = futOm->has("enable_ioc") ? futOm->getBoolean("enable_ioc") : false;
             futureOqmCfg.order_delay_ms = futOm->has("order_delay_ms") ? futOm->getDouble("order_delay_ms") : 0.0;
             if (futureOqmCfg.order_delay_ms > 0) {
@@ -308,6 +310,7 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
                 _optionFilterCfg.max_cancel_hard = optRf->has("max_cancel_hard") ? optRf->getInt32("max_cancel_hard") : 200;
                 _optionFilterCfg.max_new_orders_hard_flat = optRf->has("max_new_orders_hard_flat") ? optRf->getInt32("max_new_orders_hard_flat") : 100;
                 _optionFilterCfg.max_new_orders_reject = optRf->has("max_new_orders_reject") ? optRf->getInt32("max_new_orders_reject") : 200;
+                _optionFilterCfg.max_open_per_expiry_day = optRf->has("max_open_per_expiry_day") ? optRf->getUInt32("max_open_per_expiry_day") : 0;
             }
             // Future risk filters
             WTSVariant* futRf = rfCfg->get("future");
@@ -1487,6 +1490,26 @@ void HftOptionStrategy::setupCTG()
                 "RiskFilterChain: OptionsShortLimit added (call<={}, put<={})",
                 _riskLimitsEx.maxShortCallPerSymbol, _riskLimitsEx.maxShortPutPerSymbol);
         }
+
+        // P1 batch-4.4: per-expiry daily opening cap (options only).
+        if (&cfg == &_optionFilterCfg && cfg.max_open_per_expiry_day > 0) {
+            auto expProvider = [this](const std::string& code, uint32_t& exp) -> bool {
+                if (!_grid) return false;
+                auto od = _grid->get(code);
+                if (!od) return false;
+                exp = od->getExpiry();
+                return true;
+            };
+            auto openedProvider = [this](uint32_t exp) -> int64_t {
+                auto it = _dailyOpenByExp.find(exp);
+                return it == _dailyOpenByExp.end() ? 0 : it->second;
+            };
+            chain->add(std::make_unique<wt_option::MaxOpenOffsetFilter>(
+                cfg.max_open_per_expiry_day, expProvider, openedProvider));
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "RiskFilterChain: MaxOpenOffset added (limit={}/exp/day)",
+                cfg.max_open_per_expiry_day);
+        }
         return chain;
     };
     _optionFilterChain = buildFilterChain(_optionFilterCfg);
@@ -2075,9 +2098,31 @@ void HftOptionStrategy::setupAsyncCallbacks()
         auto fillClass = _orderRegistry.onFill(localid, fq, price, fillSpot);
         const bool skipOqm = (fillClass == wt_option::IssuedOrderRegistry::FillClass::Unknown);
 
+        // P1 batch-4.4: opened-lots accounting BEFORE applying the fill.
+        const double posBeforeOpen = _positionBook.net(code);
         _positionBook.addFill(code, isBuy, vol);
         _positions[code] = _positionBook.net(code);
         _dirtyOptions.insert(code);
+        {
+            const double posAfterOpen = _positions[code];
+            const double a0 = std::fabs(posBeforeOpen), a1 = std::fabs(posAfterOpen);
+            int64_t opened = 0;
+            if (posBeforeOpen == 0.0
+                || (posBeforeOpen > 0 && posAfterOpen > 0)
+                || (posBeforeOpen < 0 && posAfterOpen < 0))
+                opened = (int64_t)std::llround(a1 - a0);
+            else
+                opened = (int64_t)std::llround(a1);
+            if (opened > 0) {
+                uint32_t exp = 0;
+                if (_grid) { auto od = _grid->get(code); if (od) exp = od->getExpiry(); }
+                if (exp == 0 && _otg) {
+                    auto utd = _otg->getUnderlyingTradingData(code);
+                    if (utd) exp = utd->getExpiry();
+                }
+                if (exp) _dailyOpenByExp[exp] += opened;
+            }
+        }
 
         // Forward to OQM (per-contract order tracker).  Futures use UTD/OQM;
         // leaving them unrouted leaves hedge order state permanently stale.
@@ -2689,6 +2734,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_valWriter) _valWriter->init(tdate);
             // QuoteStatistics: reset for new session
             _quoteStats.onSessionBegin(tdate);
+            _dailyOpenByExp.clear();   // P1 batch-4.4: per-trading-day opening budget
         } else {
             WTSLogger::log_by_cat("strategy", LL_INFO,
                 "HftOptionStrategy session end: {}", tdate);

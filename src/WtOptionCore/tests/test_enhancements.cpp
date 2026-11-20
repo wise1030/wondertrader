@@ -2841,6 +2841,92 @@ void test_order_tag_attribution() {
     std::cout << "  PASS" << std::endl;
 }
 
+// ============================================================================
+// P1 batch-4.4: MaxOpenOffsetFilter (daily per-expiry opening cap) and the
+// MaxNewOrdersFilter hard-flat tier (must actually REJECT, not just log).
+// ============================================================================
+void test_max_open_offset_filter() {
+    std::cout << "=== test_max_open_offset_filter ===" << std::endl;
+    using namespace wt_option;
+
+    std::map<uint32_t, int64_t> opened;
+    auto expProv = [](const std::string& c, uint32_t& e) {
+        if (c.rfind("EXP1.", 0) == 0) { e = 1; return true; }
+        if (c.rfind("EXP2.", 0) == 0) { e = 2; return true; }
+        return false;
+    };
+    auto openProv = [&opened](uint32_t e) -> int64_t {
+        auto it = opened.find(e); return it == opened.end() ? 0 : it->second;
+    };
+
+    // disabled limit -> always approved
+    {
+        MaxOpenOffsetFilter f(0, expProv, openProv);
+        FilterContext c; c.code = "EXP1.C100"; c.currentPosition = 0;
+        c.potentialPosition = 50; c.qty = 50;
+        ASSERT_TRUE(f.process(c) == FilterResult::APPROVED);
+    }
+    // same-direction incremental open within the cap
+    {
+        MaxOpenOffsetFilter f(100, expProv, openProv);
+        FilterContext c; c.code = "EXP1.C100"; c.currentPosition = 10;
+        c.potentialPosition = 60; c.qty = 50;
+        ASSERT_TRUE(f.process(c) == FilterResult::APPROVED);
+    }
+    // breach: opened 60 + add 50 > 100 -> rejected
+    {
+        opened[1] = 60;
+        MaxOpenOffsetFilter f(100, expProv, openProv);
+        FilterContext c; c.code = "EXP1.C100"; c.currentPosition = 0;
+        c.potentialPosition = 50; c.qty = 50;
+        ASSERT_TRUE(f.process(c) == FilterResult::REJECTED);
+        // expiry isolation: exp2 has zero opened -> approved
+        FilterContext c2; c2.code = "EXP2.P200"; c2.currentPosition = 0;
+        c2.potentialPosition = 50; c2.qty = 50;
+        ASSERT_TRUE(f.process(c2) == FilterResult::APPROVED);
+        opened.clear();
+    }
+    // flip: whole new side counts as opening (cur +3 -> pot -10 opens 10)
+    {
+        MaxOpenOffsetFilter f(5, expProv, openProv);
+        FilterContext c; c.code = "EXP1.C100"; c.currentPosition = 3;
+        c.potentialPosition = -10; c.qty = 13;
+        ASSERT_TRUE(f.process(c) == FilterResult::REJECTED);
+    }
+    // pure close/reduce never rejected
+    {
+        opened[1] = 1000;
+        MaxOpenOffsetFilter f(100, expProv, openProv);
+        FilterContext c; c.code = "EXP1.C100"; c.currentPosition = -50;
+        c.potentialPosition = -10; c.qty = 40;   // buying back shorts
+        ASSERT_TRUE(f.process(c) == FilterResult::APPROVED);
+        FilterContext c2; c2.code = "EXP1.C100"; c2.currentPosition = 50;
+        c2.potentialPosition = 10; c2.qty = 40;  // selling longs
+        ASSERT_TRUE(f.process(c2) == FilterResult::APPROVED);
+        opened.clear();
+    }
+    // unresolvable code -> approved (futures/unknown not under this cap)
+    {
+        MaxOpenOffsetFilter f(1, expProv, openProv);
+        FilterContext c; c.code = "WHATEVER"; c.currentPosition = 0;
+        c.potentialPosition = 100; c.qty = 100;
+        ASSERT_TRUE(f.process(c) == FilterResult::APPROVED);
+    }
+
+    // MaxNewOrdersFilter: hard-flat tier now rejects (was log-only APPROVED)
+    {
+        MaxNewOrdersFilter f(10, 5);   // hardFlat=10, reject=5
+        FilterContext c; c.code = "X"; c.numNewOrders = 6;
+        ASSERT_TRUE(f.process(c) == FilterResult::REJECTED);   // reject tier
+        FilterContext c2; c2.code = "X"; c2.numNewOrders = 11;
+        ASSERT_TRUE(f.process(c2) == FilterResult::REJECTED);  // hard-flat tier
+        FilterContext c3; c3.code = "X"; c3.numNewOrders = 4;
+        ASSERT_TRUE(f.process(c3) == FilterResult::APPROVED);
+    }
+
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "WtOptionCore Enhancement Module Tests" << std::endl;
@@ -2901,6 +2987,7 @@ int main() {
     test_trading_intensity();
     test_batch_quote_validator();
     test_order_tag_attribution();
+    test_max_open_offset_filter();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;
