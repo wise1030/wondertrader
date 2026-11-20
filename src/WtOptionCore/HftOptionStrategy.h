@@ -218,6 +218,9 @@ private:
         // normalization + UI current-vs-target display (0 = no target).
         double targ_delta = 0;
         double targ_vega = 0;
+        // P1 follow-up: per-expiry GVV blend (<0 = fall back to the global
+        // pricer.blackCalc.volCurve.volcurve_weight).
+        double volcurve_weight = -1.0;
         std::string underlyingCode;  // per-expiry pricing underlying (empty=use global)
         std::string hedgeCode;       // tradeable hedge (empty=same as underlyingCode)
         std::vector<std::string> secondaryHedgeCodes;

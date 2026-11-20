@@ -124,6 +124,16 @@ CompositeOptionPricer::CompositeOptionPricer(
     , m_bReprice(true)
     , m_refPrice(0)
 {
+    // P1 follow-up (4.1 audit): teenie pricing is a stub that would silently
+    // freeze quote updates if enabled — force it off, loudly.
+    if (c.enable_teenie_pricing) {
+        m_config.enable_teenie_pricing = false;
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "CompositeOptionPricer: enable_teenie_pricing requested but the "
+            "implementation is a no-op stub (4.1 audit) — FORCING OFF.  Do not "
+            "enable until the visible book is wired into the teenie paths.");
+    }
+
     setTraceLevel(config().trace_level);
 
     // Create the black pricer sub-pricer
@@ -544,7 +554,11 @@ bool CompositeOptionPricer::initValuesCompute(OptionGrid* grid) {
         // Set GVV blend weight per expiry (quantbox: COP sets OP2's gvv_weight
         // from a notifiable property; here we use config. 0=fitted curve, 1=GVV)
         for (uint32_t exp : m_active_expiries) {
-            m_spOptionPricer2->setGvvWeight(exp, config().volcurve_weight);
+            // P1 follow-up: per-expiry override wins over the global knob.
+            double w = config().volcurve_weight;
+            auto ovr = m_gvvWeightOverride.find(exp);
+            if (ovr != m_gvvWeightOverride.end()) w = ovr->second;
+            m_spOptionPricer2->setGvvWeight(exp, w);
         }
     }
 

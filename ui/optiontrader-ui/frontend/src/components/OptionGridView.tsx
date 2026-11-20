@@ -107,7 +107,15 @@ const MemoizedGridRow = memo(({
         <td className={`${cell} font-medium`} onClick={() => onCellClick(row, side, 'theo')}>{fmtN(leg.theo)}</td>
         <td className={`${cell} bg-gray-50`}>{fmtN(leg.iv, 4)}</td>
         <td className={`${cell}`} onClick={() => ticket('B')}>{leg.ask ?? '-'}</td>
-        <td className={`${cell}`} onClick={() => ticket('B')}>{leg.askSz ?? '-'}</td>
+        <td className={`${cell}`} onClick={() => ticket('B')}>
+          {leg.askSz ?? '-'}
+          {leg.ad && leg.ad.length > 0 && (
+            <span className="text-[8px] text-gray-400"
+              title={leg.ad.map(l => `${l[0]}x${l[1]}`).join(' | ')}>
+              +{leg.ad.reduce((a, l) => a + (l[1] || 0), 0)}
+            </span>
+          )}
+        </td>
         {(() => (
           <td className={`${cell} text-[9px] text-red-700 whitespace-pre ${qpBg(leg.aqp, 'S')}`}
               title={`our ask ${leg.oask ?? '-'} · queue pos ${leg.aqp === 9999 ? 'none' : leg.aqp}${leg.aqp === 0 ? ' (best)' : leg.aqp != null && leg.aqp < 0 ? ' (crossing!)' : ''}`}>

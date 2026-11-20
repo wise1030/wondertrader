@@ -34,6 +34,14 @@ struct UiLegView
     bool hasDelta = false;  double delta = 0;
     bool hasVshift = false; double vshift = 0;   // theoVol - atmVol
 
+    // P1 follow-up (五档深度): 5-level book from OptionMarket's B12 store.
+    // Only encoded when the feed actually carries depth beyond level 1
+    // (CTP options usually carry level 1 only — see snapshot size note).
+    static constexpr int32_t DEPTH = 5;
+    int32_t numBid = 0, numAsk = 0;
+    double bidPx[DEPTH] = {}, askPx[DEPTH] = {};
+    double bidSz5[DEPTH] = {}, askSz5[DEPTH] = {};
+
     bool hasPnl = false;    double pnl = 0;
 
     double pos = 0;                          // net position (offsets applied)

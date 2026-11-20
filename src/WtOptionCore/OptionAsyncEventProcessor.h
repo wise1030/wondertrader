@@ -47,6 +47,17 @@ struct TickData {
     uint32_t expireDate = 0;   // B28: exact expiry YYYYMMDD (0 = unknown)
     double upperLimit = 0;     // R1: exchange price limit (0 = unknown)
     double lowerLimit = 0;     // R1: exchange price limit (0 = unknown)
+
+    // P1 follow-up (五档深度): five-level book from WTSTickData.  Level 0 is
+    // mirrored in bid/ask/bidQty/askQty above for backward compat; deeper
+    // levels ride these arrays (num*Levels = valid count, 0..5).
+    static constexpr int32_t DEPTH = 5;
+    double bidPrices[DEPTH] = {};
+    double askPrices[DEPTH] = {};
+    double bidQtys[DEPTH] = {};
+    double askQtys[DEPTH] = {};
+    int32_t numBidLevels = 0;
+    int32_t numAskLevels = 0;
 };
 
 struct SessionEvent {

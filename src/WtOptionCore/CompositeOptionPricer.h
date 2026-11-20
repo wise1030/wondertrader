@@ -144,6 +144,12 @@ public:
     // sticky / teenie
     double sticky_base         = 0.0;
     double improve_retreat_ratio = 1.0;
+    // P1 follow-up (4.1 audit 2026-11-20): UNSUPPORTED — the futures branch
+    // is an arithmetic no-op (min(bid, bid+bts) == bid) and the options
+    // branch returns false unconditionally (empty-book placeholder), so
+    // enabling it would silently FREEZE all quote updates.  The constructor
+    // forces this off and logs an error; a real implementation needs the
+    // visible book wired into these paths first.
     bool   enable_teenie_pricing = false;
 
     // EMA windows (seconds)
@@ -350,6 +356,10 @@ public:
     /// P1 batch-3.2: per-expiry spread multiplier from the intensity estimator.
     void setIntensityMultiplier(uint32_t exp, double m) { m_intensityMul[exp] = m; }
 
+    /// P1 follow-up: per-expiry GVV blend override (expiries[].volcurve_weight).
+    /// Falls back to config().volcurve_weight for expiries not listed.
+    void setGvvWeightPerExpiry(uint32_t exp, double w) { m_gvvWeightOverride[exp] = w; }
+
     /// P1 batch-5.2: per-expiry greek targets (expiries[].targ_delta/targ_vega).
     /// Feeds the risk-shift normalization (m_prop_exp_{delta,vega_tw}_targets)
     /// — both maps existed but had no config wiring before this.
@@ -514,6 +524,7 @@ private:
     };
     std::map<uint32_t, ExpiryDataPub> m_prop_edpub;
     std::map<uint32_t, double> m_intensityMul;   // P1 batch-3.2
+    std::map<uint32_t, double> m_gvvWeightOverride;   // P1 follow-up per-expiry GVV
 
     // Signals
     std::vector<IAlphaSignal::Ptr> m_alphaSignals;

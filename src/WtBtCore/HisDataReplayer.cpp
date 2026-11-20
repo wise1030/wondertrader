@@ -1522,6 +1522,17 @@ uint64_t HisDataReplayer::getNextTickTime(uint32_t curTDate, uint64_t stime /* =
 			continue;
 
 		WTSSessionInfo* sInfo = get_session_info(stdCode, true);
+		if (sInfo == NULL)
+		{
+			// P1 follow-up (6.5 replay audit): a subscribed code with no
+			// session mapping (missing commodities entry, non-standard code)
+			// used to segfault here.  Skip it - the tick simply cannot be
+			// placed in a trading section.
+			static std::set<std::string> s_logged;
+			if (s_logged.insert(stdCode).second)
+				WTSLogger::warn("No session info for {}, its replay ticks are skipped", stdCode);
+			continue;
+		}
 
 		auto& tickList = _ticks_cache[stdCode];
 		if (tickList._cursor == UINT_MAX)

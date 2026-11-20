@@ -286,6 +286,21 @@ void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
     mkt.underlyingPrice = getUnderlyingPrice();
     mkt.updateTime = tick.updateTime;
 
+    // P1 follow-up: five-level book into the B12 depth store (level 0 is
+    // level 1 of the arrays — bid/bidSize above stay the authoritative best).
+    for (int32_t i = 0; i < TickDataRef::DEPTH; ++i) {
+        if (i < tick.numBidLevels) {
+            mkt.bidPrices[i] = tick.bidPrices[i];
+            mkt.bidQty[i] = tick.bidQtys[i];
+        }
+        if (i < tick.numAskLevels) {
+            mkt.askPrices[i] = tick.askPrices[i];
+            mkt.askQty[i] = tick.askQtys[i];
+        }
+    }
+    mkt.numBidLevels = tick.numBidLevels;
+    mkt.numAskLevels = tick.numAskLevels;
+
     // Dynamic discovery: create if not exists
     {
         std::shared_lock<std::shared_mutex> rlock(m_gridMutex);

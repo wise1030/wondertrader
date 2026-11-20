@@ -33,6 +33,21 @@ void UiSnapshotBuilder::buildLeg(const OptionData& od, double atmVol, UiLegView&
     out.ask = mkt.ask;    out.askSz = mkt.askSize;
     out.last = mkt.last;
 
+    // P1 follow-up: five-level book (cap at the view's DEPTH)
+    {
+        const int32_t nb = std::min(mkt.numBidLevels, UiLegView::DEPTH);
+        const int32_t na = std::min(mkt.numAskLevels, UiLegView::DEPTH);
+        out.numBid = nb; out.numAsk = na;
+        for (int32_t i = 0; i < nb; ++i) {
+            out.bidPx[i] = mkt.bidPrices[i];
+            out.bidSz5[i] = mkt.bidQty[i];
+        }
+        for (int32_t i = 0; i < na; ++i) {
+            out.askPx[i] = mkt.askPrices[i];
+            out.askSz5[i] = mkt.askQty[i];
+        }
+    }
+
     // 0 is the engine's "not computed" sentinel -> JSON null downstream.
     const double theo = od.getTheoPrice();
     if (theo != 0.0) { out.hasTheo = true; out.theo = theo; }
@@ -238,6 +253,16 @@ void writeLeg(JsonWriter& w, const UiLegView& leg)
     else { w.key("obid"); w.Null(); w.key("oask"); w.Null(); }
     w.key("bqp"); w.Int(leg.bqp);
     w.key("aqp"); w.Int(leg.aqp);
+    if (leg.numBid > 1 || leg.numAsk > 1) {   // P1 follow-up: depth beyond best
+        w.key("bd"); w.StartArray();
+        for (int32_t i = 0; i < leg.numBid; ++i)
+            { w.StartArray(); w.Double(leg.bidPx[i]); w.Double(leg.bidSz5[i]); w.EndArray(); }
+        w.EndArray();
+        w.key("ad"); w.StartArray();
+        for (int32_t i = 0; i < leg.numAsk; ++i)
+            { w.StartArray(); w.Double(leg.askPx[i]); w.Double(leg.askSz5[i]); w.EndArray(); }
+        w.EndArray();
+    }
     w.nullable("pnl", leg.hasPnl, leg.pnl);
     w.EndObject();
 }

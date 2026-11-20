@@ -361,6 +361,7 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
                 e->getBoolean("enable"),
                 e->has("targ_delta") ? e->getDouble("targ_delta") : 0.0,
                 e->has("targ_vega") ? e->getDouble("targ_vega") : 0.0,
+                e->has("volcurve_weight") ? e->getDouble("volcurve_weight") : -1.0,
                 e->has("underlyingCode") ? e->getCString("underlyingCode") : "",
                 e->has("hedgeCode") ? e->getCString("hedgeCode") : "",
                 {},  // secondaryHedgeCodes filled below
@@ -1272,6 +1273,8 @@ void HftOptionStrategy::setupPricer()
             // P1 batch-5.2: greek targets feed the risk-shift normalization
             // (delta/vega buckets skew quotes toward the target book).
             _compositePricer->setExpiryTargets(exp, ec.targ_delta, ec.targ_vega);
+            if (ec.volcurve_weight >= 0.0)
+                _compositePricer->setGvvWeightPerExpiry(exp, ec.volcurve_weight);
         }
 
         _pricer = _compositePricer;
@@ -1652,6 +1655,18 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 ref.expireDate = tick.expireDate;  // B28: exact expiry backfill
                 ref.actionTime = tick.actionTime;
                 ref.updateTime = tick.updateTime;
+                // P1 follow-up: five-level book pass-through
+                static_assert(std::extent<decltype(ref.bidPrices)>::value
+                              == std::extent<decltype(tick.bidPrices)>::value,
+                              "TickDataRef/TickData depth mismatch");
+                for (int32_t i = 0; i < decltype(ref)::DEPTH; ++i) {
+                    ref.bidPrices[i] = tick.bidPrices[i];
+                    ref.askPrices[i] = tick.askPrices[i];
+                    ref.bidQtys[i] = tick.bidQtys[i];
+                    ref.askQtys[i] = tick.askQtys[i];
+                }
+                ref.numBidLevels = tick.numBidLevels;
+                ref.numAskLevels = tick.numAskLevels;
                 _grid->onTick(code, ref);
             }
 
@@ -2058,7 +2073,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _analysisRecorder.maybeFlush(now, _curSessionDate);
             }
 
-            // P1 batch-6.5: quote stream capture (default off; own cadence)
+            // P1 batch-6.5: quote stream capture (default off; own cadence).
+            // Records EVERY book-carrying tick seen this batch: option books
+            // (for the chain) and futures books (hedge + per-expiry
+            // underlyings — the engine replay needs both to rebuild forwards).
             if (_qstreamRecorder.enabled() && _grid) {
                 for (const auto& od : _grid->getAllOptions()) {
                     if (!od) continue;
@@ -2066,6 +2084,15 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     const double iv = od->getImpliedVol();
                     _qstreamRecorder.record(od->getCode(), m.bid, m.ask, m.last,
                                             iv > 0 ? iv : 0.0);
+                }
+                if (_otg) {
+                    for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
+                        const auto& utd = pair.second;
+                        if (!utd) continue;
+                        const double b = utd->getBid(), a = utd->getAsk();
+                        if (b > 0 && a > 0)
+                            _qstreamRecorder.record(pair.first, b, a, utd->getMid(), 0.0);
+                    }
                 }
                 _qstreamRecorder.maybeFlush(now, _curSessionDate);
             }

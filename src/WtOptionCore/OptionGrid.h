@@ -85,6 +85,17 @@ public:
         uint32_t expireDate = 0;   // B28: exact expiry YYYYMMDD (0 = unknown)
         uint32_t actionTime = 0;   // exchange action time (HHMMSSmmm when available)
         uint64_t updateTime = 0;   // local receive timestamp, epoch milliseconds
+
+        // P1 follow-up (五档深度): must mirror OptionAsyncEventProcessor
+        // TickData::DEPTH — the two structs are bridged by value in
+        // HftOptionStrategy's on_tick lambda.
+        static constexpr int32_t DEPTH = 5;
+        double bidPrices[DEPTH] = {};
+        double askPrices[DEPTH] = {};
+        double bidQtys[DEPTH] = {};
+        double askQtys[DEPTH] = {};
+        int32_t numBidLevels = 0;
+        int32_t numAskLevels = 0;
     };
     void onTick(const std::string& stdCode, const TickDataRef& tick);
 

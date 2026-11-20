@@ -41,6 +41,21 @@ OptionAsyncEventProcessor::AsyncEvent OptionAsyncEventProcessor::AsyncEvent::mak
     // R1: exchange price limits straight off the feed
     ev.tick.upperLimit = t->upperlimit();
     ev.tick.lowerLimit = t->lowerlimit();
+    // P1 follow-up: five-level book — stop at the first empty level; the
+    // CTP option feed normally carries level 1 only, deeper levels appear
+    // on feeds/exchanges that publish them.
+    for (int32_t i = 0; i < TickData::DEPTH; ++i) {
+        const double bp = t->bidprice(i), ap = t->askprice(i);
+        const double bq = t->bidqty(i),  aq = t->askqty(i);
+        if (bp > 0 && bq > 0) {
+            ev.tick.bidPrices[i] = bp; ev.tick.bidQtys[i] = bq;
+            ev.tick.numBidLevels = i + 1;
+        }
+        if (ap > 0 && aq > 0) {
+            ev.tick.askPrices[i] = ap; ev.tick.askQtys[i] = aq;
+            ev.tick.numAskLevels = i + 1;
+        }
+    }
     return ev;
 }
 

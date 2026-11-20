@@ -88,7 +88,8 @@ public:
                               "delta_min","delta_max","sprd_fwd","sprd_atmvol","sprd_corr",
                               "max_pos_fut","max_pos_stk","max_pos_opt","max_qsize",
                               "enable_auto_close","close_pos_thresh","include_future",
-                              "min_strikes_for_synthetic" } },
+                              "min_strikes_for_synthetic",
+                              "volcurve_weight" } },   // P1 follow-up: per-expiry GVV blend
             { "orderManager.riskFilters.option", { "enabled","max_order_size","max_order_size_reject",
                               "min_sell_price","max_position","max_position_mode",
                               "max_cancel_soft","max_cancel_hard","max_new_orders_hard_flat",

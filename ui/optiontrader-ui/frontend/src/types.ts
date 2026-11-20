@@ -13,6 +13,10 @@ export interface LegView {
   bidSz: number | null;
   ask: number | null;
   askSz: number | null;
+  // P1 follow-up (五档深度): levels beyond best as [px, qty][] (absent when
+  // the feed only carries level 1 — CTP options usually do).
+  bd?: [number, number][] | null;
+  ad?: [number, number][] | null;
   last: number | null;
   theo: number | null;
   iv: number | null;
