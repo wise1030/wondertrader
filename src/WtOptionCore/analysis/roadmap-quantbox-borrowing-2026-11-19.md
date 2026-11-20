@@ -211,9 +211,19 @@
 - 6.4 信号打分——✅ 已实施（11-20，PredictionEvaluator 加 scanner 收敛打分（theo-mid 方向 30s 验证，滚动 100 窗 Pearson IC）+ fwd30s hitRate 访问器；快照 pred 对象；前端 PredChips）
 - 6.5 回放设施——✅ 部分实施（11-20，QstreamRecorder 可回放报价流 qstream_<tdate>.csv（默认关，analysis.qstream_sec）+ analysis/qstream_check.py 离线回放校验。引擎级 tick 回放（WtBtCore ParserX 数据源自举）留作后续项）
 
-### 独立项（不阻塞）
-- 五档深度数据链（深度版 qp 前提）
-- expiries[].volcurve_weight per-expiry 配置（GVV 运营旋钮）
+### 独立项（不阻塞）——✅ 全部完成（11-20）
+- 五档深度数据链——✅ 异步断点补齐（TickData/TickDataRef 5 档数组 →
+  OptionMarket B12 存储 → 快照 bd/ad（>1 档才编码）→ 前端 Σ5 徽标）。
+  CTP 期权 feed 通常只 1 档，深度显示随 feed 自动出现
+- expiries[].volcurve_weight——✅ per-expiry GVV 混合权重（默认 -1
+  回退全局；setGvvWeightPerExpiry 覆盖）
+- teenie 配置审计——✅（4.1 发现：空操作桩启用即冻结报价；构造器
+  强制 OFF + ERROR 日志）
+- 引擎级 tick 回放——✅ 端到端实测（qstream_to_dsb.py：RAW_V2 12 字节
+  头，20 字节头会 RAW 透传错位段错误；dsb_roundtrip.py 52,439 tick
+  往返 PASS；WtBtCore 无会话品种 skip+WARN 修复——原段错误；实测
+  34.6 万 tick 铜期权日回放 enabled=true options=36 underlying=106620；
+  操作手册 analysis/replay.md）
 
 ## 3.5 遗漏补录（复核新增）
 
