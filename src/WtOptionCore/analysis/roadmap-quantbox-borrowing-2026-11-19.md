@@ -259,6 +259,35 @@
 维度；3.3/5.4 持久化补的是框架不管的状态恢复。两处编码/白名单
 错误已修。实施路径（修既有→补维度→配置灰度→实测）符合最小侵入。
 
+## 3.4c 二次逐功能复核记录（11-20，30 个功能点逐一过）
+
+**修复（本轮，commit 068ea572，已部署）**：
+1. 6.3 Attribution edge 少乘合约乘数——px/theo 是每手权利金，金额需
+   ×volscale（cu=5 时 edge 低报 5 倍）；从 meta.contracts 查表
+2. 6.3 theta 分解多乘 -1——引擎 theta（BlackCalc::thetaPerDay）已为
+   负值语义，-1 翻转把时间损耗显示为幻影收益
+3. 6.0 AnalysisRecorder append 模式同日重启重复每个重启前分钟（污染
+   vol 锥分位数）——改 truncate 全日重写 + loadDay 启动回灌 + 测试
+4. 5.5 告警限速压力不可见——suppressed 计数并入下次成功 alert 后缀
+5. VolCone 未用变量清理
+
+**复核通过项（证据要点）**：
+- 3.1 降级守卫：全量 grep 所有 setState reason（12 个）逐一核对白名
+  单——无静默拦截；hotcmd_getflat_off/hotcmd_start 是死白名单项（无
+  害）
+- 5.1 HedgePanel $Δ 无需乘 volscale：OptionRiskData::update 证据——
+  头寸希腊已乘 contractSize（吨当量），delta×fwd 即名义金额
+- 4.4 MaxOpenOffsetFilter openAdd 边界（减仓/反手/纯平）验证 ✓
+- 4.2 veto 双清（desired market + PendingQuote）✓；retainDrops 交互 ✓
+- 5.4 replay 窗口（registerAll 后、sync_param 前）✓
+- 深度链 static_assert 编译期保护 ✓
+- 黑名单核对：3.1 白名单多余项无害
+
+**新记录（不立即动）**：
+- 4.4 hard-flat 闩锁无手动解除通道（resetCounters 仅 session begin；
+  误触发需等日切）——启用 hard_flat_after_n_new_orders 前加 hot cmd
+- 6.4 scanner 打分验证用 ATM call mid（非命中 leg 本身）——已知简化
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
