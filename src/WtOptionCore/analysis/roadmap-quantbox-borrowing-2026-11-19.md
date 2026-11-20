@@ -288,6 +288,31 @@
   误触发需等日切）——启用 hard_flat_after_n_new_orders 前加 hot cmd
 - 6.4 scanner 打分验证用 ATM call mid（非命中 leg 本身）——已知简化
 
+## 3.4d UI pos 不显示——根因修复与双层问题记录（11-20，commit 3a2daa66）
+
+**A 层（真 bug，已修）**：od->setPosition（UI leg pos 的唯一来源，
+buildLeg 读 od.getPosition()）坐在批量层 enabled&&marketFresh 门内。
+日内通道断线（SimNow 4097 → channel_lost → Disabled）或未恢复时段，
+broker snapshot 已恢复的 _positions 不写入 OD → UI pos 恒 0（84 手
+遗留持仓显示为 0）。修复：持仓真相同步移出门控。
+**同类排查一并解除**（同一门内"真相同步"类）：
+- _risk->update() 同门 → 断线期组合 Δ/Γ/ν/Θ 不反映恢复持仓（内部
+  有 per-RiskData dirty 检查，门外空转近零成本）
+- checkRiskLimitsEx / checkMarginLimits / checkDeltaHedge 同门 →
+  断线恰是持仓刚恢复、最需抓超限的窗口（三者自带输入保护：
+  udlPx<=0 return / channelReady 下单检查 / 节流）
+- 无问题项：UTD pos（provider 实时读 _positions）、PositionGuard/
+  Offsets（on_position 直喂）、UI 快照构建（无门）、批量由事件驱动
+  （position/channel 事件必达唤醒，静默期无数据需同步）
+
+**B 层（动态发现固有行为，记录）**：进程重启后网格为空（期权合约靠
+tick 动态发现），开盘前 UI 整页无行——expiries=0、pos 无处显示。
+夜盘开盘 tick 到达即自愈。若要求开盘前也显示合约骨架，需启动期按
+contracts.json 期权链预建 grid（后续项，当前 basefiles 无期权链）。
+
+**验证路径**：夜盘开盘后 UI 应出现合约行且 pos 显示恢复持仓（enabled
+与否无关）。9/9 测试绿。
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
