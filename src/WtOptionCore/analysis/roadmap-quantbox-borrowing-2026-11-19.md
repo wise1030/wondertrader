@@ -499,6 +499,19 @@ ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无
 - 全局 qmode 按钮移除（ctrl 条 ALL 取代）；OrdersTable 静默返回改提示
 - 后端零改动；9/9 测试 rc=0；build ✓ 已部署
 
+## 3.4m UI 四维度终审（11-23，a2233b99，已推送）
+
+四维度（功能合理性/布局/后端联通/显示正确性）全面审阅：
+- **快照 schema 对齐**：16 顶层键+嵌套对象与前端 types 逐项核对全
+  通，无字段缺失/拼写漂移
+- **命令链路全实证**（11 条命令逐一测过）
+- 修复：GetFlat 状态色（orange，与 Disabled 灰区分）；conn_state
+  诊断帧接入（footer 双段链路灯——浏览器↔middleware↔UiBridge）
+- 复核无 bug 项：SmileBand 变量遮蔽、TOTAL colSpan、GreeksPnlBar
+  空值安全、fills dedup key
+- 遗留记录：TradesTab tag 过滤状态不持久（低风险）；GetFlat 色
+- 全部推送 origin（74+2 commits）
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
