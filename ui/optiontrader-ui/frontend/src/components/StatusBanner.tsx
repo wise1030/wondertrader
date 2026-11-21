@@ -7,6 +7,7 @@ const STATE_COLORS: Record<string, string> = {
     Panic: 'bg-red-600',
     SessionStopped: 'bg-gray-500',
     Disabled: 'bg-gray-400',
+    GetFlat: 'bg-orange-500',   // close-flatten mode — distinct from Disabled grey
 };
 
 const Lamp: React.FC<{ label: string; on: boolean; okColor?: string }> = ({ label, on, okColor = 'bg-green-500' }) => (

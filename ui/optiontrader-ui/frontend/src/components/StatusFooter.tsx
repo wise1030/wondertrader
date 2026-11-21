@@ -6,7 +6,7 @@ import { useNowMs, liveAgeMs } from '../hooks/useNow';
 // connection health lives where it is least distracting.  Everything an
 // operator glances at per minute, nothing more.
 export const StatusFooter: React.FC = () => {
-    const { connectionStatus, snapshot, snapshotArrivalMs, sid, readonly } = useData();
+    const { connectionStatus, snapshot, snapshotArrivalMs, sid, readonly, bridgeConn } = useData();
     const nowMs = useNowMs(1000);
     const age = liveAgeMs(snapshot?.snapshotAgeMs, snapshotArrivalMs, nowMs);
     const risk = snapshot?.risk;
@@ -21,6 +21,10 @@ export const StatusFooter: React.FC = () => {
             <span>age <b className={age != null && age > 3000 ? 'text-red-300' : ''}>{age != null ? `${age}ms` : '-'}</b></span>
             <span>TPS <b>{risk ? `${risk.tps}/${risk.tpsMax}` : '-'}</b></span>
             <span className="text-gray-400">sid {sid || '-'}</span>
+            <span className="flex items-center gap-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${bridgeConn === 'connected' ? 'bg-green-400' : 'bg-red-400'}`} />
+                bridge <b>{bridgeConn}</b>
+            </span>
             <span className={`px-1.5 rounded font-bold ${readonly ? 'bg-gray-600' : 'bg-green-700'}`}>
                 {readonly ? 'READONLY' : 'WRITE'}
             </span>

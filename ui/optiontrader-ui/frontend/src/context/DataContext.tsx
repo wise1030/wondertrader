@@ -22,6 +22,9 @@ interface DataState {
     lastSnapLogMs: number;      // snapshot-log throttle (design §7: no 1Hz flood)
     sid: string;
     readonly: boolean;
+    // P1: middleware bridge-link diagnostic (conn_state frame from the
+    // middleware — shows the middleware↔UiBridge upstream state).
+    bridgeConn: string;
     // P1 batch-5.5: latest graded alert — App toasts on change.
     lastAlert: { level: number; msg: string; ms: number } | null;
 }
@@ -48,6 +51,7 @@ const initialState: DataState = {
     lastSnapLogMs: 0,
     sid: '',
     readonly: true,
+    bridgeConn: 'unknown',
     lastAlert: null,
 };
 
@@ -60,7 +64,8 @@ type Action =
     | { type: 'REJECT'; ev: any }
     | { type: 'ACK'; ev: AckEvent }
     | { type: 'FILLS'; items: FillView[] }
-    | { type: 'ALERT'; level: number; msg: string; ms: number };
+    | { type: 'ALERT'; level: number; msg: string; ms: number }
+    | { type: 'CONN_STATE'; status: string };
 
 function reducer(state: DataState, a: Action): DataState {
     switch (a.type) {
@@ -142,6 +147,8 @@ function reducer(state: DataState, a: Action): DataState {
             return { ...state, lastAlert: { level: a.level, msg: a.msg, ms: a.ms },
                      ...log(state, a.level >= 2 ? 'error' : 'info', `alert[${a.level}]: ${a.msg}`) };
         }
+        case 'CONN_STATE':
+            return { ...state, bridgeConn: a.status };
         default:
             return state;
     }
@@ -185,6 +192,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 case 'ack': pending.current.push({ type: 'ACK', ev: frame }); break;
                 case 'fills': pending.current.push({ type: 'FILLS', items: frame.items ?? [] }); break;
                 case 'alert': pending.current.push({ type: 'ALERT', level: frame.level ?? 0, msg: frame.msg ?? '', ms: Date.now() }); break;
+                case 'conn_state': pending.current.push({ type: 'CONN_STATE', status: frame.status ?? 'unknown' }); break;
                 default: break;
             }
         });

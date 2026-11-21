@@ -228,6 +228,12 @@ export interface FillsMessage {
   items: FillView[];
 }
 
+export interface ConnStateMessage {
+  type: 'conn_state';
+  status: string;
+  url?: string;
+}
+
 export interface HelloMessage {
   type: 'hello';
   proto: number;
@@ -263,5 +269,6 @@ export type Frame =
   | AckEvent
   | FillsMessage
   | AlertEvent
+  | ConnStateMessage
   | HelloMessage
   | { type: string;[k: string]: any };
