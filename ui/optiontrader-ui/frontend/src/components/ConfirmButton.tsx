@@ -27,12 +27,17 @@ export const ConfirmButton: React.FC<{
   const onClick = ms <= 0
     ? onConfirm
     : () => { if (armed) { setArmed(false); onConfirm(); } else setArmed(true); };
+  // P1 fix: REPLACE the class list when armed — appending
+  // 'text-white' after a caller-supplied 'text-gray-700' does NOT win:
+  // Tailwind resolves same-specificity utilities by its own generation
+  // order (gray-700 > white), so the armed state rendered near-invisible
+  // grey text on the red background.
   return (
     <button
       disabled={disabled}
       title={title}
       onClick={onClick}
-      className={`${className} ${armed ? 'bg-red-600 text-white border-red-600 font-bold' : ''}`}>
+      className={armed ? 'bg-red-600 text-white border-red-600 font-bold px-1.5 py-0.5 rounded text-[10px] border' : className}>
       {armed ? confirmLabel : label}
     </button>
   );

@@ -124,6 +124,28 @@ bool translateCommand(const std::string& line, const std::string& verb,
         wire = "QMODES," + code + "," + mode;
         return true;
     }
+    // P1: per-expiry market-making participation (EXPIRYENABLE wire).  This
+    // translation branch was LOST in history (f79f490e only wired the
+    // strategy/CommandBus side) — UI clicks were rejected with
+    // "unsupported command" until found on 2026-11-21 review.
+    if (verb == "expiry_enable")
+    {
+        auto it = doc.FindMember("expiry");
+        if (it == doc.MemberEnd() || !it->value.IsNumber())
+        {
+            err = "expiry_enable needs expiry (YYYYMM)";
+            return false;
+        }
+        auto en = doc.FindMember("enable");
+        if (en == doc.MemberEnd() || !en->value.IsBool())
+        {
+            err = "expiry_enable needs enable (bool)";
+            return false;
+        }
+        wire = fmt::format("EXPIRYENABLE,{:.0f},{}", it->value.GetDouble(),
+                           en->value.GetBool() ? "on" : "off");
+        return true;
+    }
     if (verb == "qmode_expiry")
     {
         // P1 follow-up: per-expiry quote mode
