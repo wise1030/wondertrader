@@ -93,7 +93,8 @@ OptionPricer2Config::OptionPricer2Config() = default;
 // P1-b: shared curve factory (also used by AsyncVolFitter for fitted curves)
 // ----------------------------------------------------------------------------
 IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams,
-                                  double gvvBeta)
+                                  double gvvBeta, double gvvAlphaDn,
+                                  double gvvAlphaUp)
 {
     if (type == "linear")
         return std::make_shared<LinearVolCurve>();
@@ -103,6 +104,9 @@ IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams,
         return std::make_shared<PowerVolCurve>(static_cast<GvvVolCurve::Parameter>(powerParams));
     GvvVolCurve::Config cfg;
     cfg.beta = gvvBeta;
+    // Audit 11-22 (round 3): optional alpha search-range override (<0 = default)
+    if (gvvAlphaDn >= 0.0) cfg.alpha_dn = gvvAlphaDn;
+    if (gvvAlphaUp >= 0.0) cfg.alpha_up = gvvAlphaUp;
     return std::make_shared<GvvVolCurve>(cfg);
 }
 
@@ -234,12 +238,16 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
         // P1-b: honor volcurve_type for the initial main curve (fitted
         // replacement comes from AsyncVolFitter / PeriodicCurveFitter).
         ei->m_spVolCurve  = createVolCurveByType(m_config.volcurve_type,
-                                                 0, m_config.volcurve_beta);
+                                                 0, m_config.volcurve_beta,
+                                                 m_config.volcurve_alpha_dn,
+                                                 m_config.volcurve_alpha_up);
         // R2: restore the original GVV×Power dual-curve design. With the
         // migration-era default ("gvv") both curves are identical and
         // volcurve_weight degenerates to a no-op.
         ei->m_spVolCurve2 = createVolCurveByType(m_config.curve2_type,
-                                                 GvvVolCurve::RHO, m_config.volcurve_beta);
+                                                 GvvVolCurve::RHO, m_config.volcurve_beta,
+                                                 m_config.volcurve_alpha_dn,
+                                                 m_config.volcurve_alpha_up);
         // hardcode defaults (preserve original)
         ei->m_futsprd = 1.0;
         ei->m_atmvolsprd = 0.2;

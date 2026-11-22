@@ -551,15 +551,11 @@ bool CompositeOptionPricer::initValuesCompute(OptionGrid* grid) {
     // Delegate init to sub-pricer
     if (m_spOptionPricer2) {
         m_spOptionPricer2->initValuesCompute(grid);
-        // Set GVV blend weight per expiry (quantbox: COP sets OP2's gvv_weight
-        // from a notifiable property; here we use config. 0=fitted curve, 1=GVV)
-        for (uint32_t exp : m_active_expiries) {
-            // P1 follow-up: per-expiry override wins over the global knob.
-            double w = config().volcurve_weight;
-            auto ovr = m_gvvWeightOverride.find(exp);
-            if (ovr != m_gvvWeightOverride.end()) w = ovr->second;
-            m_spOptionPricer2->setGvvWeight(exp, w);
-        }
+        // GVV blend weight per expiry (quantbox: COP sets OP2's gvv_weight
+        // from a notifiable property; here we use config. 0=fitted curve, 1=GVV).
+        // Audit 11-22 (round 3): centralised in pushGvvWeights() so hot
+        // updates and per-expiry overrides share one re-push path.
+        pushGvvWeights();
     }
 
     // Feed signal context

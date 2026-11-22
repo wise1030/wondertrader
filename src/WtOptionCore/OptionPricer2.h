@@ -139,6 +139,11 @@ public:
     // 0 = equal weights (legacy; deep-wing noise dominates the fit); ~1 lets
     // the ATM neighbourhood drive skew and damps wings to ~0.4% at |x|=15%.
     double      volcurve_beta        = 0.0;
+    /// Audit 11-22 (round 3): GVV alpha search-range override (PriceError
+    /// weight x*v^(alpha-1), kurt scaled by atmvol^(-2a)). Negative keeps
+    /// the GvvVolCurve::Config default [GVV_MINALPHA, GVV_MAXALPHA].
+    double      volcurve_alpha_dn    = -1.0;
+    double      volcurve_alpha_up    = -1.0;
     /// P1-b: when the main curve fit fails, walk the fallback chain
     /// power → linear → constant(1.0) so pricing never dies on a bad
     /// snapshot.  Previous (good) curve still wins by curve versioning.
@@ -172,8 +177,10 @@ using OptionPricer2ConfigPtr = std::shared_ptr<OptionPricer2Config>;
 /// P1-b: curve factory shared by OptionPricer2 (initial curves) and
 /// AsyncVolFitter (fitted curves).  Unknown type falls back to GVV.
 /// powerParams selects the PowerVolCurve parameter set (SPOTVOL/RHO/...).
+/// gvvAlphaDn/Up < 0 keep the GvvVolCurve::Config default search range.
 IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams = 0,
-                                  double gvvBeta = 0.0);
+                                  double gvvBeta = 0.0,
+                                  double gvvAlphaDn = -1.0, double gvvAlphaUp = -1.0);
 
 // ----------------------------------------------------------------------------
 // OptionPricer2

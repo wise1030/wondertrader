@@ -467,6 +467,7 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.numOrNull("wgt_deltaflow", v.pWgtDeltaflow);
     w.numOrNull("wgt_atmsig", v.pWgtAtmsig);
     w.numOrNull("wgt_rollema", v.pWgtRollema);
+    w.numOrNull("volcurve_weight", v.pVolcurveWeight);
     w.key("max_tps"); w.Int(v.pMaxTps);
     w.EndObject();
 

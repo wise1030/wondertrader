@@ -60,6 +60,14 @@ public:
     /// (w = exp(-beta*x^2/(atmvol^2*T))); 0 = legacy equal weights.
     void setBeta(double beta) { m_beta = beta >= 0.0 ? beta : 0.0; }
 
+    /// Audit 11-22 (round 3): GVV alpha search-range override (both <0 =
+    /// keep the curve defaults). Passed to every GVV fit attempt.
+    void setAlphaRange(double dn, double up) {
+        if (dn >= 0.0) m_alphaDn = dn;
+        if (up >= 0.0) m_alphaUp = up;
+        if (m_alphaDn > m_alphaUp) std::swap(m_alphaDn, m_alphaUp);
+    }
+
     /// Replace any queued snapshot set.  Single-flight: while a fit is running
     /// a duplicate submit returns false; caller may retry next period.
     bool submit(std::vector<VolFitExpirySnapshot> snapshots) {
@@ -165,7 +173,8 @@ private:
 
             IVolCurvePtr curve;
             const auto tryFit = [&](const std::string& type, int powerParams) -> IVolCurvePtr {
-                auto c = createVolCurveByType(type, powerParams, m_beta);
+                auto c = createVolCurveByType(type, powerParams, m_beta,
+                                              m_alphaDn, m_alphaUp);
                 c->setATMForward(s.forward);
                 c->setMaturity(s.maturity);
                 c->setATMVol(s.atmVol);
@@ -221,6 +230,8 @@ private:
     bool m_fallback = true;
     double m_decayWindow = 0.0;
     double m_beta = 0.0;
+    double m_alphaDn = -1.0;   // <0 = GvvVolCurve::Config default
+    double m_alphaUp = -1.0;
     mutable std::map<uint32_t, PrevFit> m_prev;   // decay-carry state (fit thread only)
 };
 

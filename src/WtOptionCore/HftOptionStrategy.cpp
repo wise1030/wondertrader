@@ -207,6 +207,15 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     _wgt_rollema       = cfg->has("wgt_rollema") ? cfg->getDouble("wgt_rollema") : 0.0;
     _sticky_base       = cfg->has("sticky_base") ? cfg->getDouble("sticky_base") : 0.5;
     _improve_retreat   = cfg->has("improve_retreat_ratio") ? cfg->getDouble("improve_retreat_ratio") : 3.0;
+    // GVV blend weight lives under pricer.blackCalc.volCurve (same place the
+    // pricer config block reads it); load it here so sync_param seeds from it.
+    {
+        WTSVariant* pCfg0 = cfg->get("pricer");
+        WTSVariant* bc0 = pCfg0 ? pCfg0->get("blackCalc") : nullptr;
+        WTSVariant* vc0 = bc0 ? bc0->get("volCurve") : nullptr;
+        _volcurveWeight = (vc0 && vc0->has("volcurve_weight"))
+            ? vc0->getDouble("volcurve_weight") : 0.0;
+    }
 
     // Read pricer config as nested section (no flat member variables)
     WTSVariant* pracerCfg = cfg->get("pricer");
@@ -761,6 +770,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     _hot.wgt_deltaflow     = _ctx->sync_param("wgt_deltaflow", _wgt_deltaflow);
     _hot.wgt_atmsig        = _ctx->sync_param("wgt_atmsig", _wgt_atmsig);
     _hot.wgt_rollema       = _ctx->sync_param("wgt_rollema", _wgt_rollema);
+    _hot.volcurve_weight   = _ctx->sync_param("volcurve_weight", _volcurveWeight);
     _hot.sticky_base       = _ctx->sync_param("sticky_base", _sticky_base);
     _hot.improve_retreat_ratio = _ctx->sync_param("improve_retreat_ratio", _improve_retreat);
     _hot.trade_shock_ticks = _ctx->sync_param("trade_shock_ticks", 1.0);
@@ -1132,6 +1142,10 @@ void HftOptionStrategy::setupPricer()
                 }
                 // P1 (2026-11-18): WLS wing-weight decay — same key as the fit.
                 p2cfg.volcurve_beta = vc->has("beta") ? vc->getDouble("beta") : 0.0;
+                // Audit 11-22 (round 3): alpha search-range override (quantbox
+                // parity; <0 keeps the GvvVolCurve::Config default range).
+                p2cfg.volcurve_alpha_dn = vc->has("alpha_dn") ? vc->getDouble("alpha_dn") : -1.0;
+                p2cfg.volcurve_alpha_up = vc->has("alpha_up") ? vc->getDouble("alpha_up") : -1.0;
                 if (vc->has("curve2_type")) {
                     std::string t = vc->getCString("curve2_type");
                     if (wt_option::isValidCurve2Type(t))
@@ -1153,6 +1167,7 @@ void HftOptionStrategy::setupPricer()
     _asyncVolFitter.setFallbackEnabled(p2cfg.volcurve_fallback);
     _asyncVolFitter.setDecayWindow(p2cfg.vol_fitting_decay_window);
     _asyncVolFitter.setBeta(p2cfg.volcurve_beta);
+    _asyncVolFitter.setAlphaRange(p2cfg.volcurve_alpha_dn, p2cfg.volcurve_alpha_up);
 
     // Read pricer config from nested section
     WTSVariant* pCfg = cfgPtr_->get("pricer");
@@ -4303,11 +4318,11 @@ void HftOptionStrategy::registerCommands()
         return true;
     };
     // P2 UI: hot parameter write. Whitelist = ONLY the keys applyHotParams()
-    // consumes hot (5 alpha weights + max_tps). sticky_base / improve_retreat
-    // are init-time only and are rejected here by design. Dual path per v2.1:
-    // sync_param ptr when share_domain is active, member + _hotUpdatePending
-    // otherwise (current dist default) — applyHotParams() picks it up later
-    // in this same on_batch_complete.
+    // consumes hot (5 alpha weights + volcurve_weight + max_tps). sticky_base
+    // / improve_retreat are init-time only and are rejected here by design.
+    // Dual path per v2.1: sync_param ptr when share_domain is active, member
+    // + _hotUpdatePending otherwise (current dist default) — applyHotParams()
+    // picks it up later in this same on_batch_complete.
     hooks.setHotParam = [this](const std::string& key, double value, std::string& err) -> bool {
         if (!std::isfinite(value)) { err = "value not finite"; return false; }
         bool ptrPath = false;
@@ -4331,6 +4346,10 @@ void HftOptionStrategy::registerCommands()
         } else if (key == "wgt_rollema") {
             if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
             setWeight(_hot.wgt_rollema, &_wgt_rollema);
+        } else if (key == "volcurve_weight") {
+            // Audit 11-22 (round 3): GVV blend weight, quantbox GUI gvv_weight
+            if (value < 0 || value > 1) { err = "volcurve_weight out of range [0,1]"; return false; }
+            setWeight(_hot.volcurve_weight, &_volcurveWeight);
         } else if (key == "max_tps") {
             const int32_t tps = static_cast<int32_t>(value);
             if (tps < 1 || tps > 10000) { err = "max_tps out of range [1,10000]"; return false; }
@@ -4626,9 +4645,15 @@ void HftOptionStrategy::applyHotParams()
         _wgt_deltaflow = delta;
         _wgt_atmsig = atm;
         _wgt_rollema = roll;
+        // Audit 11-22 (round 3): GVV blend weight (quantbox gvv_weight knob).
+        // setGvvWeightDefault re-pushes the effective weight for every active
+        // expiry, per-expiry overrides included.
+        const double gvw = hotVal(_hot.volcurve_weight, _volcurveWeight);
+        _compositePricer->setGvvWeightDefault(gvw);
+        _volcurveWeight = gvw;
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "  alpha weights: vega={} frontfut={} delta={} atmsig={} rollema={}",
-            vega, front, delta, atm, roll);
+            "  alpha weights: vega={} frontfut={} delta={} atmsig={} rollema={} | volcurve_weight={}",
+            vega, front, delta, atm, roll, gvw);
     }
 
     // 2. Update TPS
@@ -4884,6 +4909,7 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
     v.pWgtDeltaflow = hotVal(_hot.wgt_deltaflow, _wgt_deltaflow);
     v.pWgtAtmsig = hotVal(_hot.wgt_atmsig, _wgt_atmsig);
     v.pWgtRollema = hotVal(_hot.wgt_rollema, _wgt_rollema);
+    v.pVolcurveWeight = hotVal(_hot.volcurve_weight, _volcurveWeight);
     v.pMaxTps = hotVal(_hot.max_tps, _maxTPS);
 }
 

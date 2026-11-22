@@ -210,6 +210,8 @@ struct UiSnapshotView
     bool hasParams = false;
     double pWgtVegaflow = 0, pWgtFrontfutSkew = 0, pWgtDeltaflow = 0;
     double pWgtAtmsig = 0, pWgtRollema = 0;
+    // Audit 11-22 (round 3): GVV blend weight echo (SETPARAM whitelist)
+    double pVolcurveWeight = 0;
     int32_t pMaxTps = 0;
 };
 

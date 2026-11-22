@@ -164,6 +164,10 @@ private:
     // alpha + pricing params from config
     double _wgt_vegaflow = 0, _wgt_frontfut_skew = 0, _wgt_deltaflow = 0;
     double _wgt_atmsig = 0, _wgt_rollema = 0;
+    // Audit 11-22 (round 3): global GVV blend weight (0=secondary curve,
+    // 1=fitted main curve). UI-hot-adjustable via SETPARAM "volcurve_weight";
+    // per-expiry overrides in expiries[].volcurve_weight still win.
+    double _volcurveWeight = 0.0;
     double _sticky_base = 0.5, _improve_retreat = 3.0;
 
     // Pricer strategy type
@@ -513,6 +517,8 @@ private:
         double* wgt_deltaflow = nullptr;
         double* wgt_atmsig = nullptr;
         double* wgt_rollema = nullptr;
+        // Audit 11-22 (round 3): GVV blend weight (quantbox gvv_weight knob)
+        double* volcurve_weight = nullptr;
         double* sticky_base = nullptr;
         double* improve_retreat_ratio = nullptr;
         double* trade_shock_ticks = nullptr;

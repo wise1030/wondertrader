@@ -174,6 +174,8 @@ export interface Snapshot {
     wgt_atmsig: number;
     wgt_rollema: number;
     wgt_exp_ddelta?: number;
+    // Audit 11-22 (round 3): GVV blend weight echo (0=secondary, 1=fitted main)
+    volcurve_weight?: number;
     max_tps: number;
   } | null;
 }

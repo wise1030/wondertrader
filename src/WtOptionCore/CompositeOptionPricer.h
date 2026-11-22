@@ -358,7 +358,28 @@ public:
 
     /// P1 follow-up: per-expiry GVV blend override (expiries[].volcurve_weight).
     /// Falls back to config().volcurve_weight for expiries not listed.
-    void setGvvWeightPerExpiry(uint32_t exp, double w) { m_gvvWeightOverride[exp] = w; }
+    /// Audit 11-22 (round 3): re-push immediately so a hot write takes
+    /// effect without waiting for a re-init.
+    void setGvvWeightPerExpiry(uint32_t exp, double w) {
+        m_gvvWeightOverride[exp] = w;
+        if (m_spOptionPricer2) m_spOptionPricer2->setGvvWeight(exp, w);
+    }
+
+    /// Audit 11-22 (round 3): hot-adjustable GLOBAL GVV blend weight
+    /// (UI SETPARAM "volcurve_weight"; quantbox GUI 的 gvv_weight 旋钮).
+    /// 0 = secondary curve, 1 = fitted main curve.  Per-expiry overrides
+    /// (setGvvWeightPerExpiry) still win for their month.
+    void setGvvWeightDefault(double w) {
+        m_config.volcurve_weight = w;
+        pushGvvWeights();
+    }
+
+    /// Effective per-expiry blend weight (override wins over the default).
+    double gvvWeight(uint32_t exp) const {
+        auto ovr = m_gvvWeightOverride.find(exp);
+        return ovr != m_gvvWeightOverride.end() ? ovr->second
+                                                : config().volcurve_weight;
+    }
 
     /// P1 follow-up: runtime per-expiry quoting switch (hot command
     /// EXPIRYENABLE).  enable=false zeroes every quote size for the expiry
@@ -536,6 +557,14 @@ private:
     std::map<uint32_t, ExpiryDataPub> m_prop_edpub;
     std::map<uint32_t, double> m_intensityMul;   // P1 batch-3.2
     std::map<uint32_t, double> m_gvvWeightOverride;   // P1 follow-up per-expiry GVV
+
+    /// Audit 11-22 (round 3): re-push the effective blend weight to the
+    /// black pricer for every active expiry (override wins over default).
+    void pushGvvWeights() {
+        if (!m_spOptionPricer2) return;
+        for (uint32_t exp : m_active_expiries)
+            m_spOptionPricer2->setGvvWeight(exp, gvvWeight(exp));
+    }
 
     // Signals
     std::vector<IAlphaSignal::Ptr> m_alphaSignals;

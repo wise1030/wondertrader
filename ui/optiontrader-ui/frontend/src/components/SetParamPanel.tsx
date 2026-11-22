@@ -23,6 +23,10 @@ const ROWS: Row[] = [
   // SETPARAM whitelist rejects it and the snapshot never echoes it, so the
   // row always showed 0 and every set failed with "key not hot-adjustable".
   { key: 'max_tps', label: 'max_tps', get: p => p.max_tps, min: 1, max: 10000 },
+  // Audit 11-22 (round 3): GVV blend weight — 0 = secondary curve (linear),
+  // 1 = fitted main curve (gvv).  The quantbox GUI's gvv_weight knob; per-
+  // expiry expiries[].volcurve_weight overrides still win for their month.
+  { key: 'volcurve_weight', label: 'volcurve_weight', get: p => p.volcurve_weight, min: 0, max: 1 },
 ];
 
 export const SetParamPanel: React.FC = () => {
