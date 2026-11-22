@@ -13,24 +13,40 @@ logger = logging.getLogger("WtOptionClient")
 
 
 class WtOptionClient:
-    def __init__(self, host: str, port: int, on_frame):
-        """on_frame(frame: dict) is invoked for every parsed JSON line."""
+    def __init__(self, host: str, port: int, on_frame, on_status=None):
+        """on_frame(frame: dict) is invoked for every parsed JSON line;
+        on_status(status: str) reports bridge-link transitions
+        (connecting / connected / disconnected) for the UI footer."""
         self.host = host
         self.port = port
         self.on_frame = on_frame
+        self.on_status = on_status
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._stopping = False
         self.connected = False
+        self._status = "disconnected"
+
+    def _set_status(self, status: str):
+        if status == self._status:
+            return
+        self._status = status
+        if self.on_status:
+            try:
+                self.on_status(status)
+            except Exception:
+                logger.exception("on_status callback failed")
 
     async def connect(self):
         backoff = 1.0
         while not self._stopping:
             try:
+                self._set_status("connecting")
                 self._reader, self._writer = await asyncio.open_connection(
                     self.host, self.port)
                 self.connected = True
                 backoff = 1.0
+                self._set_status("connected")
                 logger.info(f"Connected to UiBridge at {self.host}:{self.port}")
                 try:
                     async for raw in self._reader:
@@ -53,10 +69,12 @@ class WtOptionClient:
                             self._writer.close()
                     except Exception:
                         pass
+                    self._set_status("disconnected")
                     logger.warning("UiBridge connection lost")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                self._set_status("disconnected")
                 logger.warning(f"UiBridge connect failed: {e}")
             if not self._stopping:
                 await asyncio.sleep(backoff)
@@ -75,6 +93,7 @@ class WtOptionClient:
 
     async def stop(self):
         self._stopping = True
+        self._set_status("disconnected")
         try:
             if self._writer:
                 self._writer.close()

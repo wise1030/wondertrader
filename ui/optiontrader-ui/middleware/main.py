@@ -42,6 +42,11 @@ ALERT_WEBHOOK_MIN_LEVEL = int(os.environ.get("WTOPTION_ALERT_WEBHOOK_MIN_LEVEL",
 
 upstream: WtOptionClient | None = None
 connected_websockets: set[WebSocket] = set()
+# Audit 11-22: the UI footer's "bridge" lamp used to be fed by a conn_state
+# frame that was NEVER produced (only browser->middleware diagnostics were
+# logged), so it showed a permanent red "unknown".  Track and broadcast the
+# real middleware<->UiBridge link state.
+_upstream_status = "disconnected"
 _last_hello: dict | None = None   # most recent hello frame — replayed to new
                                   # browsers (audit batch B, M1: the bridge only
                                   # emits hello on TCP accept/auth, so a browser
@@ -57,6 +62,15 @@ async def _post_alert_webhook(frame: dict):
             await client.post(ALERT_WEBHOOK_URL, json=frame)
     except Exception as exc:
         logger.warning("alert webhook POST failed: %s", exc)
+
+
+def _upstream_state(status: str):
+    global _upstream_status
+    if status == _upstream_status:
+        return
+    _upstream_status = status
+    logger.info("UiBridge link: %s", status)
+    _broadcast({"type": "conn_state", "status": status, "scope": "bridge"})
 
 
 def _broadcast(frame: dict):
@@ -95,7 +109,7 @@ def _broadcast(frame: dict):
 async def lifespan(app: FastAPI):
     global upstream, _loop
     _loop = asyncio.get_running_loop()
-    upstream = WtOptionClient(BRIDGE_HOST, BRIDGE_PORT, _broadcast)
+    upstream = WtOptionClient(BRIDGE_HOST, BRIDGE_PORT, _broadcast, _upstream_state)
     task = asyncio.create_task(upstream.connect())
     # P1 (2026-11-18): application-layer keepalive. Public-path NAT/firewalls
     # expire the WS session on downlink-only traffic (observed irregular
@@ -178,6 +192,13 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps(_last_hello))
         except Exception:
             return
+    # Current upstream state at accept time (the transition broadcast may have
+    # happened before this client joined).
+    try:
+        await websocket.send_text(json.dumps(
+            {"type": "conn_state", "status": _upstream_status, "scope": "bridge"}))
+    except Exception:
+        return
     connected_websockets.add(websocket)
     logger.info(f"WS client connected (total {len(connected_websockets)})")
     if upstream:
@@ -230,7 +251,7 @@ if os.path.exists(frontend_path):
         "WTOPTION_SERIES_DIR",
         "/home/ubuntu/projects/wondertrader/dist/WtRunnerOption/generated")
 
-    def _read_series_csv(name: str, tdate: str) -> list[list[float]]:
+    def _read_series_csv(name: str, tdate: str) -> tuple[list[list[float]], int]:
         import csv
         import glob
         if tdate == "recent":
@@ -239,6 +260,7 @@ if os.path.exists(frontend_path):
                            reverse=True)[:15]
         else:
             paths = [os.path.join(SERIES_DIR, f"{name}_{tdate}.csv")]
+        paths = [p for p in paths if os.path.exists(p)]
         rows: list[list[float]] = []
         for path in paths:
             try:
@@ -251,7 +273,7 @@ if os.path.exists(frontend_path):
             except OSError:
                 continue
         rows.sort(key=lambda r: r[0])   # by ts — cone percentiles need no order,
-        return rows                     # but charts read better chronological
+        return rows, len(paths)         # but charts read better chronological
 
     @app.get("/api/series")
     async def series(tdate: str, kind: str = "vol"):
@@ -265,9 +287,11 @@ if os.path.exists(frontend_path):
         }
         if kind not in cols:
             return PlainTextResponse("kind must be vol|pf", status_code=400)
-        rows = _read_series_csv("volseries" if kind == "vol" else "pfseries", tdate)
+        if tdate != "recent" and not (tdate.isdigit() and len(tdate) <= 8):
+            return PlainTextResponse("tdate must be YYYYMMDD or recent", status_code=400)
+        rows, days = _read_series_csv("volseries" if kind == "vol" else "pfseries", tdate)
 
-        return {"columns": cols[kind], "rows": rows}
+        return {"columns": cols[kind], "rows": rows, "days": days}
 
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="static")
 else:
