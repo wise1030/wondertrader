@@ -563,6 +563,22 @@ ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无
 - 流程纪律补录：libWtOptionCore.so 重编后，依赖它的 test_* 二进制必须
   同步重编（本轮 test_uibridge 假阳性即源于 ABI 不同步）
 
+## 3.4p GVV 调翼能力补齐（11-22 夜，4f871503，已部署）
+
+quantbox GVV 调翼四手段逐项对照后的补齐（分析见 3.4o 后讨论）：
+- **β 翼部权重衰减**：能力已透传（`volCurve.beta`），服务端 config 实为
+  beta=1（早先已配）；本地 dist config 补录并对齐
+- **`volcurve_weight` 热调**（quantbox GUI 的 gvv_weight 旋钮）：
+  SETPARAM 白名单 + sync_param + applyHotParams →
+  `setGvvWeightDefault`（新增，重推全部活跃月份，逐月覆盖仍优先）；
+  快照 params 回显 + UI 热参数面板补行；顺手修复
+  `setGvvWeightPerExpiry` 只写映射不重推的历史问题。实测
+  set 0.5→ack ok→恢复 0.0→回显正确
+- **α 搜索区间透传**：`volCurve.alpha_dn/alpha_up`（<0 用内核默认 [0,2]），
+  p2cfg → AsyncVolFitter → createVolCurveByType 全链
+- **外部参数直灌通道（DB→setParameter）**：按运营需求暂缓
+- 验证：9/9 二进制 rc=0、线上 SETPARAM roundtrip 实测、日志 0 error
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
