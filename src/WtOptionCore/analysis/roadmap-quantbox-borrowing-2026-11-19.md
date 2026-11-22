@@ -520,8 +520,10 @@ ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无
 - **确认态串月**：ConfirmButton 的 armed 状态跨 label/disabled 变化
   保留，可把 A 月的确认意图落到 B 月；现变化即重置
 - **BOARD 阈值单位**：红色规则原比较 `delta × fwd`（CNY 数百万）与
-  `threshold_delta=30`（吨）——永不触发；改用原始 delta。TOTAL 行
-  改用组合 delta（含期货对冲）
+  `threshold_delta=30`（吨）——永不触发；第一轮改用原始 delta。
+  **复核发现仍非引擎口径**：引擎按 `eg->totalDelta()`（期权+当月期货
+  腿）逐月、按 `getPortfolioDelta()`（含全部期货对冲）组合触发，而快照
+  只有纯期权 delta——已于本轮（3.4o）补 `undDelta`/`pfDelta` 字段对齐
 - **跨日残留**：页面跨日重启保留昨日 fills（SIM 秒去重可吞今日同秒
   成交）、Analysis 环图混入昨日数据；现按 `state.tdate` 清空
 - **实际挂单 vs 目标报价**：UnderlierCard 补 live 期货挂单（来自
@@ -539,6 +541,27 @@ ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无
   `hello → conn_state(connected) → ack → snapshot`；`/api/series`
   非法 tdate 返回 400。服务端 `generated/volseries_*.csv` 尚未生成
   （周末 0 合约），下个交易日 recorder 产行后锥形图即有数据
+
+## 3.4o 审计复核修正（11-22 晚，已部署）
+
+对 3.4n 的复核发现两处自身未闭环 + 一处语义错误：
+- **断线禁发未贯彻**：BOARD ControlStrip 四个命令（expiry_enable /
+  qmode on/off/close）与 Grid 双击 qmode 切换仍裸调 sendCommand；
+  现统一 readonly/disconnected 门禁 + 失败提示（ExpiryBoard 接入 onNotify）
+- **TOTAL 行语义错误**：3.4n 称"组合 delta（含期货对冲）"，实际
+  `snapshot.greeks.delta = getPositionGreeks()->delta()` 为纯期权
+  delta（期货对冲在 `m_pfuDelta`）；对冲打平后 TOTAL 仍可能红
+- **修复（后端+前端）**：
+  - 快照新增 `greeks.pfDelta = OptionRisk::getPortfolioDelta()`（期权+
+    期货对冲，引擎 hedge 触发同一量）
+  - 快照新增 `expiries[].und.undDelta = pos × contractSize`（当月期货腿
+    delta，与 `OptionExpiryGreeks::totalDelta` 口径一致）
+  - BOARD 行级红色改比 `|Δopt + Δleg|`，TOTAL 改比 `|pfDelta|`
+  - UnderlierCard 显示 Δleg
+  - 顺手修 `bd/ad` 编码含最优档的注释漂移：改发 i≥1（beyond best），
+    前端 "+" 聚合不再重复计算最优档
+- 流程纪律补录：libWtOptionCore.so 重编后，依赖它的 test_* 二进制必须
+  同步重编（本轮 test_uibridge 假阳性即源于 ABI 不同步）
 
 ## 3.5 遗漏补录（复核新增）
 
