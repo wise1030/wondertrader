@@ -47,6 +47,9 @@ export interface UndView {
   bidSz?: number | null;
   askSz?: number | null;
   pos: number | null;
+  // hedge-leg position delta in underlying units (lots x contract size) —
+  // same quantity the per-expiry hedge gate uses (audit 11-22 round 2).
+  undDelta?: number | null;
   // P1 UI: our futures-leg quotes (symmetric to ordBid/ordAsk on options)
   ourBid?: number | null;
   ourAsk?: number | null;
@@ -84,11 +87,14 @@ export interface StateView {
 }
 
 export interface GreeksView {
-  delta: number | null;
+  delta: number | null;      // OPTION positions only
   gamma: number | null;
   vega: number | null;
   vegaTW: number | null;
   theta: number | null;
+  // option delta + futures-hedge delta — the delta hedger's trigger
+  // quantity (OptionRisk::getPortfolioDelta; audit 11-22 round 2).
+  pfDelta?: number | null;
 }
 
 export interface PnlView {

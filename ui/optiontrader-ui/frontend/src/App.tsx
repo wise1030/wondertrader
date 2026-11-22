@@ -68,7 +68,7 @@ const Shell: React.FC = () => {
         <div className="flex gap-1">
           <div className="flex-1"><GreeksPnlBar /></div>
         </div>
-        <ExpiryBoard selected={selectedExpiry} onSelect={setSelectedExpiry} />
+        <ExpiryBoard selected={selectedExpiry} onSelect={setSelectedExpiry} onNotify={notify} />
         <div className="flex gap-1 items-center flex-wrap">
           <ExpirySummary selected={selectedExpiry} />
           <UnderlierCard selected={selectedExpiry} />

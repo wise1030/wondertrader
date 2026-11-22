@@ -223,16 +223,24 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
         onNotify('readonly mode — qmode toggle is gated', 'info');
         return;
       }
+      // Audit 11-22 (round 2): same no-pretend contract as the rest — a
+      // disconnected double-click used to toast "qmode -> off" while nothing
+      // was ever sent.
+      if (connectionStatus !== 'connected') {
+        onNotify('not connected — qmode NOT sent', 'error');
+        return;
+      }
       // P3: single-code qmode toggle (off <-> on), matching the original UI's
       // double-click habit; grid-wide stays on the command bar.
       const next = leg.qmode === -1 ? 'on' : 'off';
-      sendCommand(JSON.stringify({
+      const ok = sendCommand(JSON.stringify({
         cmd: 'qmode_code', code: leg.code, mode: next,
         cmdSeq: Date.now() % 100000,
       }));
+      if (!ok) { onNotify('not connected — qmode NOT sent', 'error'); return; }
       onNotify(`${leg.code} qmode -> ${next}`, 'info');
     }
-  }, [readonly, sendCommand, onNotify]);
+  }, [readonly, sendCommand, onNotify, connectionStatus]);
 
   // Qt keyboard shortcuts (navigation/toggles live; trading shortcuts gated by readonly)
   useEffect(() => {

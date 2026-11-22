@@ -29,7 +29,8 @@ const fmt = (v: number | null | undefined, d = 1) =>
 export const ExpiryBoard: React.FC<{
   selected: number | null;
   onSelect: (expiry: number) => void;
-}> = ({ selected, onSelect }) => {
+  onNotify?: (msg: string, type: 'info' | 'error') => void;
+}> = ({ selected, onSelect, onNotify }) => {
   const { snapshot, readonly, sendCommand } = useData();
   const expiries = useMemo(() => snapshot?.expiries ?? [], [snapshot]);
 
@@ -74,20 +75,26 @@ export const ExpiryBoard: React.FC<{
             const isSel = e.expiry === selected;
             const und = e.und;
             const gammaActive = g != null && Math.abs(g) > 1e-9;
-            // raw-delta breach (tonnes) — the threshold is in the same units
-            const over = thr > 0 && d != null && Math.abs(d) > thr;
+            // Audit 11-22 (round 2): the engine's per-expiry hedge gate
+            // compares |option delta + hedge-leg delta| (OptionExpiryGreeks
+            // ::totalDelta, i.e. checkMulti) against the threshold — the UI
+            // must use the same quantity, else a fully-hedged month shows
+            // red.  undDelta = hedge lots x contract size (underlying units).
+            const legD = und?.undDelta ?? 0;
+            const dTot = (d ?? 0) + legD;
+            const over = thr > 0 && Math.abs(dTot) > thr;
             const nearExp = e.daysToExpiry >= 0 && e.daysToExpiry <= 2;
             const rowCls = over && gammaActive ? 'bg-red-100'
               : isSel ? 'bg-blue-100' : nearExp ? 'bg-amber-50' : '';
             const booksBad = e.quoting !== false && e.booksWithBid === 0;
             const undTip = und
-              ? `hedge ${und.code} bid ${fmt(und.bid)} ask ${fmt(und.ask)} pos ${fmt(und.pos, 0)}`
+              ? `hedge ${und.code} bid ${fmt(und.bid)} ask ${fmt(und.ask)} pos ${fmt(und.pos, 0)} Δleg ${fmt(und.undDelta, 1)}`
               : 'no hedge leg';
             return (
               <tr key={e.expiry}
                 onClick={() => onSelect(e.expiry)}
                 className={`${rowCls} cursor-pointer hover:bg-yellow-50 ${isSel ? 'font-bold' : ''}`}
-                title={`${undTip} · Δt=${fmt(d, 2)} thr=${fmt(thr, 1)} · quoting=${e.quoting !== false ? 'ON' : 'OFF'} · fit=${e.fitReady} fwd=${e.fwdReady} · books ${e.booksWithBid}/${e.booksTotal}`}>
+                title={`${undTip} · Δopt ${fmt(d, 2)} Δtotal ${fmt(dTot, 2)} thr ${fmt(thr, 1)} · quoting=${e.quoting !== false ? 'ON' : 'OFF'} · fit=${e.fitReady} fwd=${e.fwdReady} · books ${e.booksWithBid}/${e.booksTotal}`}>
                 <td className="border border-gray-200 px-1 text-gray-400">{i < 8 ? `F${i + 1}` : ''}</td>
                 <td className="border border-gray-200 px-1 font-mono">{e.expiry}</td>
                 <td className={`border border-gray-200 px-1 text-right ${nearExp ? 'text-red-600' : ''}`}>{e.daysToExpiry}</td>
@@ -154,14 +161,15 @@ export const ExpiryBoard: React.FC<{
             const sG = rows.reduce((a, r) => a + (r.g ?? 0), 0);
             const sT = rows.reduce((a, r) => a + (r.t ?? 0), 0);
             const sV = rows.reduce((a, r) => a + (r.v ?? 0), 0);
-            // TOTAL breach uses the PORTFOLIO delta (includes futures hedge),
-            // not the sum of option-only deltas.
-            const pfD = snapshot?.greeks?.delta ?? sDelta;
+            // TOTAL breach uses pfDelta (option + futures-hedge delta — the
+            // exact quantity the hedger compares with the threshold), with
+            // the option-only sum as fallback for pre-round-2 snapshots.
+            const pfD = snapshot?.greeks?.pfDelta ?? sDelta;
             const pfG = snapshot?.greeks?.gamma ?? sG;
             const totalOver = thr > 0 && Math.abs(pfD) > thr && Math.abs(pfG) > 1e-9;
             return (
               <tr className={`font-bold ${totalOver ? 'bg-red-100' : 'bg-gray-100'}`}
-                  title={`portfolio Δ ${fmt(pfD, 2)} (incl. futures hedge) vs threshold ${fmt(thr, 1)}`}>
+                  title={`portfolio Δ ${fmt(pfD, 2)} (option ${fmt(sDelta, 2)} + hedge) vs threshold ${fmt(thr, 1)}`}>
                 <td className="border border-gray-200 px-1" colSpan={5}>TOTAL</td>
                 <td className="border border-gray-200 px-1 text-right">{fmt(sD)}</td>
                 <td className="border border-gray-200 px-1 text-right">{fmt(sG, 3)}</td>
@@ -174,7 +182,7 @@ export const ExpiryBoard: React.FC<{
         </tbody>
       </table>
       <ControlStrip selected={selected} expiries={rows.map(r => r.e)} readonly={readonly}
-        sendCommand={sendCommand} thr={thr} />
+        sendCommand={sendCommand} thr={thr} onNotify={onNotify} />
     </div>
   );
 };
@@ -187,12 +195,26 @@ const ControlStrip: React.FC<{
   selected: number | null;
   expiries: any[];
   readonly: boolean;
-  sendCommand: (line: string) => void;
+  sendCommand: (line: string) => boolean;
   thr: number;
-}> = ({ selected, expiries, readonly, sendCommand, thr }) => {
+  onNotify?: (msg: string, type: 'info' | 'error') => void;
+}> = ({ selected, expiries, readonly, sendCommand, thr, onNotify }) => {
+  const { connectionStatus } = useData();
+  const connected = connectionStatus === 'connected';
   const cur = expiries.find(e => e.expiry === selected) ?? null;
   const on = cur ? cur.quoting !== false : false;
   const btnBase = 'px-1.5 py-0.5 rounded text-[10px] border';
+  const disabled = readonly || !connected;
+
+  // Audit 11-22 (round 2): the BOARD commands went straight to sendCommand
+  // with no readonly/disconnected handling — the widest blast-radius strip
+  // on the page was the only one that could "succeed" silently on a dead
+  // socket.  Same contract as Ticket/OrdersTable: report, never pretend.
+  const send = (line: string, what: string) => {
+    if (readonly) { onNotify?.(`${what} gated — readonly mode`, 'info'); return; }
+    if (!connected) { onNotify?.(`not connected — ${what} NOT sent`, 'error'); return; }
+    if (!sendCommand(line)) onNotify?.(`not connected — ${what} NOT sent`, 'error');
+  };
 
   return (
     <div className="flex items-center gap-1.5 flex-wrap px-2 py-1 border-t border-gray-200 text-[10px]">
@@ -210,27 +232,28 @@ const ControlStrip: React.FC<{
             key={`quote:${selected}:${on}`}
             label={on ? 'quoting OFF' : 'quoting ON'}
             confirmLabel={on ? 'confirm exit MM?' : 'confirm ON?'}
-            disabled={readonly}
-            title={`hot EXPIRYENABLE: ${on ? 'this month EXITS market making (quotes cancelled, none generated)' : 'this month JOINS market making'}`}
-            className={`${btnBase} ${readonly ? 'opacity-40 cursor-not-allowed' : on ? 'bg-gray-200 text-gray-700 border-gray-300 hover:bg-amber-50' : 'bg-green-700 text-white border-green-700'}`}
-            onConfirm={() => sendCommand(JSON.stringify({ cmd: 'expiry_enable', expiry: selected, enable: !on, cmdSeq: Date.now() % 100000 }))} />
+            disabled={disabled}
+            title={`hot EXPIRYENABLE: ${on ? 'this month EXITS market making (quotes cancelled, none generated)' : 'this month JOINS market making'}${connected ? '' : ' (disconnected)'}`}
+            className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : on ? 'bg-gray-200 text-gray-700 border-gray-300 hover:bg-amber-50' : 'bg-green-700 text-white border-green-700'}`}
+            onConfirm={() => send(JSON.stringify({ cmd: 'expiry_enable', expiry: selected, enable: !on, cmdSeq: Date.now() % 100000 }), 'expiry_enable')} />
           {/* qmode off/close are dangerous (stop/cancel), on is recovery */}
           <span className="text-gray-400">qmode</span>
-          <button disabled={readonly}
-            onClick={() => sendCommand(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'on', cmdSeq: Date.now() % 100000 }))}
-            title="qmode on (hot)"
-            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${readonly ? 'opacity-40 cursor-not-allowed' : 'hover:bg-blue-50'}`}>on</button>
+          <button disabled={disabled}
+            onClick={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'on', cmdSeq: Date.now() % 100000 }), 'qmode on')}
+            title={`qmode on (hot)${connected ? '' : ' — disconnected'}`}
+            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-blue-50'}`}>on</button>
           <ConfirmButton key={`off:${selected}`} label="off" confirmLabel="confirm off?"
-            disabled={readonly}
+            disabled={disabled}
             title="qmode off (hot) — pauses quoting for this month"
-            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${readonly ? 'opacity-40 cursor-not-allowed' : 'hover:bg-amber-50'}`}
-            onConfirm={() => sendCommand(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'off', cmdSeq: Date.now() % 100000 }))} />
+            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-amber-50'}`}
+            onConfirm={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'off', cmdSeq: Date.now() % 100000 }), 'qmode off')} />
           <ConfirmButton key={`close:${selected}`} label="close" confirmLabel="confirm close?"
-            disabled={readonly}
+            disabled={disabled}
             title="qmode close (hot) — reduce-only for this month"
-            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${readonly ? 'opacity-40 cursor-not-allowed' : 'hover:bg-amber-50'}`}
-            onConfirm={() => sendCommand(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'close', cmdSeq: Date.now() % 100000 }))} />
+            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-amber-50'}`}
+            onConfirm={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'close', cmdSeq: Date.now() % 100000 }), 'qmode close')} />
           {readonly && <span className="text-gray-400">(readonly)</span>}
+          {!readonly && !connected && <span className="text-red-500">(disconnected)</span>}
         </>
       )}
       <span className="ml-auto text-gray-400" title="delta-hedge fire threshold (same units as Δ: tonnes for cu)">

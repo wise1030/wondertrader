@@ -54,6 +54,9 @@ export const UnderlierCard: React.FC<{ selected: number | null }> = ({ selected 
         </b>
       </span>
       <span className={u?.pos ? 'font-bold' : 'text-gray-500'}>pos <b>{fmt(u?.pos, 0)}</b></span>
+      <span className="text-gray-500" title="hedge-leg position delta in underlying units (lots x contract size) — the quantity the per-expiry hedge gate uses">
+        Δleg <b className={u?.undDelta ? 'text-orange-600' : ''}>{fmt(u?.undDelta, 1)}</b>
+      </span>
       <span className="text-[10px] text-gray-400">(month {e.expiry})</span>
     </div>
   );
