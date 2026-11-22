@@ -512,6 +512,34 @@ ok=true 是 handler 误返回——参数错但路径对，取消类 handler 无
 - 遗留记录：TradesTab tag 过滤状态不持久（低风险）；GetFlat 色
 - 全部推送 origin（74+2 commits）
 
+## 3.4n UI 深度审计第二轮（11-22，453ff500/bef8484b，已部署）
+
+逐文件通读前端源码 + 抓服务端真实快照做数值交叉验证，修复：
+- **假成功链路**：`socket.send()` 无返回值，断线时 Ticket/撤单/热参数
+  仍提示 "sent"；现返回 boolean，全部写命令检查并提示 NOT sent
+- **确认态串月**：ConfirmButton 的 armed 状态跨 label/disabled 变化
+  保留，可把 A 月的确认意图落到 B 月；现变化即重置
+- **BOARD 阈值单位**：红色规则原比较 `delta × fwd`（CNY 数百万）与
+  `threshold_delta=30`（吨）——永不触发；改用原始 delta。TOTAL 行
+  改用组合 delta（含期货对冲）
+- **跨日残留**：页面跨日重启保留昨日 fills（SIM 秒去重可吞今日同秒
+  成交）、Analysis 环图混入昨日数据；现按 `state.tdate` 清空
+- **实际挂单 vs 目标报价**：UnderlierCard 补 live 期货挂单（来自
+  snapshot.orders），原 `ourBid/ourAsk` 明确标注为 pricer 目标价
+- **VOL 锥未接通**：前端只请求单日 numeric tdate；改 `tdate=recent`，
+  middleware 返回 `days`
+- **footer bridge 永久 unknown**：middleware 从未下发桥接状态；现
+  WtOptionClient 状态回调 → `conn_state(scope=bridge)` 广播 + 新客户端
+  补发当前状态
+- 其他：cancel all 两击确认/断线禁用、bid 五档深度补齐、Grid 空表
+  colSpan 25/27、qmode 徽章空数据、三 Tab 保持挂载（Grid 键盘门控）、
+  tag 过滤 sessionStorage 持久化、移除非热参数 `wgt_exp_ddelta`
+- 验证：tsc ✓、vite build ✓、9/9 测试二进制 rc=0（test_uibridge 旧
+  二进制与 16:44 动态库 ABI 不同步，重编后通过）；线上 WS 实测帧序
+  `hello → conn_state(connected) → ack → snapshot`；`/api/series`
+  非法 tdate 返回 400。服务端 `generated/volseries_*.csv` 尚未生成
+  （周末 0 合约），下个交易日 recorder 产行后锥形图即有数据
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
