@@ -10,7 +10,13 @@ interface Props {
 export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
   const { msgLogs, readonly, sid, connectionStatus, refresh, sendCommand } = useData();
 
-  const p2 = (what: string) => onNotify(`${what} is a P2 command — readonly mode`, 'info');
+  // Audit 11-22: every write command now reports two failure modes instead
+  // of pretending success — readonly gate and a dead WebSocket.
+  const send = (cmd: string) => {
+    if (readonly) { onNotify(`${cmd} is gated — readonly mode`, 'info'); return; }
+    const ok = sendCommand(JSON.stringify({ cmd, cmdSeq: Date.now() % 100000 }));
+    if (!ok) onNotify('not connected — command NOT sent', 'error');
+  };
 
   return (
     <div className="border-t border-gray-300 bg-white px-3 py-1.5 flex flex-col gap-1">
@@ -36,11 +42,12 @@ export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
               disabled={readonly}
               title="halt the whole strategy (cancels all quotes)"
               className={`px-2 py-0.5 rounded text-white bg-gray-600 hover:bg-gray-500 ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
-              onConfirm={() => sendCommand(JSON.stringify({ cmd: 'stop', cmdSeq: Date.now() % 100000 }))} />
+              onConfirm={() => send('stop')} />
           ) : (
             <button key={c}
-              className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly && c !== 'PANIC' ? 'cursor-not-allowed opacity-40' : ''}`}
-              onClick={() => readonly && c !== 'PANIC' ? p2(c) : sendCommand(JSON.stringify({ cmd: c.toLowerCase(), cmdSeq: Date.now() % 100000 }))}
+              title={c === 'PANIC' ? 'kill switch — cancels and halts (write mode required)' : `${c} (write mode required)`}
+              className={`px-2 py-0.5 rounded text-white ${c === 'PANIC' ? 'bg-red-600 hover:bg-red-500' : 'bg-gray-600 hover:bg-gray-500'} ${readonly ? 'cursor-not-allowed opacity-40' : ''}`}
+              onClick={() => send(c.toLowerCase())}
             >
               {c}
             </button>

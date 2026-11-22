@@ -12,6 +12,11 @@ export const StatusFooter: React.FC = () => {
     const risk = snapshot?.risk;
     const connCls = connectionStatus === 'connected' ? 'bg-green-500'
         : connectionStatus === 'connecting' ? 'bg-yellow-500' : 'bg-red-500';
+    // bridge = middleware -> UiBridge upstream link (conn_state scope=bridge)
+    const bridgeCls = bridgeConn === 'connected' ? 'bg-green-400'
+        : bridgeConn === 'connecting' ? 'bg-yellow-400'
+        : bridgeConn === 'disconnected' ? 'bg-red-400' : 'bg-gray-500';
+    const bridgeTitle = `middleware -> UiBridge: ${bridgeConn}`;
     return (
         <div className="flex items-center gap-3 px-3 py-0.5 bg-gray-800 text-gray-200 text-[10px] rounded-b">
             <span className="flex items-center gap-1">
@@ -21,8 +26,8 @@ export const StatusFooter: React.FC = () => {
             <span>age <b className={age != null && age > 3000 ? 'text-red-300' : ''}>{age != null ? `${age}ms` : '-'}</b></span>
             <span>TPS <b>{risk ? `${risk.tps}/${risk.tpsMax}` : '-'}</b></span>
             <span className="text-gray-400">sid {sid || '-'}</span>
-            <span className="flex items-center gap-1">
-                <span className={`w-1.5 h-1.5 rounded-full ${bridgeConn === 'connected' ? 'bg-green-400' : 'bg-red-400'}`} />
+            <span className="flex items-center gap-1" title={bridgeTitle}>
+                <span className={`w-1.5 h-1.5 rounded-full ${bridgeCls}`} />
                 bridge <b>{bridgeConn}</b>
             </span>
             <span className={`px-1.5 rounded font-bold ${readonly ? 'bg-gray-600' : 'bg-green-700'}`}>

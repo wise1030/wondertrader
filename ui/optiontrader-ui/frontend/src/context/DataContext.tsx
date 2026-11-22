@@ -27,6 +27,11 @@ interface DataState {
     bridgeConn: string;
     // P1 batch-5.5: latest graded alert — App toasts on change.
     lastAlert: { level: number; msg: string; ms: number } | null;
+    // Audit 11-22: latest FAILED command ack.  Before this the only trace of
+    // a rejected order/command was a line in the tiny message log while the
+    // entry form had already toasted "sent" — the operator could believe a
+    // dead order was working.
+    lastAckError: { msg: string; ms: number } | null;
 }
 
 const MAX_LOGS = 200;
@@ -53,6 +58,7 @@ const initialState: DataState = {
     readonly: true,
     bridgeConn: 'unknown',
     lastAlert: null,
+    lastAckError: null,
 };
 
 type Action =
@@ -86,6 +92,15 @@ function reducer(state: DataState, a: Action): DataState {
                 || a.arrivalMs - state.lastSnapLogMs >= 30000;
             const panicked = !!a.snap?.state?.panicked;
             if (panicked && !state.panicked) sound.panic();
+            // Audit 11-22: a page left open across the daily WtRunner restart
+            // used to keep yesterday's fills/flash in memory; because fill
+            // times are SIM seconds, yesterday's t=36000 and today's t=36000
+            // were even deduped as the same fill.  A trading-date change now
+            // starts a clean fill book (orders/snapshot are authoritative and
+            // replaced anyway).
+            const prevTdate = state.snapshot?.state?.tdate ?? 0;
+            const newTdate = a.snap?.state?.tdate ?? 0;
+            const dayRolled = prevTdate > 0 && newTdate > 0 && newTdate !== prevTdate;
             return {
                 ...state,
                 snapshot: a.snap,
@@ -93,6 +108,7 @@ function reducer(state: DataState, a: Action): DataState {
                 snapshotArrivalMs: a.arrivalMs,
                 panicked,
                 orders,
+                ...(dayRolled ? { fills: [], flash: {} } : {}),
                 lastSnapLogMs: doLog ? a.arrivalMs : state.lastSnapLogMs,
                 ...(doLog ? log(state, 'snapshot',
                     `seq=${a.snap.seq} age=${a.snap.snapshotAgeMs ?? '?'}ms orders=${a.snap.orders.length}${stale ? ' STALE' : ''}`) : {}),
@@ -128,12 +144,20 @@ function reducer(state: DataState, a: Action): DataState {
             return { ...state, orders, ...log(state, 'reject', `id=${a.ev.id} (entrust failed)`) };
         }
         case 'ACK':
-            return { ...state, ...log(state, a.ev.ok ? 'ack' : 'error', `ack cmdSeq=${a.ev.cmdSeq} ok=${a.ev.ok}${a.ev.err ? ' err=' + a.ev.err : ''}`) };
+            return {
+                ...state,
+                lastAckError: a.ev.ok ? state.lastAckError
+                    : { msg: a.ev.err || `command ${a.ev.cmdSeq} rejected`, ms: Date.now() },
+                ...log(state, a.ev.ok ? 'ack' : 'error',
+                    `ack cmdSeq=${a.ev.cmdSeq} ok=${a.ev.ok}${a.ev.err ? ' err=' + a.ev.err : ''}`),
+            };
         case 'FILLS': {
             // P1 fix (2026-11-19): history used to REPLACE live fills — a
             // history frame arriving right after reconnect raced with fresh
             // trade events and erased them. Merge by dedup key (t+code+px+buy).
-            const key = (f: FillView) => `${f.t}|${f.code}|${f.px}|${f.buy ? 1 : 0}`;
+            // Audit 11-22: qty+tag in the key — two equal-priced partial fills
+            // in the same second used to collapse into one on history merge.
+            const key = (f: FillView) => `${f.t}|${f.code}|${f.px}|${f.qty}|${f.buy ? 1 : 0}|${f.tag ?? 0}`;
             const seen = new Set(state.fills.map(key));
             const merged = [...state.fills];
             for (const f of a.items) {
@@ -155,7 +179,8 @@ function reducer(state: DataState, a: Action): DataState {
 }
 
 interface DataContextValue extends DataState {
-    sendCommand: (line: string) => void;
+    /// false = the line was dropped locally (socket down), NOT sent upstream.
+    sendCommand: (line: string) => boolean;
     refresh: () => void;
 }
 

@@ -20,6 +20,10 @@ export const ConfirmButton: React.FC<{
     const t = setTimeout(() => setArmed(false), ms);
     return () => clearTimeout(t);
   }, [armed, ms]);
+  // Audit 11-22: an armed button must not survive a label/disabled change
+  // (e.g. arm "quoting OFF" on month A, select month B, click again — the
+  // confirm used to apply to the NEW target while showing A's intent).
+  useEffect(() => { setArmed(false); }, [label, disabled]);
   // window <= 0 means "no confirmation" (recovery-class actions) — a
   // single tap fires directly.  (Bug found on review: window=0 used to
   // schedule a zero-timeout reset, so the arm state vanished before the

@@ -23,11 +23,22 @@ export const Ticket: React.FC<Props> = ({ buysell, leg, onClose, onNotify }) => 
     const q = parseInt(qty, 10);
     if (!Number.isFinite(px) || px <= 0) { onNotify('invalid price', 'error'); return; }
     if (!Number.isInteger(q) || q <= 0) { onNotify('invalid qty', 'error'); return; }
-    sendCommand(JSON.stringify({
+    // Audit 11-22: reject off-tick prices locally — the exchange would reject
+    // them anyway, and a client-side check gives an actionable message.
+    const tick = meta?.priceTick ?? 0;
+    if (tick > 0) {
+      const steps = px / tick;
+      if (Math.abs(steps - Math.round(steps)) > 1e-6) {
+        onNotify(`price ${px} is not on tick ${tick}`, 'error');
+        return;
+      }
+    }
+    const ok = sendCommand(JSON.stringify({
       cmd: 'order', code: leg.code,
       side: buysell, price: px, qty: q,
       cmdSeq: Date.now() % 100000,
     }));
+    if (!ok) { onNotify('not connected — order NOT sent', 'error'); return; }
     onNotify(`${buysell} ${q} ${leg.code} @ ${px} sent`, 'info');
     onClose();
   };
@@ -49,7 +60,8 @@ export const Ticket: React.FC<Props> = ({ buysell, leg, onClose, onNotify }) => 
           </label>
         </div>
         <div className="text-gray-400 mb-3">
-          bid {leg.bid ?? '-'} / ask {leg.ask ?? '-'} · theo {leg.theo ?? '-'} · mult {meta?.mult ?? '?'} tick {meta?.priceTick ?? '?'}
+          bid {leg.bid ?? '-'} / ask {leg.ask ?? '-'} · theo {leg.theo ?? '-'} · pos {leg.pos ?? 0}<br />
+          mult {meta?.mult ?? '?'} · tick {meta?.priceTick ?? '?'} · qmode {leg.qmode ?? '-'}
         </div>
         {readonly && (
           <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded px-2 py-1 mb-3">

@@ -88,8 +88,15 @@ function useRing<T>(pick: (s: Snapshot) => T): T[] {
   const ring = useRef<T[]>([]);
   const [, force] = useState(0);
   const lastSeq = useRef(0);
+  const dayRef = useRef(0);
   useEffect(() => {
-    if (!snapshot || snapshot.seq === lastSeq.current) return;
+    if (!snapshot) return;
+    // Audit 11-22: a page left open across the daily restart must not chart
+    // yesterday's PnL/latency into today's series.
+    const td = snapshot.state?.tdate ?? 0;
+    if (dayRef.current > 0 && td > 0 && td !== dayRef.current) ring.current = [];
+    if (td > 0) dayRef.current = td;
+    if (snapshot.seq === lastSeq.current) return;
     lastSeq.current = snapshot.seq;
     ring.current = [...ring.current, pick(snapshot)].slice(-MAX_POINTS);
     force(x => x + 1);

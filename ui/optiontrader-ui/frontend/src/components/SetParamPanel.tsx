@@ -18,15 +18,19 @@ const ROWS: Row[] = [
   { key: 'wgt_deltaflow', label: 'wgt_deltaflow', get: p => p.wgt_deltaflow, min: 0, max: 10 },
   { key: 'wgt_atmsig', label: 'wgt_atmsig', get: p => p.wgt_atmsig, min: 0, max: 10 },
   { key: 'wgt_rollema', label: 'wgt_rollema', get: p => p.wgt_rollema, min: 0, max: 10 },
-  { key: 'wgt_exp_ddelta', label: 'wgt_exp_ddelta', get: p => p.wgt_exp_ddelta ?? 0, min: 0, max: 10 },
+  // Audit 11-22: wgt_exp_ddelta was REMOVED — it is an init-time pricer
+  // weight (CompositeOptionPricer config, no hot setter); the backend
+  // SETPARAM whitelist rejects it and the snapshot never echoes it, so the
+  // row always showed 0 and every set failed with "key not hot-adjustable".
   { key: 'max_tps', label: 'max_tps', get: p => p.max_tps, min: 1, max: 10000 },
 ];
 
 export const SetParamPanel: React.FC = () => {
-  const { snapshot, readonly, sendCommand } = useData();
+  const { snapshot, readonly, sendCommand, connectionStatus } = useData();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   const params = snapshot?.params ?? null;
+  const connected = connectionStatus === 'connected';
   // P1 fix (2026-11-19): the per-frame params echo used to wipe ALL drafts on
   // every snapshot — typing in any row was interrupted and unrelated rows
   // lost their edits. Drafts now survive echoes; committing clears only the
@@ -45,7 +49,11 @@ export const SetParamPanel: React.FC = () => {
   }, [params]);
 
   const apply = (key: string, value: number) => {
-    sendCommand(JSON.stringify({ cmd: 'set_param', key, value, cmdSeq: Date.now() % 100000 }));
+    // keep the draft when the line cannot be sent — do not silently clear
+    // an operator's edit on a dead socket
+    if (!connected) return;
+    const ok = sendCommand(JSON.stringify({ cmd: 'set_param', key, value, cmdSeq: Date.now() % 100000 }));
+    if (!ok) return;
     setDrafts(d => { const n = { ...d }; delete n[key]; return n; });
   };
 
@@ -65,7 +73,7 @@ export const SetParamPanel: React.FC = () => {
               disabled={readonly}
               onChange={e => setDrafts(d => ({ ...d, [r.key]: e.target.value }))}
               onKeyDown={e => {
-                if (e.key !== 'Enter' || readonly) return;
+                if (e.key !== 'Enter' || readonly || !connected) return;
                 const v = parseFloat(draft ?? '');
                 if (!isFinite(v)) return;
                 apply(r.key, v);
@@ -73,8 +81,8 @@ export const SetParamPanel: React.FC = () => {
               }}
             />
             <button
-              className={`px-1.5 py-0.5 rounded text-white text-[10px] ${readonly ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
-              disabled={readonly || draft == null || draft === ''}
+              className={`px-1.5 py-0.5 rounded text-white text-[10px] ${readonly || !connected ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
+              disabled={readonly || !connected || draft == null || draft === ''}
               onClick={() => {
                 const v = parseFloat(draft ?? '');
                 if (!isFinite(v)) return;
@@ -87,7 +95,8 @@ export const SetParamPanel: React.FC = () => {
           </label>
         );
       })}
-      {readonly && <span className="text-gray-400">(readonly — P2 gate locked)</span>}
+      {readonly && <span className="text-gray-400">(readonly — write gate locked)</span>}
+      {!readonly && !connected && <span className="text-red-500">(disconnected)</span>}
     </div>
   );
 };

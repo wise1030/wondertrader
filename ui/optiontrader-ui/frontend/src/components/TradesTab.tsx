@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useData } from '../context/DataContext';
 import { OrdersTable } from './OrdersTable';
 
@@ -14,9 +14,19 @@ const TAG_CLASS = [
 export const tagLabel = (t?: number) => TAG_LABEL[(t ?? 0) & 3];
 export const tagClass = (t?: number) => TAG_CLASS[(t ?? 0) & 3];
 
-export const TradesTab: React.FC = () => {
+export const TradesTab: React.FC<{
+  onNotify?: (msg: string, type: 'info' | 'error') => void;
+}> = ({ onNotify }) => {
   const { fills, snapshot } = useData();
-  const [tagFilter, setTagFilter] = useState<number>(-1);   // -1 = all
+  // Audit 11-22: the tag filter used to reset on every remount (tab switch).
+  // Session-scoped persistence keeps the operator's view stable.
+  const [tagFilter, setTagFilter] = useState<number>(() => {
+    const v = Number(sessionStorage.getItem('opt_tagFilter'));
+    return Number.isFinite(v) ? v : -1;
+  });   // -1 = all
+  useEffect(() => {
+    try { sessionStorage.setItem('opt_tagFilter', String(tagFilter)); } catch { /* private mode */ }
+  }, [tagFilter]);
   const recent = useMemo(
     () => [...fills].reverse().filter(f => tagFilter < 0 || (f.tag ?? 0) === tagFilter).slice(0, 500),
     [fills, tagFilter]);
@@ -35,7 +45,7 @@ export const TradesTab: React.FC = () => {
   return (
     <div className="flex flex-col h-full gap-2 p-2 overflow-auto">
       <div className="bg-white border border-gray-200 rounded p-2">
-        <OrdersTable />
+        <OrdersTable onNotify={onNotify} />
       </div>
       <div className="bg-white border border-gray-200 rounded p-2">
         <div className="flex items-center gap-1 mb-1 flex-wrap">

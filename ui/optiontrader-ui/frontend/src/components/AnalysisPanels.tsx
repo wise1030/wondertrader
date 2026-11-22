@@ -86,8 +86,12 @@ export const VolCone: React.FC<{ tdate: number }> = ({ tdate }) => {
   const [resp, setResp] = useState<{ rows: number[][]; days: number } | null>(null);
   useEffect(() => {
     let live = true;
-    const load = () => fetchSeries('vol', tdate > 0 ? tdate : 0)
-      .then(r => { if (live && r) setResp({ rows: r.rows, days: 0 }); });
+    // Audit 11-22: the panel claimed multi-day history but never requested
+    // it — it fetched a single numeric tdate, so the "cone" was today's
+    // intraday band only, and on a non-trading day it was empty even with
+    // weeks of files on disk.  'recent' is the intended 6.2 mode.
+    const load = () => fetchSeries('vol', 'recent')
+      .then(r => { if (live && r) setResp({ rows: r.rows, days: r.days ?? 0 }); });
     load();
     const timer = setInterval(load, 60000);
     return () => { live = false; clearInterval(timer); };
@@ -136,7 +140,10 @@ export const VolCone: React.FC<{ tdate: number }> = ({ tdate }) => {
           ))}
         </tbody>
       </table>
-      <div className="text-[10px] text-gray-400 mt-0.5">atmvol history bands (MIN/P10/P25/P50/P75/P90/MAX over recorded minutes, tdate={tdate})</div>
+      <div className="text-[10px] text-gray-400 mt-0.5">
+        atmvol history bands (MIN/P10/P25/P50/P75/P90/MAX over recorded minutes)
+        {resp.days > 0 ? ` · ${resp.days} day file(s)` : ''}{tdate > 0 ? ` · today=${tdate}` : ''}
+      </div>
     </div>
   );
 };

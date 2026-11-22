@@ -39,11 +39,14 @@ export const blackIV = (px: number, F: number, K: number, dte: number, isCall: b
 // ---------------------------------------------------------------------------
 // Series API (middleware /api/series -> AnalysisRecorder CSVs)
 // ---------------------------------------------------------------------------
-export interface SeriesResp { columns: string[]; rows: number[][]; }
+export interface SeriesResp { columns: string[]; rows: number[][]; days?: number; }
 
-export async function fetchSeries(kind: 'vol' | 'pf', tdate: number): Promise<SeriesResp | null> {
+/// tdate = 'recent' -> the middleware merges the newest N day files (vol
+/// cone).  A numeric tdate -> that single day's sidecar.
+export async function fetchSeries(kind: 'vol' | 'pf', tdate: number | 'recent'): Promise<SeriesResp | null> {
   try {
-    const r = await fetch(`/api/series?kind=${kind}&tdate=${tdate}`, { cache: 'no-cache' });
+    const t = tdate === 'recent' ? 'recent' : String(tdate);
+    const r = await fetch(`/api/series?kind=${kind}&tdate=${t}`, { cache: 'no-cache' });
     if (!r.ok) return null;
     return await r.json();
   } catch {

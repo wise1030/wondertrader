@@ -88,9 +88,13 @@ export class SocketService {
         }
     }
 
-    send(line: string) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(line);
-        else console.warn('[SocketService] send dropped, not connected');
+    /// Returns false when the line was dropped (socket down) — callers that
+    /// claim "order sent" MUST check this (audit 11-22: the UI used to toast
+    /// "sent" even when the WebSocket was disconnected).
+    send(line: string): boolean {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) { this.ws.send(line); return true; }
+        console.warn('[SocketService] send dropped, not connected');
+        return false;
     }
 
     onFrame(h: FrameHandler) { this.frameHandlers.add(h); return () => { this.frameHandlers.delete(h); }; }

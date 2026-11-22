@@ -41,6 +41,15 @@ const qmodeClass = (q: number | null): string => {
   return '';
 };
 
+const qmodeName = (q: number | null): string => {
+  if (q === 1) return 'on';
+  if (q === 0) return 'auto';
+  if (q === -1) return 'off';
+  if (q === 2) return 'close';
+  if (q === 3) return 'flat';
+  return q == null ? '?' : String(q);
+};
+
 // P1 batch-2: queue-position background, ported from quantbox OptionGridModel
 // quoteBackgroundFormatter: 0 = at best (lightest), >0 = ticks behind (light
 // tint), <0 = crossing (solid), 9999 = no quote (none).
@@ -93,6 +102,14 @@ const MemoizedGridRow = memo(({
             <td className={`${cell}`} onClick={() => ticket('S')}
                 style={fo != null ? { opacity: 0.3 + 0.7 * fo, backgroundColor: `rgba(59,130,246,${0.55 * fo})` } : undefined}>
               {leg.bidSz ?? '-'}
+              {/* Audit 11-22: five-level bid depth was fetched but never
+                  rendered (only the ask side was) — symmetric now. */}
+              {leg.bd && leg.bd.length > 0 && (
+                <span className="text-[8px] text-gray-400"
+                  title={leg.bd.map(l => `${l[0]}x${l[1]}`).join(' | ')}>
+                  +{leg.bd.reduce((a, l) => a + (l[1] || 0), 0)}
+                </span>
+              )}
             </td>
           );
         })()}
@@ -126,7 +143,7 @@ const MemoizedGridRow = memo(({
         {vshiftVisible && <td className={`${cell} text-gray-500`}>{fmtN(leg.vshift)}</td>}
         <td
           className={`${cell} ${qCls} ${posClass(leg.pos)}`}
-          title={readonly ? `qmode=${leg.qmode ?? '?'}` : 'double-click toggles qmode'}
+          title={`qmode ${qmodeName(leg.qmode)}${readonly ? ' (readonly)' : ' — double-click toggles on/off'}`}
           onDoubleClick={() => onCellClick(row, side, 'pos_dbl')}
         >
           {leg.pos || 0}
@@ -153,9 +170,12 @@ interface Props {
   selectedExpiry: number | null;
   onExpirySelectByIndex: (i: number) => void;
   onNotify: (msg: string, type: 'info' | 'error') => void;
+  /// Audit 11-22: the tab body stays mounted while hidden, so the global
+  /// keydown handler must only act when the Grid is the visible tab.
+  active?: boolean;
 }
 
-export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelectByIndex, onNotify }) => {
+export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelectByIndex, onNotify, active = true }) => {
   const { snapshot, readonly, sendCommand, orders, flash } = useData();
   const nowMs = useNowMs(250);   // P1 batch-2: drives the sqrt-t fill fade
   // P1: aggregate live orders per contract: "B:qty@px" / "S:qty@px"
@@ -217,6 +237,7 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
   // Qt keyboard shortcuts (navigation/toggles live; trading shortcuts gated by readonly)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!active) return;   // hidden tab must not steal F1-F8 / +/- / arrows
       // Escape closes the ticket even while typing in it.
       if (e.key === 'Escape') {
         if (isTicketOpen) { setIsTicketOpen(false); return; }
@@ -246,7 +267,7 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedRowIdx, rows, onExpirySelectByIndex, openTicket, isTicketOpen, lastSide]);
+  }, [selectedRowIdx, rows, onExpirySelectByIndex, openTicket, isTicketOpen, lastSide, active]);
 
   return (
     <div className="flex flex-col h-full bg-gray-50 text-[10px] overflow-hidden">
@@ -300,7 +321,7 @@ export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelect
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={vshiftVisible ? 25 : 23} className="text-center py-12 text-gray-600 bg-gray-50">
+                <td colSpan={vshiftVisible ? 27 : 25} className="text-center py-12 text-gray-600 bg-gray-50">
                   <div className="text-3xl mb-2">📊</div>
                   <div>No strikes for this expiry (check fit-gate: booksWithBid / fwdReady)</div>
                 </td>
