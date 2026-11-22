@@ -176,7 +176,7 @@ interface Props {
 }
 
 export const OptionGridView: React.FC<Props> = ({ selectedExpiry, onExpirySelectByIndex, onNotify, active = true }) => {
-  const { snapshot, readonly, sendCommand, orders, flash } = useData();
+  const { snapshot, readonly, sendCommand, orders, flash, connectionStatus } = useData();
   const nowMs = useNowMs(250);   // P1 batch-2: drives the sqrt-t fill fade
   // P1: aggregate live orders per contract: "B:qty@px" / "S:qty@px"
   const ordersByCode = React.useMemo(() => {

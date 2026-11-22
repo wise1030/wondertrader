@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Attribution, PredChips, SmileBand, VolCone } from './AnalysisPanels';
 import { HealthPanel } from './HealthPanel';
 import { useData } from '../context/DataContext';

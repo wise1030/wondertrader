@@ -26,7 +26,7 @@ const ROWS: Row[] = [
   // Audit 11-22 (round 3): GVV blend weight — 0 = secondary curve (linear),
   // 1 = fitted main curve (gvv).  The quantbox GUI's gvv_weight knob; per-
   // expiry expiries[].volcurve_weight overrides still win for their month.
-  { key: 'volcurve_weight', label: 'volcurve_weight', get: p => p.volcurve_weight, min: 0, max: 1 },
+  { key: 'volcurve_weight', label: 'volcurve_weight', get: p => p.volcurve_weight ?? 0, min: 0, max: 1 },
 ];
 
 export const SetParamPanel: React.FC = () => {

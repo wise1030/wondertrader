@@ -18,7 +18,7 @@ const Lamp: React.FC<{ label: string; on: boolean; okColor?: string }> = ({ labe
 );
 
 export const StatusBanner: React.FC = () => {
-    const { snapshot, snapshotArrivalMs, connectionStatus } = useData();
+    const { snapshot, connectionStatus } = useData();
     // Live age (audit batch B, H1): recompute every second instead of showing
     // the static per-frame snapshotAgeMs — a stalled upstream must turn the
     // banner red, not freeze on the last healthy value.

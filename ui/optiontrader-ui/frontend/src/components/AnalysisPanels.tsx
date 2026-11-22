@@ -112,7 +112,7 @@ export const VolCone: React.FC<{ tdate: number }> = ({ tdate }) => {
     }));
   }, [resp]);
 
-  if (!cone) return <div className="text-gray-400 text-[11px] p-4">no vol history yet (recorder writes 1 row/min once the session runs)</div>;
+  if (!resp || !cone) return <div className="text-gray-400 text-[11px] p-4">no vol history yet (recorder writes 1 row/min once the session runs)</div>;
 
   return (
     <div>
@@ -187,12 +187,10 @@ export const Attribution: React.FC<{ tdate: number }> = ({ tdate }) => {
   const decomp = useMemo(() => {
     if (!pf || pf.length < 2) return null;
     // cols: ts,delta,gamma,vega,theta,pnl,spot,atmvol
-    let dS0 = 0, dv0 = 0, dt0 = 0;
     const dPnL: number[] = [], gPnL: number[] = [], vPnL: number[] = [], tPnL: number[] = [];
     for (let i = 1; i < pf.length; ++i) {
       const p = pf[i - 1], q = pf[i];
       const dS = q[6] - p[6], dv = q[7] - p[7], dtsec = q[0] - p[0];
-      if (i === 1) { dS0 = dS; dv0 = dv; dt0 = dtsec; }
       dPnL.push(p[1] * dS);
       gPnL.push(0.5 * p[2] * dS * dS);
       vPnL.push(p[3] * dv);

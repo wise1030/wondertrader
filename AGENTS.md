@@ -8,7 +8,7 @@ WonderTrader is a C++17 quant-trading framework. All sources live in `src/` (CMa
 - Runners & tools: `WtRunner`, `WtBtRunner`, `WtUftRunner`, `WtPorter`, `WtLatencyHFT`/`WtLatencyUFT`
 - Shared code: `Share`, `Includes`, `Common`, `API`
 - Tests: `src/TestUnits` (GoogleTest) plus `Test*` harness apps; `src/WtOptionCore/tests` (module-local, plain main() style)
-- `ui/optiontrader-ui/` WtOptionCore 监控 UI（P1 只读版；设计: `src/WtOptionCore/analysis/ui-migration-design-2026-11-16.md`）：纯 Python middleware + React19 SPA，经策略内 UiBridge（127.0.0.1:8710 JSON Lines）对接
+- `ui/optiontrader-ui/` WtOptionCore 监控 UI（P1 只读版；设计: `src/WtOptionCore/analysis/ui-migration-design-2026-11-16.md`）：纯 Python middleware + React19 SPA，经策略内 UiBridge（127.0.0.1:8710 JSON Lines）对接。⚠ 根 tsconfig 是 project-references 壳（files 为空），裸 `npx tsc --noEmit` 什么都不会查（恒 rc=0）；类型检查必须 `npx tsc -b`（11-22 曾因此让未定义标识符流到线上）。
 - `dist/` ready-to-run bundles (e.g. `dist/WtBtFutu`, `dist/WtRunnerFutu`), `deps/` third-party libs, `docker/` Linux build image, `docs/`
 
 ## Build, Test, and Development Commands
