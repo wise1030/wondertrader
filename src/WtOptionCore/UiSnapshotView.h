@@ -99,6 +99,12 @@ struct UiExpiryView
     double undBid = 0, undAsk = 0;
     double undBidSz = 0, undAskSz = 0;   // P1 UI: market depth
     double undPos = 0;
+    // Audit 11-22 (round 2): hedge-leg position delta in UNDERLYING units
+    // (pos lots x contract size) — the same quantity the per-expiry hedge
+    // gate (OptionHedgeCoordinator::checkMulti via OptionExpiryGreeks::
+    // totalDelta) compares against hedgeDeltaThreshold.  Lets the BOARD
+    // red rule match the engine exactly instead of option-delta-only.
+    double undDelta = 0;
     // P1 UI: futures-leg market AND our market-making orders — the option
     // legs show both in the Grid (ordBid/ordAsk); the futures leg had
     // neither in the UI after UnderlierView was folded into the BOARD.
@@ -155,9 +161,15 @@ struct UiSnapshotView
     bool panicked = false;
     uint32_t tdate = 0;
 
-    // Portfolio greeks (OptionRisk::getPositionGreeks)
+    // Portfolio greeks (OptionRisk::getPositionGreeks — OPTION positions
+    // only; the futures-hedge delta lives in pfDelta below)
     bool hasGreeks = false;
     double gDelta = 0, gGamma = 0, gVega = 0, gVegaTW = 0, gTheta = 0;
+    // Audit 11-22 (round 2): OptionRisk::getPortfolioDelta() = option delta
+    // + m_pfuDelta (futures-hedge delta).  This is the quantity the delta
+    // hedger actually compares with hedgeDeltaThreshold — the BOARD TOTAL
+    // row must use it, not gDelta, or a hedged-flat book still shows red.
+    double pfDelta = 0;
 
     // PnL (sum of per-contract PnlTrackers, mirrors the compute loop)
     bool hasPnl = false;

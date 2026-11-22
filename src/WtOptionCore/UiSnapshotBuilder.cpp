@@ -124,6 +124,7 @@ void UiSnapshotBuilder::buildExpiry(const std::vector<StrikeDataPtr>& strikes,
         out.undBidSz = utd->getBidSize();
         out.undAskSz = utd->getAskSize();
         out.undPos = utd->getPosition();
+        out.undDelta = utd->getPosition() * utd->getContractSize();
         // P1 UI: our futures-leg quotes (symmetric to the option legs'
         // ordBid/ordAsk)
         const auto& our = utd->ourMarket();
@@ -263,12 +264,15 @@ void writeLeg(JsonWriter& w, const UiLegView& leg)
     w.key("bqp"); w.Int(leg.bqp);
     w.key("aqp"); w.Int(leg.aqp);
     if (leg.numBid > 1 || leg.numAsk > 1) {   // P1 follow-up: depth beyond best
+        // Audit 11-22 (round 2): emit levels BEYOND the best only (i>=1) —
+        // level 0 is already rendered as bidSz/askSz, so including it made
+        // the frontend "+" aggregate double-count the best level.
         w.key("bd"); w.StartArray();
-        for (int32_t i = 0; i < leg.numBid; ++i)
+        for (int32_t i = 1; i < leg.numBid; ++i)
             { w.StartArray(); w.Double(leg.bidPx[i]); w.Double(leg.bidSz5[i]); w.EndArray(); }
         w.EndArray();
         w.key("ad"); w.StartArray();
-        for (int32_t i = 0; i < leg.numAsk; ++i)
+        for (int32_t i = 1; i < leg.numAsk; ++i)
             { w.StartArray(); w.Double(leg.askPx[i]); w.Double(leg.askSz5[i]); w.EndArray(); }
         w.EndArray();
     }
@@ -319,6 +323,9 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.nullable("vega", v.hasGreeks, v.gVega);
     w.nullable("vegaTW", v.hasGreeks, v.gVegaTW);
     w.nullable("theta", v.hasGreeks, v.gTheta);
+    // option delta + futures-hedge delta — the hedger's actual trigger
+    // quantity (see UiSnapshotView::pfDelta).
+    w.nullable("pfDelta", v.hasGreeks, v.pfDelta);
     w.EndObject();
 
     w.key("pnl"); w.StartObject();
@@ -402,6 +409,8 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
             w.numOrNull("bidSz", e.undBidSz);
             w.numOrNull("askSz", e.undAskSz);
             w.numOrNull("pos", e.undPos);
+            // hedge-leg position delta (underlying units) — see UiSnapshotView
+            w.numOrNull("undDelta", e.undDelta);
             if (e.hasUndOur) {   // P1 UI: our futures-leg quotes
                 w.numOrNull("ourBid", e.undOurBid);
                 w.numOrNull("ourAsk", e.undOurAsk);

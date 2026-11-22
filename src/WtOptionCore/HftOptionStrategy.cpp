@@ -4731,6 +4731,9 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
             v.gVegaTW = pg->vegaTW();
             v.gTheta = pg->theta();
         }
+        // Audit 11-22 (round 2): the hedger's trigger quantity — option
+        // delta + futures-hedge delta (OptionRisk::getPortfolioDelta).
+        v.pfDelta = _risk->getPortfolioDelta();
     }
 
     // PnL mirrors the compute loop: options + hedge underlyings. Trackers are
