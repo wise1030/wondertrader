@@ -42,8 +42,13 @@ class WtOptionClient:
         while not self._stopping:
             try:
                 self._set_status("connecting")
+                # Audit 11-23: the P1 UI snapshot is ONE JSON line (~69KB+ with
+                # five live expiry chains; asyncio's default stream limit is
+                # 64KB — readline then dies with "Separator is found, but
+                # chunk is longer than limit" and the link flaps forever,
+                # blanking the UI).  4MB gives ~60x headroom.
                 self._reader, self._writer = await asyncio.open_connection(
-                    self.host, self.port)
+                    self.host, self.port, limit=4 * 1024 * 1024)
                 self.connected = True
                 backoff = 1.0
                 self._set_status("connected")
