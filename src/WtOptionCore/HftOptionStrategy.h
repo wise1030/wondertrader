@@ -593,6 +593,27 @@ private:
     void pushUiAlert(uint8_t level, const std::string& msg);
 
     void persistHotParam(const std::string& key, double value);
+
+    // ------------------------------------------------------------------
+    // Audit 11-23 (P1): hot-parameter registry — the SINGLE source of truth
+    // for validation, routing, persistence, snapshot echo/schema and the
+    // audit trail.  setHotParam/applyHotParams/persistHotParams/replay all
+    // consult it; the UI renders from the schema it publishes.
+    // ------------------------------------------------------------------
+    struct ParamDesc {
+        std::string base;                // "wgt_vegaflow" / "targ_delta"
+        double min = 0, max = 0;
+        bool perExpiry = false;          // key form "base:YYYYMM"
+        bool persist = true;             // -> generated/hot_params.json
+        const char* expField = nullptr;  // per-expiry echo field (targDelta/...)
+        std::function<void(uint32_t exp, double)> write;  // global: exp ignored
+        std::function<double(uint32_t exp)> read;         // effective value
+    };
+    std::vector<ParamDesc> _paramRegistry;
+    bool _replayingHotParams = false;    // P2: suppress alert toasts on replay
+    void buildParamRegistry();
+    const ParamDesc* findParamDesc(const std::string& key, uint32_t& exp) const;
+    void appendParamAudit(const std::string& key, double oldV, double newV);
     size_t replayHotParams();   // returns number of params applied
 
     /// P1 follow-up: runtime per-expiry quoting on/off (hot command

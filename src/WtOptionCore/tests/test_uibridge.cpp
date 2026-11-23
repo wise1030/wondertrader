@@ -451,20 +451,23 @@ int main()
     wb.stop();
 
     // ------------------------------------------------------------------
-    // 10) snapshot params echo (P2 SETPARAM current values)
+    // 10) snapshot params echo (P1 registry: values + schema)
     // ------------------------------------------------------------------
     UiSnapshotView pv;
-    pv.pWgtVegaflow = 0.35;
-    pv.pWgtFrontfutSkew = 0.25;
-    pv.pWgtDeltaflow = 0.2;
-    pv.pWgtAtmsig = 0.15;
-    pv.pWgtRollema = 0.05;
-    pv.pMaxTps = 30;
+    pv.pValues["wgt_vegaflow"] = 0.35;
+    pv.pValues["max_tps"] = 30;
+    pv.pSchema.push_back({"wgt_vegaflow", 0, 10, false, nullptr});
+    pv.pSchema.push_back({"max_tps", 1, 10000, false, nullptr});
+    pv.pSchema.push_back({"targ_delta", -5000, 5000, true, "targDelta"});
     std::string pj;
     UiSnapshotBuilder::encodeSnapshot(pv, "sid", pj);
     ASSERT_TRUE(pj.find("\"params\"") != std::string::npos);
+    ASSERT_TRUE(pj.find("\"values\"") != std::string::npos);
     ASSERT_TRUE(pj.find("\"wgt_vegaflow\":0.35") != std::string::npos);
     ASSERT_TRUE(pj.find("\"max_tps\":30") != std::string::npos);
+    ASSERT_TRUE(pj.find("\"schema\"") != std::string::npos);
+    ASSERT_TRUE(pj.find("\"perExpiry\":true") != std::string::npos);
+    ASSERT_TRUE(pj.find("\"expField\":\"targDelta\"") != std::string::npos);
 
     std::cout << "ALL UI BRIDGE TESTS PASSED" << std::endl;
     return 0;

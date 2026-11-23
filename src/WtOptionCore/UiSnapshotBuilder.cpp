@@ -464,19 +464,26 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.EndObject();
     w.EndObject();
 
-    // P2 hot-param echo (SETPARAM whitelist — sticky_base / improve_retreat
-    // are init-time only and deliberately absent)
+    // P1: params = { values: {key:number}, schema: [...] } — both generated
+    // from the ParamRegistry (backend单一事实源; UI renders from schema).
     w.key("params"); w.StartObject();
-    w.numOrNull("wgt_vegaflow", v.pWgtVegaflow);
-    w.numOrNull("wgt_frontfut_skew", v.pWgtFrontfutSkew);
-    w.numOrNull("wgt_deltaflow", v.pWgtDeltaflow);
-    w.numOrNull("wgt_atmsig", v.pWgtAtmsig);
-    w.numOrNull("wgt_rollema", v.pWgtRollema);
-    w.numOrNull("volcurve_weight", v.pVolcurveWeight);
-    w.numOrNull("sticky_base", v.pStickyBase);
-    w.numOrNull("improve_retreat_ratio", v.pImproveRetreat);
-    w.key("trade_shock_ticks"); w.Int(static_cast<int32_t>(v.pTradeShockTicks));
-    w.key("max_tps"); w.Int(v.pMaxTps);
+    w.key("values"); w.StartObject();
+    for (const auto& kv : v.pValues) {
+        w.key(kv.first.c_str());
+        w.Double(kv.second);
+    }
+    w.EndObject();
+    w.key("schema"); w.StartArray();
+    for (const auto& se : v.pSchema) {
+        w.StartObject();
+        w.key("key"); w.String(se.key.c_str());
+        w.key("min"); w.Double(se.min);
+        w.key("max"); w.Double(se.max);
+        w.key("perExpiry"); w.Bool(se.perExpiry);
+        if (se.expField) { w.key("expField"); w.String(se.expField); }
+        w.EndObject();
+    }
+    w.EndArray();
     w.EndObject();
 
     w.EndObject();

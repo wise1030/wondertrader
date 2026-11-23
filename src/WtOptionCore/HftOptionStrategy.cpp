@@ -4169,24 +4169,104 @@ void HftOptionStrategy::pushUiAlert(uint8_t level, const std::string& msg) {
 }
 
 // ============================================================================
-// P1 batch-5.4: hot-param persistence (see header comment).
+// Audit 11-23 (P1): hot-parameter registry — single source of truth.
 // ============================================================================
-static bool isPersistableHotParam(const std::string& key) {
-    // Audit 11-23: mirror the setHotParam write whitelist 1:1.  Global keys
-    // match exactly; per-expiry keys ("name:YYYYMM") match by base name —
-    // strip the ":suffix" before the lookup.
-    static const std::set<std::string> kKeys = {
-        "wgt_vegaflow", "wgt_frontfut_skew", "wgt_deltaflow", "wgt_atmsig",
-        "wgt_rollema", "volcurve_weight", "sticky_base", "improve_retreat_ratio",
-        "trade_shock_ticks", "max_tps",
-        "targ_delta", "targ_vega", "sprd_fwd", "sprd_atmvol", "sprd_corr",
+void HftOptionStrategy::buildParamRegistry()
+{
+    // Global keys on the sync_param dual path.  The shm pointer is read at
+    // CALL time (share_domain may bind it after registration), so the
+    // lambdas capture member POINTERS, not the pointer values.
+    auto mk = [&](double* HotParams::*mp, double HftOptionStrategy::*mm,
+                  double lo, double hi, const char* name) {
+        _paramRegistry.push_back({name, lo, hi, false, true, nullptr,
+            [this, mp, mm](uint32_t, double v) {
+                if (this->_hot.*mp) *(this->_hot.*mp) = v; else this->*mm = v;
+            },
+            [this, mp, mm](uint32_t) {
+                return this->_hot.*mp ? *(this->_hot.*mp) : this->*mm;
+            }});
     };
-    const std::string base = key.substr(0, key.find(':'));
-    return kKeys.count(base) > 0;
+    mk(&HotParams::wgt_vegaflow, &HftOptionStrategy::_wgt_vegaflow, 0, 10, "wgt_vegaflow");
+    mk(&HotParams::wgt_frontfut_skew, &HftOptionStrategy::_wgt_frontfut_skew, 0, 10, "wgt_frontfut_skew");
+    mk(&HotParams::wgt_deltaflow, &HftOptionStrategy::_wgt_deltaflow, 0, 10, "wgt_deltaflow");
+    mk(&HotParams::wgt_atmsig, &HftOptionStrategy::_wgt_atmsig, 0, 10, "wgt_atmsig");
+    mk(&HotParams::wgt_rollema, &HftOptionStrategy::_wgt_rollema, 0, 10, "wgt_rollema");
+    mk(&HotParams::volcurve_weight, &HftOptionStrategy::_volcurveWeight, 0, 1, "volcurve_weight");
+    mk(&HotParams::sticky_base, &HftOptionStrategy::_sticky_base, 0, 5, "sticky_base");
+    mk(&HotParams::improve_retreat_ratio, &HftOptionStrategy::_improve_retreat, 1, 10, "improve_retreat_ratio");
+    mk(&HotParams::trade_shock_ticks, &HftOptionStrategy::_tradeShockTicks, 0, 10, "trade_shock_ticks");
+    // max_tps (int-typed storage)
+    _paramRegistry.push_back({"max_tps", 1, 10000, false, true, nullptr,
+        [this](uint32_t, double v) {
+            const int32_t t = static_cast<int32_t>(v);
+            if (_hot.max_tps) *_hot.max_tps = t; else _maxTPS = t;
+        },
+        [this](uint32_t) { return static_cast<double>(hotVal(_hot.max_tps, _maxTPS)); }});
+
+    // Per-expiry keys ("base:YYYYMM") — stored in maps; applyHotParams
+    // merges them with the config defaults before pushing to the pricer.
+    auto mkExp = [&](const char* name, double lo, double hi, const char* field,
+                     std::map<uint32_t, double>& m,
+                     const std::function<double(const ExpiryConfig&)>& cfgVal) {
+        _paramRegistry.push_back({name, lo, hi, true, true, field,
+            [this, &m](uint32_t exp, double v) { m[exp] = v; },
+            [this, &m, cfgVal](uint32_t exp) {
+                auto it = m.find(exp);
+                if (it != m.end()) return it->second;
+                auto ec = _expiryConfigs.find(exp);
+                return ec != _expiryConfigs.end() ? cfgVal(ec->second) : 0.0;
+            }});
+    };
+    mkExp("targ_delta", -5000, 5000, "targDelta", _hotTargDelta,
+          [](const ExpiryConfig& e) { return e.targ_delta; });
+    mkExp("targ_vega", -5000, 5000, "targVega", _hotTargVega,
+          [](const ExpiryConfig& e) { return e.targ_vega; });
+    mkExp("sprd_fwd", 0, 1, "sprdFwd", _hotSprdFwd,
+          [](const ExpiryConfig& e) { return e.sprd_fwd; });
+    mkExp("sprd_atmvol", 0, 1, "sprdAtmvol", _hotSprdAtmvol,
+          [](const ExpiryConfig& e) { return e.sprd_atmvol; });
+    mkExp("sprd_corr", -1, 1, "sprdCorr", _hotSprdCorr,
+          [](const ExpiryConfig& e) { return e.sprd_corr; });
 }
 
+const HftOptionStrategy::ParamDesc* HftOptionStrategy::findParamDesc(
+    const std::string& key, uint32_t& exp) const
+{
+    const size_t colon = key.find(':');
+    if (colon == std::string::npos) {
+        exp = 0;
+        for (const auto& d : _paramRegistry)
+            if (!d.perExpiry && d.base == key) return &d;
+        return nullptr;
+    }
+    const std::string base = key.substr(0, colon);
+    for (const auto& d : _paramRegistry) {
+        if (!d.perExpiry || d.base != base) continue;
+        try { exp = std::stoul(key.substr(colon + 1)); }
+        catch (...) { exp = 0; return nullptr; }
+        return &d;
+    }
+    return nullptr;
+}
+
+void HftOptionStrategy::appendParamAudit(const std::string& key, double oldV, double newV)
+{
+    std::ofstream out("generated/param_audit.log", std::ios::app);
+    if (!out.is_open()) return;
+    const std::time_t t = std::time(nullptr);
+    char buf[32] = {0};
+    std::strftime(buf, sizeof buf, "%F %T", std::localtime(&t));
+    out << buf << "," << key << "," << oldV << "," << newV << "\n";
+}
+
+// ============================================================================
+// P1 batch-5.4: hot-param persistence (see header comment).
+// ============================================================================
 void HftOptionStrategy::persistHotParam(const std::string& key, double value) {
-    if (!isPersistableHotParam(key)) return;
+    // P1: the registry's persist flag replaces the handwritten whitelist.
+    uint32_t exp = 0;
+    const ParamDesc* d = findParamDesc(key, exp);
+    if (!d || !d->persist) return;
     // Full-file rewrite: SETPARAM is an operator action (seconds apart at
     // most), not a hot-path event.
     const std::string path = "generated/hot_params.json";
@@ -4228,10 +4308,13 @@ size_t HftOptionStrategy::replayHotParams() {
     // bound — replay BEFORE sync_param (:751) so the member value becomes the
     // framework-registered default.  registerCommands runs in that window.
     size_t applied = 0;
+    _replayingHotParams = true;   // P2: suppress alert toasts during replay
     for (auto it = d["params"].MemberBegin(); it != d["params"].MemberEnd(); ++it) {
         if (!it->value.IsNumber()) continue;
         const std::string key = it->name.GetString();
-        if (!isPersistableHotParam(key)) continue;
+        uint32_t exp = 0;
+        const ParamDesc* pd = findParamDesc(key, exp);
+        if (!pd || !pd->persist) continue;
         std::string err;
         // _cmdHandlers exposes the same hooks the UI SETPARAM uses.
         if (_cmdHandlers.setHotParam(key, it->value.GetDouble(), err)) {
@@ -4243,6 +4326,7 @@ size_t HftOptionStrategy::replayHotParams() {
                 "hot-param replay FAILED: {} = {} ({})", key, it->value.GetDouble(), err);
         }
     }
+    _replayingHotParams = false;
     return applied;
 }
 
@@ -4291,6 +4375,7 @@ bool HftOptionStrategy::setExpiryEnabled(uint32_t exp, bool enable) {
 
 void HftOptionStrategy::registerCommands()
 {
+    buildParamRegistry();   // P1: registry before the replay at the tail
     wt_option::OptionCommandHandlers::Hooks hooks;
     hooks.setState = [this](wt_option::TradingStateType t, const std::string& reason) {
         setState(t, reason);
@@ -4333,103 +4418,46 @@ void HftOptionStrategy::registerCommands()
     // v2.1: sync_param ptr when share_domain is active, member +
     // _hotUpdatePending otherwise (current dist default) — applyHotParams()
     // picks it up later in this same on_batch_complete.
+    // Audit 11-23 (P1): hot writes route through the ParamRegistry — one
+    // table drives validation, routing, persistence, the snapshot
+    // values/schema echo and the audit trail.  See buildParamRegistry().
     hooks.setHotParam = [this](const std::string& key, double value, std::string& err) -> bool {
         if (!std::isfinite(value)) { err = "value not finite"; return false; }
-        bool ptrPath = false;
-        auto setWeight = [&](double* ptr, double* member) {
-            ptrPath = (ptr != nullptr);
-            if (ptr) *ptr = value; else *member = value;
-            _hotUpdatePending.store(true, std::memory_order_release);
-        };
-        if (key == "wgt_vegaflow") {
-            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
-            setWeight(_hot.wgt_vegaflow, &_wgt_vegaflow);
-        } else if (key == "wgt_frontfut_skew") {
-            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
-            setWeight(_hot.wgt_frontfut_skew, &_wgt_frontfut_skew);
-        } else if (key == "wgt_deltaflow") {
-            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
-            setWeight(_hot.wgt_deltaflow, &_wgt_deltaflow);
-        } else if (key == "wgt_atmsig") {
-            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
-            setWeight(_hot.wgt_atmsig, &_wgt_atmsig);
-        } else if (key == "wgt_rollema") {
-            if (value < 0 || value > 10) { err = "weight out of range [0,10]"; return false; }
-            setWeight(_hot.wgt_rollema, &_wgt_rollema);
-        } else if (key == "volcurve_weight") {
-            // Audit 11-22 (round 3): GVV blend weight, quantbox GUI gvv_weight
-            if (value < 0 || value > 1) { err = "volcurve_weight out of range [0,1]"; return false; }
-            setWeight(_hot.volcurve_weight, &_volcurveWeight);
-        } else if (key == "sticky_base") {
-            // Audit 11-23: min-spread stickiness (ticks). Consumed at quote
-            // time by CompositeOptionPricer (options :734/:926/:1144, futures).
-            if (value < 0 || value > 5) { err = "sticky_base out of range [0,5]"; return false; }
-            setWeight(_hot.sticky_base, &_sticky_base);
-        } else if (key == "improve_retreat_ratio") {
-            // Audit 11-23: improve/retreat asymmetry ratio (bid side). >=1.
-            if (value < 1 || value > 10) { err = "improve_retreat_ratio out of range [1,10]"; return false; }
-            setWeight(_hot.improve_retreat_ratio, &_improve_retreat);
-        } else if (key == "trade_shock_ticks") {
-            // Audit 11-23: our-fill back-away distance in ticks (int).
-            if (value < 0 || value > 10) { err = "trade_shock_ticks out of range [0,10]"; return false; }
-            setWeight(_hot.trade_shock_ticks, &_tradeShockTicks);
-        } else if (key == "max_tps") {
-            const int32_t tps = static_cast<int32_t>(value);
-            if (tps < 1 || tps > 10000) { err = "max_tps out of range [1,10000]"; return false; }
-            ptrPath = (_hot.max_tps != nullptr);
-            if (_hot.max_tps) *_hot.max_tps = tps; else _maxTPS = tps;
-            _hotUpdatePending.store(true, std::memory_order_release);
-        } else {
-            // Audit 11-23: per-expiry keys "name:YYYYMM" (quantbox 逐月 GUI
-            // 参数对齐 — targ_*/sprd_* 逐月可调).  Stored in maps, applied
-            // by applyHotParams(), echoed per-expiry in the snapshot.
-            uint32_t exp = 0;
-            auto parseExp = [&](const char* name) -> int {
-                // 0 = not this name; 1 = matched & parsed; -1 = matched, bad
-                // suffix / unknown expiry (err set).
-                const std::string pfx = std::string(name) + ":";
-                if (key.rfind(pfx, 0) != 0) return 0;
-                try { exp = std::stoul(key.substr(pfx.size())); }
-                catch (...) { err = "bad expiry suffix in " + key; return -1; }
-                if (_expiryConfigs.count(exp) == 0) {
-                    err = "expiry not configured: " + std::to_string(exp);
-                    return -1;
-                }
-                return 1;
-            };
-            auto setExp = [&](std::map<uint32_t, double>& m, double lo, double hi,
-                              const char* rng) -> bool {
-                if (value < lo || value > hi) { err = key + " out of range " + rng; return false; }
-                m[exp] = value;
-                _hotUpdatePending.store(true, std::memory_order_release);
-                return true;
-            };
-            int rc = 0;
-            bool ok = false;
-            if ((rc = parseExp("targ_delta")) != 0)
-                ok = rc > 0 && setExp(_hotTargDelta, -5000, 5000, "[-5000,5000]");
-            else if ((rc = parseExp("targ_vega")) != 0)
-                ok = rc > 0 && setExp(_hotTargVega, -5000, 5000, "[-5000,5000]");
-            else if ((rc = parseExp("sprd_fwd")) != 0)
-                ok = rc > 0 && setExp(_hotSprdFwd, 0, 1, "[0,1]");
-            else if ((rc = parseExp("sprd_atmvol")) != 0)
-                ok = rc > 0 && setExp(_hotSprdAtmvol, 0, 1, "[0,1]");
-            else if ((rc = parseExp("sprd_corr")) != 0)
-                ok = rc > 0 && setExp(_hotSprdCorr, -1, 1, "[-1,1]");
-            if (rc != 0) {
-                if (!ok) return false;
-                WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "UI SETPARAM: {} = {} (expiry-hot, member path)", key, value);
-                persistHotParam(key, value);
-                return true;
+        uint32_t exp = 0;
+        const ParamDesc* d = findParamDesc(key, exp);
+        if (!d) {
+            // differentiate "unknown key" from "known base, bad :suffix"
+            const size_t colon = key.find(':');
+            if (colon != std::string::npos) {
+                const std::string base = key.substr(0, colon);
+                for (const auto& dd : _paramRegistry)
+                    if (dd.perExpiry && dd.base == base) {
+                        err = "bad expiry suffix in " + key;
+                        return false;
+                    }
             }
             err = "key not hot-adjustable: " + key;
             return false;
         }
+        if (d->perExpiry && _expiryConfigs.count(exp) == 0) {
+            err = "expiry not configured: " + std::to_string(exp);
+            return false;
+        }
+        if (value < d->min || value > d->max) {
+            err = fmt::format("{} out of range [{},{}]", key, d->min, d->max);
+            return false;
+        }
+        const double oldValue = d->read(exp);
+        d->write(exp, value);
+        _hotUpdatePending.store(true, std::memory_order_release);
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "UI SETPARAM: {} = {} ({} path)", key, value,
-            ptrPath ? "shm-ptr" : "member");
-        persistHotParam(key, value);   // P1 batch-5.4
+            "UI SETPARAM: {} = {} (was {})", key, value, oldValue);
+        if (d->persist) persistHotParam(key, value);   // P1 batch-5.4
+        appendParamAudit(key, oldValue, value);
+        // P2: explicit UI回显 — toast via the existing alert frame (startup
+        // replay stays silent to avoid a burst of stale notifications).
+        if (!_replayingHotParams)
+            pushUiAlert(0, fmt::format("SETPARAM {}: {} -> {}", key, oldValue, value));
         return true;
     };
     // P3: single-code quote mode — same CTG entry the grid-wide hook uses.
@@ -5020,18 +5048,18 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
         }
     }
 
-    // P2 hot-param echo (same hotVal semantics applyHotParams uses)
+    // P1: params echo is registry-generated — flat values for globals
+    // (per-expiry values ride their expiry object) + the UI schema.
     v.hasParams = true;
-    v.pWgtVegaflow = hotVal(_hot.wgt_vegaflow, _wgt_vegaflow);
-    v.pWgtFrontfutSkew = hotVal(_hot.wgt_frontfut_skew, _wgt_frontfut_skew);
-    v.pWgtDeltaflow = hotVal(_hot.wgt_deltaflow, _wgt_deltaflow);
-    v.pWgtAtmsig = hotVal(_hot.wgt_atmsig, _wgt_atmsig);
-    v.pWgtRollema = hotVal(_hot.wgt_rollema, _wgt_rollema);
-    v.pVolcurveWeight = hotVal(_hot.volcurve_weight, _volcurveWeight);
-    v.pStickyBase = hotVal(_hot.sticky_base, _sticky_base);
-    v.pImproveRetreat = hotVal(_hot.improve_retreat_ratio, _improve_retreat);
-    v.pTradeShockTicks = hotVal(_hot.trade_shock_ticks, _tradeShockTicks);
-    v.pMaxTps = hotVal(_hot.max_tps, _maxTPS);
+    for (const auto& pd : _paramRegistry) {
+        if (pd.perExpiry) continue;
+        v.pValues[pd.base] = pd.read(0);
+        v.pSchema.push_back({pd.base, pd.min, pd.max, pd.perExpiry, pd.expField});
+    }
+    for (const auto& pd : _paramRegistry) {
+        if (!pd.perExpiry) continue;
+        v.pSchema.push_back({pd.base, pd.min, pd.max, pd.perExpiry, pd.expField});
+    }
 }
 
 void HftOptionStrategy::collectUiFills(std::vector<wt_option::UiFillView>& out)

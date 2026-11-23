@@ -10,6 +10,10 @@
  */
 #pragma once
 
+#include <map>
+#include <string>
+#include <vector>
+
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -208,18 +212,18 @@ struct UiSnapshotView
     std::vector<UiOrderView> orders;                      // live orders only
     std::vector<std::pair<std::string, std::pair<double, double>>> contracts; // code -> {mult, tick}
 
-    // Hot-param echo (P2 SETPARAM whitelist, hotVal semantics: sync_param ptr
-    // when share_domain is active, member otherwise) — the UI shows these as
-    // the current values before an edit.
+    // Hot-param echo (P1 audit 11-23): registry-generated.  "values" carries
+    // global keys; per-expiry values ride their expiry object; "schema"
+    // drives the UI panel so a new backend key needs no frontend change.
+    struct ParamSchemaEntry {
+        std::string key;
+        double min = 0, max = 0;
+        bool perExpiry = false;
+        const char* expField = nullptr;   // per-expiry echo field name
+    };
     bool hasParams = false;
-    double pWgtVegaflow = 0, pWgtFrontfutSkew = 0, pWgtDeltaflow = 0;
-    double pWgtAtmsig = 0, pWgtRollema = 0;
-    // Audit 11-22 (round 3): GVV blend weight echo (SETPARAM whitelist)
-    double pVolcurveWeight = 0;
-    // Audit 11-23: quoting-param echo (sticky_base / improve_retreat_ratio /
-    // trade_shock_ticks — consumed live by CompositeOptionPricer)
-    double pStickyBase = 0.5, pImproveRetreat = 3.0, pTradeShockTicks = 1.0;
-    int32_t pMaxTps = 0;
+    std::map<std::string, double> pValues;
+    std::vector<ParamSchemaEntry> pSchema;
 };
 
 // ---------------------------------------------------------------------------
