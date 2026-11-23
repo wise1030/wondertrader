@@ -606,6 +606,22 @@ GUI notifiable 属性。本次：
 - 实测：init 回显 0.5/3.0/1 → set 1.5/3 → ok+落盘 → 超范围 99 →
   拒绝（warning 日志）→ 恢复默认 0.5/1.0 落盘
 
+## 3.4s UI 热参按 quantbox 语义重构（11-23，92eb094e，已部署实测）
+
+quantbox GUI 参数面对照（lut/param_re 实证）：操作员日常旋钮 =
+逐月 targ.delta/targ.vega_tw、sprd_atmvol/corr/fwd/fut、gvv_weight、
+全局 sticky_base/improve_retreat；alpha 信号权重（vegaflow/atmsig 系）
+属量化调参，不在操作员面板。据此实施：
+- **移除 UI 5 个 alpha 权重行**（后端 sync_param/SETPARAM 热通道保留）
+- **新增逐月热键 `name:YYYYMM`**：targ_delta/targ_vega/sprd_fwd/
+  sprd_atmvol/sprd_corr；CompositeOptionPricer 增 setExpirySpread；
+  applyHotParams 与 config 默认值合并（单键热改不覆盖兄弟参数）；
+  快照逐月回显 targ（热值优先）+ sprd 三字段；持久化白名单基名匹配
+- UI 面板：静态全局 5 行 + 按 snapshot.expiries 动态生成的逐月行
+  （quantbox 点分命名空间语义）
+- 实测：targ_delta:202612=100→echo+落盘、sprd_corr:202612=0.25→echo、
+  未配置月 209901→拒绝；测试值已恢复 0
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
