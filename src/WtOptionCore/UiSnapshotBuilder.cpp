@@ -468,6 +468,9 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
     w.numOrNull("wgt_atmsig", v.pWgtAtmsig);
     w.numOrNull("wgt_rollema", v.pWgtRollema);
     w.numOrNull("volcurve_weight", v.pVolcurveWeight);
+    w.numOrNull("sticky_base", v.pStickyBase);
+    w.numOrNull("improve_retreat_ratio", v.pImproveRetreat);
+    w.key("trade_shock_ticks"); w.Int(static_cast<int32_t>(v.pTradeShockTicks));
     w.key("max_tps"); w.Int(v.pMaxTps);
     w.EndObject();
 

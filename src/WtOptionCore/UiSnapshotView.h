@@ -212,6 +212,9 @@ struct UiSnapshotView
     double pWgtAtmsig = 0, pWgtRollema = 0;
     // Audit 11-22 (round 3): GVV blend weight echo (SETPARAM whitelist)
     double pVolcurveWeight = 0;
+    // Audit 11-23: quoting-param echo (sticky_base / improve_retreat_ratio /
+    // trade_shock_ticks — consumed live by CompositeOptionPricer)
+    double pStickyBase = 0.5, pImproveRetreat = 3.0, pTradeShockTicks = 1.0;
     int32_t pMaxTps = 0;
 };
 

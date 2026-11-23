@@ -773,7 +773,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     _hot.volcurve_weight   = _ctx->sync_param("volcurve_weight", _volcurveWeight);
     _hot.sticky_base       = _ctx->sync_param("sticky_base", _sticky_base);
     _hot.improve_retreat_ratio = _ctx->sync_param("improve_retreat_ratio", _improve_retreat);
-    _hot.trade_shock_ticks = _ctx->sync_param("trade_shock_ticks", 1.0);
+    _hot.trade_shock_ticks = _ctx->sync_param("trade_shock_ticks", _tradeShockTicks);
     _hot.max_tps           = _ctx->sync_param("max_tps", _maxTPS);
     _hot.command           = _ctx->sync_param("command", 0);
     _hot.qmode_override    = _ctx->sync_param("qmode_override", 0);
@@ -4172,15 +4172,13 @@ void HftOptionStrategy::pushUiAlert(uint8_t level, const std::string& msg) {
 // P1 batch-5.4: hot-param persistence (see header comment).
 // ============================================================================
 static bool isPersistableHotParam(const std::string& key) {
-    // Audit 11-23 (P0): exactly the keys setHotParam ACCEPTS (its whitelist
-    // is the write authority — persist must mirror it). sticky_base /
-    // improve_retreat_ratio / trade_shock_ticks were dead entries here
-    // (setHotParam rejects them as init-time only). volcurve_weight was
-    // accepted at runtime but never persisted — a restart silently dropped
-    // the operator's tuning.
+    // Audit 11-23: exactly the keys setHotParam ACCEPTS (its whitelist is
+    // the write authority — persist mirrors it 1:1; the three quoting keys
+    // are writable again since the hot setters landed).
     static const std::set<std::string> kKeys = {
         "wgt_vegaflow", "wgt_frontfut_skew", "wgt_deltaflow", "wgt_atmsig",
-        "wgt_rollema", "volcurve_weight", "max_tps",
+        "wgt_rollema", "volcurve_weight", "sticky_base", "improve_retreat_ratio",
+        "trade_shock_ticks", "max_tps",
     };
     return kKeys.count(key) > 0;
 }
@@ -4328,10 +4326,10 @@ void HftOptionStrategy::registerCommands()
         return true;
     };
     // P2 UI: hot parameter write. Whitelist = ONLY the keys applyHotParams()
-    // consumes hot (5 alpha weights + volcurve_weight + max_tps). sticky_base
-    // / improve_retreat are init-time only and are rejected here by design.
-    // Dual path per v2.1: sync_param ptr when share_domain is active, member
-    // + _hotUpdatePending otherwise (current dist default) — applyHotParams()
+    // consumes hot (5 alpha weights + volcurve_weight + sticky_base +
+    // improve_retreat_ratio + trade_shock_ticks + max_tps).  Dual path per
+    // v2.1: sync_param ptr when share_domain is active, member +
+    // _hotUpdatePending otherwise (current dist default) — applyHotParams()
     // picks it up later in this same on_batch_complete.
     hooks.setHotParam = [this](const std::string& key, double value, std::string& err) -> bool {
         if (!std::isfinite(value)) { err = "value not finite"; return false; }
@@ -4360,6 +4358,19 @@ void HftOptionStrategy::registerCommands()
             // Audit 11-22 (round 3): GVV blend weight, quantbox GUI gvv_weight
             if (value < 0 || value > 1) { err = "volcurve_weight out of range [0,1]"; return false; }
             setWeight(_hot.volcurve_weight, &_volcurveWeight);
+        } else if (key == "sticky_base") {
+            // Audit 11-23: min-spread stickiness (ticks). Consumed at quote
+            // time by CompositeOptionPricer (options :734/:926/:1144, futures).
+            if (value < 0 || value > 5) { err = "sticky_base out of range [0,5]"; return false; }
+            setWeight(_hot.sticky_base, &_sticky_base);
+        } else if (key == "improve_retreat_ratio") {
+            // Audit 11-23: improve/retreat asymmetry ratio (bid side). >=1.
+            if (value < 1 || value > 10) { err = "improve_retreat_ratio out of range [1,10]"; return false; }
+            setWeight(_hot.improve_retreat_ratio, &_improve_retreat);
+        } else if (key == "trade_shock_ticks") {
+            // Audit 11-23: our-fill back-away distance in ticks (int).
+            if (value < 0 || value > 10) { err = "trade_shock_ticks out of range [0,10]"; return false; }
+            setWeight(_hot.trade_shock_ticks, &_tradeShockTicks);
         } else if (key == "max_tps") {
             const int32_t tps = static_cast<int32_t>(value);
             if (tps < 1 || tps > 10000) { err = "max_tps out of range [1,10000]"; return false; }
@@ -4661,9 +4672,22 @@ void HftOptionStrategy::applyHotParams()
         const double gvw = hotVal(_hot.volcurve_weight, _volcurveWeight);
         _compositePricer->setGvvWeightDefault(gvw);
         _volcurveWeight = gvw;
+        // Audit 11-23: quoting params (quantbox GUI parity — read at quote/
+        // fill time from the pricer config, so the setters take effect on
+        // the next refresh).
+        const double sb = hotVal(_hot.sticky_base, _sticky_base);
+        const double irr = hotVal(_hot.improve_retreat_ratio, _improve_retreat);
+        const int32_t tst = static_cast<int32_t>(hotVal(_hot.trade_shock_ticks, _tradeShockTicks));
+        _compositePricer->setStickyBase(sb);
+        _compositePricer->setImproveRetreatRatio(irr);
+        _compositePricer->setTradeShockTicks(tst);
+        _sticky_base = sb;
+        _improve_retreat = irr;
+        _tradeShockTicks = tst;
         WTSLogger::log_by_cat("strategy", LL_INFO,
-            "  alpha weights: vega={} frontfut={} delta={} atmsig={} rollema={} | volcurve_weight={}",
-            vega, front, delta, atm, roll, gvw);
+            "  alpha weights: vega={} frontfut={} delta={} atmsig={} rollema={} | volcurve_weight={}"
+            " | sticky_base={} improve_retreat={} shock_ticks={}",
+            vega, front, delta, atm, roll, gvw, sb, irr, tst);
     }
 
     // 2. Update TPS
@@ -4920,6 +4944,9 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
     v.pWgtAtmsig = hotVal(_hot.wgt_atmsig, _wgt_atmsig);
     v.pWgtRollema = hotVal(_hot.wgt_rollema, _wgt_rollema);
     v.pVolcurveWeight = hotVal(_hot.volcurve_weight, _volcurveWeight);
+    v.pStickyBase = hotVal(_hot.sticky_base, _sticky_base);
+    v.pImproveRetreat = hotVal(_hot.improve_retreat_ratio, _improve_retreat);
+    v.pTradeShockTicks = hotVal(_hot.trade_shock_ticks, _tradeShockTicks);
     v.pMaxTps = hotVal(_hot.max_tps, _maxTPS);
 }
 

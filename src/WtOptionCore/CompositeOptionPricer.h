@@ -293,6 +293,15 @@ public:
     void setAlphaWeights(double vegaflow, double frontfut_skew, double deltaflow,
                          double atmsig, double rollema);
 
+    /// Audit 11-23: quoting-parameter hot setters (SETPARAM whitelist;
+    /// quantbox GUI parity — these were config-init-only until now).  All
+    /// three are consumed at quote/fill time from m_config / this member,
+    /// and applyHotParams runs on the worker thread, so a runtime write
+    /// takes effect from the next quote refresh.
+    void setStickyBase(double v) { m_config.sticky_base = v; }
+    void setImproveRetreatRatio(double v) { m_config.improve_retreat_ratio = v; }
+    void setTradeShockTicks(int32_t v) { m_prop_trade_shock_ticks = v; }
+
     // time (replaces ClockMonitor)
     double getTime() const { return m_time; }
     void setTime(double t) {

@@ -169,6 +169,9 @@ private:
     // per-expiry overrides in expiries[].volcurve_weight still win.
     double _volcurveWeight = 0.0;
     double _sticky_base = 0.5, _improve_retreat = 3.0;
+    // Audit 11-23: trade-shock ticks (our-fill back-away distance).  Hot via
+    // SETPARAM trade_shock_ticks; pricer-side default is 1.
+    double _tradeShockTicks = 1.0;
 
     // Pricer strategy type
     std::string _pricerType = "composite_mm";

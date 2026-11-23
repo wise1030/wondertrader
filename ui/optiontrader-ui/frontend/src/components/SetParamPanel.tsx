@@ -27,6 +27,11 @@ const ROWS: Row[] = [
   // 1 = fitted main curve (gvv).  The quantbox GUI's gvv_weight knob; per-
   // expiry expiries[].volcurve_weight overrides still win for their month.
   { key: 'volcurve_weight', label: 'volcurve_weight', get: p => p.volcurve_weight ?? 0, min: 0, max: 1 },
+  // Audit 11-23: quoting params (quantbox GUI parity; read at quote/fill
+  // time by the pricer, so a hot set takes effect from the next refresh).
+  { key: 'sticky_base', label: 'sticky_base', get: p => p.sticky_base ?? 0.5, min: 0, max: 5 },
+  { key: 'improve_retreat_ratio', label: 'improve_retreat_ratio', get: p => p.improve_retreat_ratio ?? 3, min: 1, max: 10 },
+  { key: 'trade_shock_ticks', label: 'trade_shock_ticks', get: p => p.trade_shock_ticks ?? 1, min: 0, max: 10 },
 ];
 
 export const SetParamPanel: React.FC = () => {

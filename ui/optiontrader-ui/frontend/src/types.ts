@@ -176,6 +176,10 @@ export interface Snapshot {
     wgt_exp_ddelta?: number;
     // Audit 11-22 (round 3): GVV blend weight echo (0=secondary, 1=fitted main)
     volcurve_weight?: number;
+    // Audit 11-23: quoting-param echo (consumed live by the pricer)
+    sticky_base?: number;
+    improve_retreat_ratio?: number;
+    trade_shock_ticks?: number;
     max_tps: number;
   } | null;
 }
