@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useData } from '../context/DataContext';
 import { ConfirmButton } from './ConfirmButton';
 
@@ -221,10 +221,17 @@ const ControlStrip: React.FC<{
   // Audit 11-23: quoting 改为状态优先显示（原来按钮文字是动作语义——
   // quoting 开着时显示 "quoting OFF"，与 BOARD 的 Q 灯对照看起来像反了）。
   // 现在按钮即状态：绿色=ON / 灰色=OFF，双向都两击确认。
+  // Audit 11-23 (round 2): 现场日志显示 OFF→ON "失效"的根因是两击窗
+  // 2s 太短（第二次点击落在窗外只重新武装）+ ack→快照刷新（≤1s）无正
+  // 向反馈导致重复点击（服务端出现 duplicate "already off"）。确认窗
+  // 加宽到 5s，并在发送成功瞬间给闪光反馈填补空窗。
+  const [flash, setFlash] = useState<{ msg: string; at: number } | null>(null);
   const send = (line: string, what: string) => {
     if (readonly) { onNotify?.(`${what} gated — readonly mode`, 'info'); return; }
     if (!connected) { onNotify?.(`not connected — ${what} NOT sent`, 'error'); return; }
-    if (!sendCommand(line)) onNotify?.(`not connected — ${what} NOT sent`, 'error');
+    if (!sendCommand(line)) { onNotify?.(`not connected — ${what} NOT sent`, 'error'); return; }
+    setFlash({ msg: `${what} sent`, at: Date.now() });
+    setTimeout(() => setFlash(f => (f && Date.now() - f.at >= 1400) ? null : f), 1500);
   };
 
   return (
@@ -243,7 +250,7 @@ const ControlStrip: React.FC<{
             key={`quote:${selected}:${on}`}
             label={on ? 'quoting: ON' : 'quoting: OFF'}
             confirmLabel={on ? 'confirm exit MM?' : 'confirm join MM?'}
-            window={2000}
+            window={5000}
             disabled={disabled}
             title={`hot EXPIRYENABLE — status button; matches the BOARD Q lamp. ${on ? 'click twice to EXIT market making (quotes cancelled)' : 'click twice to JOIN market making'}`}
             className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : on ? 'bg-green-700 text-white border-green-700' : 'bg-gray-200 text-gray-700 border-gray-300 hover:bg-blue-50'}`}
@@ -258,20 +265,21 @@ const ControlStrip: React.FC<{
             className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : qActive(1) ? 'bg-green-700 text-white border-green-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-blue-50'}`}>on</button>
           <ConfirmButton key={`off:${selected}:${qActive(-1)}`} label="off"
             confirmLabel="confirm off?"
-            window={2000}
+            window={5000}
             disabled={disabled}
             title={`qmode off (hot) — pauses quoting for this month${qActive(-1) ? ' — ACTIVE' : ''}`}
             className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : qActive(-1) ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-50'}`}
             onConfirm={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'off', cmdSeq: Date.now() % 100000 }), 'qmode off')} />
           <ConfirmButton key={`close:${selected}:${qActive(2)}`} label="close"
             confirmLabel="confirm close?"
-            window={2000}
+            window={5000}
             disabled={disabled}
             title={`qmode close (hot) — reduce-only for this month${qActive(2) ? ' — ACTIVE' : ''}`}
             className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : qActive(2) ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-50'}`}
             onConfirm={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'close', cmdSeq: Date.now() % 100000 }), 'qmode close')} />
           {readonly && <span className="text-gray-400">(readonly)</span>}
           {!readonly && !connected && <span className="text-red-500">(disconnected)</span>}
+          {flash && <span className="text-green-700 font-bold">✓ {flash.msg}</span>}
         </>
       )}
       <span className="ml-auto text-gray-400" title="delta-hedge fire threshold (same units as Δ: tonnes for cu)">
