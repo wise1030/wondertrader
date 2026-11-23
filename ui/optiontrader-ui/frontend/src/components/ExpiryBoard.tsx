@@ -203,13 +203,24 @@ const ControlStrip: React.FC<{
   const connected = connectionStatus === 'connected';
   const cur = expiries.find(e => e.expiry === selected) ?? null;
   const on = cur ? cur.quoting !== false : false;
+  // Audit 11-23: month-wide qmode state — SAME aggregation as the BOARD
+  // badge (all legs agree → that mode; otherwise mixed/auto = no highlight).
+  const curQmode = (() => {
+    if (!cur) return null;
+    const modes = new Set<number>();
+    for (const st of cur.strikes) {
+      if (st.C?.qmode != null) modes.add(st.C.qmode);
+      if (st.P?.qmode != null) modes.add(st.P.qmode);
+    }
+    return modes.size === 1 ? [...modes][0] : null;
+  })();
+  const qActive = (m: number) => curQmode === m;
   const btnBase = 'px-1.5 py-0.5 rounded text-[10px] border';
   const disabled = readonly || !connected;
 
-  // Audit 11-22 (round 2): the BOARD commands went straight to sendCommand
-  // with no readonly/disconnected handling — the widest blast-radius strip
-  // on the page was the only one that could "succeed" silently on a dead
-  // socket.  Same contract as Ticket/OrdersTable: report, never pretend.
+  // Audit 11-23: quoting 改为状态优先显示（原来按钮文字是动作语义——
+  // quoting 开着时显示 "quoting OFF"，与 BOARD 的 Q 灯对照看起来像反了）。
+  // 现在按钮即状态：绿色=ON / 灰色=OFF，双向都两击确认。
   const send = (line: string, what: string) => {
     if (readonly) { onNotify?.(`${what} gated — readonly mode`, 'info'); return; }
     if (!connected) { onNotify?.(`not connected — ${what} NOT sent`, 'error'); return; }
@@ -230,27 +241,34 @@ const ControlStrip: React.FC<{
               close reduce-only).  Both buttons stay. */}
           <ConfirmButton
             key={`quote:${selected}:${on}`}
-            label={on ? 'quoting OFF' : 'quoting ON'}
-            confirmLabel={on ? 'confirm exit MM?' : 'confirm ON?'}
+            label={on ? 'quoting: ON' : 'quoting: OFF'}
+            confirmLabel={on ? 'confirm exit MM?' : 'confirm join MM?'}
+            window={2000}
             disabled={disabled}
-            title={`hot EXPIRYENABLE: ${on ? 'this month EXITS market making (quotes cancelled, none generated)' : 'this month JOINS market making'}${connected ? '' : ' (disconnected)'}`}
-            className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : on ? 'bg-gray-200 text-gray-700 border-gray-300 hover:bg-amber-50' : 'bg-green-700 text-white border-green-700'}`}
-            onConfirm={() => send(JSON.stringify({ cmd: 'expiry_enable', expiry: selected, enable: !on, cmdSeq: Date.now() % 100000 }), 'expiry_enable')} />
-          {/* qmode off/close are dangerous (stop/cancel), on is recovery */}
+            title={`hot EXPIRYENABLE — status button; matches the BOARD Q lamp. ${on ? 'click twice to EXIT market making (quotes cancelled)' : 'click twice to JOIN market making'}`}
+            className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : on ? 'bg-green-700 text-white border-green-700' : 'bg-gray-200 text-gray-700 border-gray-300 hover:bg-blue-50'}`}
+            onConfirm={() => send(JSON.stringify({ cmd: 'expiry_enable', expiry: selected, enable: !on, cmdSeq: Date.now() % 100000 }), 'quoting toggle')} />
+          {/* qmode stateful buttons — the ACTIVE mode is highlighted (same
+              colours as the BOARD badge), so the strip always agrees with
+              the row above it. */}
           <span className="text-gray-400">qmode</span>
           <button disabled={disabled}
             onClick={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'on', cmdSeq: Date.now() % 100000 }), 'qmode on')}
-            title={`qmode on (hot)${connected ? '' : ' — disconnected'}`}
-            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-blue-50'}`}>on</button>
-          <ConfirmButton key={`off:${selected}`} label="off" confirmLabel="confirm off?"
+            title={`qmode on (hot)${qActive(1) ? ' — ACTIVE for this month' : ''}`}
+            className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : qActive(1) ? 'bg-green-700 text-white border-green-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-blue-50'}`}>on</button>
+          <ConfirmButton key={`off:${selected}:${qActive(-1)}`} label="off"
+            confirmLabel="confirm off?"
+            window={2000}
             disabled={disabled}
-            title="qmode off (hot) — pauses quoting for this month"
-            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-amber-50'}`}
+            title={`qmode off (hot) — pauses quoting for this month${qActive(-1) ? ' — ACTIVE' : ''}`}
+            className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : qActive(-1) ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-50'}`}
             onConfirm={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'off', cmdSeq: Date.now() % 100000 }), 'qmode off')} />
-          <ConfirmButton key={`close:${selected}`} label="close" confirmLabel="confirm close?"
+          <ConfirmButton key={`close:${selected}:${qActive(2)}`} label="close"
+            confirmLabel="confirm close?"
+            window={2000}
             disabled={disabled}
-            title="qmode close (hot) — reduce-only for this month"
-            className={`${btnBase} bg-white text-gray-700 border-gray-300 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-amber-50'}`}
+            title={`qmode close (hot) — reduce-only for this month${qActive(2) ? ' — ACTIVE' : ''}`}
+            className={`${btnBase} ${disabled ? 'opacity-40 cursor-not-allowed' : qActive(2) ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-50'}`}
             onConfirm={() => send(JSON.stringify({ cmd: 'qmode_expiry', expiry: selected, mode: 'close', cmdSeq: Date.now() % 100000 }), 'qmode close')} />
           {readonly && <span className="text-gray-400">(readonly)</span>}
           {!readonly && !connected && <span className="text-red-500">(disconnected)</span>}

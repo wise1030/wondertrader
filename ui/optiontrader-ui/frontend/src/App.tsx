@@ -99,7 +99,7 @@ const Shell: React.FC = () => {
         </div>
       </div>
 
-      <CommandPanel onNotify={notify} />
+      <CommandPanel onNotify={notify} selectedExpiry={selectedExpiry} />
       <StatusFooter />
 
       <div className="fixed bottom-2 right-2 z-50 flex flex-col">

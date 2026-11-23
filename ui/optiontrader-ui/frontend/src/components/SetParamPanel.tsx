@@ -3,24 +3,28 @@ import { useData } from '../context/DataContext';
 import type { Snapshot } from '../types';
 
 type Params = NonNullable<NonNullable<Snapshot['params']>>;
+type Expiry = NonNullable<Snapshot['expiries']>[number];
 
-interface Row {
-  key: string;                 // SETPARAM key (global or "name:YYYYMM")
+interface RowDef {
+  base: string;                // schema key ("targ_delta")
   label: string;
-  get: (values: Params['values'], exps: Snapshot['expiries']) => number | null;
   min?: number;
   max?: number;
-  group?: string;              // UI grouping label (expiry month)
+  get: (values: Params['values'], exp: Expiry | null) => number | null;
 }
 
-// P1 (audit 11-23): the panel renders ENTIRELY from the registry schema the
-// backend publishes in snapshot.params.schema — global entries become static
-// rows, perExpiry entries are crossed with snapshot.expiries.  Adding a key
-// on the backend (buildParamRegistry) needs NO frontend change.  The 5 alpha
-// signal weights keep their backend hot channel but are operator-hidden
-// because the backend does not publish them in the schema.
+interface RowInst {
+  def: RowDef;
+  fullKey: string;             // global: base; per-expiry: "base:YYYYMM"
+  exp: Expiry | null;
+}
 
-export const SetParamPanel: React.FC = () => {
+// P1 (audit 11-23): rows render from the registry schema the backend
+// publishes (snapshot.params.schema).  Layout audit 11-23: TWO tables side
+// by side — globals (never change) and the SELECTED month's per-expiry
+// params (follows the BOARD selection; switching rows switches the table).
+
+export const SetParamPanel: React.FC<{ selectedExpiry: number | null }> = ({ selectedExpiry }) => {
   const { snapshot, readonly, sendCommand, connectionStatus } = useData();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
@@ -28,107 +32,137 @@ export const SetParamPanel: React.FC = () => {
   const values = params?.values ?? null;
   const connected = connectionStatus === 'connected';
 
-  const rows = useMemo<Row[]>(() => {
-    const rs: Row[] = [];
-    for (const se of params?.schema ?? []) {
-      if (!se.perExpiry) {
-        rs.push({
-          key: se.key, label: se.key, min: se.min, max: se.max,
-          get: v => v[se.key] ?? null,
-        });
-      } else {
-        for (const e of snapshot?.expiries ?? []) {
-          rs.push({
-            key: `${se.key}:${e.expiry}`,
-            label: `${se.key}:${String(e.expiry).slice(2)}`,
-            group: String(e.expiry),
-            min: se.min, max: se.max,
-            get: (_v, exps) => {
-              const ee = exps?.find(x => x.expiry === e.expiry);
-              if (!ee || !se.expField) return null;
-              const f = ee as unknown as Record<string, number | null | undefined>;
-              return f[se.expField!] ?? null;
-            },
-          });
-        }
-      }
-    }
-    return rs;
-  }, [params?.schema, snapshot?.expiries]);
+  const selExpiry = snapshot?.expiries.find(e => e.expiry === selectedExpiry) ?? null;
 
-  // P1 fix (2026-11-19): the per-frame params echo used to wipe ALL drafts on
-  // every snapshot — typing in any row was interrupted and unrelated rows
-  // lost their edits. Drafts now survive echoes; committing clears only the
-  // committed row. A draft whose value matches the echoed param is also
-  // dropped (external change, e.g. another operator).
+  const globalRows = useMemo<RowDef[]>(() =>
+    (params?.schema ?? []).filter(s => !s.perExpiry).map(s => ({
+      base: s.key, label: s.key, min: s.min, max: s.max,
+      get: v => v[s.key] ?? null,
+    })), [params?.schema]);
+
+  const expiryRowDefs = useMemo<RowDef[]>(() =>
+    (params?.schema ?? []).filter(s => s.perExpiry).map(s => ({
+      base: s.key, label: s.key, min: s.min, max: s.max,
+      get: (_v, exp) => {
+        if (!exp || !s.expField) return null;
+        const f = exp as unknown as Record<string, number | null | undefined>;
+        return f[s.expField] ?? null;
+      },
+    })), [params?.schema]);
+
+  const instances = useMemo<RowInst[]>(() => [
+    ...globalRows.map(d => ({ def: d, fullKey: d.base, exp: null })),
+    ...(selExpiry ? expiryRowDefs.map(d => ({
+      def: d, fullKey: `${d.base}:${selExpiry.expiry}`, exp: selExpiry,
+    })) : []),
+  ], [globalRows, expiryRowDefs, selExpiry]);
+
+  // P1 fix (2026-11-19): drafts survive per-frame echoes; committing clears
+  // only the committed row; a draft matching the echoed value is dropped
+  // (external change, e.g. another operator / the REST entry).  Drafts are
+  // keyed by the FULL key ("targ_delta:202612") so different months never
+  // share an edit box state.
   useEffect(() => {
     setDrafts(d => {
       const next: Record<string, string> = { ...d };
       let dirty = false;
-      for (const r of rows) {
-        const v = values ? r.get(values, snapshot?.expiries ?? []) : null;
-        if (v != null && d[r.key] === String(v)) { delete next[r.key]; dirty = true; }
+      for (const r of instances) {
+        const v = values ? r.def.get(values, r.exp) : null;
+        if (v != null && d[r.fullKey] === String(v)) { delete next[r.fullKey]; dirty = true; }
       }
       return dirty ? next : d;
     });
-  }, [values, rows, snapshot?.expiries]);
+  }, [values, instances]);
 
-  const apply = (key: string, value: number) => {
-    // keep the draft when the line cannot be sent — do not silently clear
-    // an operator's edit on a dead socket
-    if (!connected) return;
-    const ok = sendCommand(JSON.stringify({ cmd: 'set_param', key, value, cmdSeq: Date.now() % 100000 }));
+  const apply = (r: RowInst) => {
+    const draft = drafts[r.fullKey];
+    const v = parseFloat(draft ?? '');
+    if (!isFinite(v)) return;
+    if (!connected) return;   // keep the draft on a dead socket
+    const ok = sendCommand(JSON.stringify({ cmd: 'set_param', key: r.fullKey, value: v, cmdSeq: Date.now() % 100000 }));
     if (!ok) return;
-    setDrafts(d => { const n = { ...d }; delete n[key]; return n; });
+    setDrafts(d => { const n = { ...d }; delete n[r.fullKey]; return n; });
   };
 
-  let lastGroup: string | undefined;
+  const renderRow = (r: RowInst) => {
+    const cur = values ? r.def.get(values, r.exp) : null;
+    const draft = drafts[r.fullKey];
+    return (
+      <tr key={r.fullKey} title={`key=${r.fullKey} current=${cur ?? '?'} range=[${r.def.min},${r.def.max}]`}>
+        <td className="border border-gray-200 px-1 text-gray-600 font-mono">{r.def.label}</td>
+        <td className="border border-gray-200 px-1 text-right font-mono font-bold">{cur ?? '-'}</td>
+        <td className="border border-gray-200 px-1">
+          <div className="flex items-center gap-1">
+            <input
+              className="w-16 border rounded px-1 py-0.5 font-mono"
+              placeholder={cur != null ? String(cur) : '-'}
+              value={draft ?? ''}
+              disabled={readonly}
+              onChange={e => setDrafts(d => ({ ...d, [r.fullKey]: e.target.value }))}
+              onKeyDown={e => {
+                if (e.key !== 'Enter' || readonly || !connected) return;
+                apply(r);
+              }}
+            />
+            <button
+              className={`px-1.5 py-0.5 rounded text-white text-[10px] ${readonly || !connected ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
+              disabled={readonly || !connected || draft == null || draft === ''}
+              onClick={() => apply(r)}
+            >
+              set
+            </button>
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
   return (
-    <div className="flex items-center gap-3 flex-wrap text-[11px]">
-      <span className="font-semibold text-gray-500">Hot params</span>
-      {rows.length === 0 && <span className="text-gray-400">(schema unavailable — waiting for snapshot)</span>}
-      {rows.map(r => {
-        const cur = values ? r.get(values, snapshot?.expiries ?? []) : null;
-        const draft = drafts[r.key];
-        const header = r.group !== lastGroup ? r.group : undefined;
-        lastGroup = r.group;
-        return (
-          <React.Fragment key={r.key}>
-            {header && <span className="text-gray-400 font-semibold">·{header}</span>}
-            <label className="flex items-center gap-1" title={`key=${r.key} current=${cur ?? '?'} range=[${r.min},${r.max}]`}>
-              <span className="text-gray-500">{r.label}</span>
-              <input
-                className="w-16 border rounded px-1 py-0.5 font-mono"
-                placeholder={cur != null ? String(cur) : '-'}
-                value={draft ?? ''}
-                disabled={readonly}
-                onChange={e => setDrafts(d => ({ ...d, [r.key]: e.target.value }))}
-                onKeyDown={e => {
-                  if (e.key !== 'Enter' || readonly || !connected) return;
-                  const v = parseFloat(draft ?? '');
-                  if (!isFinite(v)) return;
-                  apply(r.key, v);
-                  setDrafts(d => ({ ...d, [r.key]: '' }));
-                }}
-              />
-              <button
-                className={`px-1.5 py-0.5 rounded text-white text-[10px] ${readonly || !connected ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
-                disabled={readonly || !connected || draft == null || draft === ''}
-                onClick={() => {
-                  const v = parseFloat(draft ?? '');
-                  if (!isFinite(v)) return;
-                  apply(r.key, v);
-                  setDrafts(d => ({ ...d, [r.key]: '' }));
-                }}
-              >
-                set
-              </button>
-            </label>
-          </React.Fragment>
-        );
-      })}
-      {readonly && <span className="text-gray-400">(readonly — write gate locked)</span>}
-      {!readonly && !connected && <span className="text-red-500">(disconnected)</span>}
+    <div className="flex items-start gap-3 text-[11px] flex-wrap">
+      {/* 全局参数表 — 不随月份选择变化 */}
+      <table className="border-collapse">
+        <thead>
+          <tr className="bg-gray-50 text-gray-500">
+            <th className="border border-gray-200 px-1 text-left" colSpan={3}>全局参数 global</th>
+          </tr>
+          <tr className="bg-gray-50 text-gray-400 text-[9px]">
+            <th className="border border-gray-200 px-1 text-left">param</th>
+            <th className="border border-gray-200 px-1 text-right">cur</th>
+            <th className="border border-gray-200 px-1 text-left">set</th>
+          </tr>
+        </thead>
+        <tbody>
+          {globalRows.length === 0 && (
+            <tr><td colSpan={3} className="border border-gray-200 px-2 py-1 text-gray-400">waiting for schema…</td></tr>
+          )}
+          {instances.filter(r => r.exp === null).map(renderRow)}
+        </tbody>
+      </table>
+
+      {/* 月份参数表 — 与 BOARD 选择联动；未选中月份时占位 */}
+      <table className="border-collapse">
+        <thead>
+          <tr className="bg-blue-50 text-blue-700">
+            <th className="border border-gray-200 px-1 text-left" colSpan={3}>
+              月份参数 expiry {selExpiry ? selExpiry.expiry : '— 在 BOARD 中选择月份'}
+            </th>
+          </tr>
+          <tr className="bg-gray-50 text-gray-400 text-[9px]">
+            <th className="border border-gray-200 px-1 text-left">param</th>
+            <th className="border border-gray-200 px-1 text-right">cur</th>
+            <th className="border border-gray-200 px-1 text-left">set</th>
+          </tr>
+        </thead>
+        <tbody>
+          {!selExpiry && (
+            <tr><td colSpan={3} className="border border-gray-200 px-2 py-1 text-gray-400">no expiry selected</td></tr>
+          )}
+          {instances.filter(r => r.exp !== null).map(renderRow)}
+        </tbody>
+      </table>
+
+      {readonly && <span className="text-gray-400 self-center">(readonly — write gate locked)</span>}
+      {!readonly && !connected && <span className="text-red-500 self-center">(disconnected)</span>}
     </div>
   );
 };
