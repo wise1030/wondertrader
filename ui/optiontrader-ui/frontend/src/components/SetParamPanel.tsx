@@ -87,14 +87,15 @@ export const SetParamPanel: React.FC<{ selectedExpiry: number | null }> = ({ sel
   const renderRow = (r: RowInst) => {
     const cur = values ? r.def.get(values, r.exp) : null;
     const draft = drafts[r.fullKey];
+    // Audit 11-23: current value and editor share ONE cell — the input's
+    // placeholder shows the live value; typing reveals a commit button.
     return (
       <tr key={r.fullKey} title={`key=${r.fullKey} current=${cur ?? '?'} range=[${r.def.min},${r.def.max}]`}>
-        <td className="border border-gray-200 px-1 text-gray-600 font-mono">{r.def.label}</td>
-        <td className="border border-gray-200 px-1 text-right font-mono font-bold">{cur ?? '-'}</td>
+        <td className="border border-gray-200 px-1 text-gray-600 font-mono whitespace-nowrap">{r.def.label}</td>
         <td className="border border-gray-200 px-1">
           <div className="flex items-center gap-1">
             <input
-              className="w-16 border rounded px-1 py-0.5 font-mono"
+              className="w-20 border rounded px-1 py-0.5 font-mono"
               placeholder={cur != null ? String(cur) : '-'}
               value={draft ?? ''}
               disabled={readonly}
@@ -104,13 +105,15 @@ export const SetParamPanel: React.FC<{ selectedExpiry: number | null }> = ({ sel
                 apply(r);
               }}
             />
-            <button
-              className={`px-1.5 py-0.5 rounded text-white text-[10px] ${readonly || !connected ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
-              disabled={readonly || !connected || draft == null || draft === ''}
-              onClick={() => apply(r)}
-            >
-              set
-            </button>
+            {draft != null && draft !== '' && (
+              <button
+                className={`px-1.5 py-0.5 rounded text-white text-[10px] ${readonly || !connected ? 'bg-gray-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
+                disabled={readonly || !connected}
+                onClick={() => apply(r)}
+              >
+                set
+              </button>
+            )}
           </div>
         </td>
       </tr>
@@ -123,17 +126,16 @@ export const SetParamPanel: React.FC<{ selectedExpiry: number | null }> = ({ sel
       <table className="border-collapse">
         <thead>
           <tr className="bg-gray-50 text-gray-500">
-            <th className="border border-gray-200 px-1 text-left" colSpan={3}>全局参数 global</th>
+            <th className="border border-gray-200 px-1 text-left" colSpan={2}>全局参数 global</th>
           </tr>
           <tr className="bg-gray-50 text-gray-400 text-[9px]">
             <th className="border border-gray-200 px-1 text-left">param</th>
-            <th className="border border-gray-200 px-1 text-right">cur</th>
-            <th className="border border-gray-200 px-1 text-left">set</th>
+            <th className="border border-gray-200 px-1 text-left">value (type to edit)</th>
           </tr>
         </thead>
         <tbody>
           {globalRows.length === 0 && (
-            <tr><td colSpan={3} className="border border-gray-200 px-2 py-1 text-gray-400">waiting for schema…</td></tr>
+            <tr><td colSpan={2} className="border border-gray-200 px-2 py-1 text-gray-400">waiting for schema…</td></tr>
           )}
           {instances.filter(r => r.exp === null).map(renderRow)}
         </tbody>
@@ -143,19 +145,18 @@ export const SetParamPanel: React.FC<{ selectedExpiry: number | null }> = ({ sel
       <table className="border-collapse">
         <thead>
           <tr className="bg-blue-50 text-blue-700">
-            <th className="border border-gray-200 px-1 text-left" colSpan={3}>
+            <th className="border border-gray-200 px-1 text-left" colSpan={2}>
               月份参数 expiry {selExpiry ? selExpiry.expiry : '— 在 BOARD 中选择月份'}
             </th>
           </tr>
           <tr className="bg-gray-50 text-gray-400 text-[9px]">
             <th className="border border-gray-200 px-1 text-left">param</th>
-            <th className="border border-gray-200 px-1 text-right">cur</th>
-            <th className="border border-gray-200 px-1 text-left">set</th>
+            <th className="border border-gray-200 px-1 text-left">value (type to edit)</th>
           </tr>
         </thead>
         <tbody>
           {!selExpiry && (
-            <tr><td colSpan={3} className="border border-gray-200 px-2 py-1 text-gray-400">no expiry selected</td></tr>
+            <tr><td colSpan={2} className="border border-gray-200 px-2 py-1 text-gray-400">no expiry selected</td></tr>
           )}
           {instances.filter(r => r.exp !== null).map(renderRow)}
         </tbody>

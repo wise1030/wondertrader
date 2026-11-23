@@ -1294,6 +1294,12 @@ void HftOptionStrategy::setupPricer()
             // P1 batch-5.2: greek targets feed the risk-shift normalization
             // (delta/vega buckets skew quotes toward the target book).
             _compositePricer->setExpiryTargets(exp, ec.targ_delta, ec.targ_vega);
+            // Audit 11-23: the per-expiry spread params were loaded into
+            // _expiryConfigs but NEVER pushed to the pricer (enableExpiry
+            // only carries the delta band), so config sprd_* was dead while
+            // the hot key path worked.  Push them at init; the hot keys can
+            // still override afterwards.
+            _compositePricer->setExpirySpread(exp, ec.sprd_fwd, ec.sprd_atmvol, ec.sprd_corr);
             if (ec.volcurve_weight >= 0.0)
                 _compositePricer->setGvvWeightPerExpiry(exp, ec.volcurve_weight);
         }
@@ -4356,7 +4362,11 @@ bool HftOptionStrategy::setExpiryEnabled(uint32_t exp, bool enable) {
         _compositePricer->setMaxPosQty(exp, ec.max_qsize, ec.max_pos_stk, ec.max_pos_opt);
         _compositePricer->setExpiryCloseParams(exp, ec.enable_auto_close,
             static_cast<int32_t>(ec.close_pos_thresh));
-        _compositePricer->setExpiryTargets(exp, ec.targ_delta, ec.targ_vega);
+        // Audit 11-23: replay merged with the hot maps (hot value wins) —
+        // a quoting toggle must not silently reset operator-tuned targets.
+        const double td = _hotTargDelta.count(exp) ? _hotTargDelta[exp] : ec.targ_delta;
+        const double tv = _hotTargVega.count(exp) ? _hotTargVega[exp] : ec.targ_vega;
+        _compositePricer->setExpiryTargets(exp, td, tv);
         // Audit 11-23 (P0): volcurve_weight is NOT re-applied here.  It has
         // a live hot channel now (SETPARAM volcurve_weight), and replaying
         // the config snapshot on a quoting toggle would silently overwrite
