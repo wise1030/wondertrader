@@ -332,6 +332,10 @@ private:
     wt_option::RiskLimitsEx _riskLimitsEx;                          // Extended risk limits
     wt_option::FillPriceCheckerPtr _fillPriceChecker;                // Fill price deviation monitor
     std::unordered_map<std::string, wt_option::PositionGuardPtr> _positionGuards;  // Per-contract position guards
+    // Audit 11-23: per-expiry hot params (SETPARAM keys "name:YYYYMM";
+    // quantbox 逐月 GUI 参数对齐).  Applied to the pricer in applyHotParams.
+    std::map<uint32_t, double> _hotTargDelta, _hotTargVega;
+    std::map<uint32_t, double> _hotSprdFwd, _hotSprdAtmvol, _hotSprdCorr;
     std::unordered_map<std::string, wt_option::PositionOffsetMgrPtr> _positionOffsets; // Per-contract offset managers
     wt_option::QuoteStatistics _quoteStats;                          // Quote statistics (session-level)
     // P1 batch-3.2: per-expiry fill-intensity estimator (AS decay fit) —

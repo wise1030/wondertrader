@@ -74,6 +74,10 @@ export interface ExpiryView {
   targVega?: number | null;
   und: UndView | null;
   strikes: StrikeView[];
+  // Audit 11-23: hot spread params echo (SETPARAM sprd_*:<exp>)
+  sprdFwd?: number | null;
+  sprdAtmvol?: number | null;
+  sprdCorr?: number | null;
 }
 
 export interface StateView {

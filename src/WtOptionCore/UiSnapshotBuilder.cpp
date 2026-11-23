@@ -401,6 +401,11 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
         w.EndObject();
         w.nullable("targDelta", e.hasTargDelta, e.targDelta);
         w.nullable("targVega", e.hasTargVega, e.targVega);
+        if (e.hasSprd) {   // Audit 11-23: hot spread params echo
+            w.numOrNull("sprdFwd", e.sprdFwd);
+            w.numOrNull("sprdAtmvol", e.sprdAtmvol);
+            w.numOrNull("sprdCorr", e.sprdCorr);
+        }
         w.key("und"); if (e.hasUnd) {
             w.StartObject();
             w.key("code"); w.String(e.undCode.c_str());

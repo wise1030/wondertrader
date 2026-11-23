@@ -409,6 +409,19 @@ public:
         m_prop_exp_vega_tw_targets[exp] = targVegaTW;
     }
 
+    /// Audit 11-23: per-expiry spread hot setter (SETPARAM keys
+    /// sprd_fwd:<exp> / sprd_atmvol:<exp> / sprd_corr:<exp> — quantbox
+    /// sprd_* GUI parity).  Consumed per quote by __getForwardSpread /
+    /// __getAtmvolSpread and the correlation premium term (:722).
+    void setExpirySpread(uint32_t exp, double sprdFwd, double sprdAtmvol, double sprdCorr) {
+        auto it = m_mapExpiryRiskConfig.find(exp);
+        if (it != m_mapExpiryRiskConfig.end()) {
+            it->second.sprd_fwd = sprdFwd;
+            it->second.sprd_atmvol = sprdAtmvol;
+            it->second.sprd_corr = sprdCorr;
+        }
+    }
+
     // Signal management
     void setAlphaSignals(std::vector<IAlphaSignal::Ptr> sigs) { m_alphaSignals = std::move(sigs); }
     void setRiskSignals(std::vector<IRiskSignal::Ptr> sigs) { m_riskSignals = std::move(sigs); }

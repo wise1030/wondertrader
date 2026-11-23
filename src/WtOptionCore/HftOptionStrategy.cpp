@@ -4172,15 +4172,17 @@ void HftOptionStrategy::pushUiAlert(uint8_t level, const std::string& msg) {
 // P1 batch-5.4: hot-param persistence (see header comment).
 // ============================================================================
 static bool isPersistableHotParam(const std::string& key) {
-    // Audit 11-23: exactly the keys setHotParam ACCEPTS (its whitelist is
-    // the write authority — persist mirrors it 1:1; the three quoting keys
-    // are writable again since the hot setters landed).
+    // Audit 11-23: mirror the setHotParam write whitelist 1:1.  Global keys
+    // match exactly; per-expiry keys ("name:YYYYMM") match by base name —
+    // strip the ":suffix" before the lookup.
     static const std::set<std::string> kKeys = {
         "wgt_vegaflow", "wgt_frontfut_skew", "wgt_deltaflow", "wgt_atmsig",
         "wgt_rollema", "volcurve_weight", "sticky_base", "improve_retreat_ratio",
         "trade_shock_ticks", "max_tps",
+        "targ_delta", "targ_vega", "sprd_fwd", "sprd_atmvol", "sprd_corr",
     };
-    return kKeys.count(key) > 0;
+    const std::string base = key.substr(0, key.find(':'));
+    return kKeys.count(base) > 0;
 }
 
 void HftOptionStrategy::persistHotParam(const std::string& key, double value) {
@@ -4378,6 +4380,49 @@ void HftOptionStrategy::registerCommands()
             if (_hot.max_tps) *_hot.max_tps = tps; else _maxTPS = tps;
             _hotUpdatePending.store(true, std::memory_order_release);
         } else {
+            // Audit 11-23: per-expiry keys "name:YYYYMM" (quantbox 逐月 GUI
+            // 参数对齐 — targ_*/sprd_* 逐月可调).  Stored in maps, applied
+            // by applyHotParams(), echoed per-expiry in the snapshot.
+            uint32_t exp = 0;
+            auto parseExp = [&](const char* name) -> int {
+                // 0 = not this name; 1 = matched & parsed; -1 = matched, bad
+                // suffix / unknown expiry (err set).
+                const std::string pfx = std::string(name) + ":";
+                if (key.rfind(pfx, 0) != 0) return 0;
+                try { exp = std::stoul(key.substr(pfx.size())); }
+                catch (...) { err = "bad expiry suffix in " + key; return -1; }
+                if (_expiryConfigs.count(exp) == 0) {
+                    err = "expiry not configured: " + std::to_string(exp);
+                    return -1;
+                }
+                return 1;
+            };
+            auto setExp = [&](std::map<uint32_t, double>& m, double lo, double hi,
+                              const char* rng) -> bool {
+                if (value < lo || value > hi) { err = key + " out of range " + rng; return false; }
+                m[exp] = value;
+                _hotUpdatePending.store(true, std::memory_order_release);
+                return true;
+            };
+            int rc = 0;
+            bool ok = false;
+            if ((rc = parseExp("targ_delta")) != 0)
+                ok = rc > 0 && setExp(_hotTargDelta, -5000, 5000, "[-5000,5000]");
+            else if ((rc = parseExp("targ_vega")) != 0)
+                ok = rc > 0 && setExp(_hotTargVega, -5000, 5000, "[-5000,5000]");
+            else if ((rc = parseExp("sprd_fwd")) != 0)
+                ok = rc > 0 && setExp(_hotSprdFwd, 0, 1, "[0,1]");
+            else if ((rc = parseExp("sprd_atmvol")) != 0)
+                ok = rc > 0 && setExp(_hotSprdAtmvol, 0, 1, "[0,1]");
+            else if ((rc = parseExp("sprd_corr")) != 0)
+                ok = rc > 0 && setExp(_hotSprdCorr, -1, 1, "[-1,1]");
+            if (rc != 0) {
+                if (!ok) return false;
+                WTSLogger::log_by_cat("strategy", LL_INFO,
+                    "UI SETPARAM: {} = {} (expiry-hot, member path)", key, value);
+                persistHotParam(key, value);
+                return true;
+            }
             err = "key not hot-adjustable: " + key;
             return false;
         }
@@ -4684,6 +4729,38 @@ void HftOptionStrategy::applyHotParams()
         _sticky_base = sb;
         _improve_retreat = irr;
         _tradeShockTicks = tst;
+        // Audit 11-23: per-expiry hot params (targ_*/sprd_*:<exp>).  Merge
+        // each key with its config default so a single-key hot set never
+        // clobbers the sibling parameter's current effective value.
+        {
+            std::set<uint32_t> exps;
+            for (const auto& [e, _] : _hotTargDelta) exps.insert(e);
+            for (const auto& [e, _] : _hotTargVega) exps.insert(e);
+            for (uint32_t e : exps) {
+                const auto ec = _expiryConfigs.find(e);
+                const double d = _hotTargDelta.count(e) ? _hotTargDelta[e]
+                    : (ec != _expiryConfigs.end() ? ec->second.targ_delta : 0.0);
+                const double v = _hotTargVega.count(e) ? _hotTargVega[e]
+                    : (ec != _expiryConfigs.end() ? ec->second.targ_vega : 0.0);
+                _compositePricer->setExpiryTargets(e, d, v);
+            }
+        }
+        {
+            std::set<uint32_t> exps;
+            for (const auto& [e, _] : _hotSprdFwd) exps.insert(e);
+            for (const auto& [e, _] : _hotSprdAtmvol) exps.insert(e);
+            for (const auto& [e, _] : _hotSprdCorr) exps.insert(e);
+            for (uint32_t e : exps) {
+                const auto ec = _expiryConfigs.find(e);
+                const double f = _hotSprdFwd.count(e) ? _hotSprdFwd[e]
+                    : (ec != _expiryConfigs.end() ? ec->second.sprd_fwd : 0.01);
+                const double a = _hotSprdAtmvol.count(e) ? _hotSprdAtmvol[e]
+                    : (ec != _expiryConfigs.end() ? ec->second.sprd_atmvol : 0.1);
+                const double c = _hotSprdCorr.count(e) ? _hotSprdCorr[e]
+                    : (ec != _expiryConfigs.end() ? ec->second.sprd_corr : 0.0);
+                _compositePricer->setExpirySpread(e, f, a, c);
+            }
+        }
         WTSLogger::log_by_cat("strategy", LL_INFO,
             "  alpha weights: vega={} frontfut={} delta={} atmsig={} rollema={} | volcurve_weight={}"
             " | sticky_base={} improve_retreat={} shock_ticks={}",
@@ -4889,14 +4966,21 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
             ev.quoting = (ecIt != _expiryConfigs.end()) && ecIt->second.enable;
             if (ecIt != _expiryConfigs.end()) {
                 // P1 batch-5.2: current-vs-target display in the UI.
-                if (ecIt->second.targ_delta != 0.0) {
-                    ev.hasTargDelta = true;
-                    ev.targDelta = ecIt->second.targ_delta;
-                }
-                if (ecIt->second.targ_vega != 0.0) {
-                    ev.hasTargVega = true;
-                    ev.targVega = ecIt->second.targ_vega;
-                }
+                // Audit 11-23: hot map wins over the config snapshot echo.
+                const double td = _hotTargDelta.count(kv.first)
+                    ? _hotTargDelta[kv.first] : ecIt->second.targ_delta;
+                if (td != 0.0) { ev.hasTargDelta = true; ev.targDelta = td; }
+                const double tv = _hotTargVega.count(kv.first)
+                    ? _hotTargVega[kv.first] : ecIt->second.targ_vega;
+                if (tv != 0.0) { ev.hasTargVega = true; ev.targVega = tv; }
+                // Audit 11-23: hot spread params echo (sprd_*:<exp> keys).
+                const double sf = _hotSprdFwd.count(kv.first)
+                    ? _hotSprdFwd[kv.first] : ecIt->second.sprd_fwd;
+                const double sav = _hotSprdAtmvol.count(kv.first)
+                    ? _hotSprdAtmvol[kv.first] : ecIt->second.sprd_atmvol;
+                const double sc = _hotSprdCorr.count(kv.first)
+                    ? _hotSprdCorr[kv.first] : ecIt->second.sprd_corr;
+                ev.hasSprd = true; ev.sprdFwd = sf; ev.sprdAtmvol = sav; ev.sprdCorr = sc;
             }
             v.expiries.push_back(std::move(ev));
         }

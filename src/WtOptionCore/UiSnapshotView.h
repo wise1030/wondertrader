@@ -94,6 +94,10 @@ struct UiExpiryView
     bool hasTargDelta = false; double targDelta = 0;
     bool hasTargVega  = false; double targVega  = 0;
 
+    // Audit 11-23: hot-adjustable spread params echo (SETPARAM sprd_*:<exp>).
+    bool hasSprd = false;
+    double sprdFwd = 0, sprdAtmvol = 0, sprdCorr = 0;
+
     bool hasUnd = false;
     std::string undCode;
     double undBid = 0, undAsk = 0;
