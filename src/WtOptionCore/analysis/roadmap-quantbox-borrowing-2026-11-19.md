@@ -593,6 +593,19 @@ quantbox GVV 调翼四手段逐项对照后的补齐（分析见 3.4o 后讨论�
 - 遗留：参数注册表（单一事实源）、UI 动态面板、逐月键命名空间、
   审计日志、REST 入口 = P1/P2 立项
 
+## 3.4r 报价三参数接通热调（11-23，efcdc86d，已部署实测）
+
+sticky_base / improve_retreat_ratio / trade_shock_ticks：**每次报价/成交
+实时消费**（点差下限 :734/:926/:1144、改退倍率 :739、成交退避 :971/:978），
+但此前只能 config 静态调——sync_param 注册了指针却无人重推，
+trade_shock_ticks 甚至未接线（pricer 内硬编码 1）。quantbox 中三者为
+GUI notifiable 属性。本次：
+- CompositeOptionPricer 增 setStickyBase/setImproveRetreatRatio/
+  setTradeShockTicks；setHotParam 白名单 + 范围 [0,5]/[1,10]/[0,10]；
+  applyHotParams 重推；持久化白名单恢复三键；快照回显 + UI 面板三行
+- 实测：init 回显 0.5/3.0/1 → set 1.5/3 → ok+落盘 → 超范围 99 →
+  拒绝（warning 日志）→ 恢复默认 0.5/1.0 落盘
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
