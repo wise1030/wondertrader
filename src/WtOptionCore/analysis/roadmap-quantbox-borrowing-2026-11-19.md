@@ -622,6 +622,21 @@ quantbox GUI 参数面对照（lut/param_re 实证）：操作员日常旋钮 =
 - 实测：targ_delta:202612=100→echo+落盘、sprd_corr:202612=0.25→echo、
   未配置月 209901→拒绝；测试值已恢复 0
 
+## 3.4t ParamRegistry + REST 调参入口（11-23，272fa7a0/cfa5e39e/61e01954，已部署实测）
+
+参数交互 P1/P2 落地：
+- **ParamRegistry**（单一事实源）：ParamDesc 表（9 全局 + 5 逐月）驱动
+  setHotParam 校验/路由、持久化标志、快照 values/schema 回显、审计旧值；
+  消灭第四处人肉对齐（前端静态行）——UI 按 schema 渲染，后端加键
+  UI 零改动；同步参数指针调用期解析（share_domain 后绑定可用）
+- **快照 params 重构**：`{values:{key:num}, schema:[{key,min,max,perExpiry,expField}]}`
+- **审计**：`generated/param_audit.log` append-only（ts,key,old,new），
+  REST/UI 修改均留痕；启动回放的审计行 old==new 属预期
+- **UI 回显**：SETPARAM 成功经 alert 帧 toast（启动回放静默）
+- **REST**：`POST /api/param`（token 鉴权）→ 上行 SETPARAM → 挂起等
+  ack ≤2.5s → 返回 ok/err
+- 实测：schema 15 条下发、REST 1.0/0.5→ok、99→范围拒绝、审计行齐
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
