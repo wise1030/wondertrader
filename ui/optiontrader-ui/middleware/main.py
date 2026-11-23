@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from wt_option_client import WtOptionClient
@@ -42,6 +42,8 @@ ALERT_WEBHOOK_MIN_LEVEL = int(os.environ.get("WTOPTION_ALERT_WEBHOOK_MIN_LEVEL",
 
 upstream: WtOptionClient | None = None
 connected_websockets: set[WebSocket] = set()
+# P2 (audit 11-23): REST POST /api/param ack correlation — cmdSeq -> Future
+_pending_acks: dict[int, asyncio.Future] = {}
 # Audit 11-22: the UI footer's "bridge" lamp used to be fed by a conn_state
 # frame that was NEVER produced (only browser->middleware diagnostics were
 # logged), so it showed a permanent red "unknown".  Track and broadcast the
@@ -76,6 +78,14 @@ def _upstream_state(status: str):
 def _broadcast(frame: dict):
     """Called from the upstream reader (any thread/loop context)."""
     global _last_hello
+    # P2: resolve REST /api/param waiters before the general fan-out.
+    if frame.get("type") == "ack":
+        fut = _pending_acks.pop(int(frame.get("cmdSeq", -1)), None)
+        if fut is not None and not fut.done():
+            try:
+                fut.set_result(frame)
+            except Exception:
+                pass
     now_ms = int(time.time() * 1000)
     if frame.get("type") == "snapshot":
         ts = frame.get("ts")
@@ -226,6 +236,33 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 frontend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "dist")
+# P2 (audit 11-23): REST hot-param entry — reaches the strategy's
+# ParamRegistry through the same SETPARAM path the UI uses.  Requires the
+# token cookie (or ?token= on this request via the guard).
+@app.post("/api/param")
+async def api_param(body: dict):
+    if upstream is None or not upstream.connected:
+        return JSONResponse({"ok": False, "err": "upstream not connected"}, status_code=503)
+    key = str(body.get("key", "")).strip()
+    if not key:
+        return JSONResponse({"ok": False, "err": "key required"}, status_code=400)
+    try:
+        value = float(body["value"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "err": "numeric value required"}, status_code=400)
+    cmd_seq = int(time.time() * 1000) % 1000000000
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    _pending_acks[cmd_seq] = fut
+    await upstream.send(json.dumps({"cmd": "set_param", "key": key, "value": value, "cmdSeq": cmd_seq}))
+    try:
+        ack = await asyncio.wait_for(fut, timeout=2.5)
+    except asyncio.TimeoutError:
+        _pending_acks.pop(cmd_seq, None)
+        return JSONResponse({"ok": False, "err": "timeout waiting for strategy ack"}, status_code=504)
+    return {"ok": bool(ack.get("ok")), "err": ack.get("err", ""), "key": key, "value": value}
+
+
 if os.path.exists(frontend_path):
     from fastapi.responses import FileResponse
 
