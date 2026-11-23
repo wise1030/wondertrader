@@ -96,6 +96,12 @@ const MemoizedGridRow = memo(({
     const ourOrd = ordersByCode[leg.code];
     return (
       <>
+        {(() => (
+          <td className={`${cell} text-[9px] text-green-700 whitespace-pre ${qpBg(leg.bqp, 'B')}`}
+              title={`our bid ${leg.obid ?? '-'} · queue pos ${leg.bqp === 9999 ? 'none' : leg.bqp}${leg.bqp === 0 ? ' (best)' : leg.bqp != null && leg.bqp < 0 ? ' (crossing!)' : ''}`}>
+            {ourOrd?.B || (leg.obid ? `${leg.obid}` : '-')}
+          </td>
+        ))()}
         {(() => {
           const fo = flashOpacity(flash[leg.code], nowMs);
           return (
@@ -113,12 +119,6 @@ const MemoizedGridRow = memo(({
             </td>
           );
         })()}
-        {(() => (
-          <td className={`${cell} text-[9px] text-green-700 whitespace-pre ${qpBg(leg.bqp, 'B')}`}
-              title={`our bid ${leg.obid ?? '-'} · queue pos ${leg.bqp === 9999 ? 'none' : leg.bqp}${leg.bqp === 0 ? ' (best)' : leg.bqp != null && leg.bqp < 0 ? ' (crossing!)' : ''}`}>
-            {ourOrd?.B || (leg.obid ? `${leg.obid}` : '-')}
-          </td>
-        ))()}
         <td className={`${cell}`} onClick={() => ticket('S')}>{leg.bid ?? '-'}</td>
         <td className={`${cell} bg-gray-50`}>{leg.last ?? '-'}</td>
         <td className={`${cell} font-medium`} onClick={() => onCellClick(row, side, 'theo')}>{fmtN(leg.theo)}</td>
