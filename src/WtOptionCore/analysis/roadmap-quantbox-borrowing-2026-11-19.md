@@ -579,6 +579,20 @@ quantbox GVV 调翼四手段逐项对照后的补齐（分析见 3.4o 后讨论�
 - **外部参数直灌通道（DB→setParameter）**：按运营需求暂缓
 - 验证：9/9 二进制 rc=0、线上 SETPARAM roundtrip 实测、日志 0 error
 
+## 3.4q 热参数一致性 P0 修复（11-23 早，f5f18907，已部署实测）
+
+参数交互方案分析（见下）后的 P0 三项：
+- `isPersistableHotParam` 与 setHotParam 写入白名单对齐：补
+  `volcurve_weight`（此前运行期生效、重启即丢）、删 sticky_base /
+  improve_retreat_ratio / trade_shock_ticks 三个死键
+- EXPIRYENABLE off→on 重放不再带 volcurve_weight（不再覆盖 SETPARAM
+  热调、不再把月份钉成逐月覆盖遮蔽全局值）；config 逐月权重维持
+  init 期一次性应用
+- 实测全链路：set 0.5→落盘→重启回放 echo=0.5→恢复 0.0→落盘 0.0，
+  Runner 日志审计行齐全
+- 遗留：参数注册表（单一事实源）、UI 动态面板、逐月键命名空间、
+  审计日志、REST 入口 = P1/P2 立项
+
 ## 3.5 遗漏补录（复核新增）
 
 - **vol 锥（6.2）前置缺口**：需历史 atm vol 序列——AsyncVolFitter 无
