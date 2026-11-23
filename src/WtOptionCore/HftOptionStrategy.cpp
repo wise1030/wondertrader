@@ -4172,10 +4172,15 @@ void HftOptionStrategy::pushUiAlert(uint8_t level, const std::string& msg) {
 // P1 batch-5.4: hot-param persistence (see header comment).
 // ============================================================================
 static bool isPersistableHotParam(const std::string& key) {
+    // Audit 11-23 (P0): exactly the keys setHotParam ACCEPTS (its whitelist
+    // is the write authority — persist must mirror it). sticky_base /
+    // improve_retreat_ratio / trade_shock_ticks were dead entries here
+    // (setHotParam rejects them as init-time only). volcurve_weight was
+    // accepted at runtime but never persisted — a restart silently dropped
+    // the operator's tuning.
     static const std::set<std::string> kKeys = {
         "wgt_vegaflow", "wgt_frontfut_skew", "wgt_deltaflow", "wgt_atmsig",
-        "wgt_rollema", "sticky_base", "improve_retreat_ratio",
-        "trade_shock_ticks", "max_tps",
+        "wgt_rollema", "volcurve_weight", "max_tps",
     };
     return kKeys.count(key) > 0;
 }
@@ -4268,8 +4273,13 @@ bool HftOptionStrategy::setExpiryEnabled(uint32_t exp, bool enable) {
         _compositePricer->setExpiryCloseParams(exp, ec.enable_auto_close,
             static_cast<int32_t>(ec.close_pos_thresh));
         _compositePricer->setExpiryTargets(exp, ec.targ_delta, ec.targ_vega);
-        if (ec.volcurve_weight >= 0.0)
-            _compositePricer->setGvvWeightPerExpiry(exp, ec.volcurve_weight);
+        // Audit 11-23 (P0): volcurve_weight is NOT re-applied here.  It has
+        // a live hot channel now (SETPARAM volcurve_weight), and replaying
+        // the config snapshot on a quoting toggle would silently overwrite
+        // the operator's runtime tuning (also pinning this month to a
+        // per-expiry override that shadows the global hot value forever).
+        // Config-level per-expiry weights are applied once at init
+        // (setupPricer loop); runtime state owns the value afterwards.
     } else {
         _compositePricer->setExpiryEnabled(exp, false);
     }
