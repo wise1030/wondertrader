@@ -1,15 +1,12 @@
 import React from 'react';
 import { useData } from '../context/DataContext';
-import { SetParamPanel } from './SetParamPanel';
 import { ConfirmButton } from './ConfirmButton';
 
 interface Props {
   onNotify: (msg: string, type: 'info' | 'error') => void;
-  /// Audit 11-23: the per-expiry hot-param table follows the BOARD selection.
-  selectedExpiry: number | null;
 }
 
-export const CommandPanel: React.FC<Props> = ({ onNotify, selectedExpiry}) => {
+export const CommandPanel: React.FC<Props> = ({ onNotify }) => {
   const { msgLogs, readonly, sid, connectionStatus, refresh, sendCommand } = useData();
 
   // Audit 11-22: every write command now reports two failure modes instead
@@ -58,7 +55,6 @@ export const CommandPanel: React.FC<Props> = ({ onNotify, selectedExpiry}) => {
         {/* P1 UI redesign: grid-wide qmode moved to the EXPIRY BOARD ctrl
             strip (ALL scope) — one control surface per scope. */}
       </div>
-      <SetParamPanel selectedExpiry={selectedExpiry} />
       <div className="h-20 overflow-y-auto bg-gray-50 border border-gray-200 rounded px-2 py-0.5 text-[10px] font-mono">
         {msgLogs.slice().reverse().map((l, i) => (
           <div key={i} className={l.type === 'error' || l.type === 'reject' ? 'text-red-600' : 'text-gray-600'}>

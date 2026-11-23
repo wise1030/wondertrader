@@ -10,6 +10,7 @@ import { OptionGridView } from './components/OptionGridView';
 import { TradesTab } from './components/TradesTab';
 import { AnalysisTab } from './components/AnalysisTab';
 import { CommandPanel } from './components/CommandPanel';
+import { SetParamPanel } from './components/SetParamPanel';
 import { Toast } from './components/Toast';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
@@ -87,9 +88,17 @@ const Shell: React.FC = () => {
           filter and the Analysis PnL/latency rings (which restart from zero
           on every visit).  The render cost is one hidden tree at 1Hz. */}
       <div className="flex-1 overflow-hidden">
-        <div className={tab === 'grid' ? 'h-full' : 'hidden'}>
-          <OptionGridView selectedExpiry={selectedExpiry} onExpirySelectByIndex={selectByIndex}
-            onNotify={notify} active={tab === 'grid'} />
+        {/* Audit 11-23: the two hot-param tables live in a left rail of the
+            Grid (operator works params against the chain view); the global
+            table never changes, the month table follows the BOARD row. */}
+        <div className={tab === 'grid' ? 'h-full flex' : 'hidden'}>
+          <div className="w-auto shrink-0 overflow-y-auto p-1 bg-gray-50 border-r border-gray-200">
+            <SetParamPanel selectedExpiry={selectedExpiry} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <OptionGridView selectedExpiry={selectedExpiry} onExpirySelectByIndex={selectByIndex}
+              onNotify={notify} active={tab === 'grid'} />
+          </div>
         </div>
         <div className={tab === 'trades' ? 'h-full' : 'hidden'}>
           <TradesTab onNotify={notify} />
@@ -99,7 +108,7 @@ const Shell: React.FC = () => {
         </div>
       </div>
 
-      <CommandPanel onNotify={notify} selectedExpiry={selectedExpiry} />
+      <CommandPanel onNotify={notify} />
       <StatusFooter />
 
       <div className="fixed bottom-2 right-2 z-50 flex flex-col">
