@@ -171,20 +171,17 @@ export interface Snapshot {
   orders: OrderView[];
   hedgeDeltaThreshold?: number;   // batch-5.1 hedge-panel signal threshold
   meta: { contracts: Record<string, { mult: number | null; priceTick: number | null }> };
+  // P1 (audit 11-23): registry-driven params — values for global keys,
+  // schema drives the panel (backend 加键 UI 零改动).
   params?: {
-    wgt_vegaflow: number;
-    wgt_frontfut_skew: number;
-    wgt_deltaflow: number;
-    wgt_atmsig: number;
-    wgt_rollema: number;
-    wgt_exp_ddelta?: number;
-    // Audit 11-22 (round 3): GVV blend weight echo (0=secondary, 1=fitted main)
-    volcurve_weight?: number;
-    // Audit 11-23: quoting-param echo (consumed live by the pricer)
-    sticky_base?: number;
-    improve_retreat_ratio?: number;
-    trade_shock_ticks?: number;
-    max_tps: number;
+    values: Record<string, number>;
+    schema: {
+      key: string;
+      min: number;
+      max: number;
+      perExpiry: boolean;
+      expField?: string;   // per-expiry echo field on ExpiryView (targDelta/...)
+    }[];
   } | null;
 }
 
