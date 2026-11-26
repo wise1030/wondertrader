@@ -483,11 +483,19 @@ OrderMap* TraderAdapter::getOrders(const char* stdCode)
 
 uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 {
-	_trader_api->makeEntrustID(entrust->getEntrustID(), 64);
+	if (entrust == NULL || _trader_api == NULL)
+		return UINT_MAX;
 
 	WTSContractInfo* cInfo = entrust->getContractInfo();
 	if (cInfo == NULL) cInfo = getContract(entrust->getCode());
+	if (cInfo == NULL)
+	{
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,
+			"[{}] Order rejected: contract {} not found", _id.c_str(), entrust->getCode());
+		return UINT_MAX;
+	}
 
+	_trader_api->makeEntrustID(entrust->getEntrustID(), 64);
 	entrust->setCode(cInfo->getCode());
 	entrust->setExchange(cInfo->getExchg());
 
@@ -1285,8 +1293,15 @@ bool TraderAdapter::cancel(uint32_t localid)
 uint32_t TraderAdapter::quote(const char* stdCode, double bidPrice, double bidQty, double askPrice, double askQty, int flag, WTSContractInfo* cInfo)
 {
 	if (bidQty == 0 && askQty == 0) return 0;
+	if (_trader_api == NULL) return 0;
 
 	if (cInfo == NULL) cInfo = getContract(stdCode);
+	if (cInfo == NULL)
+	{
+		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,
+			"[{}] Quote rejected: contract {} not found", _id.c_str(), stdCode);
+		return 0;
+	}
 
 	WTSEntrust* bidEntrust = WTSEntrust::create(stdCode, bidQty, bidPrice, cInfo->getExchg());
 	bidEntrust->setDirection(WDT_LONG);

@@ -116,6 +116,7 @@ private:
 public:
 	bool	init(const char* filename, uint32_t uDate, CacheLogger logger = nullptr)
 	{
+		SpinLock lock(_lock);
 		bool isNew = false;
 		if (!BoostFile::exists(filename))
 		{
@@ -183,75 +184,75 @@ public:
 
 	inline void clear()
 	{
-		_lock.lock();
-
+		SpinLock lock(_lock);
 		if (_cache._block == NULL)
 			return;
 
 		_indice.clear();
-
 		memset(_cache._block->_items, 0, sizeof(CacheItem)*_cache._block->_capacity);
 		_cache._block->_size = 0;
-
-		_lock.unlock();
 	}
 
 	inline const char*	get(const char* key) const
 	{
+		SpinLock lock(_lock);
 		if (_cache._block == NULL)
 			return "";
 
-		_lock.lock();
 		auto it = _indice.find(key);
 		if (it == _indice.end())
-		{
-			_lock.unlock();
 			return "";
-		}
-		const char* ret = _cache._block->_items[it->second]._val;
-		_lock.unlock();
+
+		// Never expose mmap-owned storage after unlocking: a concurrent put may
+		// resize and unmap it before the caller's strlen/strcpy. Return a value
+		// snapshot instead. Valid until the next get() on the SAME thread; all
+		// gateway call sites consume the string immediately.
+		thread_local char ret[64];
+		memcpy(ret, _cache._block->_items[it->second]._val, sizeof(ret));
+		ret[sizeof(ret) - 1] = '\0';
 		return ret;
 	}
 
 	void	put(const char* key, const char*val, std::size_t len = 0, CacheLogger logger = nullptr)
 	{
+		SpinLock lock(_lock);
 		if (_cache._block == NULL)
 			return;
 
+		// Existing-key writes also need the lock: get() copies under this same
+		// mutex, and an unlocked overwrite was a data race on the mmap bytes.
 		auto it = _indice.find(key);
 		if (it != _indice.end())
 		{
 			wt_strcpy(_cache._block->_items[it->second]._val, val, len);
+			return;
 		}
-		else
-		{
-			_lock.lock();
-			if(_cache._block->_size == _cache._block->_capacity)
-			{
-				if(!resize(_cache._block->_capacity*2, logger))
-				{
-					//resize失败，放弃本次写入，避免访问无效内存
-					_lock.unlock();
-					if(logger) logger("resize failed, put discarded");
-					return;
-				}
-			}
 
-			_indice[key] = _cache._block->_size;
-			wt_strcpy(_cache._block->_items[_cache._block->_size]._key, key);
-			wt_strcpy(_cache._block->_items[_cache._block->_size]._val, val, len);
-			_cache._block->_size += 1;
-			_lock.unlock();
+		if(_cache._block->_size == _cache._block->_capacity)
+		{
+			if(!resize(_cache._block->_capacity*2, logger))
+			{
+				// resize failed; old mapping remains valid and lock is RAII.
+				if(logger) logger("resize failed, put discarded");
+				return;
+			}
 		}
+
+		_indice[key] = _cache._block->_size;
+		wt_strcpy(_cache._block->_items[_cache._block->_size]._key, key);
+		wt_strcpy(_cache._block->_items[_cache._block->_size]._val, val, len);
+		_cache._block->_size += 1;
 	}
 
-	inline bool	has(const char* key) const 
+	inline bool	has(const char* key) const
 	{
+		SpinLock lock(_lock);
 		return (_indice.find(key) != _indice.end());
 	}
 
 	inline uint32_t size() const
 	{
+		SpinLock lock(_lock);
 		if (_cache._block == 0)
 			return 0;
 
@@ -260,6 +261,7 @@ public:
 
 	inline uint32_t capacity() const
 	{
+		SpinLock lock(_lock);
 		if (_cache._block == 0)
 			return 0;
 

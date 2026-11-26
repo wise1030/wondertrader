@@ -33,6 +33,7 @@ namespace rj = rapidjson;
 
 WtCtaEngine::WtCtaEngine()
 	: _tm_ticker(NULL)
+	, _cfg(NULL)
 {
 	
 }
