@@ -61,6 +61,16 @@ public:
     int32_t getBrokerPos() const { return m_brokerPos; }
 
     void reconcile();
+
+    // P0 fix (2026-11-25): session/reconnect boundary reset — UN-initialize
+    // the guard so the next broker snapshot re-baselines internal=broker
+    // cleanly.  reconcile() is NOT usable at a boundary when no snapshot has
+    // arrived yet: it would stamp brokerPos=0 as the basis and the first
+    // real snapshot would read as a huge discrepancy (observed 00:35:22
+    // 2026-11-25: 24+ contracts disabled right after restart).  Use reset()
+    // there; reconcile() stays for callers that hold a fresh snapshot.
+    void reset();
+
     void setGetTimeFn(GetTimeFn fn) { m_getTime = std::move(fn); }
     void setDiscrepancyCallback(DiscrepancyCallback cb) { m_callback = std::move(cb); }
 

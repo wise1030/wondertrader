@@ -59,7 +59,7 @@ LinearVolCurve::~LinearVolCurve()
 
 double LinearVolCurve::eval(double xi) const
 {
-    if (!m_bInitialized)
+    if (!m_bInitialized || m_points.size() < 2)
         return 1.0;
 
     if (LE(xi, m_minXpt.first)) // left wing extrapolation
@@ -120,16 +120,70 @@ double LinearVolCurve::operator()(double diff) const
     return eval(diff);
 }
 
+// ---------------------------------------------------------------------------
+// fit — store the normalized multipliers (y = IV / anchor_at_fit).
+// 2026-11-26 hardening (scale-race fix, user-approved plan §L2): the old fit
+// accepted anything (even an empty set — m_points.front() then read out of
+// bounds).  Now: filter non-finite/non-positive y, require >=3 points, and
+// reject economically absurd tilts (|slope| > 5 vol-multiplier units per unit
+// log-moneyness — a real commodity smile over the nearest-strikes fit window
+// sits around 1-3; a 0.1-vs-0.24 anchor mix-up produces garbage tilts too).
+// ---------------------------------------------------------------------------
 bool LinearVolCurve::fit(const dataset_t& src_pts)
 {
-    m_points = src_pts;
-    std::sort(m_points.begin(), m_points.end(), comp);
+    m_bInitialized = false;
+    m_bLastFitOK   = false;
+    m_points.clear();
 
+    dataset_t pts;
+    pts.reserve(src_pts.size());
+    for (const auto& pt : src_pts) {
+        if (!std::isfinite(pt.first) || !std::isfinite(pt.second))
+            continue;
+        if (!(pt.second > 0.0))
+            continue;
+        pts.push_back(pt);
+    }
+    if (pts.size() < 3) {
+        std::cout << "LinearVolCurve fit failed: only " << pts.size()
+                  << " usable points (need >=3)." << std::endl;
+        return false;
+    }
+    std::sort(pts.begin(), pts.end(), comp);
+
+    // Wing tilt sanity: convert the fitted strike window to log-moneyness
+    // (needs a valid forward — the async fitter always sets one before fit).
+    if (m_atmforward > 0.0) {
+        const double kLo = pts.front().first + m_atmforward;
+        const double kHi = pts.back().first + m_atmforward;
+        if (kLo > 0.0 && kHi > 0.0 && kHi > kLo) {
+            const double spanLog = std::log(kHi / kLo);
+            const double slope = (pts.back().second - pts.front().second) / spanLog;
+            if (!std::isfinite(slope) || std::fabs(slope) > 5.0) {
+                std::cout << "LinearVolCurve fit failed: wing slope " << slope
+                          << " per log-moneyness out of range." << std::endl;
+                return false;
+            }
+        }
+    }
+
+    m_points = std::move(pts);
     m_minXpt = m_points.front();
     m_maxXpt = m_points.back();
 
     m_bInitialized = true;
+    m_bLastFitOK   = true;
     return true;
+}
+
+void LinearVolCurve::rescale(double factor)
+{
+    if (!std::isfinite(factor) || !(factor > 0.0) || m_points.empty())
+        return;
+    for (auto& pt : m_points)
+        pt.second *= factor;
+    m_minXpt.second *= factor;
+    m_maxXpt.second *= factor;
 }
 
 } // namespace wt_option

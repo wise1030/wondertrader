@@ -121,6 +121,36 @@ bool PowerVolCurve::fit(const dataset_t& src_pts)
     }
 
     updateParameters(std::exp(lnA), b);
+
+    // 2026-11-26 quality gate (scale-race fix, user-approved plan §L2) —
+    // PowerVolCurve had NO parameter-domain protection, so a mis-normalized
+    // dataset (e.g. points scaled by IV/0.1 against a 0.24 market) fit
+    // "successfully" and published.  The stored multipliers must describe a
+    // market-scale smile:
+    //   1. ATM level: eval(0) = a + c must be a sane vol multiplier.
+    //   2. Wing bound: eval(±0.5) (= ±50% moneyness) finite and positive.
+    //   3. Residual: max |eval(x_i) − sv_i| within tolerance on used points.
+    const double level = m_a * std::exp(m_b * 0.0) + m_c;
+    const double wingLo = m_a * std::exp(m_b * -0.5) + m_c;
+    const double wingHi = m_a * std::exp(m_b *  0.5) + m_c;
+    double maxResid = 0.0;
+    for (size_t i = 0; i < xs.size(); ++i) {
+        const double model = m_a * std::exp(m_b * xs[i]) + m_c;
+        const double sv = std::exp(ys[i]) + m_c;   // ys stores ln(sv − c)
+        const double resid = std::fabs(model - sv);
+        if (resid > maxResid) maxResid = resid;
+    }
+    if (!std::isfinite(level) || level < 0.45 || level > 1.55
+        || !std::isfinite(wingLo) || wingLo < 0.05
+        || !std::isfinite(wingHi) || wingHi < 0.05
+        || maxResid > 0.4) {
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "PowerVolCurve::fit: rejected (a={:.4f} b={:.4f} c={:.2f} level={:.3f} "
+            "wing=[{:.3f},{:.3f}] maxResid={:.3f})",
+            m_a, m_b, m_c, level, wingLo, wingHi, maxResid);
+        return false;
+    }
+
     m_bInitialized = true;
 
     WTSLogger::log_by_cat("strategy", LL_INFO,

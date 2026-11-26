@@ -118,9 +118,18 @@ public:
     UnderlyingType getUnderlyingType() const { return m_underlyingType; }
 
     // Per-expiry underlying price (set by onTick when this expiry's underlying receives a tick)
-    void setUnderlyingPrice(double px) { m_underlyingPrice = px; m_underlyingPriceValid = (px > 0); }
+    // setUnderlyingPrice now also records the receive timestamp (epoch ms) so
+    // the grid-level freshness gate can be derived from the front expiry's
+    // price feed (2026-11-26: grid-level m_underlyingPrice state removed).
+    // updateTimeMs == 0 keeps the previous timestamp (legacy/test callers).
+    void setUnderlyingPrice(double px, uint64_t updateTimeMs = 0) {
+        m_underlyingPrice = px;
+        m_underlyingPriceValid = (px > 0);
+        if (updateTimeMs != 0) m_underlyingUpdateTime = updateTimeMs;
+    }
     double getUnderlyingPrice() const { return m_underlyingPrice; }
     bool isUnderlyingPriceValid() const { return m_underlyingPriceValid; }
+    uint64_t underlyingUpdateTime() const { return m_underlyingUpdateTime; }
 
     // Hedge instrument
     void setHedgeCode(const std::string& code) { m_hedgeCode = code; }
@@ -159,7 +168,14 @@ public:
     uint64_t getLastValidForwardTime() const { return m_lastValidForwardTime; }
     void setFitReady(bool ready) { m_fitReady = ready; }
     bool isFitReady() const { return m_fitReady; }
-    bool isValuesReady() const { return m_forwardReady && m_fitReady; }
+    /// Curve-side readiness (2026-11-26 L4, default true for backward
+    /// compatibility): OptionPricer2 clears/raises it from the DYNAMIC
+    /// check — required-curves-available for the CURRENT blend weight &&
+    /// startup-confirm && publish-freshness.  The market-readiness drought
+    /// flag (fitReady) stays strategy-owned and orthogonal.
+    void setCurvesReady(bool ready) { m_curvesReady = ready; }
+    bool isCurvesReady() const { return m_curvesReady; }
+    bool isValuesReady() const { return m_forwardReady && m_fitReady && m_curvesReady; }
 
     // EMA roll vs front
     EMAFilter& emaRollVsFront() { return m_emaRollVsFront; }
@@ -183,6 +199,7 @@ private:
     UnderlyingType m_underlyingType = UnderlyingType::Future;
     double m_underlyingPrice = 0;
     bool m_underlyingPriceValid = false;
+    uint64_t m_underlyingUpdateTime = 0;  // epoch ms, 0 = unknown
 
     UnderlyingTradingData* m_hedgeUTD = nullptr;  // set by OTG (raw ptr, non-owning)
 
@@ -222,6 +239,7 @@ private:
     double m_fwd = NAN;
     bool m_forwardReady = false;
     bool m_fitReady = false;
+    bool m_curvesReady = true;   // L4 dynamic; cleared/raised by OptionPricer2
     uint64_t m_lastValidForwardTime = 0;  // last time forwardReady was set to true (for sticky semantics)
 
     // Synthetic forward spread (from put-call parity)

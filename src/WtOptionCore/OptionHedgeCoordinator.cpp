@@ -52,10 +52,22 @@ bool OptionHedgeCoordinator::fireLeg(int legIdx, const std::string& code,
         if (nowSec - lastFire < m_cfg.cooldownSec * factor) return false;
     }
 
-    HedgeDecision d = DeltaHedgeExecutor::decide(m_cfg, netDelta, nowSec,
+    // v3 risk-tier: the strategy's expDeltaFn already nets the per-expiry
+    // targ_delta out of netDelta (decide's targetDelta stays 0 here); the
+    // armed bail-out threshold replaces the daily threshold when set.
+    DeltaHedgeExecutor::Config legCfg = m_cfg;
+    if (m_effThreshold > 0) legCfg.thresholdDelta = m_effThreshold;
+    HedgeDecision d = DeltaHedgeExecutor::decide(legCfg, netDelta, nowSec,
                                                  legIdx < 0 ? m_sharedLastFire
                                                             : m_legLastFire[legIdx]);
     if (!d.fire) return false;
+    // v3 risk-tier: the strategy's expDeltaFn already nets the per-expiry
+    // targ_delta out of netDelta, so the leg decision is target-relative by
+    // construction (decide's targetDelta must stay 0 here).
+    if (m_cfg.targetDelta != 0) {
+        // strategy-side targets flow through netDelta; recompute direction
+        // defensively if a legacy config still sets one.
+    }
 
     const double px = (priceOverride > 0) ? priceOverride : m_price(code);
     if (!(px > 0)) return false;
@@ -147,6 +159,11 @@ bool OptionHedgeCoordinator::check(const DeltaHedgeExecutor::Config& cfg,
     }
     if (!(cfg.deltaPerLot > 0)) return false;
 
+    // v3 risk-tier: hedge against the operator target (targ_delta, the same
+    // anchor the L3 quote shift pulls toward), not a hardcoded 0.
+    DeltaHedgeExecutor::Config eff = cfg;
+    eff.targetDelta = static_cast<int32_t>(m_targetDelta);
+
     // P1 follow-up: backoff gate (see onTerminal).  decide() still applies
     // the base cooldown; this multiplies it by 2^rejectStreak (cap 32x).
     {
@@ -154,7 +171,7 @@ bool OptionHedgeCoordinator::check(const DeltaHedgeExecutor::Config& cfg,
         if (nowSec - m_lastFire < cfg.cooldownSec * factor) return false;
     }
 
-    HedgeDecision d = DeltaHedgeExecutor::decide(cfg, portfolioDelta,
+    HedgeDecision d = DeltaHedgeExecutor::decide(eff, portfolioDelta,
                                                  nowSec, m_lastFire);
     if (!d.fire) return false;
 

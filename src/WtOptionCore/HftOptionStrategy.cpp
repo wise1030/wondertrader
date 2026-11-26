@@ -29,6 +29,8 @@
 #include "OptionData.h"
 #include "OptionValues.h"
 #include "ExpiryData.h"
+#include "QuoteRiskHelpers.h"
+#include "GarchLiteEstimator.h"
 #include "StrikeData.h"
 #include "OptionGrid.h"
 #include "OptionTradingGrid.h"
@@ -76,6 +78,10 @@ void HftOptionStrategy::shutdown()
     // enqueue_control() on _async; after the worker stops that would race.
     if (_uiBridge) { _uiBridge->stop(); _uiBridge.reset(); }
     if (_async) _async->stop();
+    // Pure-poll AsyncStress is stopped after the AEP: shutdown drain may run a
+    // final on_batch_complete and submit/consume, but no completion callback
+    // can enqueue new AEP work. stop() drains and joins the stress thread.
+    _asyncStress.stop();
     // 3.6: final attribution flush.  The worker is stopped and joined above,
     // so the registry is single-threaded again; this covers fills recorded
     // after the LAST session-end export (append-only delta rows, no loss).
@@ -141,6 +147,7 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     _maxTPS = cv.maxTPS;
     _minComputeInterval = cv.minComputeInterval;
     _marketStaleTimeoutMs = cv.marketFreshTimeoutMs;
+    _positionGuardCfg = cv.positionGuard;
 
     // Derive option product IDs from exchange + futures product
     if (cfg->has("optionProduct")) {
@@ -240,6 +247,8 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             optionOqmCfg.cancel_max_retries = optOm->has("cancel_max_retries") ? optOm->getUInt32("cancel_max_retries") : 3;
             optionOqmCfg.max_cancels_allowed = optOm->has("max_cancels_allowed") ? optOm->getInt32("max_cancels_allowed") : 0;
             optionOqmCfg.hard_flat_after_n_fills = optOm->has("hard_flat_after_n_fills") ? optOm->getInt32("hard_flat_after_n_fills") : 0;
+            // P0 fix (2026-11-24): reject-latch release window (see Config).
+            optionOqmCfg.reject_release_sec = optOm->has("reject_release_sec") ? optOm->getDouble("reject_release_sec") : 300.0;
             // A4: exchange quoting style
             {
                 std::string qs = optOm->has("quote_style") ? optOm->getCString("quote_style") : "paired";
@@ -281,6 +290,8 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             futureOqmCfg.wait_for_cancels = futOm->has("wait_for_cancels") ? futOm->getBoolean("wait_for_cancels") : false;
             futureOqmCfg.cancel_ack_timeout_ms = futOm->has("cancel_ack_timeout_ms") ? futOm->getDouble("cancel_ack_timeout_ms") : 2000;
             futureOqmCfg.cancel_max_retries = futOm->has("cancel_max_retries") ? futOm->getUInt32("cancel_max_retries") : 3;
+            // P0 fix (2026-11-24): reject-latch release window (see Config).
+            futureOqmCfg.reject_release_sec = futOm->has("reject_release_sec") ? futOm->getDouble("reject_release_sec") : 300.0;
             std::string qs = futOm->has("quote_style") ? futOm->getCString("quote_style") : "paired";
             futureOqmCfg.quote_style = (qs == "buy_sell")
                 ? wt_option::OptionQuoteManager::Config::QS_BUYSELL
@@ -382,7 +393,7 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
                 e->has("max_pos_fut") ? static_cast<int32_t>(e->getInt32("max_pos_fut")) : 1,
                 e->has("max_pos_stk") ? static_cast<int32_t>(e->getInt32("max_pos_stk")) : 50,
                 e->has("max_pos_opt") ? static_cast<int32_t>(e->getInt32("max_pos_opt")) : 50,
-                e->has("max_qsize") ? static_cast<int32_t>(e->getInt32("max_qsize")) : 5,
+                e->has("max_qsize") ? static_cast<int32_t>(e->getInt32("max_qsize")) : 1,
                 e->getBoolean("enable_auto_close"),
                 e->has("close_pos_thresh") ? e->getDouble("close_pos_thresh") : 0,
                 e->has("include_future") ? e->getBoolean("include_future") : true,
@@ -499,6 +510,23 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
             _hedgeCfg.targetDelta    = dh->has("target_delta") ? dh->getInt32("target_delta") : 0;
             _hedgeCfg.maxOrderSize   = dh->has("max_order_size") ? dh->getUInt32("max_order_size") : 5;
             _hedgeCfg.cooldownSec    = dh->has("cooldown_sec") ? dh->getDouble("cooldown_sec") : 3.0;
+            // v3 (quote-shift-design-proposal-v3.md §4): futures hedge is the
+            // RISK-CONTROL fallback, not the daily tool — it arms only once
+            // the normalized delta exposure crosses bail_pgn (the quote-shift
+            // channel owns everything below). bail_threshold_delta is the
+            // FIRE threshold once armed (recommend 200~300 = 40~60 futures
+            // lots of exposure, not the daily 30); 0 = reuse threshold_delta.
+            _hedgeBailPgn       = dh->has("bail_pgn") ? dh->getDouble("bail_pgn") : 0.8;
+            _hedgeBailThreshold = dh->has("bail_threshold_delta") ? dh->getDouble("bail_threshold_delta") : 0.0;
+            if (_hedgeBailPgn > 0 && _hedgeBailThreshold <= 0)
+                _hedgeBailThreshold = _hedgeCfg.thresholdDelta;
+            // v4: static severity-ratio panic removed (see header note); the
+            // reducing-channel failure gate (panic_fail_*) replaces it.
+            // v4: reducing-channel failure gate params (now ALERT thresholds —
+            // v4.1 moved failStreak out of the panic sources; see
+            // analysis/panic-source-evaluation-failstreak.md).
+            _panicFailStreakSec = dh->has("panic_fail_streak_sec") ? dh->getDouble("panic_fail_streak_sec") : 120.0;
+            _panicFailRate      = dh->has("panic_fail_rate") ? dh->getDouble("panic_fail_rate") : 0.8;
             // delta_per_lot must be explicit (or derivable from the hedge contract
             // multiplier); defaulting to 1.0 would over-hedge by the multiplier.
             // Legacy migration: old configs used `minHedgeQty` with the same
@@ -576,8 +604,65 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
     }
 
     // R-B33: startup config schema validation — unknown keys WARN loudly
+    // 2026-11-25: plus required-section structural check (dropped `pricer:` header).
+    wt_option::ConfigValidator::validateStructure(cfg);
     wt_option::ConfigValidator::validate(cfg);
     return true;
+}
+
+// ============================================================================
+// B1/B2 (2026-11-25): expiry table for expired-subscription / hot-key pruning.
+// common/contracts.json is the framework's own basefiles source — same data.
+// ============================================================================
+void HftOptionStrategy::loadOptionExpireDates()
+{
+    std::ifstream in("./common/contracts.json");
+    if (!in.is_open()) return;
+    std::stringstream ss; ss << in.rdbuf();
+    rapidjson::Document d;
+    if (d.Parse(ss.str().c_str()).HasParseError()) return;
+
+    // The file is {"SHFE": {"cu2612C100000": {...}, ...}} (exchange → map of
+    // code → contract), though a flat array of contracts is also accepted.
+    auto ingestOne = [&](const rapidjson::Value& o) {
+        if (!o.IsObject()) return;
+        if (!o.HasMember("code") || !o.HasMember("expiredate")) return;
+        const std::string code = o["code"].GetString();
+        if (!isRawOptionCode(code)) return;      // options only
+        _optExpireDates[code] = o["expiredate"].GetUint();
+    };
+    auto ingest = [&](const rapidjson::Value& v) {
+        if (v.IsArray()) {
+            for (auto it = v.Begin(); it != v.End(); ++it) ingestOne(*it);
+        } else if (v.IsObject()) {
+            for (auto it = v.MemberBegin(); it != v.MemberEnd(); ++it) ingestOne(it->value);
+        }
+    };
+    if (d.IsArray()) {
+        ingest(d);
+    } else if (d.IsObject()) {
+        for (auto it = d.MemberBegin(); it != d.MemberEnd(); ++it) ingest(it->value);
+    } else {
+        return;
+    }
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "Option expiry table loaded: {} option contracts", _optExpireDates.size());
+}
+
+bool HftOptionStrategy::isExpiredExpiryMonth(const std::string& ym) const
+{
+    // ym is YYYYMM (e.g. "202612"). Match by the YYMM suffix inside an option
+    // code ("cu2612C100000" → suffix "2612") and compare its expiredate with
+    // today's natural date. Unknown months are kept (do not drop).
+    if (ym.size() != 6) return false;
+    const std::string suffix = ym.substr(2);
+    for (const auto& [code, exp] : _optExpireDates) {
+        if (code.size() > 4 && code.compare(2, 4, suffix) == 0
+            && isRawOptionCode(code)) {
+            return exp > 0 && exp < TimeUtils::getCurDate();
+        }
+    }
+    return false;
 }
 
 // ============================================================================
@@ -607,6 +692,8 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     _ctx = ctx;
     WTSLogger::log_by_cat("strategy", LL_INFO, "HftOptionStrategy[{}] on_init", id());
 
+    loadOptionExpireDates();
+
     // Auto-discover option contracts from framework base data
     // Discover all option product IDs (e.g. ["SRP","SRC"] for CZCE, ["IO"] for CFFEX)
     {
@@ -615,7 +702,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
             WTSCommodityInfo* commInfo = _ctx->stra_get_comminfo(commKey.c_str());
             if (commInfo && commInfo->isOption()) {
                 const CodeSet& codes = commInfo->getCodes();
-                size_t skipped = 0;
+                size_t skipped = 0, expired = 0;
                 for (const auto& rawCode : codes) {
                     // getCodes() returns ALL contracts of the commodity,
                     // including underlying futures (e.g. cu2607). Passing a
@@ -627,14 +714,25 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
                         skipped++;
                         continue;
                     }
+                    // B1 (2026-11-25): drop contracts already past expiry by
+                    // natural date (e.g. cu2612 after its 2026-11-24 expiry) —
+                    // subscribing them only buys dead subscriptions, with no
+                    // market data ever arriving. Disabled-but-tradable months
+                    // (202702-04) are KEPT so EXPIRYENABLE can hot-enable them.
+                    auto expIt = _optExpireDates.find(rawCode);
+                    if (expIt != _optExpireDates.end() && expIt->second > 0
+                        && expIt->second < TimeUtils::getCurDate()) {
+                        ++expired;
+                        continue;
+                    }
                     std::string stdCode = CodeHelper::rawFutOptCodeToStdCode(rawCode.c_str(), _exchange.c_str());
                     _optionCodes.emplace_back(stdCode);
-                    _positionGuards[stdCode] = std::make_shared<wt_option::PositionGuard>();
+                    _positionGuards[stdCode] = std::make_shared<wt_option::PositionGuard>(_positionGuardCfg);
                     _positionOffsets[stdCode] = std::make_shared<wt_option::PositionOffsetMgr>();
                 }
                 WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "Auto-discovered {} option contracts for {}{}", codes.size() - skipped, commKey,
-                    skipped ? fmt::format(" (skipped {} non-option codes)", skipped).c_str() : "");
+                    "Auto-discovered {} option contracts for {} (skipped {} non-option, {} expired)",
+                    codes.size() - skipped - expired, commKey, skipped, expired);
             } else {
                 WTSLogger::log_by_cat("strategy", LL_WARN,
                     "Option product {} not found", commKey);
@@ -642,7 +740,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
         }
         // Create PositionGuard/PositionOffsetMgr for underlying (skip if index - not tradeable)
         if (!_underlyingCode.empty() && _underlyingType != "index") {
-            _positionGuards[_underlyingCode] = std::make_shared<wt_option::PositionGuard>();
+            _positionGuards[_underlyingCode] = std::make_shared<wt_option::PositionGuard>(_positionGuardCfg);
             _positionOffsets[_underlyingCode] = std::make_shared<wt_option::PositionOffsetMgr>();
         }
     }
@@ -682,6 +780,29 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     setupCTG();
     setupSignals();
     setupScanners();
+
+    // Replay AFTER setupPricer: setupPricer mirrors config into the hot-param
+    // fallback members. Replaying earlier (inside registerCommands) let config
+    // overwrite the persisted operator values before sync_param registration.
+    // This remains before sync_param, so the replayed value is the registered
+    // default and the pricer receives the same value through applyHotParams.
+    {
+        const size_t n = replayHotParams();
+        if (n > 0)
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "hot-param persistence: {} params restored from generated/hot_params.json", n);
+    }
+
+    // v4.1 P2: configurable panic switches (top-level `panic:` section) —
+    // the market-signal sources themselves are `signals.risk[]` entries
+    // (Toxicity / PnlLimit, config-driven via SignalFactory), mirroring the
+    // original's configurable `panic_signal`.
+    if (WTSVariant* pf = cfgPtr_->get("panic")) {
+        _panicCheckerEnable = pf->has("enable_fill_price_checker")
+            ? pf->getBoolean("enable_fill_price_checker") : true;
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "Panic switches: fill_price_checker={}", _panicCheckerEnable ? "on" : "off");
+    }
 
     // B7: Initialize attribute publisher
     _attrPub = std::make_shared<wt_option::AttributePublisher>();
@@ -774,6 +895,13 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
     _hot.sticky_base       = _ctx->sync_param("sticky_base", _sticky_base);
     _hot.improve_retreat_ratio = _ctx->sync_param("improve_retreat_ratio", _improve_retreat);
     _hot.trade_shock_ticks = _ctx->sync_param("trade_shock_ticks", _tradeShockTicks);
+    _hot.risk_shift_distort_delta = _ctx->sync_param("risk_shift_distort_delta", _riskShiftDistortDelta);
+    _hot.risk_shift_max_delta     = _ctx->sync_param("risk_shift_max_delta", _riskShiftMaxDelta);
+    _hot.risk_shift_distort_vega  = _ctx->sync_param("risk_shift_distort_vega", _riskShiftDistortVega);
+    _hot.risk_shift_max_vega      = _ctx->sync_param("risk_shift_max_vega", _riskShiftMaxVega);
+    _hot.risk_shrink_start        = _ctx->sync_param("risk_shrink_start", _riskShrinkStart);
+    _hot.risk_shift_distort_vega_vol = _ctx->sync_param("risk_shift_distort_vega_vol", _riskShiftDistortVegaVol);
+    _hot.risk_shift_max_vega_vol     = _ctx->sync_param("risk_shift_max_vega_vol", _riskShiftMaxVegaVol);
     _hot.max_tps           = _ctx->sync_param("max_tps", _maxTPS);
     _hot.command           = _ctx->sync_param("command", 0);
     _hot.qmode_override    = _ctx->sync_param("qmode_override", 0);
@@ -808,7 +936,7 @@ void HftOptionStrategy::on_init(IHftStraCtx* ctx)
             // Ensure future OQMs created for per-expiry hedge codes also have
             // guard/offset objects available through the dynamic lookup.
             if (!_positionGuards.count(hedgeCode))
-                _positionGuards[hedgeCode] = std::make_shared<wt_option::PositionGuard>();
+                _positionGuards[hedgeCode] = std::make_shared<wt_option::PositionGuard>(_positionGuardCfg);
             if (!_positionOffsets.count(hedgeCode))
                 _positionOffsets[hedgeCode] = std::make_shared<wt_option::PositionOffsetMgr>();
         }
@@ -1125,9 +1253,11 @@ void HftOptionStrategy::setupPricer()
         p2cfg.fast_full_reprice_forward_step = pCfg0->has("fast_full_reprice_forward_step")
             ? pCfg0->getDouble("fast_full_reprice_forward_step") : 0.0;
 
-        // R2: curve2 type — "power" restores the original GVV×Power dual-curve
-        // design and makes volcurve_weight effective; "gvv" keeps legacy behavior
-        // P1-b: both type and curve2_type accept gvv|power|linear|constant.
+        // R2/2026-11-26: dual-curve design chosen by CONFIG —
+        //   curve1 `type` = "gvv" | "power" (weight=1 pricing)
+        //   curve2 `curve2_type` = "linear"  (weight=0 pricing)
+        // NO runtime fallback: a curve the current weight requires must fit
+        // or the expiry stays unpublished/not ready ("constant" retired).
         {
             WTSVariant* bc = pCfg0->get("blackCalc");
             WTSVariant* vc = bc ? bc->get("volCurve") : nullptr;
@@ -1138,7 +1268,7 @@ void HftOptionStrategy::setupPricer()
                         p2cfg.volcurve_type = t;
                     else
                         WTSLogger::log_by_cat("strategy", LL_WARN,
-                            "pricer.blackCalc.volCurve.type '{}' invalid (use gvv|linear|constant)", t);
+                            "pricer.blackCalc.volCurve.type '{}' invalid (use gvv|power)", t);
                 }
                 // P1 (2026-11-18): WLS wing-weight decay — same key as the fit.
                 p2cfg.volcurve_beta = vc->has("beta") ? vc->getDouble("beta") : 0.0;
@@ -1152,10 +1282,15 @@ void HftOptionStrategy::setupPricer()
                         p2cfg.curve2_type = t;
                     else
                         WTSLogger::log_by_cat("strategy", LL_WARN,
-                            "pricer.blackCalc.volCurve.curve2_type '{}' invalid (use gvv|power|linear|constant)", t);
+                            "pricer.blackCalc.volCurve.curve2_type '{}' invalid (use linear)", t);
                 }
-                if (vc->has("fallback"))
-                    p2cfg.volcurve_fallback = vc->getBoolean("fallback");
+                // P2 startup protection + P1 freshness (2026-11-26): see
+                // OptionPricer2Config for semantics.
+                p2cfg.volcurve_startup_confirm_versions =
+                    vc->has("startup_confirm_versions")
+                        ? vc->getInt32("startup_confirm_versions") : 2;
+                p2cfg.volcurve_max_age =
+                    vc->has("max_age") ? vc->getDouble("max_age") : 900.0;
             }
         }
     }
@@ -1164,7 +1299,6 @@ void HftOptionStrategy::setupPricer()
     _blackPricer = pricer2;
     _asyncVolFitter.setCurveType(p2cfg.volcurve_type);
     _asyncVolFitter.setCurve2Type(p2cfg.curve2_type);
-    _asyncVolFitter.setFallbackEnabled(p2cfg.volcurve_fallback);
     _asyncVolFitter.setDecayWindow(p2cfg.vol_fitting_decay_window);
     _asyncVolFitter.setBeta(p2cfg.volcurve_beta);
     _asyncVolFitter.setAlphaRange(p2cfg.volcurve_alpha_dn, p2cfg.volcurve_alpha_up);
@@ -1266,6 +1400,44 @@ void HftOptionStrategy::setupPricer()
         copCfg.hedge_ratio_vega  = pCfg->has("hedge_ratio_vega")  ? pCfg->getDouble("hedge_ratio_vega")  : 0.0;
         copCfg.lambda_vega_decay = pCfg->has("lambda_vega_decay") ? pCfg->getDouble("lambda_vega_decay") : 0.0;
         copCfg.lambda_vega_wing  = pCfg->has("lambda_vega_wing")  ? pCfg->getDouble("lambda_vega_wing")  : 0.0;
+
+        // v3 risk-shift params (analysis/quote-shift-design-proposal-v3.md).
+        // risk_prem_opt / risk_prem_vega align the risk tolerances to the
+        //品种限位 (max_delta / max_vega) so normRisk sits at ±1 at the limit;
+        // the L3 quadratic shift + soft-limit size shrink hang off the same
+        // normalization.
+        copCfg.risk_prem_opt     = pCfg->has("risk_prem_opt") ? pCfg->getDouble("risk_prem_opt") : 0.0;
+        copCfg.risk_prem_vega    = pCfg->has("risk_prem_vega") ? pCfg->getDouble("risk_prem_vega") : 0.0;
+        copCfg.risk_shift_distort_delta = pCfg->has("risk_shift_distort_delta") ? pCfg->getDouble("risk_shift_distort_delta") : 0.0;
+        copCfg.risk_shift_max_delta     = pCfg->has("risk_shift_max_delta") ? pCfg->getDouble("risk_shift_max_delta") : 0.0;
+        copCfg.risk_shift_distort_vega  = pCfg->has("risk_shift_distort_vega") ? pCfg->getDouble("risk_shift_distort_vega") : 0.0;
+        copCfg.risk_shift_max_vega      = pCfg->has("risk_shift_max_vega") ? pCfg->getDouble("risk_shift_max_vega") : 0.0;
+        // 2026-11-25 follow-up: vol-space vega shift (preferred when set).
+        copCfg.risk_shift_distort_vega_vol = pCfg->has("risk_shift_distort_vega_vol") ? pCfg->getDouble("risk_shift_distort_vega_vol") : 0.0;
+        copCfg.risk_shift_max_vega_vol     = pCfg->has("risk_shift_max_vega_vol") ? pCfg->getDouble("risk_shift_max_vega_vol") : 0.0;
+        copCfg.risk_shrink_start = pCfg->has("risk_shrink_start") ? pCfg->getDouble("risk_shrink_start") : 1.0;
+        copCfg.enable_teenie_pricing = pCfg->has("enable_teenie_pricing") ? pCfg->getBoolean("enable_teenie_pricing") : false;
+        // v3-P1: depth gate (0 = off)
+        copCfg.min_market_depth_qty = pCfg->has("min_market_depth_qty") ? pCfg->getDouble("min_market_depth_qty") : 0.0;
+
+        // v3-GARCH-lite: second ATM-vol anchor (borrow plan §1). weight=0 = off.
+        _garchWeight = pCfg->has("garch_weight") ? pCfg->getDouble("garch_weight") : 0.0;
+        if (_garchWeight > 0) {
+            wt_option::GarchLiteEstimator::Config gc;
+            gc.sampleSec = 60.0;
+            _garchEstimator.configure(gc);
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "GARCH-lite ATM-vol anchor enabled (weight={})", _garchWeight);
+        }
+        // Sync to the hot-param fallback members so applyHotParams (empty hot
+        // set) re-asserts the config values instead of zeroing them.
+        _riskShiftDistortDelta = copCfg.risk_shift_distort_delta;
+        _riskShiftMaxDelta     = copCfg.risk_shift_max_delta;
+        _riskShiftDistortVega  = copCfg.risk_shift_distort_vega;
+        _riskShiftMaxVega      = copCfg.risk_shift_max_vega;
+        _riskShrinkStart       = copCfg.risk_shrink_start;
+        _riskShiftDistortVegaVol = copCfg.risk_shift_distort_vega_vol;
+        _riskShiftMaxVegaVol     = copCfg.risk_shift_max_vega_vol;
 
         // GVV blend weight
         {
@@ -1644,8 +1816,7 @@ void HftOptionStrategy::setupCTG()
     // run on the same worker thread, so this is race-free.
     if (_otg) {
         _otg->setPositionSourceFn([this](const std::string& pcode) -> int32_t {
-            auto it = _positions.find(pcode);
-            return it != _positions.end() ? static_cast<int32_t>(it->second) : 0;
+            return static_cast<int32_t>(_positionBook.net(pcode));
         });
     }
 
@@ -1756,7 +1927,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_pnlPendingInit.count(code)) {
                 _pnlPendingInit.erase(code);
                 _pnlInited.insert(code);
-                double pos = _positions[code];
+                const double pos = _positionBook.net(code);
                 if (_otg) {
                     auto utd = _otg->getUnderlyingTradingData(code);
                     // P1 fix (pnl basis): the exchange marks carried
@@ -1882,12 +2053,13 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // P1 audit fix (UI pos): broker-restored positions must reach the
         // OptionData objects UNCONDITIONALLY.  This loop used to sit inside
         // the enabled&&marketFresh gate, so while trading was off (overnight,
-        // channel down, pre-recovery) the snapshot-restored _positions never
+        // channel down, pre-recovery) the snapshot-restored PositionBook never
         // reached od->setPosition() and the UI showed pos=0 for real
         // holdings.  Position truth is not market-state dependent; the gate
         // below keeps only the market-driven work.
         if (_traderCtx) {
-            for (const auto& [code, pos] : _positions) {
+            for (const auto& [code, instrumentPos] : _positionBook.view()) {
+                const double pos = instrumentPos.net();
                 auto od = _grid->get(code);
                 if (od) {
                     od->setPosition(pos);
@@ -1926,7 +2098,90 @@ void HftOptionStrategy::setupAsyncCallbacks()
         const double nowUngated = _timeService.nowSeconds(_ctx);
         checkRiskLimitsEx();
         checkMarginLimits(nowUngated);
-        checkDeltaHedge(nowUngated);
+        // P0 fix (2026-11-24): the hedge ORDER path — unlike the risk checks
+        // above — must run only while the state machine says trading is on.
+        // Overnight (SessionStopped/OFF, broker TCP still alive) it fired 1 Hz
+        // × 2 legs × 10 lots for 8 hours: 59,280 "not in trading time"
+        // rejects, none of them visible to the strategy (the adapter's
+        // trading-hours guard returns silently before any event). The risk
+        // checks stay ungated on purpose: a breach must be caught exactly
+        // when the channel/session is down.
+        if (_tstate.channelReady &&
+            !_channelDown.load(std::memory_order_acquire) &&
+            _traderCtx && _traderCtx->enabled &&
+            !_sessionStopped)
+            checkDeltaHedge(nowUngated);
+
+        // v3-GARCH-lite: refresh the second ATM-vol anchor (O(1) per batch,
+        // worker-owned estimator; garch_weight=0 keeps the fitted atmVol).
+        if (_blackPricer && _grid) {
+            _blackPricer->setGarchBlend(_garchWeight,
+                _garchEstimator.update(nowUngated, _grid->getUnderlyingPrice()));
+        }
+
+        // v4.1: panic propagation — UNGATED (was inside shouldCompute; the
+        // debounce skip left breaches unevaluated).
+        // Trigger sources (analysis/panic-source-evaluation-failstreak.md —
+        // aligned with the original: panic is for MARKET shocks, level-
+        // triggered, auto-recovering; position risk NEVER panics):
+        //   1. pricerPanic  — toxicity/PnL signals (config `signals.risk[]`)
+        //   2. checkerPanic — fill-price deviation (config `panic.enable_fill_price_checker`)
+        // The reducing-channel failure (failStreak) is NOT a panic source:
+        // its root cause is account/ops state (funds, riskmon), it may never
+        // self-recover, and suspending quotes punishes the healthy MM
+        // business without fixing anything. It surfaces as a persistent
+        // rate-limited OPERATOR ALERT instead (below), while the futures
+        // bail-out tier and directional suppression keep managing the risk.
+        {
+            const bool checkerPanic = _panicCheckerEnable && _fillPriceChecker
+                && _fillPriceChecker->isPanicked();
+            const bool pricerPanic = _pricer ? _pricer->isPanicked() : false;
+            const bool wantPanic = pricerPanic || checkerPanic;
+            if (_traderCtx) {
+                const bool wasPanicked = _traderCtx->panicked;
+                if (wantPanic && _tstate.type != wt_option::TradingStateType::Disabled) {
+                    setState(wt_option::TradingStateType::Panic,
+                             checkerPanic ? "fill_price_deviation" : "risk_signal");
+                    // v4 P1d: scanners fall silent for the blackout (original
+                    // `scanner->onPanic` parity).
+                    _scanCoord.stopAll();
+                } else if (!wantPanic && _tstate.type == wt_option::TradingStateType::Panic
+                           && !pricerPanic && !checkerPanic) {
+                    setState(wt_option::TradingStateType::Normal, "blackout_expired");
+                    _scanCoord.startAll();
+                }
+                if (_traderCtx->panicked && !wasPanicked) {
+                    WTSLogger::log_by_cat("strategy", LL_ERROR,
+                        "Auto-panic triggered by market risk signal{}",
+                        checkerPanic ? " (fill price deviation)" : "");
+                    pushUiAlert(2, "PANIC: quoting suspended — market risk signal"
+                        " (blackout, auto-recovery)");
+                } else if (!_traderCtx->panicked && wasPanicked) {
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "Panic blackout expired, resuming");
+                    pushUiAlert(1, "Panic cleared — quoting resumed");
+                }
+            }
+        }
+
+        // v4.1: reducing-channel failure = persistent OPERATOR ALERT (not a
+        // panic source): root cause is account/ops state (funds, riskmon) —
+        // suspending quotes would lock the reducing channel too. Rate-limited
+        // re-alert every 60s while the condition holds; the futures bail-out
+        // tier and directional suppression keep managing the risk.
+        if (_traderCtx && reducingChannelFailed(nowUngated)) {
+            if (nowUngated - _redFailAlertLastSec >= 60.0) {
+                _redFailAlertLastSec = nowUngated;
+                WTSLogger::log_by_cat("strategy", LL_ERROR,
+                    "REDUCING CHANNEL FAILED: exposure over limit and reducing orders"
+                    " not filling (reject rate {:.0f}%) — manual intervention required;"
+                    " quoting continues (directional suppression active)",
+                    _redRejectsSinceFill * 100.0
+                        / std::max(1u, _redOrdersSinceFill));
+                pushUiAlert(2, "REDUCING CHANNEL FAILED — manual intervention required"
+                    " (quoting continues, futures bail-out armed)");
+            }
+        }
 
         if (_traderCtx && _traderCtx->enabled && marketFresh) {
 
@@ -1987,6 +2242,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 }
             }
 
+            // Stress results are published only after the generic panic
+            // propagation/recovery block above. Publishing beside async volfit
+            // would let the same batch clear stress_limit as blackout_expired.
+            publishAsyncStress(now);
+
             // Underlying-driven compute scheduling (quantbox design):
             // Only reprice when the underlying book changed AND the debounce
             // interval has elapsed. Option-only ticks update market snapshots
@@ -2004,51 +2264,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 _underlyingChanged = false;
                 _needsRefresh = false;
 
-                // Phase 2: periodic scenario stress on current portfolio Greeks.
-                if (_risk && now - _lastStressTime >= 60.0
-                    && !_stress.scenarios().empty()) {
-                    auto g = _risk->getPositionGreeks();
-                    const double spot = _grid->getUnderlyingPrice();
-                    if (g && spot > 0) {
-                        auto rep = _stress.evaluateAll(spot, g->delta(), g->gamma(),
-                                                       g->vega(), g->theta());
-                        auto w = _stress.worst(spot, g->delta(), g->gamma(),
-                                               g->vega(), g->theta());
-                        WTSLogger::log_by_cat("strategy", LL_INFO,
-                            "STRESS worst={:.2f} scenario={} (spot={:.2f} delta={:.2f} gamma={:.4f} vega={:.2f} theta={:.2f})",
-                            w.pnl, w.scenario.name, spot, g->delta(), g->gamma(),
-                            g->vega(), g->theta());
-                        for (const auto& r : rep) {
-                            WTSLogger::log_by_cat("strategy", LL_DEBUG,
-                                "STRESS {} pnl={:.2f} spot_shock={:.2f} vol_shock={:.2f}",
-                                r.scenario.name, r.pnl, r.scenario.spot_shock_pct,
-                                r.scenario.vol_shock);
-                        }
-                        if (_stressLimit > 0 && w.pnl < -_stressLimit
-                            && _tstate.type != wt_option::TradingStateType::Panic) {
-                            WTSLogger::log_by_cat("strategy", LL_ERROR,
-                                "STRESS limit breached: worst={:.2f} < -{:.2f}, PANIC",
-                                w.pnl, _stressLimit);
-                            setState(wt_option::TradingStateType::Panic, "stress_limit");
-                        }
-                        // Per-expiry view (IO expiries can have different hedge
-                        // forwards); aggregate risk can hide a single-expiry tail.
-                        // P1 (2026-11-18): use totalDelta() (option + the
-                        // month's EXCLUSIVE hedge legs) so a hedged expiry no
-                        // longer shows a phantom naked delta in stress.
-                        for (const auto& [exp, ed] : _grid->expiries()) {
-                            (void)ed;
-                            auto eg = _risk->getExpiryGreeks(exp);
-                            if (!eg) continue;
-                            auto ew = _stress.worst(spot, eg->totalDelta(), eg->gamma(),
-                                                    eg->vega(), eg->theta());
-                            WTSLogger::log_by_cat("strategy", LL_DEBUG,
-                                "STRESS_EXP {} worst={:.2f} scenario={} delta={:.2f}",
-                                exp, ew.pnl, ew.scenario.name, eg->delta());
-                        }
-                        _lastStressTime = now;
-                    }
-                }
+                // B13: worker only captures a small value snapshot. Scenario
+                // evaluation runs on the independent AsyncStress thread.
+                submitAsyncStress(now);
 
                 if (_compositePricer)
                     _compositePricer->setMarketTime(nowMs, _marketStaleTimeoutMs);
@@ -2059,31 +2277,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 }
                 _grid->computeValues(_pricer.get());
 
-                // Propagate pricer panic state to the CTG context.
-                // B13 fix: OR-merge with FillPriceChecker's latched panic —
-                // the unconditional overwrite used to clear it after 1 cycle.
-                if (_traderCtx && _pricer) {
-                    bool wasPanicked = _traderCtx->panicked;
-                    bool pricerPanic = _pricer->isPanicked();
-                    bool checkerPanic = _fillPriceChecker && _fillPriceChecker->isPanicked();
-                    const bool wantPanic = pricerPanic || checkerPanic
-                         || _limitsBreached.load(std::memory_order_relaxed);
-                    if (wantPanic && _tstate.type != wt_option::TradingStateType::Disabled)
-                        setState(wt_option::TradingStateType::Panic,
-                                 checkerPanic ? "fill_price_deviation" : "risk_signal");
-                    else if (!wantPanic && _tstate.type == wt_option::TradingStateType::Panic
-                             && !pricerPanic)
-                        setState(wt_option::TradingStateType::Normal, "blackout_expired");
-                    if (_traderCtx->panicked && !wasPanicked) {
-                        WTSLogger::log_by_cat("strategy", LL_ERROR,
-                            "Auto-panic triggered by risk signal{}{}",
-                            checkerPanic ? " (fill price deviation)" : "",
-                            _limitsBreached.load(std::memory_order_relaxed) ? " (limits breach)" : "");
-                    } else if (!_traderCtx->panicked && wasPanicked) {
-                        WTSLogger::log_by_cat("strategy", LL_INFO,
-                            "Panic blackout expired, resuming");
-                    }
-                }
+                // (v3: the panic propagation block moved OUT of this
+                // shouldCompute branch — see the ungated copy right after
+                // checkRiskLimitsEx. Its old position left the breach latch
+                // unevaluated whenever the underlying-book debounce skipped a
+                // compute pass; observed 0 Panic transitions across 4
+                // production days with vega pinned at 1.7× the limit.)
 
                 // A2: periodic Greeks / daily-loss limits (non-hot-path)
                 // refresh() is auto-triggered by OptionGrid::__notifyComputeCompleted
@@ -2243,6 +2442,17 @@ void HftOptionStrategy::setupAsyncCallbacks()
             "HftOptionStrategy trade: {} {} {}@{}", code, isBuy?"BUY":"SELL", vol, price);
         uint32_t fq = static_cast<uint32_t>(vol);
 
+        // v4 P1b: a reducing-direction fill proves the reducing channel works
+        // — resets the fail-streak gate (exposure may still be over limit,
+        // but the channel to fix it is alive, so no Panic).
+        if (_risk) {
+            const double pd = _risk->getPortfolioDelta();
+            const auto pg = _risk->getPositionGreeks();
+            const double pv = pg ? pg->vega() : 0.0;
+            if (wt_option::quote_risk::isReducingOrder(isBuy, pd, pv))
+                noteReducingFill(_timeService.nowSeconds(_ctx));
+        }
+
         // B2/3.3: classify the fill against the single per-order registry
         // FIRST.  Unknown fills still update positions/risk (money moved!)
         // but skip the OQM tracker so a bogus report cannot corrupt order
@@ -2265,10 +2475,9 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // P1 batch-4.4: opened-lots accounting BEFORE applying the fill.
         const double posBeforeOpen = _positionBook.net(code);
         _positionBook.addFill(code, isBuy, vol);
-        _positions[code] = _positionBook.net(code);
         _dirtyOptions.insert(code);
         {
-            const double posAfterOpen = _positions[code];
+            const double posAfterOpen = _positionBook.net(code);
             const double a0 = std::fabs(posBeforeOpen), a1 = std::fabs(posAfterOpen);
             int64_t opened = 0;
             if (posBeforeOpen == 0.0
@@ -2331,7 +2540,7 @@ void HftOptionStrategy::setupAsyncCallbacks()
         // (old AnomalyGuard semantics); the deviation policy only checks
         // live-order fills (old checker erased on done — reproduced by the
         // Normal/Overfill class filter below).
-        if (_fillPriceChecker &&
+        if (_panicCheckerEnable && _fillPriceChecker &&
             (fillClass == wt_option::IssuedOrderRegistry::FillClass::Normal ||
              fillClass == wt_option::IssuedOrderRegistry::FillClass::Overfill)) {
             if (const auto* rec = _orderRegistry.get(localid))
@@ -2354,8 +2563,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (rd) {
                 rd->addFill((isBuy ? 1 : -1) * static_cast<int32_t>(vol), price);
             }
-            // Update hedge position if this is a hedge instrument
-            _risk->setHedgePosition(code, static_cast<int32_t>(_positions[code]));
+            // Only futures/hedge codes enter the hedge registry. Option fills
+            // still update OptionRiskData above; forwarding them here only
+            // produced "unknown hedge code" debug noise.
+            if (!CodeHelper::isStdChnFutOptCode(code.c_str()))
+                _risk->setHedgePosition(code, static_cast<int32_t>(_positionBook.net(code)));
         }
 
         // Feed PnlTracker for hedge and option instruments
@@ -2588,6 +2800,16 @@ void HftOptionStrategy::setupAsyncCallbacks()
             pushUiAlert(2, fmt::format(
                 "HEDGE order rejected: {} {} id={} — naked delta, check account limits",
                 rec->code, rec->isBuy ? "buy" : "sell", localid));
+        }
+
+        // v4 P1b: a rejected reducing-direction order feeds the fail-streak
+        // gate (reducing channel failing while exposure sits over limit).
+        if (const auto* rec = _orderRegistry.get(localid); rec && _risk) {
+            const double pd = _risk->getPortfolioDelta();
+            const auto pg = _risk->getPositionGreeks();
+            const double pv = pg ? pg->vega() : 0.0;
+            if (wt_option::quote_risk::isReducingOrder(rec->isBuy, pd, pv))
+                noteReducingReject();
         }
 
         // P1-d/W5: rejected combo legs go terminal in the audit records too.
@@ -2836,6 +3058,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // MaxNewOrders / hard_flat thresholds permanently lock all quoting
             if (_otg) _otg->onSessionBegin();
 
+            // P0 fix (2026-11-25): boundary reset (NOT reconcile) — guards
+            // re-baseline from the next broker snapshot. reconcile() here
+            // stamped brokerPos=0 into fresh guards and the first snapshot
+            // disabled 24+ contracts (observed 00:35:22 2026-11-25).
+            for (auto& [gcode, guard] : _positionGuards)
+                if (guard) guard->reset();
+            _forbiddenBackoff.clear();
+
             // P1 audit fix: re-ingest the same day's analysis series so the
             // truncate-rewrite flush keeps pre-restart history (append mode
             // used to duplicate every pre-restart minute).
@@ -2871,7 +3101,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_otg) {
                 for (const auto& pair : _otg->getAllUnderlyingTradingData()) {
                     if (pair.second) {
-                        int32_t carried = _positions[pair.first];
+                        const int32_t carried = static_cast<int32_t>(_positionBook.net(pair.first));
+                        _pnlPendingInit.insert(pair.first);
                         double basis = 0.0;
                         auto pcIt = _preCloseCache.find(pair.first);
                         if (pcIt != _preCloseCache.end()) basis = pcIt->second;
@@ -2882,7 +3113,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
             if (_grid) {
                 for (const auto& od : _grid->getAllOptions()) {
                     if (od && od->getTradingData()) {
-                        int32_t carried = _positions[od->getCode()];
+                        const int32_t carried = static_cast<int32_t>(_positionBook.net(od->getCode()));
+                        _pnlPendingInit.insert(od->getCode());
                         double basis = 0.0;
                         auto pcIt = _preCloseCache.find(od->getCode());
                         if (pcIt != _preCloseCache.end()) basis = pcIt->second;
@@ -2890,10 +3122,14 @@ void HftOptionStrategy::setupAsyncCallbacks()
                     }
                 }
             }
-            // Re-arm cost-basis initialization for carried positions.  The next
-            // preClose tick will seed each tracker with the new session basis.
-            for (const auto& [posCode, posVal] : _positions)
+            // Re-arm every broker-known code too (including codes not currently
+            // in grid/OTG). Known zero-position instruments were inserted by
+            // the two resetSession loops above, preserving legacy coverage
+            // without operator[] silently inserting them into the position book.
+            for (const auto& [posCode, instrumentPos] : _positionBook.view()) {
+                (void)instrumentPos;
                 _pnlPendingInit.insert(posCode);
+            }
 
             // B2: archive the anomaly counters of the session that just
             // ended, then clear them.  ORDER RECORDS ARE NOT RESET at the
@@ -2913,6 +3149,10 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // (late fills arriving before this point stay attributed to the
             // session that just ended).
             _curSessionDate = tdate;
+            // B2: startup replay precedes the session callback, so its rewrite
+            // necessarily had tdate=0. Normalize once now that the trading day
+            // is authoritative; expired per-expiry keys are filtered again.
+            persistHotParamsForSession();
             // QuoteDuty window resets: the denominator is derived at session
             // end from the FIRST/LAST timer payload times of the session
             // (tick-active window) — both payload-based, so the ratio is
@@ -2965,7 +3205,12 @@ void HftOptionStrategy::setupAsyncCallbacks()
                                        // next begin still belong to this session
             setState(wt_option::TradingStateType::Disabled, "session_end");
             // Phase 2: ExpiryLifecycle owns the session-end hard stop.
-            wt_option::OptionExpiryLifecycle::onSessionEnd(_ctx, _positions,
+            // Compatibility adapter at this once-per-session boundary keeps
+            // the existing Σ|net| alert semantics (not long+short gross).
+            std::unordered_map<std::string, double> sessionNet;
+            for (const auto& [posCode, instrumentPos] : _positionBook.view())
+                sessionNet.emplace(posCode, instrumentPos.net());
+            wt_option::OptionExpiryLifecycle::onSessionEnd(_ctx, sessionNet,
                 [](double gross, size_t codes) {
                     WTSLogger::log_by_cat("strategy", LL_ERROR,
                         "HftOptionStrategy session_end: non-zero gross position {:.0f} lots across {} codes (manual/next-session closeout required)",
@@ -3062,12 +3307,11 @@ void HftOptionStrategy::setupAsyncCallbacks()
     cbs.on_position = [this](const std::string& code, bool isLong,
                              double prevol, double preavail,
                              double newvol, double newavail) {
-        // PositionBook is authoritative and keeps long/short plus prev/new
-        // availability.  `_positions` remains as a legacy net projection.
+        // PositionBook is the sole authoritative store for long/short plus
+        // prev/new availability; all net consumers read this same update.
         _positionBook.onBrokerPosition(code, isLong, prevol, preavail, newvol, newavail);
         const auto& fullPos = _positionBook.get(code);
         const double pos = fullPos.net();
-        _positions[code] = pos;
 
         if (_risk) {
             // Initialize option RiskData from the broker snapshot as well as
@@ -3075,7 +3319,8 @@ void HftOptionStrategy::setupAsyncCallbacks()
             auto rd = _risk->get(code);
             if (rd)
                 rd->setPosition(static_cast<int32_t>(pos));
-            _risk->setHedgePosition(code, static_cast<int32_t>(pos));
+            if (!CodeHelper::isStdChnFutOptCode(code.c_str()))
+                _risk->setHedgePosition(code, static_cast<int32_t>(pos));
         }
         // P1 (2026-11-18): only arm a pending-init when the tracker's basis has
         // never been seeded — otherwise every broker snapshot (periodic pos
@@ -3085,9 +3330,23 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _pnlPendingInit.insert(code);
 
         // Enhancement: PositionGuard - consume the authoritative full snapshot
-        auto git = _positionGuards.find(code);
-        if (git != _positionGuards.end())
-            git->second->onBrokerPosition(fullPos);
+        // P0 fix (2026-11-24): feed the guard ONLY on the short edge. The
+        // adapter emits two callbacks per contract — long side first, then
+        // short side (TraderAdapter.cpp:1680-1681) — and the guard
+        // initializes from the FIRST callback. Feeding the long edge handed
+        // it a half-updated book (net of long minus the stale short), so the
+        // short edge landing registered as a discrepancy and disabled the
+        // contract: 32 false disables on the 00:33 restart, 21 on 22:01,
+        // 6,512 DISCREPANCY lines over the day. The book is complete only
+        // after the short edge. Side order is guaranteed by the adapter loop;
+        // an adapter emitting short-then-long would degrade to
+        // init-on-second-edge, which is still consistent, never one-sided.
+        if (!isLong)
+        {
+            auto git = _positionGuards.find(code);
+            if (git != _positionGuards.end())
+                git->second->onBrokerPosition(fullPos);
+        }
 
         // Offset manager receives long/short + today/prev availability split.
         auto oit = _positionOffsets.find(code);
@@ -3108,7 +3367,6 @@ void HftOptionStrategy::setupAsyncCallbacks()
             _tstate.channelReady = true;
             _tstate.underlyingReady = false;
             _positionBook.clearAll();
-            _positions.clear();
             // P1 (2026-11-19): a mid-break startup reconciles to SessionStopped
             // BEFORE the trading channel finishes logging in. channel_ready
             // must NOT downgrade that back to Recovering — the UI would show
@@ -3126,6 +3384,24 @@ void HftOptionStrategy::setupAsyncCallbacks()
             // D: recovery sweep issued — lift the fail-safe fence so quoting
             // may resume once the state machine returns to Normal.
             _channelDown = false;
+
+            // P0 fix (2026-11-24): on a mid-session restart the session-begin
+            // callback fires BEFORE any OTD/OQM exists, so the B07 counter
+            // reset never reached a single manager for the whole trading day
+            // (0 "counters reset" logs on 11-24) — every contract that ate 3
+            // entrust rejects stayed latched in REJECT-ONLY until the process
+            // restart, and day-session quoting ran at zero orders. Run the
+            // same reset HERE, when the OTDs exist, and reset the guards so
+            // a restart re-baselines them from the next broker snapshot
+            // (reset, NOT reconcile — see the session-begin hook).
+            if (_otg)
+                _otg->onSessionBegin();
+            for (auto& [gcode, guard] : _positionGuards)
+                if (guard) guard->reset();
+            _forbiddenBackoff.clear();   // recovery re-probes every code
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "channel_ready: OQM counters reset, {} position guards reset",
+                _positionGuards.size());
         } else {
             WTSLogger::log_by_cat("strategy", LL_WARN, "channel_lost (worker)");
             _tstate.channelReady = false;
@@ -3449,7 +3725,7 @@ void HftOptionStrategy::on_position(IHftStraCtx* ctx, const char* stdCode, bool 
                                      double prevol, double preavail, double newvol, double newavail)
 {
     // A1+A2: Enqueue to async processor instead of directly accessing
-    // _positions / _pnlPendingInit (owned by worker thread, avoid data race).
+    // _positionBook / _pnlPendingInit (owned by worker thread, avoid data race).
     // A1: full four-tuple preserved (prevol/preavail were dropped before).
     if (_async)
         _async->enqueue_position(stdCode, isLong, prevol, preavail, newvol, newavail);
@@ -3605,10 +3881,32 @@ std::pair<uint32_t, uint32_t> HftOptionStrategy::executeQuoteIds(
     // R1: reject out-of-limit quotes before hitting the wire
     if (!withinPriceLimits(code, bidP) || !withinPriceLimits(code, askP)) return {0, 0};
 
+    // P0 fix (2026-11-24): per-code quiet window after an empty OrderIDs
+    // result (riskmon exclusion / funds reject) — stops re-piercing the
+    // framework's "is forbidden to trade" check on every quote cycle
+    // (1,467 spam lines in 19 min for one contract on 11-24).
+    {
+        auto it = _forbiddenBackoff.find(code);
+        if (it != _forbiddenBackoff.end())
+        {
+            if (_timeService.nowSeconds(_ctx) < it->second) return {0, 0};
+            _forbiddenBackoff.erase(it);
+        }
+    }
+
     auto ids = _ctx->stra_quote(code.c_str(), bidP, bidQ, askP, askQ, "OptionMM");
     WTSLogger::log_by_cat("strategy", LL_DEBUG,
         "Quote: {} bid={}x{} ask={}x{} → ids={},{}",
         code, bidP, bidQ, askP, askQ, ids.first, ids.second);
+
+    if (ids.first == 0 && ids.second == 0)
+    {
+        _forbiddenBackoff[code] = _timeService.nowSeconds(_ctx) + _forbiddenBackoffSec;
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "Quote gateway: {} got empty ids (forbidden/rejected pre-trade), backing off {:.0f}s",
+            code, _forbiddenBackoffSec);
+        return ids;
+    }
 
     if (ids.first != 0)
         registerIssuedOrderIds(code, {ids.first}, bidP, bidQ, true,
@@ -3634,9 +3932,39 @@ OrderIDs HftOptionStrategy::executeOrderIds(const std::string& code, bool isBuy,
     // R1
     if (!withinPriceLimits(code, price)) return {};
 
+    // P0 fix (2026-11-24): same per-code quiet window as executeQuoteIds —
+    // after a riskmon exclusion or a funds reject, stop re-piercing the
+    // framework check every cycle.
+    {
+        auto it = _forbiddenBackoff.find(code);
+        if (it != _forbiddenBackoff.end())
+        {
+            if (_timeService.nowSeconds(_ctx) < it->second) return {};
+            _forbiddenBackoff.erase(it);
+        }
+    }
+
     auto ids = isBuy
         ? _ctx->stra_buy(code.c_str(), price, qty, "OptionMM")
         : _ctx->stra_sell(code.c_str(), price, qty, "OptionMM");
+
+    if (ids.empty())
+    {
+        _forbiddenBackoff[code] = _timeService.nowSeconds(_ctx) + _forbiddenBackoffSec;
+        WTSLogger::log_by_cat("strategy", LL_WARN,
+            "Order gateway: {} got empty ids (forbidden/rejected pre-trade), backing off {:.0f}s",
+            code, _forbiddenBackoffSec);
+        return ids;
+    }
+
+    // v4 P1b: count reducing-direction order flow (fail-streak gate input).
+    if (_risk) {
+        const double pd = _risk->getPortfolioDelta();
+        const auto pg = _risk->getPositionGreeks();
+        const double pv = pg ? pg->vega() : 0.0;
+        if (wt_option::quote_risk::isReducingOrder(isBuy, pd, pv))
+            noteReducingOrder(_timeService.nowSeconds(_ctx));
+    }
 
     registerIssuedOrderIds(code, ids, price, qty, isBuy, tag);
     return ids;
@@ -3819,7 +4147,8 @@ void HftOptionStrategy::checkRiskLimitsEx()
     if (!pg) { _limitsBreached = false; return; }
 
     double pnlToday = 0;
-    for (const auto& [pcode, pos] : _positions) {
+    for (const auto& [pcode, instrumentPos] : _positionBook.view()) {
+        (void)instrumentPos;  // net value unused; book supplies the code set
         if (_otg) {
             auto utd = _otg->getUnderlyingTradingData(pcode);
             if (utd) { pnlToday += utd->getPnlTracker()->getCurPnl(); continue; }
@@ -3836,6 +4165,22 @@ void HftOptionStrategy::checkRiskLimitsEx()
             rep.reason, rep.value, rep.limit);
     }
     _limitsBreached = breach;
+
+    // v3: worst |exposure|/limit across the checked greeks — drives the
+    // tiered disposal (1.0 = directional suppression at the quote layer via
+    // the pricer pgn; ≥ panic_severity_ratio = full Panic). Keeps the
+    // reducing side alive between 1.0× and 1.2× instead of blanket-stopping.
+    double severity = 0.0;
+    const auto sevOf = [](double v, double lim) {
+        return lim > 0 ? std::fabs(v) / lim : 0.0;
+    };
+    severity = std::max(severity, sevOf(pg->delta(), _riskLimitsEx.maxDelta));
+    if (_riskLimitsEx.maxGamma > 0)
+        severity = std::max(severity, sevOf(pg->gamma(), _riskLimitsEx.maxGamma));
+    severity = std::max(severity, sevOf(pg->vega(), _riskLimitsEx.maxVega));
+    if (_riskLimitsEx.maxLossPerDay > 0)
+        severity = std::max(severity, sevOf(pnlToday, _riskLimitsEx.maxLossPerDay));
+    _riskSeverity.store(severity, std::memory_order_relaxed);
 }
 
 // ============================================================================
@@ -3898,7 +4243,13 @@ bool HftOptionStrategy::submitAsyncVolFit()
         s.forward = fwd;
         s.maturity = maturity;
         s.atmVol = atmVol;
-        s.version = _blackPricer->getCurveVersion(exp) + 1;
+        // Version counts ANY accepted curve (main or curve2): a weight=0
+        // expiry whose main curve never fits must keep advancing curve2
+        // versions (2026-11-26 publish decoupling).
+        s.version = _blackPricer->getAnyCurveVersion(exp) + 1;
+        // Effective blend weight decides which curves the fitter REQUIRES
+        // (weight=0 → linear only; weight=1 → main only; blend → both).
+        s.weight = _blackPricer->getGvvWeight(exp);
         s.timestamp = now;
 
         // Fit-candidate selection (user-approved design): the candidates are
@@ -4000,6 +4351,88 @@ void HftOptionStrategy::publishAsyncVolFit()
     }
 }
 
+void HftOptionStrategy::submitAsyncStress(double now)
+{
+    if (!_risk || now - _lastStressTime < 60.0
+        || _stress.scenarios().empty() || _asyncStress.busy()) return;
+    auto g = _risk->getPositionGreeks();
+    const double spot = _grid ? _grid->getUnderlyingPrice() : 0.0;
+    if (!g || !(spot > 0.0)) return;
+
+    wt_option::StressSnapshot snapshot;
+    snapshot.seq = _stressSubmitSeq + 1;
+    snapshot.sessionDate = _curSessionDate;
+    snapshot.positionVersion = _positionBook.version();
+    snapshot.submittedAt = now;
+    snapshot.spot = spot;
+    snapshot.portfolio = {g->delta(), g->gamma(), g->vega(), g->theta()};
+    snapshot.scenarios = _stress.scenarios();   // deep copy, including names
+
+    // Preserve the legacy stress calculation semantics: portfolio uses option
+    // position delta; each expiry uses totalDelta (option + exclusive hedge),
+    // while STRESS_EXP keeps logging option-only delta.
+    snapshot.expiries.reserve(_grid->expiries().size());
+    for (const auto& [exp, ed] : _grid->expiries()) {
+        (void)ed;
+        auto eg = _risk->getExpiryGreeks(exp);
+        if (!eg) continue;
+        snapshot.expiries.push_back({exp, eg->totalDelta(), eg->delta(),
+                                     eg->gamma(), eg->vega(), eg->theta()});
+    }
+
+    if (_asyncStress.submit(std::move(snapshot))) {
+        ++_stressSubmitSeq;
+        _lastStressTime = now;
+    }
+}
+
+void HftOptionStrategy::publishAsyncStress(double now)
+{
+    wt_option::StressReport report;
+    if (!_asyncStress.tryTake(report)) return;
+    if (report.seq <= _stressPublishedSeq) return;
+
+    const bool fresh = wt_option::AsyncStress::isFresh(report,
+        _stressPublishedSeq, _curSessionDate, _positionBook.version(),
+        now, _stressResultTtlSec);
+    _stressPublishedSeq = report.seq;
+    if (!fresh) {
+        // Never let an old position/session breach panic the new book. Consume
+        // the stale result and make the next eligible compute resubmit promptly.
+        _lastStressTime = -1e9;
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "STRESS discard stale result seq={} session={}/{} position={}/{} age={:.3f}s",
+            report.seq, report.sessionDate, _curSessionDate,
+            report.positionVersion, _positionBook.version(),
+            now - report.submittedAt);
+        return;
+    }
+
+    const auto& g = report.portfolio;
+    const auto& w = report.worst;
+    WTSLogger::log_by_cat("strategy", LL_INFO,
+        "STRESS worst={:.2f} scenario={} (spot={:.2f} delta={:.2f} gamma={:.4f} vega={:.2f} theta={:.2f})",
+        w.pnl, w.scenario.name, report.spot, g.delta, g.gamma, g.vega, g.theta);
+    for (const auto& r : report.all) {
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "STRESS {} pnl={:.2f} spot_shock={:.2f} vol_shock={:.2f}",
+            r.scenario.name, r.pnl, r.scenario.spot_shock_pct,
+            r.scenario.vol_shock);
+    }
+    if (_stressLimit > 0 && w.pnl < -_stressLimit
+        && _tstate.type != wt_option::TradingStateType::Panic) {
+        WTSLogger::log_by_cat("strategy", LL_ERROR,
+            "STRESS limit breached: worst={:.2f} < -{:.2f}, PANIC",
+            w.pnl, _stressLimit);
+        setState(wt_option::TradingStateType::Panic, "stress_limit");
+    }
+    for (const auto& er : report.expiries) {
+        WTSLogger::log_by_cat("strategy", LL_DEBUG,
+            "STRESS_EXP {} worst={:.2f} scenario={} delta={:.2f}",
+            er.expiry, er.worst.pnl, er.worst.scenario.name, er.optionDelta);
+    }
+}
+
 // ============================================================================
 // Market-readiness gate — strategy side.  Readiness is the single flag
 // ExpiryData::isFitReady: session open and sustained point droughts clear it
@@ -4060,7 +4493,8 @@ void HftOptionStrategy::checkMarginLimits(double nowSec)
     if (udlPx <= 0) return;
 
     double estMargin = 0;
-    for (const auto& [mcode, pos] : _positions) {
+    for (const auto& [mcode, instrumentPos] : _positionBook.view()) {
+        const double pos = instrumentPos.net();
         double apos = std::fabs(pos);
         if (apos < 1e-9) continue;
         bool isOpt = CodeHelper::isStdChnFutOptCode(mcode.c_str());
@@ -4192,15 +4626,23 @@ void HftOptionStrategy::buildParamRegistry()
                 return this->_hot.*mp ? *(this->_hot.*mp) : this->*mm;
             }});
     };
-    mk(&HotParams::wgt_vegaflow, &HftOptionStrategy::_wgt_vegaflow, 0, 10, "wgt_vegaflow");
-    mk(&HotParams::wgt_frontfut_skew, &HftOptionStrategy::_wgt_frontfut_skew, 0, 10, "wgt_frontfut_skew");
-    mk(&HotParams::wgt_deltaflow, &HftOptionStrategy::_wgt_deltaflow, 0, 10, "wgt_deltaflow");
-    mk(&HotParams::wgt_atmsig, &HftOptionStrategy::_wgt_atmsig, 0, 10, "wgt_atmsig");
-    mk(&HotParams::wgt_rollema, &HftOptionStrategy::_wgt_rollema, 0, 10, "wgt_rollema");
+    // Alpha weights are intentionally NOT in the UI hot-param panel (既定要求:
+    // alpha 权重不进面板). Their config-time defaults still flow through
+    // sync_param below and applyHotParams re-asserts them, but they are NOT
+    // registered as SETPARAM/schema entries. Runtime alpha configuration
+    // lives in `signals.alpha[]` (type/enable/params.weight).
     mk(&HotParams::volcurve_weight, &HftOptionStrategy::_volcurveWeight, 0, 1, "volcurve_weight");
     mk(&HotParams::sticky_base, &HftOptionStrategy::_sticky_base, 0, 5, "sticky_base");
     mk(&HotParams::improve_retreat_ratio, &HftOptionStrategy::_improve_retreat, 1, 10, "improve_retreat_ratio");
     mk(&HotParams::trade_shock_ticks, &HftOptionStrategy::_tradeShockTicks, 0, 10, "trade_shock_ticks");
+    // v3 risk-shift hot params
+    mk(&HotParams::risk_shift_distort_delta, &HftOptionStrategy::_riskShiftDistortDelta, 0, 100, "risk_shift_distort_delta");
+    mk(&HotParams::risk_shift_max_delta, &HftOptionStrategy::_riskShiftMaxDelta, 0, 500, "risk_shift_max_delta");
+    mk(&HotParams::risk_shift_distort_vega, &HftOptionStrategy::_riskShiftDistortVega, 0, 100, "risk_shift_distort_vega");
+    mk(&HotParams::risk_shift_max_vega, &HftOptionStrategy::_riskShiftMaxVega, 0, 500, "risk_shift_max_vega");
+    mk(&HotParams::risk_shrink_start, &HftOptionStrategy::_riskShrinkStart, 0, 1, "risk_shrink_start");
+    mk(&HotParams::risk_shift_distort_vega_vol, &HftOptionStrategy::_riskShiftDistortVegaVol, 0, 0.1, "risk_shift_distort_vega_vol");
+    mk(&HotParams::risk_shift_max_vega_vol, &HftOptionStrategy::_riskShiftMaxVegaVol, 0, 0.1, "risk_shift_max_vega_vol");
     // max_tps (int-typed storage)
     _paramRegistry.push_back({"max_tps", 1, 10000, false, true, nullptr,
         [this](uint32_t, double v) {
@@ -4273,33 +4715,57 @@ void HftOptionStrategy::persistHotParam(const std::string& key, double value) {
     uint32_t exp = 0;
     const ParamDesc* d = findParamDesc(key, exp);
     if (!d || !d->persist) return;
+    writeHotParams(&key, value);
+}
+
+void HftOptionStrategy::writeHotParams(const std::string* updateKey, double updateValue) {
     // Full-file rewrite: SETPARAM is an operator action (seconds apart at
-    // most), not a hot-path event.
+    // most), not a hot-path event. Session normalization uses the same path
+    // so expired keys and tdate cannot diverge between the two writers.
     const std::string path = "generated/hot_params.json";
     std::map<std::string, double> params;
-    {   // merge with the existing file (other keys may live there)
+    bool validExistingFile = false;
+    {
         std::ifstream in(path);
         if (in.is_open()) {
             std::stringstream ss; ss << in.rdbuf();
             rapidjson::Document d;
             if (!d.Parse(ss.str().c_str()).HasParseError() && d.IsObject()
                 && d.HasMember("params") && d["params"].IsObject()) {
-                for (auto it = d["params"].MemberBegin(); it != d["params"].MemberEnd(); ++it)
-                    if (it->value.IsNumber()) params[it->name.GetString()] = it->value.GetDouble();
+                validExistingFile = true;
+                for (auto it = d["params"].MemberBegin(); it != d["params"].MemberEnd(); ++it) {
+                    if (!it->value.IsNumber()) continue;
+                    // B2 (2026-11-25): don't carry expired per-expiry keys
+                    // (e.g. targ_delta:202612) forward on rewrite.
+                    const std::string k = it->name.GetString();
+                    const auto colon = k.find(':');
+                    if (colon != std::string::npos
+                        && isExpiredExpiryMonth(k.substr(colon + 1))) continue;
+                    params[k] = it->value.GetDouble();
+                }
             }
         }
     }
-    params[key] = value;
+    // A session-boundary cleanup must not create a new file, nor replace a
+    // malformed/foreign file with an empty one. Explicit SETPARAM retains the
+    // legacy recovery behavior and may recreate it.
+    if (!updateKey && !validExistingFile) return;
+    if (updateKey) params[*updateKey] = updateValue;
+
     rapidjson::StringBuffer sb;
     rapidjson::Writer<rapidjson::StringBuffer> w(sb);
     w.StartObject();
-    w.Key("tdate"); w.Uint(_curSessionDate ? _curSessionDate : 0);
+    w.Key("tdate"); w.Uint(_curSessionDate);
     w.Key("params"); w.StartObject();
     for (const auto& [k, v] : params) { w.Key(k.c_str()); w.Double(v); }
     w.EndObject();
     w.EndObject();
     std::ofstream out(path, std::ios::trunc);
     if (out.is_open()) out << sb.GetString();
+}
+
+void HftOptionStrategy::persistHotParamsForSession() {
+    writeHotParams(nullptr, 0.0);
 }
 
 size_t HftOptionStrategy::replayHotParams() {
@@ -4318,9 +4784,23 @@ size_t HftOptionStrategy::replayHotParams() {
     for (auto it = d["params"].MemberBegin(); it != d["params"].MemberEnd(); ++it) {
         if (!it->value.IsNumber()) continue;
         const std::string key = it->name.GetString();
+        // B2 (2026-11-25): prune expired per-expiry keys on replay so stale
+        // months (e.g. targ_delta:202612) never replay into the hot maps.
+        const auto colon = key.find(':');
+        if (colon != std::string::npos && isExpiredExpiryMonth(key.substr(colon + 1))) {
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "hot-param replay: expired key dropped: {}", key);
+            continue;
+        }
         uint32_t exp = 0;
         const ParamDesc* pd = findParamDesc(key, exp);
         if (!pd || !pd->persist) continue;
+        // B12: accept old persisted keys during the deprecation cycle, but
+        // never drop them silently. Numeric behavior is intentionally unchanged.
+        if (key == "risk_shift_distort_vega" || key == "risk_shift_max_vega")
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "hot-param replay: {} is deprecated; migrate to {}_vol",
+                key, key.c_str());
         std::string err;
         // _cmdHandlers exposes the same hooks the UI SETPARAM uses.
         if (_cmdHandlers.setHotParam(key, it->value.GetDouble(), err)) {
@@ -4378,7 +4858,8 @@ bool HftOptionStrategy::setExpiryEnabled(uint32_t exp, bool enable) {
         _compositePricer->setExpiryEnabled(exp, false);
     }
     WTSLogger::log_by_cat("strategy", LL_INFO,
-        "EXPIRYENABLE: expiry {} quoting -> {} (hot)", exp, enable ? "ON" : "OFF");
+        "EXPIRYENABLE: expiry {} quoting -> {} (hot, effective max_qsize={})",
+        exp, enable ? "ON" : "OFF", ec.max_qsize);
     _needsRefresh = true;
     return true;
 }
@@ -4449,6 +4930,9 @@ void HftOptionStrategy::registerCommands()
             err = "key not hot-adjustable: " + key;
             return false;
         }
+        if (key == "risk_shift_distort_vega" || key == "risk_shift_max_vega")
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "SETPARAM {} is deprecated; use {}_vol", key, key.c_str());
         if (d->perExpiry && _expiryConfigs.count(exp) == 0) {
             err = "expiry not configured: " + std::to_string(exp);
             return false;
@@ -4543,15 +5027,9 @@ void HftOptionStrategy::registerCommands()
             return true;
         });
 
-    // P1 batch-5.4: replay operator-tuned hot params BEFORE sync_param
-    // registration (see replayHotParams).  Runs after registerAll so the
-    // handler is live; still inside on_init's pre-sync_param window.
-    {
-        const size_t n = replayHotParams();
-        if (n > 0)
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "hot-param persistence: {} params restored from generated/hot_params.json", n);
-    }
+    // Hot-param replay is invoked by on_init AFTER setupPricer (not here):
+    // this function registers commands while the pricer config mirror is not
+    // yet initialized, so replaying here would be overwritten by setupPricer.
 }
 
 // ============================================================================
@@ -4659,6 +5137,47 @@ void HftOptionStrategy::computeCloseSectionEnds()
         _closeSectionEnds.size(), median);
 }
 
+// ============================================================================
+// v4 P1b: reducing-channel failure gate (analysis/panic-design-benchmark-plan.md).
+// Exposure over limit alone never panics (the original never panics on
+// position risk — it is managed by quote shift + directional suppression +
+// the futures bail-out tier). Panic fires only when the REDUCING channel is
+// PROVEN dead: no reducing fills for panic_fail_streak_sec, enough attempts
+// to judge (≥3), and reject rate ≥ panic_fail_rate.
+// ============================================================================
+bool HftOptionStrategy::reducingChannelFailed(double nowSec) const
+{
+    if (!_limitsBreached.load(std::memory_order_relaxed)) return false;
+
+    // Window anchor: last reducing fill; before the first fill, the first
+    // reducing order (a restart with a dead account starts its clock then).
+    const double anchor = (_redLastFillSec >= 0) ? _redLastFillSec : _redFirstOrderSec;
+    if (anchor < 0) return false;                        // no reducing attempt yet
+    if (nowSec - anchor < _panicFailStreakSec) return false;
+    if (_redOrdersSinceFill < 3) return false;           // too few attempts to judge
+
+    const double rate = _redRejectsSinceFill / static_cast<double>(_redOrdersSinceFill);
+    return rate >= _panicFailRate;
+}
+
+void HftOptionStrategy::noteReducingOrder(double nowSec)
+{
+    if (_redFirstOrderSec < 0) _redFirstOrderSec = nowSec;
+    ++_redOrdersSinceFill;
+}
+
+void HftOptionStrategy::noteReducingFill(double nowSec)
+{
+    _redLastFillSec = nowSec;
+    _redOrdersSinceFill = 0;
+    _redRejectsSinceFill = 0;
+}
+
+void HftOptionStrategy::noteReducingReject()
+{
+    ++_redRejectsSinceFill;
+}
+
 void HftOptionStrategy::checkDeltaHedge(double nowSec)
 {
     if (!_deltaHedgeEnable || !_risk) return;
@@ -4674,6 +5193,30 @@ void HftOptionStrategy::checkDeltaHedge(double nowSec)
     // legs; shared legs excluded), plus the optional shared residual leg.
     _hedgeCoord.setLegs(_hedgeLegs);
     _hedgeCoord.setSharedLeg(_sharedHedgeCode);
+
+    // v3 risk-tier (quote-shift-design-proposal-v3.md §4): futures hedge is
+    // the bail-out tier. Below bail_pgn the quote-shift channel owns delta —
+    // disarm the hedger (huge threshold). At/above it, arm with the bail
+    // threshold. pgn_d uses the SAME normalization as the pricer
+    // (risk_prem_opt), so |pgn_d| ≥ 1.0 coincides with RiskLimitsEx breach.
+    double portfolioTarg = 0.0;
+    for (const auto& [exp, t] : _hotTargDelta) {
+        auto ecIt = _expiryConfigs.find(exp);
+        if (ecIt != _expiryConfigs.end() && ecIt->second.enable) portfolioTarg += t;
+    }
+    _hedgeCoord.setPortfolioTargetDelta(portfolioTarg);
+    const double riskTolD = _compositePricer ? _compositePricer->riskTolDelta() : 10.0;
+    const double pgnD = (riskTolD > 0)
+        ? (_risk->getPortfolioDelta() - portfolioTarg) / riskTolD : 0.0;
+    if (_hedgeBailPgn > 0) {
+        const double effTh = (std::fabs(pgnD) >= _hedgeBailPgn)
+            ? _hedgeBailThreshold
+            : 1e12;   // disarm — quote-shift owns delta inside the band
+        _hedgeCoord.setEffectiveThreshold(effTh);
+    } else {
+        _hedgeCoord.setEffectiveThreshold(0);   // legacy (no tiering)
+    }
+
     if (_closeFlattenActive) {        // Close-phase flatten: half-lot deadband (excess >= 0.5 lot rounds up
         // to one lot), target 0, fast cooldown. Self-terminating because
         // getPortfolioDelta() includes the futures hedge leg (m_pfuDelta).
@@ -4708,10 +5251,14 @@ void HftOptionStrategy::checkDeltaHedge(double nowSec)
     _hedgeCoord.checkMulti(nowSec,
         [this](uint32_t exp) {
             auto eg = _risk ? _risk->getExpiryGreeks(exp) : nullptr;
-            return eg ? eg->totalDelta() : 0.0;   // option + exclusive legs
+            if (!eg) return 0.0;
+            // v3: net the per-expiry target (same anchor as the L3 shift) —
+            // the leg hedges the GAP to targ, decide() stays target-0.
+            auto t = _hotTargDelta.find(exp);
+            return eg->totalDelta() - (t != _hotTargDelta.end() ? t->second : 0.0);
         },
-        [this](uint32_t) {
-            return _risk ? _risk->getPortfolioDelta() : 0.0;
+        [this, portfolioTarg](uint32_t) {
+            return _risk ? _risk->getPortfolioDelta() - portfolioTarg : 0.0;
         });
 }
 
@@ -4767,6 +5314,31 @@ void HftOptionStrategy::applyHotParams()
         _sticky_base = sb;
         _improve_retreat = irr;
         _tradeShockTicks = tst;
+        // v3 risk-shift hot params (quote-shift-design-proposal-v3.md §7).
+        {
+            const double dd = hotVal(_hot.risk_shift_distort_delta, _riskShiftDistortDelta);
+            const double md = hotVal(_hot.risk_shift_max_delta, _riskShiftMaxDelta);
+            const double dv = hotVal(_hot.risk_shift_distort_vega, _riskShiftDistortVega);
+            const double mv = hotVal(_hot.risk_shift_max_vega, _riskShiftMaxVega);
+            const double rs = hotVal(_hot.risk_shrink_start, _riskShrinkStart);
+            _compositePricer->setRiskShiftDistortDelta(dd);
+            _compositePricer->setRiskShiftMaxDelta(md);
+            _compositePricer->setRiskShiftDistortVega(dv);
+            _compositePricer->setRiskShiftMaxVega(mv);
+            _compositePricer->setRiskShrinkStart(rs);
+            _riskShiftDistortDelta = dd;
+            _riskShiftMaxDelta = md;
+            _riskShiftDistortVega = dv;
+            _riskShiftMaxVega = mv;
+            _riskShrinkStart = rs;
+            // 2026-11-25 follow-up: vol-space vega shift (preferred when set).
+            const double dvv = hotVal(_hot.risk_shift_distort_vega_vol, _riskShiftDistortVegaVol);
+            const double mvv = hotVal(_hot.risk_shift_max_vega_vol, _riskShiftMaxVegaVol);
+            _compositePricer->setRiskShiftDistortVegaVol(dvv);
+            _compositePricer->setRiskShiftMaxVegaVol(mvv);
+            _riskShiftDistortVegaVol = dvv;
+            _riskShiftMaxVegaVol = mvv;
+        }
         // Audit 11-23: per-expiry hot params (targ_*/sprd_*:<exp>).  Merge
         // each key with its config default so a single-key hot set never
         // clobbers the sibling parameter's current effective value.
@@ -4943,6 +5515,8 @@ void HftOptionStrategy::buildUiSnapshot(wt_option::UiSnapshotView& v)
 
     // Risk / limits
     v.limitsBreached = _limitsBreached.load(std::memory_order_relaxed);
+    // 2026-11-25 follow-up: expose worst exposure/limit ratio to the UI.
+    v.riskSeverity = _riskSeverity.load(std::memory_order_relaxed);
     v.tpsMax = _maxTPS;
     v.tps = _ctg ? _ctg->getTransactionCount() : 0;
     const auto ss = _quoteStats.getSessionSummary();

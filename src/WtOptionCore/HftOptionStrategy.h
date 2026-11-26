@@ -11,6 +11,7 @@
 #include "IHftStraCtx.h"
 #include "WTSVariant.hpp"
 #include "WTSSessionInfo.hpp"
+#include "GarchLiteEstimator.h"
 #include "OptionAsyncEventProcessor.h"
 #include "OptionTimeService.h"
 #include "OptionConfigLoader.h"
@@ -47,7 +48,7 @@
 #include "ConfigValidator.h"
 #include "UiBridge.h"
 #include "UiSnapshotView.h"
-#include "StressAnalyzer.h"
+#include "AsyncStress.h"
 
 #include <string>
 #include <memory>
@@ -131,8 +132,8 @@ private:
     // breaking duration-based timers on night sessions.
     wt_option::OptionTimeService _timeService;
 
-    // Authoritative long/short position book.  `_positions` below is a net
-    // projection retained for legacy consumers/session accounting.
+    // Single authoritative position source. Net-only consumers use net()/view();
+    // no second legacy projection is maintained.
     wt_option::PositionBook _positionBook;
 
     // Core components
@@ -172,6 +173,28 @@ private:
     // Audit 11-23: trade-shock ticks (our-fill back-away distance).  Hot via
     // SETPARAM trade_shock_ticks; pricer-side default is 1.
     double _tradeShockTicks = 1.0;
+
+    // v3 risk-shift hot params (SETPARAM; consumed via applyHotParams →
+    // CompositeOptionPricer hot setters). Config defaults live in the
+    // pricer config block; these mirror the effective values.
+    double _riskShiftDistortDelta = 0.0;
+    double _riskShiftMaxDelta = 0.0;
+    double _riskShiftDistortVega = 0.0;
+    double _riskShiftMaxVega = 0.0;
+    double _riskShrinkStart = 1.0;
+    double _riskShiftDistortVegaVol = 0.0;
+    double _riskShiftMaxVegaVol = 0.0;
+    // v3 delta-hedge bail-out tiers (analysis/quote-shift-design-proposal-v3.md §4)
+    double _hedgeBailPgn = 0.8;          // |pgn_d| at which futures bail-out arms
+    double _hedgeBailThreshold = 0.0;    // bail threshold (0 = use threshold_delta)
+    // v4: static severity-ratio panic REMOVED (analysis/panic-design-benchmark-plan.md —
+    // the original never panics on position risk; it is managed by quote shift
+    // + directional suppression + the futures bail-out tier). Replaced by the
+    // reducing-channel failure gate (see _panicFail* members).
+
+    // v3-GARCH-lite: second ATM-vol anchor (borrow plan §1). weight=0 = off.
+    double _garchWeight = 0.0;
+    wt_option::GarchLiteEstimator _garchEstimator;
 
     // Pricer strategy type
     std::string _pricerType = "composite_mm";
@@ -240,7 +263,7 @@ private:
         std::vector<std::string> secondaryHedgeCodes;
         double delta_min = 0.05, delta_max = 0.95;
         double sprd_fwd = 0.01, sprd_atmvol = 0.1, sprd_corr = 0.0;
-        int32_t max_pos_fut = 1, max_pos_stk = 50, max_pos_opt = 50, max_qsize = 5;
+        int32_t max_pos_fut = 1, max_pos_stk = 50, max_pos_opt = 50, max_qsize = 1;
         bool enable_auto_close = false;
         double close_pos_thresh = 0;
         bool include_future = true;          // include future mid in synthetic forward (quantbox design)
@@ -267,9 +290,13 @@ private:
     // single-writer via the async channel callback); the former engine-thread
     // atomic mirror was a double-write hazard.
 
-    // Position tracking (strategy local)
-    std::unordered_map<std::string, double> _positions;
-
+    // Position tracking lives solely in _positionBook (declared above).
+    // B1/B2 (2026-11-25): per-option-code expiry table from
+    // common/contracts.json — drives expired-subscription filtering and
+    // expired hot-param key pruning (e.g. 202612 after its 11-24 expiry).
+    std::unordered_map<std::string, uint32_t> _optExpireDates;
+    void loadOptionExpireDates();
+    bool isExpiredExpiryMonth(const std::string& ym) const;
     // Tick counter (for diagnostics)
     std::atomic<uint64_t> _tickCount{0};
 
@@ -331,6 +358,7 @@ private:
     // Enhancement modules (borrowed from quantbox)
     wt_option::RiskLimitsEx _riskLimitsEx;                          // Extended risk limits
     wt_option::FillPriceCheckerPtr _fillPriceChecker;                // Fill price deviation monitor
+    wt_option::PositionGuard::Config _positionGuardCfg;
     std::unordered_map<std::string, wt_option::PositionGuardPtr> _positionGuards;  // Per-contract position guards
     // Audit 11-23: per-expiry hot params (SETPARAM keys "name:YYYYMM";
     // quantbox 逐月 GUI 参数对齐).  Applied to the pricer in applyHotParams.
@@ -431,6 +459,17 @@ private:
     // a lost channel stops quoting instantly instead of waiting for the
     // queued worker callback (which may lag or, pre-fix, could be dropped).
     std::atomic<bool> _channelDown{false};
+
+    // P0 fix (2026-11-24): per-code quiet window after an empty OrderIDs
+    // result (riskmon exclusion / funds reject).  executeQuoteIds /
+    // executeOrderIds record code -> release-time here; while the window is
+    // active the send paths return empty silently instead of re-piercing the
+    // framework's "is forbidden to trade" check on every quote cycle
+    // (1,467 spam lines in 19 min for one contract on 11-24).  Cleared on
+    // channel_ready / session begin so a recovery re-probes every code.
+    std::unordered_map<std::string, double> _forbiddenBackoff;
+    static constexpr double _forbiddenBackoffSec = 60.0;
+
     void setState(wt_option::TradingStateType t, const std::string& reason);
     bool _tradingStateEnabled() const;
     void applyTradingState();
@@ -467,6 +506,14 @@ private:
     std::string _sharedHedgeCode;
     bool _deltaHedgeLotWarned = false;
     void checkDeltaHedge(double nowSec);
+    /// v4 P1b: exposure over limit AND the reducing channel proven dead
+    /// (no reducing fills, reject rate ≥ panic_fail_rate, sustained
+    /// panic_fail_streak_sec) — the only position-risk path to Panic.
+    bool reducingChannelFailed(double nowSec) const;
+    /// v4 P1b hooks: track reducing-direction order flow.
+    void noteReducingOrder(double nowSec);
+    void noteReducingFill(double nowSec);
+    void noteReducingReject();
     /// Resolve delta-per-lot from the hedge contract multiplier; <=0 means unknown.
     double resolveDeltaPerLot();
 
@@ -491,9 +538,13 @@ private:
     wt_option::PredictionEvaluator _predEvaluator;
 
     // Phase 2: scenario stress (delta-gamma-vega-theta) on the portfolio book
-    wt_option::StressAnalyzer _stress;
+    wt_option::StressAnalyzer _stress;       // immutable scenario source after init
+    wt_option::AsyncStress _asyncStress;     // pure value-snapshot background job
     double _lastStressTime = -1e9;
     double _stressLimit = 0.0;   // 0 = alert-only; >0 = Panic if worst < -limit
+    double _stressResultTtlSec = 5.0;
+    uint64_t _stressSubmitSeq = 0;
+    uint64_t _stressPublishedSeq = 0;
 
     // B1: estimated-margin guard (config-driven; exchange does not publish
     // margins via commInfo, so rates are calibrated in config)
@@ -507,12 +558,28 @@ private:
     } _marginCfg;
     double _lastMarginCheckTime = 0;
     std::atomic<bool> _limitsBreached{false};   // Greeks/daily-loss/margin breach latch
+    // v4 P1b: reducing-channel failure detection — severity alone never
+    // triggers Panic (aligned with the original: panic is for MARKET shocks);
+    // it fires only when the exposure is over limit AND the reducing channel
+    // is proven dead (no reducing fills, reject rate ≥ panic_fail_rate, for
+    // panic_fail_streak_sec).
+    std::atomic<double> _riskSeverity{0.0};
+    double _panicFailStreakSec = 120.0;
+    double _panicFailRate = 0.8;
+    double _redLastFillSec = -1.0;       // last reducing-direction fill (-1 = none yet)
+    double _redFirstOrderSec = -1.0;     // first reducing-direction order (-1 = none yet)
+    uint32_t _redOrdersSinceFill = 0;    // reducing orders since last reducing fill
+    uint32_t _redRejectsSinceFill = 0;   // rejected subset of the above
+    double _redFailAlertLastSec = -1e9;  // last operator alert for the failed channel
+    bool _panicCheckerEnable = true;     // v4.1 P2: fill-price checker panic switch
     bool _fifoPnlMode = false;                  // B5
 
     void checkMarginLimits(double nowSec);       // B1
     void checkRiskLimitsEx();                    // A2 (Greeks / daily loss)
     bool submitAsyncVolFit();                    // Phase 9 async fit snapshot
     void publishAsyncVolFit();                   // worker batch-boundary publish
+    void submitAsyncStress(double now);          // worker: value snapshot only
+    void publishAsyncStress(double now);         // worker: all logs/state/UI side effects
 
     // Option contracts to subscribe (from config)
     std::vector<std::string> _optionCodes;
@@ -529,6 +596,14 @@ private:
         double* sticky_base = nullptr;
         double* improve_retreat_ratio = nullptr;
         double* trade_shock_ticks = nullptr;
+        // v3 risk-shift hot params
+        double* risk_shift_distort_delta = nullptr;
+        double* risk_shift_max_delta = nullptr;
+        double* risk_shift_distort_vega = nullptr;
+        double* risk_shift_max_vega = nullptr;
+        double* risk_shrink_start = nullptr;
+        double* risk_shift_distort_vega_vol = nullptr;
+        double* risk_shift_max_vega_vol = nullptr;
         int32_t* max_tps = nullptr;
         int32_t* command = nullptr;   // 0=normal, 1=stop, 2=panic, 3=resume
         int32_t* qmode_override = nullptr;  // 0=no override, 1=ON, -1=OFF, 2=CLOSE
@@ -593,6 +668,10 @@ private:
     void pushUiAlert(uint8_t level, const std::string& msg);
 
     void persistHotParam(const std::string& key, double value);
+    // Rewrite the existing persistence file after the session date is known.
+    // A null updateKey means normalization only (no parameter value changes).
+    void writeHotParams(const std::string* updateKey, double updateValue);
+    void persistHotParamsForSession();
 
     // ------------------------------------------------------------------
     // Audit 11-23 (P1): hot-parameter registry — the SINGLE source of truth

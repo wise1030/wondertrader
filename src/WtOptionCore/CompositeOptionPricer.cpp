@@ -23,6 +23,7 @@
 #include "OptionRiskData.h"
 #include "OptionExpiryGreeks.h"
 #include "ExpiryData.h"
+#include "QuoteRiskHelpers.h"
 #include "OptionData.h"
 #include "OptionValues.h"
 #include "StrikeData.h"
@@ -124,15 +125,11 @@ CompositeOptionPricer::CompositeOptionPricer(
     , m_bReprice(true)
     , m_refPrice(0)
 {
-    // P1 follow-up (4.1 audit): teenie pricing is a stub that would silently
-    // freeze quote updates if enabled — force it off, loudly.
-    if (c.enable_teenie_pricing) {
-        m_config.enable_teenie_pricing = false;
-        WTSLogger::log_by_cat("strategy", LL_ERROR,
-            "CompositeOptionPricer: enable_teenie_pricing requested but the "
-            "implementation is a no-op stub (4.1 audit) — FORCING OFF.  Do not "
-            "enable until the visible book is wired into the teenie paths.");
-    }
+    // v3 (2026-11-25): teenie is implemented per the original MMPricer
+    // semantics (bid ≤ mkt_best + 1 tick, mirrored for ask; a missing market
+    // price on a side skips that side) — see computeOurMarkets. The 4.1-audit
+    // force-off of the stub is gone; `enable_teenie_pricing` now actually
+    // enables the mechanism.
 
     setTraceLevel(config().trace_level);
 
@@ -260,7 +257,10 @@ void CompositeOptionPricer::setupRiskTolerances() {
     td.risk_tol = config().risk_prem_opt > 0 ? config().risk_prem_opt : 10.0;
 
     ToleranceParams& tv = m_tolerance_params[GT_vega_tw];
-    tv.risk_tol = config().risk_prem_opt > 0 ? config().risk_prem_opt * 100 : 1000.0;
+    // v3 (2026-11-25): separate vega tolerance (aligned to max_vega), falling
+    // back to the legacy risk_prem_opt×100 coupling when unset.
+    tv.risk_tol = config().risk_prem_vega > 0 ? config().risk_prem_vega
+                : (config().risk_prem_opt > 0 ? config().risk_prem_opt * 100 : 1000.0);
 
     // Primary expiry = front month
     if (m_grid && !m_grid->expiries().empty()) {
@@ -345,8 +345,14 @@ void CompositeOptionPricer::computeValues_FAST(OptionGrid* grid) {
 
         const ExpiryDataPtr& ed = sd->getExpiryData();
 
-        // We do not need fit ready to quote.
-        bool expiry_ready = ed && ed->isForwardReady();
+        // P0 fix (2026-11-25): require forward AND fit. The old comment
+        // ("we do not need fit ready to quote") let the pricer compute theos
+        // off the flat default/bootstrap IV before the first GVV fit
+        // published, and CTG quoted straight off them — orders with garbage
+        // prices right at startup (the 00:35:54 2026-11-25 reject burst).
+        // valuesReady = forwardReady && fitReady; before that, priced=false
+        // and ourMarket empties (cancel-only).
+        bool expiry_ready = ed && ed->isValuesReady();
         if (!expiry_ready) {
             // Reset priced flag so stale theoretical values don't pass inputs_good
             otm->values(0).setPriced(false);
@@ -422,7 +428,9 @@ void CompositeOptionPricer::computeValues_SLOW(OptionGrid* grid) {
 
         const ExpiryDataPtr& ed = sd->getExpiryData();
 
-        bool expiry_ready = ed && ed->isForwardReady();
+        // P0 fix (2026-11-25): SLOW path — same fit gate as FAST (see the
+        // computeValues_FAST comment). No forward+fit, no theory.
+        bool expiry_ready = ed && ed->isValuesReady();
         if (!expiry_ready) {
             // Reset priced flag so stale theoretical values don't pass inputs_good
             otm->values(0).setPriced(false);
@@ -572,6 +580,7 @@ bool CompositeOptionPricer::initValuesCompute(OptionGrid* grid) {
 
     updateRiskShiftsDelta(grid);
     updateRiskShiftsVega(grid);
+    updateStickyScale(grid);
 
     // Portfolio greeks
     if (m_spPositionRisk) {
@@ -731,7 +740,9 @@ double CompositeOptionPricer::__getOptionCosts(OptionData* option, double /*mid*
 // ============================================================================
 double CompositeOptionPricer::__apply_sticky_params(
     side_t s, const PriceSize& our_q, double new_px, double tick_size) {
-    double base = config().sticky_base * tick_size;
+    // v3: sticky band shrinks under risk pressure (soft-limit zone) so the
+    // L3 shift can actually move the quote (QuoteRiskHelpers::stickyScaleFor).
+    double base = config().sticky_base * tick_size * m_stickyScale;
     double sticky_pts = base;
 
     double rval = new_px;
@@ -808,15 +819,29 @@ void CompositeOptionPricer::__computeBidAndAskFuture(
 // ============================================================================
 int32_t CompositeOptionPricer::__computeQuoteSize(
     const ExpiryRiskConfig& erc, side_t side, double /*mid*/, double /*px*/,
-    int32_t opt_pos, int32_t stk_pos, double /*delta*/) {
+    int32_t opt_pos, int32_t stk_pos, double delta
+    , double deltaSign, double pgnDelta, double pgnVega) {
+    // v3 soft-limit size shrink (analysis/quote-shift-design-proposal-v3.md
+    // §3.4/§5): the side that worsens a risk dimension shrinks linearly once
+    // |pgn| passes risk_shrink_start, reaching 0 at 1.0 — directional
+    // suppression at the quote layer (stop adding risk, keep the reducing
+    // side). risk_shrink_start >= 1.0 disables (previous behavior).
+    double riskScale = 1.0;
+    if (m_config.risk_shrink_start < 1.0) {
+        riskScale = quote_risk::riskSizeScale(
+            side == BID ? quote_risk::Side::BID : quote_risk::Side::ASK,
+            deltaSign, pgnDelta, pgnVega, m_config.risk_shrink_start);
+    }
+    if (riskScale <= 0) return 0;
+
     if (side == BID) {
         int32_t bid_size = std::min(erc.max_qsize, std::max(0, erc.max_pos_stk - stk_pos));
         bid_size = std::min(bid_size, std::max(0, erc.max_pos_opt - opt_pos));
-        return bid_size;
+        return static_cast<int32_t>(bid_size * riskScale);
     } else {
         int32_t ask_size = std::min(erc.max_qsize, std::max(0, -(-erc.max_pos_stk - stk_pos)));
         ask_size = std::min(ask_size, std::max(0, -(-erc.max_pos_opt - opt_pos)));
-        return ask_size;
+        return static_cast<int32_t>(ask_size * riskScale);
     }
 }
 
@@ -842,19 +867,16 @@ bool CompositeOptionPricer::__compute_interesting(
 }
 
 // ============================================================================
-// __compute_teenie_price (static)
+// __compute_teenie_price — original MMPricer semantics (cc:1481-1495): cap
+// our quote at market best ± 1 tick (queue priority, never crossing).
+// Caller must skip the side when the market price is absent (original
+// `return false`).
 // ============================================================================
 double CompositeOptionPricer::__compute_teenie_price(
-    side_t dir, double our_px, int32_t our_sz, const PriceSize& mkt, double tick_size) {
-    double px = our_px;
-    double teenie_amt = tick_size;  // one tick
-    if (mkt.sz() < our_sz)
-        teenie_amt = 0;
-    if (dir == BID)
-        px = std::min(our_px, mkt.px() + teenie_amt);
-    else
-        px = std::max(our_px, mkt.px() - teenie_amt);
-    return px;
+    side_t dir, double our_px, double mkt_px, double tick_size) {
+    return quote_risk::teenieCapPrice(
+        dir == BID ? quote_risk::Side::BID : quote_risk::Side::ASK,
+        our_px, mkt_px, tick_size);
 }
 
 // ============================================================================
@@ -905,6 +927,16 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
         return;
     }
 
+    // v3-P1 (borrow plan): depth gate — don't quote razor-thin books (anti
+    // fishing). 0 = disabled. Uses best-level size already on OptionMarket.
+    if (m_config.min_market_depth_qty > 0 &&
+        (option->getMarket().bidSize < m_config.min_market_depth_qty ||
+         option->getMarket().askSize < m_config.min_market_depth_qty)) {
+        black_values.ourMarket().clear();
+        option->setActive(false);
+        return;
+    }
+
     // spread
     double our_cost = __getOptionCosts(option, mid);
     double widen = getRiskWidenFactorByCode(option->getCode());
@@ -938,7 +970,8 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     if (config().wgt_exp_ddelta != 0.0) {
         const double expNetDelta = cvcxt().exp_cxt[exp].pos_delta;
         const double cDelta = black_values.greeks().delta();
-        ddAdj = -config().wgt_exp_ddelta * expNetDelta * (cDelta >= 0.0 ? 1.0 : -1.0);
+        ddAdj = wt_option::quote_risk::expiryDeltaSkew(
+            expNetDelta, cDelta, config().wgt_exp_ddelta);
     }
     bid_spread = std::max(0.0, bid_spread - alpha_val - adj_val - ddAdj);
     ask_spread = std::max(0.0, ask_spread + alpha_val + adj_val + ddAdj);
@@ -1051,32 +1084,68 @@ void CompositeOptionPricer::computeOurMarkets(OptionData* option, StrikeData* sd
     double tick_size = option->getTickSize();
     if (tick_size <= 0) tick_size = 1e-6;
 
+    // v3 risk-shift inputs: normalized risks + this leg's delta direction.
+    const double pgnD = expiry_data ? expiry_data->getNormRiskDelta() : 0.0;
+    const double pgnV = black_values.vega_risk_norm;
+    const double deltaSign = (black_values.greeks().delta() > 0) ? 1.0
+                           : (black_values.greeks().delta() < 0 ? -1.0 : 0.0);
+    // L3 translation active? (delta_risk/vega_risk carry shift × greek.)
+    const bool shiftActive = std::fabs(black_values.adj().delta_risk) > 1e-9
+                          || std::fabs(black_values.adj().vega_risk) > 1e-9;
+    const double mktBid = option->getBid();
+    const double mktAsk = option->getAsk();
+    const bool teenieOn = config().enable_teenie_pricing;
+
     if (enable_bid) {
-        int32_t bid_size = __computeQuoteSize(erc, BID, mid, bid, opt_pos, stk_pos, delta);
-        bool valid = erc.enable && (bid_size > 0);
-        if (!valid) {
+        // v3 teenie (original MMPricer semantics): cap our bid at
+        // mkt_best + 1 tick; without a market bid on this side, skip the
+        // bid entirely (original `return false`).
+        if (teenieOn && mktBid <= 0) {
             multmkt.eraseBids();
         } else {
-            bid = round_to_tick_by_side(bid, tick_size, BID, mid);
-            PriceSize new_bid(bid, bid_size);
-            PriceSize old_bid = multmkt.getBest(BID);
-            if (old_bid.empty() || !EQ(old_bid.px(), bid) || old_bid.sz() != bid_size) {
-                multmkt.setBest(BID, new_bid);
+            if (teenieOn)
+                bid = quote_risk::teenieCapPrice(quote_risk::Side::BID, bid, mktBid, tick_size);
+            // v3 passivity cap: an L3-shifted quote stays RESTING (never
+            // crosses). Only binds when the shift is active — the unshifted
+            // theo path keeps its previous behavior.
+            if (shiftActive && mktAsk > 0)
+                bid = std::min(bid, mktAsk - tick_size);
+            int32_t bid_size = __computeQuoteSize(erc, BID, mid, bid, opt_pos, stk_pos, delta
+                , deltaSign, pgnD, pgnV);
+            bool valid = erc.enable && (bid_size > 0);
+            if (!valid) {
+                multmkt.eraseBids();
+            } else {
+                bid = round_to_tick_by_side(bid, tick_size, BID, mid);
+                PriceSize new_bid(bid, bid_size);
+                PriceSize old_bid = multmkt.getBest(BID);
+                if (old_bid.empty() || !EQ(old_bid.px(), bid) || old_bid.sz() != bid_size) {
+                    multmkt.setBest(BID, new_bid);
+                }
             }
         }
     }
 
     if (enable_ask) {
-        int32_t ask_size = __computeQuoteSize(erc, ASK, mid, ask, opt_pos, stk_pos, delta);
-        bool valid = erc.enable && (ask_size > 0);
-        if (!valid) {
+        if (teenieOn && mktAsk <= 0) {
             multmkt.eraseAsks();
         } else {
-            ask = round_to_tick_by_side(ask, tick_size, ASK, mid);
-            PriceSize new_ask(ask, ask_size);
-            PriceSize old_ask = multmkt.getBest(ASK);
-            if (old_ask.empty() || !EQ(old_ask.px(), ask) || old_ask.sz() != ask_size) {
-                multmkt.setBest(ASK, new_ask);
+            if (teenieOn)
+                ask = quote_risk::teenieCapPrice(quote_risk::Side::ASK, ask, mktAsk, tick_size);
+            if (shiftActive && mktBid > 0)
+                ask = std::max(ask, mktBid + tick_size);
+            int32_t ask_size = __computeQuoteSize(erc, ASK, mid, ask, opt_pos, stk_pos, delta
+                , deltaSign, pgnD, pgnV);
+            bool valid = erc.enable && (ask_size > 0);
+            if (!valid) {
+                multmkt.eraseAsks();
+            } else {
+                ask = round_to_tick_by_side(ask, tick_size, ASK, mid);
+                PriceSize new_ask(ask, ask_size);
+                PriceSize old_ask = multmkt.getBest(ASK);
+                if (old_ask.empty() || !EQ(old_ask.px(), ask) || old_ask.sz() != ask_size) {
+                    multmkt.setBest(ASK, new_ask);
+                }
             }
         }
     }
@@ -1169,6 +1238,21 @@ void CompositeOptionPricer::computeOurMarketsFuture(ExpiryData* ed) {
         int32_t fut_pos = utd->getPosition();
         int32_t bid_size = std::min(erc.max_pos_fut, std::max(0, erc.max_pos_fut - fut_pos));
         int32_t ask_size = std::min(erc.max_pos_fut, std::max(0, erc.max_pos_fut + fut_pos));
+        // v3 soft-limit size shrink (delta dimension only — futures delta
+        // sign is +1 per lot, vega n/a): the worsening side shrinks to zero
+        // at |pgn_d| = 1.0, keeping the reducing side full.
+        const double pgnFut = ed->getNormRiskDelta();
+        const double shrinkStart = config().risk_shrink_start;
+        if (shrinkStart < 1.0) {
+            if (bid_size > 0 && pgnFut > shrinkStart)
+                bid_size = static_cast<int32_t>(bid_size
+                    * quote_risk::clampd(1.0 - (pgnFut - shrinkStart) / std::max(1e-9, 1.0 - shrinkStart), 0.0, 1.0));
+            if (ask_size > 0 && -pgnFut > shrinkStart)
+                ask_size = static_cast<int32_t>(ask_size
+                    * quote_risk::clampd(1.0 - (-pgnFut - shrinkStart) / std::max(1e-9, 1.0 - shrinkStart), 0.0, 1.0));
+        }
+        if (bid_size > 0)
+        int32_t ask_size = std::min(erc.max_pos_fut, std::max(0, erc.max_pos_fut + fut_pos));
         if (bid_size > 0)
             mkt.setBest(BID, PriceSize(bid, bid_size));
         else
@@ -1182,144 +1266,10 @@ void CompositeOptionPricer::computeOurMarketsFuture(ExpiryData* ed) {
     }
 }
 
-// ============================================================================
-// updateOurMarketSide — update one side of our market for an option
-// ============================================================================
-bool CompositeOptionPricer::updateOurMarketSide(
-    OptionTradingData* otd, side_t side, double bid, double ask, double mid,
-    double bid_tick_size, double ask_tick_size, const ExpiryRiskConfig& erc, int32_t stk_pos) {
-    if (!otd) return false;
-    double delta = std::fabs(otd->values().greeks().delta());
-    MultiMarket& multmkt = otd->values().ourMarket();
-    int32_t opt_pos = otd->getPosition();
+// (updateOurMarketSide / updateOurMarketSideFuture removed 2026-11-25:
+//  dead code — zero call sites; the live quoting path is the direct block
+//  in computeOurMarkets. Their teenie reference used a stub signature.)
 
-    if (side == BID) {
-        PriceSize old_bid = multmkt.getBest(BID);
-
-        // teenie pricing
-        if (config().enable_teenie_pricing) {
-            // mkt_bid would come from book; simplified
-            PriceSize mkt_bid;
-            if (!mkt_bid.empty()) {
-                bid = __compute_teenie_price(BID, bid, erc.max_qsize, mkt_bid, bid_tick_size);
-            } else {
-                return false;
-            }
-        }
-        if (!old_bid.empty()) {
-            bid = __apply_sticky_params(BID, old_bid, bid, bid_tick_size);
-        }
-        bid = round_to_tick_by_side(bid, bid_tick_size, BID, mid);
-
-        int32_t bid_size = __computeQuoteSize(erc, side, mid, bid, opt_pos, stk_pos, delta);
-        bool valid = erc.enable && (bid_size > 0);
-        if (!valid) {
-            multmkt.eraseBids();
-            return !old_bid.empty();
-        }
-
-        PriceSize new_bid(bid, bid_size);
-        if (!old_bid.empty() && EQ(bid, old_bid.px())) {
-            return false;
-        }
-
-        // interesting check (simplified without book)
-        if (!old_bid.empty() && old_bid == new_bid) {
-            return false;
-        }
-        multmkt.setBest(BID, new_bid);
-        return true;
-    } else if (side == ASK) {
-        PriceSize old_ask = multmkt.getBest(ASK);
-
-        if (config().enable_teenie_pricing) {
-            PriceSize mkt_ask;
-            if (!mkt_ask.empty()) {
-                ask = __compute_teenie_price(ASK, ask, erc.max_qsize, mkt_ask, ask_tick_size);
-            } else {
-                return false;
-            }
-        }
-        if (!old_ask.empty()) {
-            ask = __apply_sticky_params(ASK, old_ask, ask, ask_tick_size);
-        }
-        ask = round_to_tick_by_side(ask, ask_tick_size, ASK, mid);
-
-        int32_t ask_size = __computeQuoteSize(erc, side, mid, ask, opt_pos, stk_pos, delta);
-        bool valid = erc.enable && (ask_size > 0);
-        if (!valid) {
-            multmkt.eraseAsks();
-            return !old_ask.empty();
-        }
-
-        PriceSize new_ask(ask, ask_size);
-        if (!old_ask.empty() && EQ(ask, old_ask.px())) {
-            return false;
-        }
-        if (!old_ask.empty() && old_ask == new_ask) {
-            return false;
-        }
-        multmkt.setBest(ASK, new_ask);
-        return true;
-    }
-    return false;
-}
-
-// ============================================================================
-// updateOurMarketSideFuture
-// ============================================================================
-bool CompositeOptionPricer::updateOurMarketSideFuture(
-    UnderlyingTradingData* utd, side_t side, double bid, double ask, double mid,
-    int32_t bid_size, int32_t ask_size, double bid_tick_size, double ask_tick_size,
-    const ExpiryRiskConfig& erc) {
-    if (!utd) return false;
-    MultiMarket& multmkt = utd->ourMarket();
-    if (side == BID) {
-        PriceSize old_bid = multmkt.getBest(BID);
-        bool valid = erc.enable && (bid_size > 0);
-        if (!valid) {
-            multmkt.eraseBids();
-            return !old_bid.empty();
-        }
-
-        // teenie
-        if (config().enable_teenie_pricing) {
-            double bts = bid_tick_size;  // simplified
-            bid = std::min(bid, bid + bts);
-        } else {
-            bid = round_to_tick_by_side(bid, bid_tick_size, BID, mid);
-        }
-
-        PriceSize new_bid(bid, bid_size);
-        bool changed = old_bid.empty() || !(old_bid == new_bid);
-        if (changed) {
-            multmkt.setBest(BID, new_bid);
-            return true;
-        }
-    } else if (side == ASK) {
-        PriceSize old_ask = multmkt.getBest(ASK);
-        bool valid = erc.enable && (ask_size > 0);
-        if (!valid) {
-            multmkt.eraseAsks();
-            return !old_ask.empty();
-        }
-
-        if (config().enable_teenie_pricing) {
-            double ats = ask_tick_size;
-            ask = std::max(ask, ask - ats);
-        } else {
-            ask = round_to_tick_by_side(ask, ask_tick_size, ASK, mid);
-        }
-
-        PriceSize new_ask(ask, ask_size);
-        bool changed = old_ask.empty() || !(old_ask == new_ask);
-        if (changed) {
-            multmkt.setBest(ASK, new_ask);
-            return true;
-        }
-    }
-    return false;
-}
 
 // ============================================================================
 // __computeEffectiveDelta — cross-expiry effective delta
@@ -1352,6 +1302,38 @@ double CompositeOptionPricer::__computeEffectiveDelta(uint32_t exp0) {
     return pg;
 }
 
+// v3: effective tolerances (mirror setupRiskTolerances incl. fallbacks) —
+// the strategy hedger gate normalizes with the same values so the bail-out
+// tiers coincide with RiskLimitsEx breach levels.
+double CompositeOptionPricer::riskTolDelta() const {
+    return config().risk_prem_opt > 0 ? config().risk_prem_opt : 10.0;
+}
+double CompositeOptionPricer::riskTolVega() const {
+    return config().risk_prem_vega > 0 ? config().risk_prem_vega
+        : (config().risk_prem_opt > 0 ? config().risk_prem_opt * 100 : 1000.0);
+}
+
+// ============================================================================
+// updateStickyScale — v3: sticky band downweight under risk pressure.
+// max(|pgn_delta|, |pgn_vega|) ≤ 0.5 → full sticky; linear to 0 at ≥ 1.0.
+// With the shift channels off, pgn values stay at their risk levels but the
+// scale only matters when quotes are being shifted, so this is inert until
+// the soft-limit zone is entered.
+// ============================================================================
+void CompositeOptionPricer::updateStickyScale(OptionGrid* grid) {
+    double maxRisk = 0.0;
+    for (uint32_t exp : m_active_expiries) {
+        if (const ExpiryDataPtr ed = grid->getExpiryData(exp))
+            maxRisk = std::max(maxRisk, std::fabs(ed->getNormRiskDelta()));
+    }
+    for (const auto& stk : grid->getAllStrikes()) {
+        if (!stk->call() || !stk->put()) continue;
+        maxRisk = std::max(maxRisk, std::fabs(stk->call()->values().vega_risk_norm));
+        maxRisk = std::max(maxRisk, std::fabs(stk->put()->values().vega_risk_norm));
+    }
+    m_stickyScale = quote_risk::stickyScaleFor(maxRisk);
+}
+
 // ============================================================================
 // updateRiskShiftsDelta — __computeEffectiveDelta -> normalized
 // ============================================================================
@@ -1370,6 +1352,19 @@ void CompositeOptionPricer::updateRiskShiftsDelta(OptionGrid* grid) {
         double pgn = pg / risk_tol;  // normalized
 
         ed0->setNormRiskDelta(pgn);
+
+        // v3 L3 (2026-11-25): revive the original quantbox quadratic shift
+        // (commented at cc:2160-2168) — s = −sign(pgn)·distort·pgn², clamped.
+        // shift × δ_leg lands in adj() as a WHOLE-QUOTE price translation:
+        // net long delta shifts calls down / puts up so the risk-reducing
+        // side turns aggressive and fills passively. distort ≤ 0 keeps the
+        // channel off (previous behavior).
+        if (m_config.risk_shift_distort_delta > 0 && m_config.risk_shift_max_delta > 0) {
+            ed0->setRiskShiftDelta(wt_option::quote_risk::quadraticShift(pgn,
+                m_config.risk_shift_distort_delta, m_config.risk_shift_max_delta));
+        } else {
+            ed0->setRiskShiftDelta(0);
+        }
 
         CVExpiryContext& expcxt = cvcxt().exp_cxt[exp0];
         expcxt.delta_eff = pg;
@@ -1491,14 +1486,10 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
 
         double lambda_vega_wing = m_prop_lambda_vega_wing;
         double pg_other = 0.0;
+        OptionRiskDataPtr rd0 = m_spPositionRisk ? m_spPositionRisk->get(instr0) : nullptr;
 
         for (const auto& [bucketKey, bucket] : vegaBuckets) {
             (void)bucketKey;
-            // Preserve the old exact self-exclusion when the bucket contains
-            // only the current option's position.
-            if (bucket.codes.size() == 1 && bucket.codes.count(instr0) != 0)
-                continue;
-
             const uint32_t exp1 = bucket.expiry;
             const double frac1 = expiryFracCache[exp1];
             const double corr_exp = (exp1 == optExpiry)
@@ -1506,7 +1497,15 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
                 : m_prop_hedge_ratio_vega * frac0 * frac1;
             const double corr_stk = std::exp(
                 -m_prop_lambda_vega_decay * std::abs(delta0 - bucket.repDelta));
-            const double vega_other = bucket.baseVega * atm_vega_tw;
+            // Exact self-exclusion even in a MIXED bucket. Skipping only a
+            // self-only bucket counted instr0 once in bucket.baseVega and a
+            // second time in the own exact-delta term below.
+            const double baseWithoutSelf = wt_option::quote_risk::vegaBucketWithoutSelf(
+                bucket.baseVega, bucket.codes.count(instr0) != 0,
+                rd0 ? rd0->getPosition() : 0.0,
+                rd0 ? rd0->getContractSize() : 1.0,
+                bucket.repDelta, lambda_vega_wing);
+            const double vega_other = baseWithoutSelf * atm_vega_tw;
             pg_other += corr_exp * corr_stk * vega_other;
         }
 
@@ -1518,17 +1517,33 @@ void CompositeOptionPricer::updateRiskShiftsVega(OptionGrid* grid) {
             pg_other += -corr_exp * risk_targ1;
         }
 
-        // own position vega
-        OptionRiskDataPtr rd0 = nullptr;
-        if (m_spPositionRisk) {
-            rd0 = m_spPositionRisk->get(instr0);
-        }
+        // own position vega (exact delta), added once after bucket exclusion
         double vega_adj0 = std::exp(-lambda_vega_wing * std::abs(delta0 - 0.5));
         double pg = (rd0 ? rd0->getPosition() : 0)
             * (rd0 ? rd0->getContractSize() : 1.0)
             * atm_vega_tw * vega_adj0 + pg_other;
         double pgn = (pg - risk_targ0) / risk_tol;  // normalized
         od0->values().vega_risk_norm = pgn;
+
+        // v3 L3 (2026-11-25): vega secondary shift — same quadratic form.
+        // Buying ANY option adds vega, so the translation is deliberately
+        // leg-agnostic: net short vega shifts all quotes up (aggressive bids
+        // attract passive sellers feeding us vega). Lands via adj().vega_risk.
+        // 2026-11-25 follow-up: prefer the VOL-space form (dimensionally pure)
+        // when risk_shift_*_vega_vol is configured; legacy price-unit keys
+        // remain as a fallback.
+        if (m_config.risk_shift_distort_vega_vol > 0 && m_config.risk_shift_max_vega_vol > 0) {
+            // B12 compatibility: keep the established numeric contract in this
+            // cleanup. Both old and new pairs feed the same scalar × raw vega;
+            // no hidden 100× unit migration is allowed in a deprecation patch.
+            od0->values().setRiskShiftVega(wt_option::quote_risk::quadraticShift(pgn,
+                m_config.risk_shift_distort_vega_vol, m_config.risk_shift_max_vega_vol));
+        } else if (m_config.risk_shift_distort_vega > 0 && m_config.risk_shift_max_vega > 0) {
+            od0->values().setRiskShiftVega(wt_option::quote_risk::quadraticShift(pgn,
+                m_config.risk_shift_distort_vega, m_config.risk_shift_max_vega));
+        } else {
+            od0->values().setRiskShiftVega(0);
+        }
     }
 }
 
@@ -1697,6 +1712,23 @@ void CompositeOptionPricer::onFitCompleted(const PeriodicCurveFitter&) {
 // Panic
 // ============================================================================
 void CompositeOptionPricer::setPanic() {
+    // v4 (panic-design-benchmark-plan.md P1c): re-arming DURING the current
+    // blackout means the condition never cleared — escalate the blackout
+    // (300→600→…→1800s cap) instead of flapping Panic↔Normal every interval.
+    const double now = getTime();
+    if (m_tvPanicSignalTriggerTime) {
+        const double age = now - m_tvPanicSignalTriggerTime.value();
+        m_panicBlackoutSec = quote_risk::escalateBlackout(
+            age, m_panicBlackoutSec, config().panic_blackout_interval, 1800.0);
+        if (m_panicBlackoutSec > config().panic_blackout_interval) {
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "CompositeOptionPricer: panic re-armed after {:.0f}s (blackout {:.0f}s "
+                "not expired) — escalating blackout to {:.0f}s",
+                age, m_panicBlackoutSec, m_panicBlackoutSec);
+        }
+    } else {
+        m_panicBlackoutSec = config().panic_blackout_interval;
+    }
     m_tvPanicSignalTriggerTime = getTime();
 }
 
@@ -1704,7 +1736,9 @@ bool CompositeOptionPricer::isPanicked() const {
     if (!m_tvPanicSignalTriggerTime)
         return false;
     double diff = getTime() - m_tvPanicSignalTriggerTime.value();
-    if (diff > config().panic_blackout_interval) {
+    const double blackout = m_panicBlackoutSec > 0
+        ? m_panicBlackoutSec : config().panic_blackout_interval;
+    if (diff > blackout) {
         m_tvPanicSignalTriggerTime.reset();
         return false;
     }

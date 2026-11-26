@@ -6,7 +6,6 @@
 #include "GvvVolCurve.h"
 #include "PowerVolCurve.h"
 #include "LinearVolCurve.h"
-#include "ConstantVolCurve.h"
 
 #include <algorithm>
 #include <atomic>
@@ -31,26 +30,31 @@ struct VolFitExpirySnapshot {
     IVolCurve::dataset_t points;   // {K-F, iv/atmVol}
     uint64_t version = 0;
     double timestamp = 0.0;        // seconds (host clock) — drives decay carry
+    /// Effective blend weight for this expiry at SUBMIT time (0 = curve2
+    /// linear prices, 1 = curve1 prices, in-between = blend).  The fitter
+    /// uses it to decide which curves MUST succeed; readiness is re-evaluated
+    /// at publish/pricing time against the CURRENT weight, so a hot weight
+    /// change between submit and publish can only ever make readiness MORE
+    /// conservative, never less.
+    double weight = 0.0;
 };
 
 class AsyncVolFitter {
 public:
-    explicit AsyncVolFitter(std::string curve2Type = "gvv")
+    explicit AsyncVolFitter(std::string curve2Type = "linear")
         : m_curve2Type(std::move(curve2Type)) {}
     ~AsyncVolFitter() { m_runner.stop(); }
 
-    /// P1-b: main-curve type. "gvv" (default) | "linear" | "constant".
+    /// Main-curve type: "gvv" (default) | "power" (2026-11-26 whitelist).
     void setCurveType(const std::string& t) {
         if (isValidMainCurveType(t)) m_curveType = t;
     }
 
-    /// P1-b: curve2 type, extended beyond the R2 gvv|power pair.
+    /// Curve2 type: "linear" only (2026-11-26 design: curve2 is fixed linear;
+    /// "constant" retired with the fallback chain).
     void setCurve2Type(const std::string& t) {
         if (isValidCurve2Type(t)) m_curve2Type = t;
     }
-
-    /// P1-a: walk power→linear→constant when the main-curve fit fails.
-    void setFallbackEnabled(bool b) { m_fallback = b; }
 
     /// P1-a: age bound (seconds) for carrying previous-fit wing points into
     /// the current dataset (port of PeriodicCurveFitter's decay_window).
@@ -159,6 +163,55 @@ private:
         return merged;
     }
 
+    /// L1 — model-independent dataset gate (2026-11-26, user-approved plan).
+    /// Runs BEFORE any model fit; a dataset that fails here is never fitted
+    /// and never published.  This is the primary fix for the 2026-11-26
+    /// 21:05 explosion: a snapshot normalized by the default 0.1 anchor
+    /// against a ~0.24-0.30 market yields multipliers ~2.3-3.0, far outside
+    /// the [0.7, 1.3] band, so the poisoned first fit is rejected outright
+    /// instead of being published (or worse, "fallback-published").
+    /// NOTE: no explicit "atmVol == default 0.1" check — the median check
+    /// subsumes it, and a market whose ATM vol really is 0.10 must still fit.
+    static bool validateDataset(const VolFitExpirySnapshot& s, std::string* why) {
+        if (s.points.size() < 4) {
+            if (why) *why = "too few points";
+            return false;
+        }
+        double lo = 0, hi = 0;
+        bool hasUp = false, hasDn = false;
+        std::vector<double> ys;
+        ys.reserve(s.points.size());
+        for (const auto& p : s.points) {
+            if (!std::isfinite(p.first) || !std::isfinite(p.second) || !(p.second > 0.0)) {
+                if (why) *why = "non-finite/non-positive multiplier";
+                return false;
+            }
+            if (p.second < 0.02 || p.second > 20.0) {
+                if (why) *why = "multiplier out of sanity range";
+                return false;
+            }
+            if (p.first > 1e-9) hasUp = true;
+            else if (p.first < -1e-9) hasDn = true;
+            ys.push_back(p.second);
+            lo = std::min(lo, p.first); hi = std::max(hi, p.first);
+        }
+        if (!hasUp || !hasDn) {
+            if (why) *why = "one-sided window";
+            return false;
+        }
+        if (hi - lo < 1e-9) {
+            if (why) *why = "degenerate strike span";
+            return false;
+        }
+        std::sort(ys.begin(), ys.end());
+        const double med = ys[ys.size() / 2];
+        if (med < 0.7 || med > 1.3) {
+            if (why) *why = "normalized median off-scale (atmVol mismatch)";
+            return false;
+        }
+        return true;
+    }
+
     std::vector<OptionPricer2::FittedCurveSet>
     fit(const std::vector<VolFitExpirySnapshot>& input) const {
         std::vector<OptionPricer2::FittedCurveSet> out;
@@ -171,43 +224,86 @@ private:
             VolFitExpirySnapshot s = s0;
             s.points = mergeCarried(s0);
 
-            IVolCurvePtr curve;
+            // L1: shared, model-independent dataset gate — reject before any
+            // model sees the data (see validateDataset comment).
+            {
+                std::string why;
+                if (!validateDataset(s, &why)) {
+                    static std::atomic<uint64_t> s_l1Reject{0};
+                    const uint64_t n = ++s_l1Reject;
+                    if (n <= 20 || n % 100 == 0)
+                        WTSLogger::log_by_cat("strategy", LL_WARN,
+                            "AsyncVolFitter exp={} fit rejected by dataset gate: {} "
+                            "(atmVol={:.4f} n={} count={})",
+                            s.expiry, why, s.atmVol, s.points.size(), n);
+                    continue;
+                }
+            }
+
+            const double w = std::max(0.0, std::min(1.0, s.weight));
+            const bool mainRequired = w > 0.0;
+            const bool curve2Required = w < 1.0;
+
             const auto tryFit = [&](const std::string& type, int powerParams) -> IVolCurvePtr {
                 auto c = createVolCurveByType(type, powerParams, m_beta,
                                               m_alphaDn, m_alphaUp);
                 c->setATMForward(s.forward);
                 c->setMaturity(s.maturity);
                 c->setATMVol(s.atmVol);
-                if (type == "constant") return c;      // nothing to fit
                 return c->fit(s.points) ? c : nullptr;
             };
 
-            curve = tryFit(m_curveType, GvvVolCurve::SPOTVOL);
-            if (!curve && m_fallback) {
-                // Fallback chain: power → linear → constant(1.0).  The last
-                // good curve still wins via OptionPricer2 version gating, so
-                // a fallback publish never regresses a better previous fit.
-                static std::atomic<uint64_t> s_fallbackWarn{0};
-                for (const char* t : {"power", "linear", "constant"}) {
-                    curve = tryFit(t, GvvVolCurve::SPOTVOL);
-                    if (curve) {
-                        uint64_t n = ++s_fallbackWarn;
-                        if (n <= 20 || n % 1000 == 0)
-                            WTSLogger::log_by_cat("strategy", LL_WARN,
-                                "AsyncVolFitter exp={} main curve '{}' fit failed, fallback '{}' used (count={})",
-                                s.expiry, m_curveType, t, n);
-                        break;
-                    }
-                }
-            }
-            if (!curve) continue;
-
+            // L2: fit BOTH configured curves (curve2 is always needed as the
+            // blend partner / observability mirror; NO fallback — a failed
+            // curve stays null and is simply not published).
+            IVolCurvePtr curve  = tryFit(m_curveType,  GvvVolCurve::SPOTVOL);
             IVolCurvePtr curve2 = tryFit(m_curve2Type, GvvVolCurve::RHO);
-            if (!curve2)
-                curve2 = std::make_shared<ConstantVolCurve>(1.0);
+
+            if (mainRequired && !curve) {
+                static std::atomic<uint64_t> s_mainFail{0};
+                const uint64_t n = ++s_mainFail;
+                if (n <= 20 || n % 100 == 0)
+                    WTSLogger::log_by_cat("strategy", LL_WARN,
+                        "AsyncVolFitter exp={} main curve '{}' fit failed at weight={:.2f} "
+                        "— expiry not published (count={})",
+                        s.expiry, m_curveType, w, n);
+                continue;   // curve1 is required — no publish, no substitute
+            }
+            if (curve2Required && !curve2) {
+                static std::atomic<uint64_t> s_c2Fail{0};
+                const uint64_t n = ++s_c2Fail;
+                if (n <= 20 || n % 100 == 0)
+                    WTSLogger::log_by_cat("strategy", LL_WARN,
+                        "AsyncVolFitter exp={} curve2 '{}' fit failed at weight={:.2f} "
+                        "— expiry not published (count={})",
+                        s.expiry, m_curve2Type, w, n);
+                continue;   // curve2 is required — no publish, no constant stub
+            }
+            // Observability: the non-pricing curve is fitted as a health
+            // mirror only — its failure never blocks a weight-driven publish.
+            if (!mainRequired && !curve) {
+                static std::atomic<uint64_t> s_mainSkip{0};
+                const uint64_t n = ++s_mainSkip;
+                if (n <= 20 || n % 500 == 0)
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "AsyncVolFitter exp={} curve1 unfit — linear pricing "
+                        "(weight=0, gate-only mirror failed, count={})",
+                        s.expiry, n);
+            }
 
             m_prev[s.expiry] = {s.points, s.timestamp, s.atmVol, s.forward};
-            out.push_back({s.expiry, curve, curve2, s.atmVol, s.version});
+            // Per-curve versions: 0 = "no update for this curve".  Both carry
+            // the snapshot version; the pricer installs each curve
+            // independently against its own version map, so a linear-only
+            // history keeps advancing curve2 while the main version stays 0.
+            OptionPricer2::FittedCurveSet fcs;
+            fcs.expiry   = s.expiry;
+            fcs.volCurve = curve;
+            fcs.volCurve2 = curve2;
+            fcs.version  = curve  ? s.version : 0;
+            fcs.version2 = curve2 ? s.version : 0;
+            fcs.atmVol   = s.atmVol;
+            out.push_back(std::move(fcs));
         }
         return out;
     }
@@ -226,8 +322,7 @@ private:
     std::vector<OptionPricer2::FittedCurveSet> m_result;
     std::atomic<bool> m_ready{false};
     std::string m_curveType{"gvv"};
-    std::string m_curve2Type;
-    bool m_fallback = true;
+    std::string m_curve2Type{"linear"};
     double m_decayWindow = 0.0;
     double m_beta = 0.0;
     double m_alphaDn = -1.0;   // <0 = GvvVolCurve::Config default

@@ -85,6 +85,48 @@ OptionConfigLoader::Result OptionConfigLoader::load(wtp::WTSVariant* cfg) {
     }
     setEff(r, "pricer.slow_compute_interval", num(r.values.slowComputeInterval));
 
+    // B12 deprecation cycle: retain the old vega-price keys as a fallback and
+    // keep them in schema, but make every legacy configuration visible.
+    if (pricer) {
+        const std::pair<const char*, const char*> deprecatedVega[] = {
+            {"risk_shift_distort_vega", "risk_shift_distort_vega_vol"},
+            {"risk_shift_max_vega", "risk_shift_max_vega_vol"}
+        };
+        for (const auto& [oldKey, newKey] : deprecatedVega) {
+            if (pricer->has(oldKey))
+                r.warnings.push_back(fmt::format(
+                    "pricer.{} is deprecated; use {} (old fallback retained this version)",
+                    oldKey, newKey));
+        }
+    }
+
+    // PositionGuard: wire every field, but preserve the conservative defaults.
+    // clamp/undo/stale remain opt-in because they alter reconciliation state.
+    auto& pgv = r.values.positionGuard;
+    wtp::WTSVariant* pg = cfg->get("positionGuard");
+    if (pg) {
+        if (pg->has("tolerance")) pgv.tolerance = pg->getInt32("tolerance");
+        if (pg->has("alertCooldownSec")) pgv.alertCooldownSec = pg->getDouble("alertCooldownSec");
+        if (pg->has("disableOnBreach")) pgv.disableOnBreach = pg->getBoolean("disableOnBreach");
+        if (pg->has("staleFreezeSec")) pgv.staleFreezeSec = pg->getDouble("staleFreezeSec");
+        if (pg->has("clampLimit")) pgv.clampLimit = pg->getInt32("clampLimit");
+        if (pg->has("undoWindowSec")) pgv.undoWindowSec = pg->getDouble("undoWindowSec");
+    }
+    if (pgv.tolerance < 0) r.errors.push_back("positionGuard.tolerance must be >= 0");
+    if (!std::isfinite(pgv.alertCooldownSec) || pgv.alertCooldownSec < 0)
+        r.errors.push_back("positionGuard.alertCooldownSec must be finite and >= 0");
+    if (!std::isfinite(pgv.staleFreezeSec) || pgv.staleFreezeSec < 0)
+        r.errors.push_back("positionGuard.staleFreezeSec must be finite and >= 0");
+    if (pgv.clampLimit < 0) r.errors.push_back("positionGuard.clampLimit must be >= 0");
+    if (!std::isfinite(pgv.undoWindowSec) || pgv.undoWindowSec < 0)
+        r.errors.push_back("positionGuard.undoWindowSec must be finite and >= 0");
+    setEff(r, "positionGuard.tolerance", std::to_string(pgv.tolerance));
+    setEff(r, "positionGuard.alertCooldownSec", num(pgv.alertCooldownSec));
+    setEff(r, "positionGuard.disableOnBreach", pgv.disableOnBreach ? "true" : "false");
+    setEff(r, "positionGuard.staleFreezeSec", num(pgv.staleFreezeSec));
+    setEff(r, "positionGuard.clampLimit", std::to_string(pgv.clampLimit));
+    setEff(r, "positionGuard.undoWindowSec", num(pgv.undoWindowSec));
+
     // Legacy OQM keys that are known to be ignored by the current loader.
     wtp::WTSVariant* om = cfg->get("orderManager");
     auto warnLegacy = [&](wtp::WTSVariant* section, const char* legacy, const char* replacement) {
@@ -111,6 +153,7 @@ OptionConfigLoader::Result OptionConfigLoader::load(wtp::WTSVariant* cfg) {
             const uint32_t expiry = e->getUInt32("expiry");
             const double dmin = e->has("delta_min") ? e->getDouble("delta_min") : 0.05;
             const double dmax = e->has("delta_max") ? e->getDouble("delta_max") : 0.95;
+            const int32_t maxQSize = e->has("max_qsize") ? e->getInt32("max_qsize") : 1;
             // P0-3: the grid keys everything by 6-digit YYYYMM parsed from the
             // option code (e.g. 202607).  A 4-digit YYMM (2607) used to load
             // silently and match nothing — the expiry never got enabled and
@@ -123,6 +166,7 @@ OptionConfigLoader::Result OptionConfigLoader::load(wtp::WTSVariant* cfg) {
                 r.errors.push_back(fmt::format("expiry {} delta range invalid: [{}, {}]", expiry, dmin, dmax));
             setEff(r, fmt::format("expiries[{}].delta_min", expiry), num(dmin));
             setEff(r, fmt::format("expiries[{}].delta_max", expiry), num(dmax));
+            setEff(r, fmt::format("expiries[{}].max_qsize", expiry), std::to_string(maxQSize));
         }
     }
 

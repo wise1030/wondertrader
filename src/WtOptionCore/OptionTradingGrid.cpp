@@ -340,7 +340,7 @@ ExpiryTradingDataPtr OptionTradingGrid::__createExpiryTradingData(const ExpiryDa
 
     // P0-1: give the UTD a live position source.  Without it fut_pos was
     // permanently 0 (CompositeOptionPricer sized future quotes as if flat).
-    // Same provider contract as the OTD one (strategy _positions projection).
+    // Same provider contract as the OTD one (strategy PositionBook net view).
     if (freshUtd && m_positionSource)
         utd->setPositionProvider([src = m_positionSource, hedgeCode]() -> int32_t {
             return src(hedgeCode);

@@ -57,6 +57,15 @@ public:
         int32_t cancel_soft_max = 0;           // soft limit (warn only)
         int32_t hard_flat_after_n_fills = 0;
         int32_t reject_max_new_orders = -1;
+        // P0 fix (2026-11-24): REJECT-ONLY used to latch for the whole trading
+        // day — no in-session release, and the session-begin reset never
+        // reached the OQMs on a mid-session restart. 11-24: funds-driven
+        // entrust rejects (CTP err 31) latched every quoting contract within
+        // 20 minutes and day-session quoting ran at ZERO orders for 6 hours.
+        // With reject_release_sec > 0 the latch releases after this many
+        // seconds without a NEW entrust reject; any new reject re-latches
+        // (and re-logs).  0 keeps the old permanent latch.
+        double reject_release_sec = 300.0;
         // P1 batch-4.4: second-tier response for the reject counter.
         // 0 = off.  When newOrders >= this, OQM cancels BOTH sides and locks
         // (hard-flat latch) until resetCounters() — reject-only is the first
@@ -86,6 +95,9 @@ public:
 
     // --- Core: update desired market -> send orders ---
     int32_t updateOrders(const MultiMarket& desired, bool cancel_only = false);
+
+    /// P0 fix (2026-11-25): live orders on one side, cancelPending included.
+    uint32_t activeSideCount(bool isBuy) const;
 
     // --- Callbacks (from strategy on_order/on_trade) ---
     void onOrderStatusChange(uint32_t localid, bool isLong,

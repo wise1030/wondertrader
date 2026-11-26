@@ -35,6 +35,9 @@ public:
         if (!task) return false;
         {
             std::lock_guard<std::mutex> lock(m_mtx);
+            // stop() drains the existing queue; late submissions would otherwise
+            // be accepted but never executed (the worker has already exited).
+            if (m_stopping) return false;
             for (const auto& pending : m_queue)
                 if (pending.first == name) return false;
             if (m_runningName == name) return false;

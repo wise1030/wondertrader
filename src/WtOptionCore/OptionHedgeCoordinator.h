@@ -54,6 +54,18 @@ public:
     struct Leg { uint32_t exp = 0; std::string code; };
     void setLegs(std::vector<Leg> legs) { m_legs = std::move(legs); }
     void setSharedLeg(std::string code) { m_sharedCode = std::move(code); }
+
+    // ---- v3 risk-tier API (quote-shift-design-proposal-v3.md §4) ----
+    // Futures hedge is the risk-control FALLBACK: the strategy computes the
+    // normalized delta exposure each cycle and arms the bail-out threshold
+    // only past bail_pgn. effThreshold <= 0 = use m_cfg.thresholdDelta
+    // (legacy). targetDelta aligns the hedge with the operator's targ_delta
+    // (same source as the L3 quote-shift anchor).
+    void setEffectiveThreshold(double th) { m_effThreshold = th; }
+    void setPortfolioTargetDelta(double t) { m_targetDelta = t; }
+    double effectiveThreshold() const {
+        return m_effThreshold > 0 ? m_effThreshold : m_cfg.thresholdDelta;
+    }
     /// Multi-leg check: every leg whose |net delta| breaches the threshold is
     /// rebalanced independently; the shared leg (if configured) hedges
     /// portfolioNetDelta MINUS the target delta of exclusive legs' in-flight
@@ -98,6 +110,9 @@ private:
                  double nowSec, double priceOverride = 0);
 
     DeltaHedgeExecutor::Config m_cfg;
+    // v3 risk-tier: armed bail-out threshold + operator target (0 = legacy).
+    double m_effThreshold = 0.0;
+    double m_targetDelta = 0.0;
     std::string m_code;
     SendFn m_send;
     PriceFn m_price;

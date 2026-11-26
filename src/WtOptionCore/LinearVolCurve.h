@@ -47,13 +47,19 @@ public:
     double eval(double x) const;
     virtual bool fit(const dataset_t& points);
     virtual bool isInitialized() const { return m_bInitialized; }
+    bool isLastFitOK() const { return m_bLastFitOK; }
     virtual const std::string getNameString() const { return "LinearVolCurve"; }
 
     virtual void setATMForward(double atmforward) { m_atmforward = atmforward; }
     virtual void setMaturity(double maturity) { m_maturity = maturity; }
 
+    /// IVolCurve anchor re-base (2026-11-26): the stored multipliers are
+    /// IV/anchor_at_fit; scale them by oldAnchor/newAnchor.
+    virtual void rescale(double factor);
+
 private:
     bool m_bInitialized;
+    bool m_bLastFitOK = false;
     bool m_extrapolateFlat;
 
     dataset_t m_points;

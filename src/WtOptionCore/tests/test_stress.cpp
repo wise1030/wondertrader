@@ -1,8 +1,10 @@
 // Phase 2: scenario stress analyzer acceptance.
-#include "../StressAnalyzer.h"
+#include "../AsyncStress.h"
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
+#include <thread>
 
 using namespace wt_option;
 
@@ -45,6 +47,68 @@ int main()
     sa.clearScenarios();
     sa.addScenario({"bad", std::nan(""), 0.0, 0.0});
     ASSERT_TRUE(sa.scenarios().empty());
+
+    // B13: async result is computed from an immutable value snapshot and is
+    // delivered exactly once. Mutating the caller's object after submit must
+    // not affect the background job.
+    AsyncStress async;
+    StressSnapshot snapshot;
+    snapshot.seq = 42;
+    snapshot.sessionDate = 20260605;
+    snapshot.positionVersion = 7;
+    snapshot.submittedAt = 100.0;
+    snapshot.spot = 4000.0;
+    snapshot.portfolio = {100.0, 0.0, 0.0, 0.0};
+    snapshot.scenarios = {{"up", 0.10, 0.0, 0.0},
+                          {"down", -0.10, 0.0, 0.0}};
+    snapshot.expiries = {
+        {202606, 50.0, 60.0, 0.0, 0.0, 0.0},
+        {202607, -20.0, -10.0, 0.0, 0.0, 0.0}};
+    ASSERT_TRUE(async.submit(snapshot));
+    snapshot.spot = 1.0;
+    snapshot.portfolio.delta = 999999.0;
+    snapshot.expiries.clear();
+    snapshot.scenarios[0].spot_shock_pct = 5.0;
+
+    StressReport report;
+    bool published = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (async.tryTake(report)) { published = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(published);
+    ASSERT_TRUE(!async.tryTake(report));
+    ASSERT_TRUE(report.seq == 42 && report.sessionDate == 20260605);
+    ASSERT_TRUE(report.positionVersion == 7 && report.submittedAt == 100.0);
+    ASSERT_NEAR(report.spot, 4000.0, 1e-12);
+    ASSERT_TRUE(report.all.size() == 2);
+    ASSERT_TRUE(report.all[0].scenario.name == "up");
+    ASSERT_NEAR(report.all[0].pnl, 40000.0, 1e-6);
+    ASSERT_TRUE(report.all[1].scenario.name == "down");
+    ASSERT_NEAR(report.all[1].pnl, -40000.0, 1e-6);
+    ASSERT_TRUE(report.worst.scenario.name == "down");
+    ASSERT_NEAR(report.worst.pnl, -40000.0, 1e-6);
+    ASSERT_TRUE(report.expiries.size() == 2);
+    ASSERT_NEAR(report.expiries[0].optionDelta, 60.0, 1e-12);
+    ASSERT_NEAR(report.expiries[0].worst.pnl, -20000.0, 1e-6);
+    ASSERT_TRUE(report.expiries[1].worst.scenario.name == "up");
+    ASSERT_NEAR(report.expiries[1].worst.pnl, -8000.0, 1e-6);
+
+    // Freshness gate: old sequence, session/position changes, time reversal
+    // and TTL expiry are all rejected before they can trigger Panic.
+    ASSERT_TRUE(AsyncStress::isFresh(report, 41, 20260605, 7, 100.1, 5.0));
+    ASSERT_TRUE(!AsyncStress::isFresh(report, 42, 20260605, 7, 100.1, 5.0));
+    ASSERT_TRUE(!AsyncStress::isFresh(report, 41, 20260606, 7, 100.1, 5.0));
+    ASSERT_TRUE(!AsyncStress::isFresh(report, 41, 20260605, 8, 100.1, 5.0));
+    ASSERT_TRUE(!AsyncStress::isFresh(report, 41, 20260605, 7, 99.9, 5.0));
+    ASSERT_TRUE(!AsyncStress::isFresh(report, 41, 20260605, 7, 105.1, 5.0));
+    ASSERT_TRUE(AsyncStress::isFresh(report, 41, 20260605, 7, 100000.0, 0.0));
+
+    async.stop();
+    async.stop();  // idempotent
+    ASSERT_TRUE(!async.submit(StressSnapshot{1, 20260605, 7, 100.0, 4000.0,
+        {100.0, 0.0, 0.0, 0.0}, {}, {{"up", 0.1, 0.0, 0.0}}}));
 
     std::cout << "  PASS" << std::endl;
     std::cout << "\nALL TESTS PASSED" << std::endl;

@@ -119,21 +119,16 @@ public:
     int32_t trace_level              = 0;
     bool    use_parallel_for          = false;  // P1: enable via config "use_parallel"
 
-    /// R2: curve2 type for the GVV×curve2 blend. "gvv" reproduces the
-    /// migration-era behavior (both curves Gvv → vol≡vol2, weight no-op);
-    /// "power" restores the ORIGINAL quantbox dual-curve design
-    /// (GVV parametric smile × PowerVolCurve empirical wings), making
-    /// volcurve_weight meaningful. Recommended: "power".
-    /// Also selectable: "linear" | "constant" (P1-b wiring).
-    // P1 (2026-11-19): QB default is LinearVolCurve::Config
-    // (OptionPricer2Params.xml:19). Two GVV curves fit on the SAME points are
-    // numerically identical, making volcurve_weight a no-op (WT issue-log
-    // 2026-07-17). curve2 = linear gives the blend a real second curve.
+    /// R2/2026-11-26: dual-curve design, chosen purely by CONFIG —
+    ///   curve1 (main): `type` = "gvv" | "power"      (weight=1 pricing)
+    ///   curve2:        `curve2_type` = "linear"       (weight=0 pricing)
+    /// 0<w<1 blends both.  There is NO runtime fallback: a curve the current
+    /// weight requires must fit, or the expiry stays unpublished/not ready.
+    /// "constant" is retired (it was the silent fallback stub).
     std::string curve2_type          = "linear";
-    /// P1-b: main vol-curve type. "gvv" (default) | "linear" | "constant".
-    /// linear fits σ-multiplier linearly in K−F (robust for illiquid
-    /// expiries where GVV's >=4-point fit fails); constant pins the
-    /// σ-multiplier to 1 (cold-start for newly listed expiries).
+    /// P1-b: main vol-curve type. "gvv" (default) | "power".
+    /// GVV fits a parametric smile (robust for liquid expiries); power fits
+    /// the empirical wing law. linear/constant are NOT valid main types.
     std::string volcurve_type        = "gvv";
     // P1 (2026-11-18): WLS wing-weight decay (w = exp(-beta*x^2/(atmvol^2*T))).
     // 0 = equal weights (legacy; deep-wing noise dominates the fit); ~1 lets
@@ -144,10 +139,16 @@ public:
     /// the GvvVolCurve::Config default [GVV_MINALPHA, GVV_MAXALPHA].
     double      volcurve_alpha_dn    = -1.0;
     double      volcurve_alpha_up    = -1.0;
-    /// P1-b: when the main curve fit fails, walk the fallback chain
-    /// power → linear → constant(1.0) so pricing never dies on a bad
-    /// snapshot.  Previous (good) curve still wins by curve versioning.
-    bool    volcurve_fallback        = true;
+    /// P2 startup protection (2026-11-26): a newly published curve only
+    /// unlocks quoting after this many consecutive accepted publishes
+    /// (>= 2 = the first quote always waits one extra fit period, so a
+    /// single poisoned snapshot can never arm quoting on its own).
+    int32_t volcurve_startup_confirm_versions = 2;
+    /// P1 hot-failure protection (2026-11-26): if no accepted publish for an
+    /// expiry for longer than this many seconds (grid compute clock), the
+    /// curves are no longer "fresh" and readiness drops (stale smile must not
+    /// price forever).  0 disables.
+    double  volcurve_max_age         = 900.0;
     /// P1-④ (audit 2026-11-18): the ATM vol bootstrap only ran while
     /// curveVersion==0, and publishFittedCurves wrote the snapshot value
     /// back verbatim — the ATM anchor froze at first-fit market level and
@@ -189,13 +190,17 @@ class OptionPricer2 : public IOptionPricer
 {
 public:
     /// Immutable fitted curve set produced by AsyncVolFitter and published by
-    /// the single worker thread at a batch boundary.
+    /// the single worker thread at a batch boundary.  A null curve (with the
+    /// matching version left 0) means "this curve failed / is not required at
+    /// the submit-time weight" — the pricer keeps the previous instance of
+    /// that curve and never installs over it.
     struct FittedCurveSet {
         uint32_t expiry = 0;
         IVolCurvePtr volCurve;
         IVolCurvePtr volCurve2;
         double atmVol = 0.0;
-        uint64_t version = 0;
+        uint64_t version = 0;    ///< main curve version (0 = no main update)
+        uint64_t version2 = 0;   ///< curve2 version   (0 = no curve2 update)
     };
 
     // fitCompleted event callback (replaces ListenerRelay<...>)
@@ -208,6 +213,11 @@ public:
         ExpiryInfo(uint32_t exp);
 
         void setATMV(double atmv);
+        /// Scale-correction variant (2026-11-26): same as setATMV but the
+        /// stored curve normalizations are re-based by oldAnchor/newAnchor —
+        /// used ONLY by the bootstrap seed, where the anchor move corrects
+        /// our estimate rather than tracking the market.
+        void setATMVReseed(double atmv);
         // Reads ExpiryData::getForward() directly (no IPriceProvider / grid->getAtmForward)
         void computeForwardPrice(OptionGrid* grid, const ExpiryDataPtr& ed);
         void computeMaturity(const ExpiryData* ed);
@@ -250,6 +260,12 @@ public:
     virtual double getATMForward(uint32_t exp) const override;
 
     virtual void   setATMVol(uint32_t exp, double atmvol) override;
+    // v3-GARCH-lite: blend a second ATM-vol anchor with the fitted atmVol.
+    // weight=0 (default) = fitted only; vol<=0 = estimator warming up → fitted.
+    void setGarchBlend(double weight, double vol) {
+        m_garchWeight = weight;
+        m_garchVol = vol;
+    }
     virtual double getATMVol(uint32_t exp) const override;
 
     virtual double getFutSprd(uint32_t exp) const override;
@@ -274,10 +290,36 @@ public:
 
     fitCompletedEventSource& fitCompletedEvent() { return m_fitCompletedEvent; }
 
-    /// Publish async-fit curves at a worker batch boundary.  Older versions
-    /// are ignored; this is the only curve mutation path for AsyncVolFitter.
+    /// Publish async-fit curves at a worker batch boundary.  Per-curve
+    /// version gating: each curve installs only if its own version advances
+    /// and the pointer is non-null; the ATM anchor is re-based (never
+    /// reverted) when the snapshot was taken at a different anchor.
+    /// This is the only curve mutation path for AsyncVolFitter.
     void publishFittedCurves(const std::vector<FittedCurveSet>& fitted);
     uint64_t getCurveVersion(uint32_t exp) const;
+    uint64_t getCurve2Version(uint32_t exp) const;
+    /// max(main, curve2) — "has this expiry ever accepted ANY fitted curve".
+    /// Drives the ATM bootstrap / re-anchor branch selection: a weight=0
+    /// expiry whose main curve never fits must still leave the bootstrap
+    /// window once its linear curve publishes.
+    uint64_t getAnyCurveVersion(uint32_t exp) const;
+
+    /// Effective blend weight for an expiry (per-expiry override wins over
+    /// the config default).  Read by the vol-fit submit path.
+    double getGvvWeight(uint32_t exp) const;
+
+    /// Bootstrap-seed the ATM anchor with curve re-basing: this path corrects
+    /// OUR scale estimate (the market did not move), so stored curve
+    /// multipliers are rescaled by old/new to keep the absolute vol they
+    /// encode unchanged.  Contrast with setATMVol (re-anchor), which follows
+    /// the market and deliberately moves theo with the anchor.
+    void setATMVolReseed(uint32_t exp, double v);
+
+    /// Hot blend-weight entry (SETPARAM volcurve_weight / per-expiry
+    /// override): re-evaluates dynamic readiness immediately, so a switch to
+    /// a weight whose required curve is missing/never-fitted drops the expiry
+    /// out of quoting at once.
+    void setGvvWeight(uint32_t exp, double wgt);
 
     // 暴露 doFit 给定时器调用 (路径1: 独立定时 doFit)
     bool hasFitter() const { return m_spFitter != nullptr; }
@@ -289,8 +331,12 @@ private:
     friend class CompositeSpreadPricer;
     friend class CompositeOtcPricer;
 
-    void setGvvWeight(uint32_t exp, double wgt) { m_gvv_weight[exp] = wgt; }
     void updateGvvParams(uint32_t exp, IVolCurvePtr curve) const;
+    /// Dynamic readiness (L4): required-curves-available && startup-confirm &&
+    /// publish-freshness, evaluated against the CURRENT blend weight.  Writes
+    /// ExpiryData::curvesReady; safe to call repeatedly.
+    void refreshCurvesReady(uint32_t exp);
+    bool hasRequiredCurves(uint32_t exp) const;
     void computeTheoreticalValues(OptionData* option, std::shared_ptr<BlackCalculatorInfo> bci);
     bool updateTheoreticalValues(OptionData* option);
     void decayGreeks(OptionData* option);
@@ -322,12 +368,22 @@ private:
     OptionGrid*   m_grid = nullptr;
     OptionRisk*   m_spPositionRisk = nullptr;
     mutable std::map<uint32_t, ExpiryInfoPtr> m_expiryInfoTable;
-    std::map<uint32_t, uint64_t> m_curveVersion;
+    /// Per-curve publish versions (2026-11-26 decoupling): a weight=0 expiry
+    /// can publish linear-only for hours while the main curve never fits.
+    std::map<uint32_t, uint64_t> m_curveVersion;    ///< main curve
+    std::map<uint32_t, uint64_t> m_curve2Version;   ///< curve2
+    /// Accepted-publish counter / last publish time per expiry — drive the
+    /// startup-confirm and max-age readiness terms.
+    std::map<uint32_t, uint64_t> m_publishCount;
+    std::map<uint32_t, double> m_publishTime;
     /// P1-④: per-expiry last ATM re-anchor time (grid compute-time seconds;
     /// absent entry = anchor at next check, i.e. wait one full period first).
     std::map<uint32_t, double> m_lastReanchor;
     double m_defaultVolatility = 0.1;
     std::map<uint32_t, double> m_gvv_weight;
+    // v3-GARCH-lite blend state (worker-owned)
+    double m_garchWeight = 0.0;
+    double m_garchVol = 0.0;
     double m_prop_atmsig = 0.0;
     int32_t m_traceLevel = 0;
 

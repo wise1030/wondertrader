@@ -54,42 +54,40 @@ OptionGrid::OptionGrid(const std::string& optionProduct,
 OptionGrid::~OptionGrid() {}
 
 // ============================================================================
-// Underlying price
+// Underlying price — DERIVED, scene-dispatched (2026-11-26 refactor, revised
+// same day after review: one-underlying-many-expiries vs per-month futures)
 // ============================================================================
+//  - Multi-series commodity futures (any expiry registered an EXCLUSIVE own
+//    underlying): there is no single shared underlying — the underlying
+//    family is {front-month future, far-month futures}.  The grid-level
+//    reference price is the FRONT month's price: frontExpiry()->price().
+//  - Single-underlying scenes (index options like CFFEX IO/MO; exchange
+//    series options configured on one product-level code): ONE underlying
+//    feeds MULTIPLE expiries, all sharing the same price series.  The
+//    reference price is the global underlying price itself — it must NOT
+//    wait for any ExpiryData to exist (startup window regression) and does
+//    not need a front-month selector.
 double OptionGrid::getUnderlyingPrice() const {
-    std::shared_lock<std::shared_mutex> lock(m_priceMutex);
-    return m_underlyingPrice;
-}
-
-void OptionGrid::setUnderlyingPrice(double price) {
-    std::unique_lock<std::shared_mutex> lock(m_priceMutex);
-    m_underlyingPrice = price;
-}
-
-void OptionGrid::onUnderlyingTick(double price) {
-    onUnderlyingTick(price, 0);
-}
-
-void OptionGrid::onUnderlyingTick(double price, uint64_t updateTime) {
-    {
-        std::unique_lock<std::shared_mutex> lock(m_priceMutex);
-        m_underlyingPrice = price;
-        if (updateTime != 0)
-            m_underlyingUpdateTime = updateTime;
+    if (!m_expiryOwnUnderlying.empty()) {
+        auto fe = frontExpiry();
+        return fe ? fe->getUnderlyingPrice() : 0.0;
     }
-    // Eager computeValues removed: computation is now owned by on_batch_complete's
-    // debounce in HftOptionStrategy. This prevents:
-    // 1. Redundant compute when on_batch_complete also calls computeValues
-    // 2. Stale ourMarket from per-tick compute before all ticks are applied
-    // 3. Debounce (_underlyingChanged + _minComputeInterval) being bypassed
+    return m_globalUnderlyingPrice;
 }
 
 bool OptionGrid::isUnderlyingFresh(uint64_t nowMs) const {
     if (m_marketStaleTimeoutMs == 0) return true;
-    std::shared_lock<std::shared_mutex> lock(m_priceMutex);
-    if (m_underlyingUpdateTime == 0) return false;
-    if (nowMs < m_underlyingUpdateTime) return true;  // clock skew: accept
-    return nowMs - m_underlyingUpdateTime <= m_marketStaleTimeoutMs;
+    uint64_t ts;
+    if (!m_expiryOwnUnderlying.empty()) {
+        auto fe = frontExpiry();
+        if (!fe) return false;
+        ts = fe->underlyingUpdateTime();
+    } else {
+        ts = m_globalUnderlyingUpdateTime;
+    }
+    if (ts == 0) return false;
+    if (nowMs < ts) return true;  // clock skew: accept
+    return nowMs - ts <= m_marketStaleTimeoutMs;
 }
 
 bool OptionGrid::hasFreshOptionMarket(uint64_t nowMs) const {
@@ -116,47 +114,50 @@ void OptionGrid::setExpiryUnderlying(uint32_t expiry, const std::string& code) {
         "OptionGrid: expiry {} underlying registered as '{}'", expiry, code);
 }
 
-// P1-⑦ (audit 2026-11-18): the grid-level m_underlyingPrice must follow only
-// the FRONT month's underlying.  With multi-expiry routing (202612 → cu2612,
-// 202701 → cu2701) both codes hit m_expiryUnderlyingMap, so every tick of
-// either future used to overwrite m_underlyingPrice (last-tick-won) and the
-// grid price oscillated across the ~2600-point inter-month spread (observed
-// 100900↔103580 in the 11/17 FITGATE log), polluting frontfut_skew / rollema
-// signals and every mkt.underlyingPrice fallback.
-bool OptionGrid::isFrontUnderlyingCode(const std::string& stdCode) {
-    if (stdCode.empty())
-        return false;
-    if (stdCode == m_underlyingCode)
-        return true;   // single-series / global underlying scenario
-    auto fed = getFrontMonthExpiryData();
-    if (!fed)
-        return false;
-    auto ownIt = m_expiryOwnUnderlying.find(fed->getExpiry());
-    return ownIt != m_expiryOwnUnderlying.end() && ownIt->second == stdCode;
-}
-
 // ============================================================================
 // onTick — tick-driven contract discovery + market update
 // ============================================================================
 void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick) {
     if (!tick) return;
 
-    // Per-expiry underlying tick?
+    // The global underlying's own tick always refreshes the global price
+    // state, independent of routing (index codes are ALSO registered in the
+    // per-expiry map for fallback expiries, so they never reach the global
+    // branch below).  Single-underlying scenes read this state as the
+    // grid-level reference price.
+    if (stdCode == m_underlyingCode)
+        m_globalUnderlyingPrice = tick->price();
+
+    // Per-expiry underlying tick? (multi-series scenario: different futures
+    // contracts for different expiries).  Each registered expiry's own price
+    // is updated — this is the pricing source of truth.  The grid-level
+    // price derives from the front expiry via getUnderlyingPrice().
     auto eit = m_expiryUnderlyingMap.find(stdCode);
     if (eit != m_expiryUnderlyingMap.end()) {
         for (uint32_t exp : eit->second) {
             auto ed = getExpiryData(exp);
             if (ed) ed->setUnderlyingPrice(tick->price());
         }
-        // P1-⑦: only the front month's underlying moves the grid-level price
-        if (isFrontUnderlyingCode(stdCode))
-            onUnderlyingTick(tick->price());
         return;
     }
 
-    // Global underlying tick?
+    // Global underlying tick? (e.g. index price for CFFEX options, or
+    // single-series commodity).  Route it into the expiries that fall back
+    // to the global underlying — same P0-② month-match gate as the fallback
+    // registration.  Index-type underlyings (no month segment) feed all
+    // fallback expiries.  Also remember the price/timestamp as the
+    // single-underlying scene's grid-level reference (independent of any
+    // ExpiryData existing).
     if (stdCode == m_underlyingCode) {
-        onUnderlyingTick(tick->price());
+        const std::string gm = contractMonthOf(stdCode);
+        for (auto& [exp, ed] : m_expiries) {
+            if (!ed) continue;
+            if (m_expiryOwnUnderlying.find(exp) != m_expiryOwnUnderlying.end())
+                continue;   // exclusive own underlying — never overwritten
+            const std::string em = std::to_string(exp).substr(2);   // YYYYMM → YYMM
+            if (gm.size() != 4 || gm == em)
+                ed->setUnderlyingPrice(tick->price());
+        }
         return;
     }
 
@@ -226,49 +227,54 @@ void OptionGrid::onTick(const std::string& stdCode, const wtp::WTSTickData* tick
 // onTick (TickDataRef) — async path, no WTSTickData* dependency
 // ============================================================================
 void OptionGrid::onTick(const std::string& stdCode, const TickDataRef& tick) {
+    // The global underlying's own tick always refreshes the global price
+    // state, independent of routing (index codes are ALSO registered in the
+    // per-expiry map for fallback expiries, so they never reach the global
+    // branch below).  Single-underlying scenes read this state as the
+    // grid-level reference price.
+    if (stdCode == m_underlyingCode) {
+        m_globalUnderlyingPrice = tick.price;
+        m_globalUnderlyingUpdateTime = tick.updateTime;
+    }
+
     // 1. Per-expiry underlying tick? (multi-series scenario: different futures contracts for different expiries)
     auto eit = m_expiryUnderlyingMap.find(stdCode);
     if (eit != m_expiryUnderlyingMap.end()) {
         for (uint32_t exp : eit->second) {
             auto ed = getExpiryData(exp);
             if (ed) {
-                ed->setUnderlyingPrice(tick.price);
+                ed->setUnderlyingPrice(tick.price, tick.updateTime);
                 // Update future market data for synthetic forward (quantbox design)
                 double futSpread = (tick.bid > 0 && tick.ask > 0) ? (tick.ask - tick.bid) : 0;
                 ed->setFutureMid(tick.price, futSpread);
             }
         }
-        // P1-⑦: only the front month's underlying moves the grid-level price
-        if (isFrontUnderlyingCode(stdCode))
-            onUnderlyingTick(tick.price, tick.updateTime);
         return;
     }
 
     // 2. Global underlying tick? (e.g. index price for CFFEX options, or single-series commodity)
+    //    Route it into the expiries that FALL BACK to the global underlying,
+    //    with the same P0-② month-match gate as the fallback registration —
+    //    the global MAIN-month tick must not overwrite a far month's pricing
+    //    leg.  Index-type underlyings (no month segment) feed all fallback
+    //    expiries.  Also remember the price/timestamp as the
+    //    single-underlying scene's grid-level reference (independent of any
+    //    ExpiryData existing).
     if (stdCode == m_underlyingCode) {
-        // Update future market data for expiries that FALL BACK to the global
-        // underlying.  Audit 2026-11-13 (multi-month config fix): an expiry
-        // with an EXCLUSIVE own underlying (m_expiryOwnUnderlying) receives
-        // its future mid ONLY from that contract's ticks — otherwise the
-        // global tick (which may be an auto-derived main-continuous code)
-        // overwrites the per-month futures leg of the synthetic forward.
+        const std::string gm = contractMonthOf(stdCode);
         for (auto& [exp, ed] : m_expiries) {
-            if (ed && ed->getIncludeFuture()
-                && m_expiryOwnUnderlying.find(exp) == m_expiryOwnUnderlying.end()) {
-                // P0-②: same month-match gate as the fallback registration —
-                // the global MAIN-month tick must not overwrite a far month's
-                // futures leg (early-session window before the fallback
-                // registration exists).  No month segment (index/continuous
-                // code) keeps the old feed.
-                const std::string gm = contractMonthOf(stdCode);
-                const std::string em = std::to_string(exp).substr(2);   // YYYYMM → YYMM
-                if (gm.size() != 4 || gm == em) {
+            if (!ed) continue;
+            if (m_expiryOwnUnderlying.find(exp) != m_expiryOwnUnderlying.end())
+                continue;   // exclusive own underlying — never overwritten
+            const std::string em = std::to_string(exp).substr(2);   // YYYYMM → YYMM
+            if (gm.size() != 4 || gm == em) {
+                ed->setUnderlyingPrice(tick.price, tick.updateTime);
+                if (ed->getIncludeFuture()) {
                     double futSpread = (tick.bid > 0 && tick.ask > 0) ? (tick.ask - tick.bid) : 0;
                     ed->setFutureMid(tick.price, futSpread);
                 }
             }
         }
-        onUnderlyingTick(tick.price, tick.updateTime);
         return;
     }
 
@@ -604,57 +610,29 @@ ExpiryDataPtr OptionGrid::getExpiryData(uint32_t expiry) const {
     return (it != m_expiries.end()) ? it->second : nullptr;
 }
 
-ExpiryDataPtr OptionGrid::getFrontMonthExpiryData() {
-    if (m_frontMonthExpiry) return m_frontMonthExpiry;
-    if (!m_expiries.empty()) return m_expiries.begin()->second;
-    return nullptr;
-}
-
-// B6: Re-evaluate front month on session begin.
-// If the current front month has expired (daysToExpiry <= 0), roll to the
-// next nearest expiry that still has days to expiry.
-void OptionGrid::reevaluateFrontMonth() {
-    if (m_expiries.empty()) return;
-
-    // Check if current front month is still valid
-    if (m_frontMonth > 0) {
-        auto it = m_expiries.find(m_frontMonth);
-        if (it != m_expiries.end() && it->second) {
-            int32_t dte = it->second->daysToExpiry();
-            if (dte > 0) {
-                // Still valid, just update expiry data
-                m_frontMonthExpiry = it->second;
-                return;
-            }
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "Front month {} expired (dte={}), rolling to next",
-                m_frontMonth, dte);
-        }
-    }
-
-    // Find the nearest non-expired expiry
-    uint32_t bestExp = 0;
+// 2026-11-26 refactor: "front" is a QUERY, not state.  frontExpiry() returns
+// the nearest expiry with daysToExpiry > 0 (fallback: earliest expiry in the
+// map; nullptr when empty).  This replaces the former m_frontMonth /
+// m_frontMonthExpiry state, reevaluateFrontMonth() and isFrontUnderlyingCode
+// — see analysis/front-underlying-roles-analysis-20261126.md.
+ExpiryDataPtr OptionGrid::frontExpiry() const {
+    ExpiryDataPtr best;
     int32_t bestDte = -1;
     for (const auto& [exp, ed] : m_expiries) {
         if (!ed) continue;
         int32_t dte = ed->daysToExpiry();
         if (dte > 0 && (bestDte < 0 || dte < bestDte)) {
             bestDte = dte;
-            bestExp = exp;
+            best = ed;
         }
     }
+    if (!best && !m_expiries.empty())
+        best = m_expiries.begin()->second;   // all expired: earliest fallback
+    return best;
+}
 
-    if (bestExp > 0) {
-        if (bestExp != m_frontMonth) {
-            WTSLogger::log_by_cat("strategy", LL_INFO,
-                "Front month rolled: {} -> {}", m_frontMonth, bestExp);
-            m_frontMonth = bestExp;
-        }
-        m_frontMonthExpiry = m_expiries[bestExp];
-    } else if (!m_expiries.empty()) {
-        // All expired - use the first as fallback
-        m_frontMonthExpiry = m_expiries.begin()->second;
-    }
+ExpiryDataPtr OptionGrid::getFrontMonthExpiryData() {
+    return frontExpiry();
 }
 
 void OptionGrid::purgeExpired()
@@ -684,11 +662,6 @@ void OptionGrid::purgeExpired()
                          : (sd->put() ? sd->put()->getExpiry() : 0);
             return std::find(dead.begin(), dead.end(), exp) != dead.end();
         }), m_allStrikes.end());
-
-    if (std::find(dead.begin(), dead.end(), m_frontMonth) != dead.end())
-        m_frontMonth = 0;
-    m_frontMonthExpiry.reset();
-    reevaluateFrontMonth();
 
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "OptionGrid: purged {} expired expiries, {} options remain",
@@ -770,9 +743,8 @@ std::vector<StrikeDataPtr> OptionGrid::getStrikesByExpiry(uint32_t expiry) const
 // Forward calculation
 // ============================================================================
 double OptionGrid::getFrontForward() {
-    if (m_frontMonth == 0 && !m_expiries.empty())
-        m_frontMonth = m_expiries.begin()->first;
-    return getAtmForward(m_frontMonth);
+    auto fe = frontExpiry();
+    return fe ? getAtmForward(fe->getExpiry()) : NAN;
 }
 
 double OptionGrid::getAtmForward(uint32_t expiry) {

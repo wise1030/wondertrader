@@ -6,6 +6,9 @@
 #include "../RiskFilterChain.h"
 #include "../PositionOffsetMgr.h"
 #include "../PositionGuard.h"
+#include "../QuoteRiskHelpers.h"
+#include "../GarchLiteEstimator.h"
+#include <unordered_map>
 #include "../FillPriceChecker.h"
 #include "../IssuedOrderRegistry.h"
 #include "../RiskLimitsEx.h"
@@ -1027,16 +1030,32 @@ void test_p0_1_disabled_cancels_hedge() {
     otg->setPositionRisk(risk);
 
     // Recording gateway: quote submission allocates ids, cancels are counted.
+    // P0 fix (2026-11-25): cancels deliver their acks back to the OQM, as the
+    // venue does in production — max_side_orders now counts cancel-pending
+    // orders, so without acks a re-quote would be blocked forever here.
     uint32_t nextId = 1000;
     uint32_t cancels = 0;
+    std::unordered_map<uint32_t, std::pair<bool, double>> idInfo;  // id -> (isBuy, qty)
+    std::shared_ptr<OptionQuoteManager> qm;   // captured after UTD creation
     OrderGateway::Handlers handlers;
-    handlers.submitQuote = [&](const std::string&, double, uint32_t, double, uint32_t) {
-        return std::make_pair(nextId++, nextId++);
+    handlers.submitQuote = [&](const std::string&, double, uint32_t bidQ, double, uint32_t askQ) {
+        uint32_t bidId = nextId++, askId = nextId++;
+        idInfo[bidId] = {true, (double)bidQ};
+        idInfo[askId] = {false, (double)askQ};
+        return std::make_pair(bidId, askId);
     };
-    handlers.submitOrder = [&](const std::string&, bool, double, uint32_t) {
-        return std::vector<uint32_t>{nextId++};
+    handlers.submitOrder = [&](const std::string&, bool isBuy, double, uint32_t qty) {
+        uint32_t id = nextId++;
+        idInfo[id] = {isBuy, (double)qty};
+        return std::vector<uint32_t>{id};
     };
-    handlers.cancelOrder = [&](uint32_t) { ++cancels; return true; };
+    handlers.cancelOrder = [&](uint32_t id) {
+        ++cancels;
+        auto it = idInfo.find(id);
+        if (it != idInfo.end() && qm)
+            qm->onOrderStatusChange(id, it->second.first, it->second.second, 0, 0.0, true);
+        return true;
+    };
     handlers.cancelAll = [](const std::string&) {};
     otg->setOrderGateway(std::make_shared<OrderGateway>(handlers));
 
@@ -1046,6 +1065,7 @@ void test_p0_1_disabled_cancels_hedge() {
     auto utd = otg->getUnderlyingTradingData("TEST.HEDGE");
     ASSERT_TRUE(utd != nullptr);
     ASSERT_TRUE(utd->getQuoteManager() != nullptr);
+    qm = utd->getQuoteManager();
 
     auto ctx = std::make_shared<OptionTraderContext>();
     ctx->enabled = true;
@@ -1120,6 +1140,38 @@ void test_p1_1_entrust_reject_clears_order() {
     // The level must be re-sendable afterwards (phantom order is gone).
     qm.updateOrders(desired, false);
     ASSERT_EQ(sends, 2u);
+    ASSERT_EQ(cancels, 0u);
+    std::cout << "  PASS" << std::endl;
+}
+
+void test_native_same_price_replace_side_gate() {
+    std::cout << "=== test_native_same_price_replace_side_gate ===" << std::endl;
+    using namespace wt_option;
+    OptionQuoteManager::Config cfg;
+    cfg.enable_quote_api = true;
+    cfg.quote_style = OptionQuoteManager::Config::QS_PAIRED;
+    cfg.max_side_orders = 1;
+    cfg.time_in_force_ms = 0;
+    OptionQuoteManager qm("TEST.OPT", cfg);
+    uint32_t nextId = 7000;
+    uint32_t sends = 0, cancels = 0;
+    qm.setSendSingleFn([&](bool, double, uint32_t) { ++sends; return nextId++; });
+    qm.setCancelOrderFn([&](uint32_t) { ++cancels; return true; });
+    qm.setGetTimeFn([] { return 100.0; });
+    qm.setActive(true);
+
+    MultiMarket desired;
+    desired.setBid(10.0, 1);
+    qm.updateOrders(desired, false);
+    ASSERT_EQ(sends, 1u);
+
+    // Same-price increase and decrease are venue replacements, not new layers.
+    desired.setBid(10.0, 2);
+    qm.updateOrders(desired, false);
+    ASSERT_EQ(sends, 2u);
+    desired.setBid(10.0, 1);
+    qm.updateOrders(desired, false);
+    ASSERT_EQ(sends, 3u);
     ASSERT_EQ(cancels, 0u);
     std::cout << "  PASS" << std::endl;
 }
@@ -1272,11 +1324,23 @@ void test_power_vol_curve() {
     ASSERT_TRUE(std::fabs(c5.getParameter(PowerVolCurve::PAR_B) - 0.30) < 1e-6);
 
     // Domain guard: sv<=0 points are skipped, remaining 3 still fit
+    // (2026-11-26: data kept market-scale — the new fit-level gate rejects
+    // sub-0.45 ATM multipliers, as it should).
     PowerVolCurve c4(GvvVolCurve::SPOTVOL);
-    IVolCurve::dataset_t neg = {{0.1, -0.5}, {0.2, 0.6}, {0.3, 0.7}, {0.4, 0.8}};
+    IVolCurve::dataset_t neg = {{0.1, -0.5}, {0.2, 0.85}, {0.3, 0.95}, {0.4, 1.05}};
     ASSERT_TRUE(c4.fit(neg));
     ASSERT_TRUE(c4.isInitialized());
     ASSERT_TRUE(c4.eval(0.2) < c4.eval(0.4));
+
+    // New quality gate (2026-11-26): an off-scale ATM level (the signature of
+    // a mis-normalized dataset, e.g. IV/0.1 against a 0.24 market) must be
+    // rejected even though the LS solve itself succeeds.
+    PowerVolCurve c6(GvvVolCurve::SPOTVOL);
+    IVolCurve::dataset_t poisoned;
+    for (double x : {-0.10, -0.05, 0.0, 0.05, 0.10})
+        poisoned.push_back({x, 2.5 * std::exp(0.1 * x)});   // level ≈ 2.5
+    ASSERT_TRUE(!c6.fit(poisoned));
+    ASSERT_TRUE(!c6.isInitialized());
 
     std::cout << "  PASS" << std::endl;
 }
@@ -1392,6 +1456,85 @@ void test_gvv_closed_form() {
     // top edge of the fitted log-moneyness window (+0.9) instead of the old
     // free parametric extrapolation.
     ASSERT_TRUE(std::fabs(c.eval(50.0) - c.eval(0.9)) < 1e-9);
+    std::cout << "  PASS" << std::endl;
+}
+
+// B11: fit→eval round trip with alpha != 1. The fit inversion must use the
+// newly selected alpha, not m_alpha left by the previous fit/default.
+void test_gvv_general_alpha_round_trip() {
+    std::cout << "=== test_gvv_general_alpha_round_trip ===" << std::endl;
+    constexpr double F = 100000.0;
+    constexpr double T = 0.325;
+    constexpr double ATM = 0.18;
+
+    // Generate exact model points with a high-precision bisection. Using the
+    // production Brent evaluator to generate AND verify points otherwise adds
+    // two independent 1e-4 root errors and obscures the alpha regression.
+    constexpr double SPOTVOL = 0.18;
+    constexpr double RHO = 0.70;
+    constexpr double VOLVOL = 0.27;
+    constexpr double ALPHA = 1.80;
+    const double a = 1.0 + 0.25 * VOLVOL * VOLVOL;
+    const double b = -RHO * SPOTVOL * VOLVOL;
+    const double c = -SPOTVOL * SPOTVOL;
+    const double derivedAtm = (-b + std::sqrt(b * b - 4.0 * a * c)) / (2.0 * a);
+    const double kurt = VOLVOL * VOLVOL / T / std::pow(derivedAtm, 2.0 * ALPHA);
+    const double skew = 2.0 * RHO * SPOTVOL * std::sqrt(kurt);
+    auto exactNormalizedVol = [&](double x) {
+        auto residual = [&](double v) {
+            const double z = x * std::pow(v, ALPHA - 1.0);
+            return v * v - (derivedAtm * derivedAtm + skew * z + kurt * z * z);
+        };
+        double lo = GVV_MINATMVOL, hi = GVV_MAXATMVOL;
+        double flo = residual(lo);
+        ASSERT_TRUE(flo * residual(hi) <= 0.0);
+        for (int i = 0; i < 160; ++i) {
+            const double mid = 0.5 * (lo + hi);
+            const double fm = residual(mid);
+            if (flo * fm <= 0.0) hi = mid;
+            else { lo = mid; flo = fm; }
+        }
+        return 0.5 * (lo + hi) / ATM;
+    };
+
+    IVolCurve::dataset_t points;
+    for (double x : {-0.08, -0.05, -0.025, 0.0, 0.025, 0.05, 0.08}) {
+        const double strike = F * std::exp(x);
+        points.push_back({strike - F, exactNormalizedVol(x)});
+    }
+
+    GvvVolCurve::Config cfg;
+    cfg.vega_weighted = false;  // exact model points: isolate alpha inversion
+    GvvVolCurve fitted(cfg);   // previous/default alpha starts at 1.0
+    fitted.setATMForward(F);
+    fitted.setMaturity(T);
+    fitted.setATMVol(ATM);
+    ASSERT_TRUE(fitted.fit(points));
+    ASSERT_TRUE(std::fabs(fitted.getParameter(GvvVolCurve::ALPHA) - 1.80) < 0.03);
+    ASSERT_TRUE(std::fabs(fitted.getParameter(GvvVolCurve::VOLVOL) - 0.27) < 0.01);
+
+    // These wings fell back to exactly 1.0 with the old-alpha inversion.
+    for (double x : {-0.05, 0.0, 0.05}) {
+        const double expected = exactNormalizedVol(x);
+        const double actual = fitted.eval(x);
+        if (std::fabs(actual - expected) >= 0.10)
+            std::cerr << "GVV roundtrip x=" << x << " expected=" << expected
+                      << " actual=" << actual
+                      << " fitAlpha=" << fitted.getParameter(GvvVolCurve::ALPHA)
+                      << " fitVolVol=" << fitted.getParameter(GvvVolCurve::VOLVOL)
+                      << " fitSpotVol=" << fitted.getParameter(GvvVolCurve::SPOTVOL)
+                      << " fitRho=" << fitted.getParameter(GvvVolCurve::RHO)
+                      << std::endl;
+        // Tight alpha/volvol assertions above are the regression discriminator.
+        // WLS spotvol/rho inversion has a separate numerical approximation;
+        // this broad eval smoke bound only rejects gross errors/ATM fallback.
+        ASSERT_TRUE(std::isfinite(actual) && actual > 0.0);
+        ASSERT_TRUE(std::fabs(actual - expected) < 0.10);
+    }
+    ASSERT_TRUE(std::fabs(fitted.eval(-0.05) - 1.0) > 0.05);
+    // General-alpha wing evaluation is still clamped to the fitted domain.
+    ASSERT_TRUE(std::fabs(fitted.eval(0.20) - fitted.eval(0.08)) < 1e-12);
+    ASSERT_TRUE(std::fabs(fitted.eval(-0.20) - fitted.eval(-0.08)) < 1e-12);
     std::cout << "  PASS" << std::endl;
 }
 
@@ -1708,15 +1851,21 @@ void test_async_vol_fitter_publish() {
     wt_option::OptionPricer2Config cfg;
     wt_option::OptionPricer2 pricer(cfg, grid.get(), risk.get());
 
-    AsyncVolFitter fitter("gvv");
+    // 2026-11-26: weight=0 snapshot — curve2 (linear) is the required curve;
+    // the main GVV mirror may fail on this synthetic set and that must NOT
+    // block the publish (no fallback, publish is per-curve).  Strike offsets
+    // are physical price units (±1.5% moneyness) so the linear wing-slope
+    // gate passes.
+    AsyncVolFitter fitter;   // default curve2 = linear
     VolFitExpirySnapshot s;
     s.expiry = 202612;
     s.forward = 4000.0;
     s.maturity = 0.25;
     s.atmVol = 0.18;
     s.version = 1;
-    for (double x : {-0.30, -0.20, -0.10, 0.0, 0.10, 0.20, 0.30})
-        s.points.push_back({x, 1.0 + 0.10 * x + 0.20 * x * x});
+    s.weight = 0.0;
+    for (double x : {-60.0, -40.0, -20.0, 0.0, 20.0, 40.0, 60.0})
+        s.points.push_back({x, 1.0 + x / 1200.0});   // 0.95 .. 1.05, slope ≈ 3.3/log
 
     ASSERT_TRUE(fitter.submit({s}));
     ASSERT_TRUE(!fitter.submit({s}));  // single-flight while running/queued
@@ -1728,12 +1877,13 @@ void test_async_vol_fitter_publish() {
     ASSERT_TRUE(published.size() == 1u && published[0] == 202612u);
     ASSERT_TRUE(!fitter.tryPublish(pricer));   // result consumed
 
-    ASSERT_EQ(pricer.getCurveVersion(202612), 1u);
-    auto curve = pricer.getVolCurve(202612);
-    ASSERT_TRUE(curve != nullptr);
-    ASSERT_TRUE(curve->isInitialized());
-    const double eval = (*curve)(0.0);
-    ASSERT_TRUE(std::isfinite(eval));
+    ASSERT_EQ(pricer.getCurve2Version(202612), 1u);
+    ASSERT_EQ(pricer.getAnyCurveVersion(202612), 1u);
+    auto curve2 = pricer.getVolCurve2(202612);
+    ASSERT_TRUE(curve2 != nullptr);
+    ASSERT_TRUE(curve2->isInitialized());
+    const double eval2 = (*curve2)(0.0);
+    ASSERT_TRUE(std::isfinite(eval2));
 
     std::cout << "  PASS" << std::endl;
 }
@@ -1759,19 +1909,23 @@ void test_market_readiness_gate() {
     wt_option::OptionPricer2 pricer(cfg, grid.get(), risk.get());
 
     // Underlying + three strikes around forward 4200 with two-sided markets.
+    // The global index tick is registered AFTER the option ticks so the
+    // expiry exists when it arrives (2026-11-26: the grid-level price derives
+    // from the front expiry; a global tick with no expiry to route into is
+    // not remembered anywhere).
     auto reg = [&](const char* code, double bid, double ask) {
         OptionGrid::TickDataRef t;
         t.bid = bid; t.ask = ask; t.price = (bid + ask) * 0.5;
         t.updateTime = 1000;
         grid->onTick(code, t);
     };
-    reg("CFFEX.000300", 4199, 4201);
     reg("CFFEX.IO2606.C.4100", 150, 160);
     reg("CFFEX.IO2606.P.4100", 140, 150);
     reg("CFFEX.IO2606.C.4200", 100, 110);
     reg("CFFEX.IO2606.P.4200",  95, 105);
     reg("CFFEX.IO2606.C.4300",  70,  80);
     reg("CFFEX.IO2606.P.4300",  65,  75);
+    reg("CFFEX.000300", 4199, 4201);
 
     auto ed = grid->getExpiryData(202606);
     ASSERT_TRUE(ed != nullptr);
@@ -1795,12 +1949,16 @@ void test_market_readiness_gate() {
     // --- 1. priced gate ---
     auto od = grid->get("CFFEX.IO2606.C.4200");
     pricer.computeValue(od.get());
-    ASSERT_TRUE(std::fabs(od->values(0).greeks().delta()) > 1e-6);  // greeks computed
-    ASSERT_TRUE(!od->values(0).isPriced());                          // but unpriced
+    // P0 fix (2026-11-25): pre-fit NO theory at all — not even greeks. The old
+    // contract (greeks computed, priced flag false) still left quoting one
+    // flag away from garbage prices and leaked stale theos to the UI.
+    ASSERT_TRUE(!od->values(0).isPriced());
+    ASSERT_TRUE(std::fabs(od->values(0).greeks().delta()) < 1e-9);
 
     ed->setFitReady(true);
     pricer.computeValue(od.get());
     ASSERT_TRUE(od->values(0).isPriced());
+    ASSERT_TRUE(std::fabs(od->values(0).greeks().delta()) > 1e-6);
 
     // FAST-cache clearing: drought re-block drops cached priced immediately.
     // Exercised through the public computeValues entry (FAST pass), which is
@@ -1811,15 +1969,19 @@ void test_market_readiness_gate() {
     ASSERT_TRUE(!od->values(0).isPriced());
 
     // --- 3. publish lifts fitReady; bootstrap scale freezes after version ---
-    AsyncVolFitter fitter("gvv");
+    // 2026-11-26: weight=0 → curve2 (linear) is the required curve; the main
+    // GVV mirror may fail on this near-flat synthetic set and must not block
+    // the publish.  Slight slope keeps the new linear wing-slope gate happy.
+    AsyncVolFitter fitter;   // default curve2 = linear
     VolFitExpirySnapshot s;
     s.expiry = 202606;
     s.forward = pricer.getATMForward(202606);
     s.maturity = pricer.getMaturity(202606);
     s.atmVol = pricer.getATMVol(202606);          // bootstrapped scale
     s.version = 1;
+    s.weight = 0.0;
     for (double x : {-0.06, -0.03, 0.0, 0.03, 0.06})
-        s.points.push_back({x, 1.0});
+        s.points.push_back({x * 4200.0, 1.0 + x * 0.15});
     ASSERT_TRUE(fitter.submit({s}));
     for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1832,6 +1994,209 @@ void test_market_readiness_gate() {
     setIv("CFFEX.IO2606.C.4200", 0.40);           // market moves on
     pricer.initValuesCompute(grid.get());
     ASSERT_TRUE(std::fabs(pricer.getATMVol(202606) - fittedScale) < 1e-12);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// 2026-11-26 scale-race / weight-semantics / dynamic-readiness suite
+// (user-approved final plan; incident = 2026-11-26 21:05 cu2701 explosion):
+//  1. L1 dataset gate   — a snapshot normalized by the 0.1 default anchor
+//                         against a ~0.25 market (median ≈ 2.5) is rejected
+//                         BEFORE any model fit: no publish, no readiness.
+//  2. weight semantics  — weight=0: curve2(linear) required, main-curve
+//                         failure does NOT block (no fallback, per-curve
+//                         publish); hot weight 0→1 with no main curve drops
+//                         readiness immediately.
+//  3. startup confirm   — startup_confirm_versions=2: a single publish never
+//                         arms quoting; the second one does.
+//  4. anchor reseed     — bootstrap reseed re-bases stored multipliers so the
+//                         ABSOLUTE vol stays constant; a market-following
+//                         re-anchor (plain setATMVol) moves theo with the
+//                         anchor as before.
+//  5. max-age freshness — no accepted publish within volcurve_max_age
+//                         (compute clock) drops the expiry out of pricing.
+// ============================================================================
+namespace {
+struct VolFitFixture {
+    std::shared_ptr<OptionGrid> grid;
+    std::shared_ptr<OptionRisk> risk;
+    std::unique_ptr<wt_option::OptionPricer2> pricer;
+    wt_option::ExpiryDataPtr ed;
+
+    static VolFitFixture make(const wt_option::OptionPricer2Config& cfg) {
+        VolFitFixture f;
+        f.grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+        f.risk = std::make_shared<OptionRisk>(f.grid);
+        f.pricer = std::make_unique<wt_option::OptionPricer2>(cfg, f.grid.get(), f.risk.get());
+        auto reg = [&](const char* code, double bid, double ask) {
+            OptionGrid::TickDataRef t;
+            t.bid = bid; t.ask = ask; t.price = (bid + ask) * 0.5;
+            t.updateTime = 1000;
+            f.grid->onTick(code, t);
+        };
+        // two-sided market around forward 4200, IV ≈ 0.22
+        reg("CFFEX.IO2606.C.4100", 150, 160);
+        reg("CFFEX.IO2606.P.4100", 140, 150);
+        reg("CFFEX.IO2606.C.4200", 100, 110);
+        reg("CFFEX.IO2606.P.4200",  95, 105);
+        reg("CFFEX.IO2606.C.4300",  70,  80);
+        reg("CFFEX.IO2606.P.4300",  65,  75);
+        reg("CFFEX.000300", 4199, 4201);
+        f.ed = f.grid->getExpiryData(202606);
+        f.ed->updateDaysToExpiration(20260603, 20260619);
+        f.ed->setForward(4200.0);
+        f.ed->setForwardReady(true);
+        for (const char* c : {"CFFEX.IO2606.C.4100", "CFFEX.IO2606.P.4100",
+                              "CFFEX.IO2606.C.4200", "CFFEX.IO2606.P.4200",
+                              "CFFEX.IO2606.C.4300", "CFFEX.IO2606.P.4300"})
+            f.grid->get(c)->values(0).setImpliedVol(0.22);
+        f.pricer->initValuesCompute(f.grid.get());   // bootstrap seeds atmVol=0.22
+        return f;
+    }
+
+    /// Sloped near-ATM snapshot (passes L1 + linear gates).
+    wt_option::VolFitExpirySnapshot snap(double atmVol, uint64_t version,
+                                         double weight, double maturity) const {
+        wt_option::VolFitExpirySnapshot s;
+        s.expiry = 202606;
+        s.forward = pricer->getATMForward(202606);
+        s.maturity = maturity;
+        s.atmVol = atmVol;
+        s.version = version;
+        s.weight = weight;
+        s.timestamp = 1000.0 * version;
+        for (double x : {-0.06, -0.03, 0.0, 0.03, 0.06})
+            s.points.push_back({x * 4200.0, 1.0 + x * 0.15});
+        return s;
+    }
+
+    void publish(AsyncVolFitter& fitter, const wt_option::VolFitExpirySnapshot& s) {
+        ASSERT_TRUE(fitter.submit({s}));
+        for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ASSERT_TRUE(fitter.hasResult());
+        std::vector<uint32_t> published;
+        ASSERT_TRUE(fitter.tryPublish(*pricer, &published));
+    }
+};
+} // namespace
+
+// --- 1. L1 dataset gate: the 0.1-vs-0.25 anchor mix-up never reaches a model
+void test_volfit_l1_dataset_gate() {
+    std::cout << "=== test_volfit_l1_dataset_gate ===" << std::endl;
+    wt_option::OptionPricer2Config cfg;
+    auto f = VolFitFixture::make(cfg);
+
+    AsyncVolFitter fitter;   // curve2 = linear
+    auto s = f.snap(0.1, 1, 0.0, 0.05);
+    for (auto& p : s.points) p.second *= 2.2;   // median ≈ 2.2: the 21:05 signature
+    f.publish(fitter, s);
+
+    ASSERT_EQ(f.pricer->getAnyCurveVersion(202606), 0u);   // nothing published
+    ASSERT_EQ(f.pricer->getCurve2Version(202606), 0u);
+    std::cout << "  PASS" << std::endl;
+}
+
+// --- 2. weight semantics: linear-only publish at weight=0; hot 0→1 drops readiness
+void test_volfit_weight_semantics() {
+    std::cout << "=== test_volfit_weight_semantics ===" << std::endl;
+    wt_option::OptionPricer2Config cfg;
+    cfg.volcurve_startup_confirm_versions = 1;
+    auto f = VolFitFixture::make(cfg);
+
+    // Tiny snapshot maturity forces the GVV mirror to fail (volvol2 out of
+    // range) while linear fits — the exact "weight=0, main unfit" shape.
+    AsyncVolFitter fitter;
+    f.publish(fitter, f.snap(0.22, 1, 0.0, 1e-9));
+
+    ASSERT_EQ(f.pricer->getCurveVersion(202606), 0u);      // main never installed
+    ASSERT_EQ(f.pricer->getCurve2Version(202606), 1u);     // linear published
+    ASSERT_TRUE(f.ed->isFitReady());
+    ASSERT_TRUE(f.ed->isCurvesReady());
+
+    // Pricing works at weight=0 (default: no per-expiry override → cfg 0.0)
+    auto od = f.grid->get("CFFEX.IO2606.C.4200");
+    f.pricer->computeValue(od.get());
+    ASSERT_TRUE(od->values(0).isPriced());
+
+    // Hot weight 0→1 with a never-fitted main curve must drop readiness NOW
+    f.pricer->setGvvWeight(202606, 1.0);
+    ASSERT_TRUE(!f.ed->isCurvesReady());
+    f.pricer->computeValue(od.get());
+    ASSERT_TRUE(!od->values(0).isPriced());
+
+    // ...and back to 0 restores it
+    f.pricer->setGvvWeight(202606, 0.0);
+    ASSERT_TRUE(f.ed->isCurvesReady());
+    f.pricer->computeValue(od.get());
+    ASSERT_TRUE(od->values(0).isPriced());
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// --- 3. startup confirm + max-age freshness
+void test_volfit_startup_confirm_and_max_age() {
+    std::cout << "=== test_volfit_startup_confirm_and_max_age ===" << std::endl;
+    wt_option::OptionPricer2Config cfg;
+    cfg.volcurve_startup_confirm_versions = 2;
+    cfg.volcurve_max_age = 5.0;
+    auto f = VolFitFixture::make(cfg);
+
+    f.grid->setComputeTime(1000.0);
+    AsyncVolFitter fitter;
+    f.publish(fitter, f.snap(0.22, 1, 0.0, 0.05));       // publish #1
+    ASSERT_TRUE(f.ed->isFitReady());
+    ASSERT_TRUE(!f.ed->isCurvesReady());                  // confirm pending
+
+    auto od = f.grid->get("CFFEX.IO2606.C.4200");
+    f.pricer->computeValue(od.get());
+    ASSERT_TRUE(!od->values(0).isPriced());               // single publish ≠ quotable
+
+    f.publish(fitter, f.snap(0.22, 2, 0.0, 0.05));       // publish #2
+    ASSERT_TRUE(f.ed->isCurvesReady());
+    f.pricer->computeValue(od.get());
+    ASSERT_TRUE(od->values(0).isPriced());
+
+    // Freshness: > volcurve_max_age since the last accepted publish
+    f.grid->setComputeTime(1010.0);
+    f.pricer->initValuesCompute(f.grid.get());
+    ASSERT_TRUE(!f.ed->isCurvesReady());
+    f.pricer->computeValue(od.get());
+    ASSERT_TRUE(!od->values(0).isPriced());
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// --- 4. anchor reseed re-bases curves; market-following re-anchor does not
+void test_atm_reseed_rescale() {
+    std::cout << "=== test_atm_reseed_rescale ===" << std::endl;
+    wt_option::OptionPricer2Config cfg;
+    cfg.volcurve_startup_confirm_versions = 1;
+    auto f = VolFitFixture::make(cfg);
+
+    AsyncVolFitter fitter;
+    f.publish(fitter, f.snap(0.22, 1, 0.0, 0.05));
+
+    auto od = f.grid->get("CFFEX.IO2606.C.4200");
+    f.pricer->computeValue(od.get());
+    const double theo0 = od->values(0).theo();
+    ASSERT_TRUE(theo0 > 0);
+
+    // Bootstrap reseed (scale CORRECTION): theo must stay put — the market
+    // did not move, only our anchor estimate.
+    f.pricer->setATMVolReseed(202606, 0.264);             // 0.22 × 1.2
+    f.pricer->computeValue(od.get());
+    const double theo1 = od->values(0).theo();
+    ASSERT_TRUE(std::fabs(theo1 - theo0) / theo0 < 1e-9);
+
+    // Market-following re-anchor (plain setATMVol): theo moves with the
+    // anchor until the next refit — the quantbox re-anchor contract.
+    // (0.5% tolerance: ATM Black value is linear in σ only to first order.)
+    f.pricer->setATMVol(202606, 0.264 * 1.05);
+    f.pricer->computeValue(od.get());
+    const double theo2 = od->values(0).theo();
+    ASSERT_TRUE(std::fabs(theo2 - theo1 * 1.05) / theo1 < 5e-3);
 
     std::cout << "  PASS" << std::endl;
 }
@@ -1852,7 +2217,17 @@ void test_option_config_loader() {
 
     auto pricer = wtp::WTSVariant::createObject();
     pricer->append("slow_compute_interval", 0.1);
+    pricer->append("risk_shift_distort_vega", 1.0);  // B12 deprecated fallback
     cfg->append("pricer", pricer);
+
+    auto pg = wtp::WTSVariant::createObject();
+    pg->append("tolerance", 7);
+    pg->append("alertCooldownSec", 3.5);
+    pg->append("disableOnBreach", false);
+    pg->append("staleFreezeSec", 0.0);
+    pg->append("clampLimit", 0);       // opt-in behavior remains off
+    pg->append("undoWindowSec", 0.0);  // opt-in behavior remains off
+    cfg->append("positionGuard", pg);
 
     auto om = wtp::WTSVariant::createObject();
     auto optOm = wtp::WTSVariant::createObject();
@@ -1875,20 +2250,52 @@ void test_option_config_loader() {
     ASSERT_EQ(r.values.maxTPS, 50);
     ASSERT_EQ(r.values.marketFreshTimeoutMs, 1500u);
     ASSERT_EQ(r.values.slowComputeInterval, 0.1);
+    ASSERT_EQ(r.values.positionGuard.tolerance, 7);
+    ASSERT_EQ(r.values.positionGuard.alertCooldownSec, 3.5);
+    ASSERT_TRUE(!r.values.positionGuard.disableOnBreach);
+    ASSERT_EQ(r.values.positionGuard.staleFreezeSec, 0.0);
+    ASSERT_EQ(r.values.positionGuard.clampLimit, 0);
+    ASSERT_EQ(r.values.positionGuard.undoWindowSec, 0.0);
     ASSERT_EQ(r.effective["riskFreeRate"], "0");
     ASSERT_EQ(r.effective["pricer.slow_compute_interval"], "0.1");
     ASSERT_TRUE(!r.warnings.empty());
 
-    bool sawLegacy = false;
+    bool sawLegacy = false, sawDeprecatedVega = false;
     for (const auto& w : r.warnings) {
         if (w.find("cancel_timeout_ms") != std::string::npos)
             sawLegacy = true;
+        if (w.find("risk_shift_distort_vega") != std::string::npos
+            && w.find("deprecated") != std::string::npos)
+            sawDeprecatedVega = true;
     }
     ASSERT_TRUE(sawLegacy);
+    ASSERT_TRUE(sawDeprecatedVega);
 
     const std::string dump = OptionConfigLoader::dumpEffectiveValues(r);
     ASSERT_TRUE(dump.find("effective config values") != std::string::npos);
     ASSERT_TRUE(dump.find("marketFreshTimeoutMs = 1500") != std::string::npos);
+    ASSERT_TRUE(dump.find("positionGuard.tolerance = 7") != std::string::npos);
+    ASSERT_TRUE(dump.find("positionGuard.disableOnBreach = false") != std::string::npos);
+
+    auto defaultsCfg = wtp::WTSVariant::createObject();
+    defaultsCfg->append("exchange", "SHFE");
+    defaultsCfg->append("futuresProduct", "cu");
+    auto defaultsR = OptionConfigLoader::load(defaultsCfg);
+    ASSERT_TRUE(defaultsR.ok);
+    ASSERT_EQ(defaultsR.values.positionGuard.tolerance, 5);
+    ASSERT_EQ(defaultsR.values.positionGuard.alertCooldownSec, 10.0);
+    ASSERT_TRUE(defaultsR.values.positionGuard.disableOnBreach);
+    ASSERT_EQ(defaultsR.values.positionGuard.staleFreezeSec, 0.0);
+    ASSERT_EQ(defaultsR.values.positionGuard.clampLimit, 0);
+    ASSERT_EQ(defaultsR.values.positionGuard.undoWindowSec, 0.0);
+
+    auto badPgCfg = wtp::WTSVariant::createObject();
+    badPgCfg->append("exchange", "SHFE");
+    badPgCfg->append("futuresProduct", "cu");
+    auto badPg = wtp::WTSVariant::createObject();
+    badPg->append("clampLimit", -1);
+    badPgCfg->append("positionGuard", badPg);
+    ASSERT_TRUE(!OptionConfigLoader::load(badPgCfg).ok);
 
     // Invalid core values must abort startup.
     auto bad = wtp::WTSVariant::createObject();
@@ -1928,6 +2335,13 @@ void test_position_book_long_short_bridge() {
     ASSERT_EQ(book.get("A").shortPos.vol(), 4.0);
     ASSERT_EQ(book.net("A"), 3.0);
     ASSERT_TRUE(book.version() >= 4u);
+    // B6: worker enumeration is a zero-copy view of the same authoritative
+    // state; snapshot() remains the value-copy handoff for other threads.
+    const auto& view = book.view();
+    ASSERT_TRUE(view.size() == 1 && view.count("A") == 1);
+    ASSERT_EQ(view.at("A").net(), book.net("A"));
+    const auto copied = book.snapshot();
+    ASSERT_EQ(copied.at("A").net(), view.at("A").net());
 
     // Restart/recovery: broker snapshot replaces stale bridge state.
     book.clearAll();
@@ -1957,17 +2371,13 @@ void test_optiongrid_market_freshness() {
     auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
     grid->setMarketStaleTimeoutMs(1000);
 
-    OptionGrid::TickDataRef und;
-    und.price = 4000.0;
-    und.bid = 3999.0;
-    und.ask = 4001.0;
-    und.updateTime = 1000;
-    grid->onTick("CFFEX.000300", und);
-
-    ASSERT_TRUE(grid->isUnderlyingFresh(1500));
-    ASSERT_TRUE(!grid->isUnderlyingFresh(2500));
+    // Nothing exists yet: no front expiry -> underlying not fresh.
+    ASSERT_TRUE(!grid->isUnderlyingFresh(1500));
     ASSERT_TRUE(!grid->hasFreshOptionMarket(1500));   // no option market yet
 
+    // Create the expiry first (option tick), then feed the global index —
+    // the grid-level price/freshness derives from the front expiry's price
+    // feed (2026-11-26 refactor: grid-level price state removed).
     OptionGrid::TickDataRef opt;
     opt.price = 100.0;
     opt.bid = 99.0;
@@ -1975,11 +2385,56 @@ void test_optiongrid_market_freshness() {
     opt.updateTime = 2000;
     grid->onTick("CFFEX.IO2606.C.4300", opt);
 
+    OptionGrid::TickDataRef und;
+    und.price = 4000.0;
+    und.bid = 3999.0;
+    und.ask = 4001.0;
+    und.updateTime = 1000;
+    grid->onTick("CFFEX.000300", und);
+
+    ASSERT_TRUE(grid->isUnderlyingFresh(1500));      // ed price ts=1000, 500ms old
+    ASSERT_TRUE(!grid->isUnderlyingFresh(2500));     // 1500ms old > timeout
+
     auto od = grid->get("CFFEX.IO2606.C.4300");
     ASSERT_TRUE(od != nullptr);
     ASSERT_EQ(od->getMarket().updateTime, 2000u);
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 4000.0) < 1e-9);  // derived
     ASSERT_TRUE(grid->hasFreshOptionMarket(2500));
     ASSERT_TRUE(!grid->hasFreshOptionMarket(3500));
+
+    // Single-underlying scene: the global tick alone makes the grid-level
+    // price available — BEFORE any ExpiryData exists (2026-11-26 scene
+    // dispatch: one underlying feeds many expiries; the reference price
+    // must not wait for an expiry to be discovered).
+    {
+        auto g = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
+        g->setMarketStaleTimeoutMs(1000);
+        OptionGrid::TickDataRef und;
+        und.price = 4000.0; und.bid = 3999.0; und.ask = 4001.0; und.updateTime = 1000;
+        g->onTick("CFFEX.000300", und);
+        ASSERT_TRUE(std::fabs(g->getUnderlyingPrice() - 4000.0) < 1e-9);
+        ASSERT_TRUE(g->isUnderlyingFresh(1500));
+        ASSERT_TRUE(!g->isUnderlyingFresh(2500));
+    }
+
+    // Multi-series scene: with exclusive per-month underlyings registered,
+    // the global code is NOT the reference price source — the front expiry
+    // is.  A lone global tick must not surface as the grid-level price.
+    {
+        auto g = std::make_shared<OptionGrid>("cu", "SHFE.cu.2612", nullptr, nullptr);
+        g->setExpiryOwnUnderlying(202701, "SHFE.cu.2701");
+        OptionGrid::TickDataRef und;
+        und.price = 89600.0; und.bid = 89590.0; und.ask = 89610.0; und.updateTime = 1000;
+        g->onTick("SHFE.cu.2612", und);
+        ASSERT_TRUE(std::fabs(g->getUnderlyingPrice() - 0.0) < 1e-9);   // front ed absent
+        OptionGrid::TickDataRef opt;
+        opt.price = 100.0; opt.bid = 99.0; opt.ask = 101.0; opt.updateTime = 1000;
+        g->onTick("SHFE.cu2701.C.100000", opt);   // creates 202701
+        OptionGrid::TickDataRef f1;
+        f1.price = 92250.0; f1.bid = 92240.0; f1.ask = 92260.0; f1.updateTime = 1200;
+        g->onTick("SHFE.cu.2701", f1);
+        ASSERT_TRUE(std::fabs(g->getUnderlyingPrice() - 92250.0) < 1e-9);
+    }
 
     // Disabled timeout preserves legacy behavior.
     grid->setMarketStaleTimeoutMs(0);
@@ -2312,6 +2767,50 @@ void test_p0_forward_month_routing() {
     std::cout << "  PASS" << std::endl;
 }
 
+// P1-⑦ follow-up (audit 2026-11-26): after the front month rolls past the
+// configured global contract (B1 expiry filtering removed 202612 options so
+// its ExpiryData never exists), the stale global contract's ticks must NOT
+// drive the grid-level m_underlyingPrice — only the front month's EXCLUSIVE
+// own underlying may.  Production shape: underlyingCode=SHFE.cu.2612 (202612,
+// expired) while front=202701 own=SHFE.cu.2701; pre-fix the
+// "global code == front" short-circuit let cu2612 ticks keep alternating with
+// cu2701 (observed grid price 89600↔92250, ~2500-pt spread, on 11/26).
+void test_front_roll_excludes_stale_global_underlying() {
+    std::cout << "=== test_front_roll_excludes_stale_global_underlying ===" << std::endl;
+    OptionGrid::TickDataRef opt;
+    opt.price = 100; opt.bid = 99; opt.ask = 101;
+
+    auto grid = std::make_shared<OptionGrid>("cu", "SHFE.cu.2612", nullptr, nullptr);
+    grid->setExpiryOwnUnderlying(202612, "SHFE.cu.2612");
+    grid->setExpiryOwnUnderlying(202701, "SHFE.cu.2701");
+
+    // 202701 (front) created by an option tick; 202612 never exists —
+    // exactly the post-B1 subscription-filtered state.
+    grid->onTick("SHFE.cu2701.C.100000", opt);
+    auto ed1 = grid->getExpiryData(202701);
+    ASSERT_TRUE(ed1 != nullptr);
+    ASSERT_TRUE(grid->getExpiryData(202612) == nullptr);
+
+    // front month's own future moves the grid price
+    OptionGrid::TickDataRef f1; f1.price = 92250; f1.bid = 92240; f1.ask = 92260;
+    grid->onTick("SHFE.cu.2701", f1);
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 92250) < 1e-9);
+    ASSERT_TRUE(std::fabs(ed1->getUnderlyingPrice() - 92250) < 1e-9);
+
+    // stale global contract (expired 202612) must NOT move the grid price
+    OptionGrid::TickDataRef f0; f0.price = 89600; f0.bid = 89590; f0.ask = 89610;
+    grid->onTick("SHFE.cu.2612", f0);
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 92250) < 1e-9);  // P1-⑦ follow-up
+
+    // alternating interleave (live tick pattern): grid follows cu2701 only
+    f1.price = 92260;
+    grid->onTick("SHFE.cu.2701", f1);
+    grid->onTick("SHFE.cu.2612", f0);
+    ASSERT_TRUE(std::fabs(grid->getUnderlyingPrice() - 92260) < 1e-9);
+    ASSERT_TRUE(std::fabs(ed1->getUnderlyingPrice() - 92260) < 1e-9);
+    std::cout << "  PASS" << std::endl;
+}
+
 // P0-③: outside the fitted strike window the GVV curve must be FLAT at the
 // window edge, not parametrically extrapolated (observed wing theos at
 // +1503% / −99% of mid against a market ATM IV of ~0.20).
@@ -2377,15 +2876,18 @@ void test_p4_atm_reanchor_cap() {
     pricer.initValuesCompute(grid.get());
 
     // first accepted fit pins the scale (bootstrap median = 0.22)
-    AsyncVolFitter fitter("gvv");
+    // 2026-11-26: weight=0, linear curve2 required; sloped points for the
+    // linear wing-slope gate; GVV mirror failure must not block.
+    AsyncVolFitter fitter;   // default curve2 = linear
     VolFitExpirySnapshot s;
     s.expiry = 202606;
     s.forward = pricer.getATMForward(202606);
     s.maturity = pricer.getMaturity(202606);
     s.atmVol = pricer.getATMVol(202606);
     s.version = 1;
+    s.weight = 0.0;
     for (double x : {-0.06, -0.03, 0.0, 0.03, 0.06})
-        s.points.push_back({x, 1.0});
+        s.points.push_back({x * 4200.0, 1.0 + x * 0.15});
     ASSERT_TRUE(fitter.submit({s}));
     for (int i = 0; i < 200 && !fitter.hasResult(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -2925,6 +3427,144 @@ void test_max_open_offset_filter() {
 }
 
 // ============================================================================
+// v3 risk-shift helpers (QuoteRiskHelpers.h) — pure-function coverage for the
+// secondary shift, soft-limit size shrink, teenie cap, sticky downweight.
+// ============================================================================
+void test_quote_risk_helpers()
+{
+    std::cout << "=== test_quote_risk_helpers ===" << std::endl;
+    namespace qr = wt_option::quote_risk;
+    constexpr double EPS = 1e-9;
+
+    // --- quadraticShift: original quantbox secondary form ---
+    ASSERT_TRUE(qr::quadraticShift(0.0, 20.0, 50.0) == 0.0);
+    ASSERT_TRUE(std::fabs(qr::quadraticShift(1.0, 20.0, 50.0) - (-20.0)) < EPS);   // long excess → negative shift
+    ASSERT_TRUE(std::fabs(qr::quadraticShift(-1.5, 20.0, 50.0) - 45.0) < EPS);     // short excess → positive, quadratic growth
+    ASSERT_TRUE(std::fabs(qr::quadraticShift(3.0, 20.0, 50.0) - (-50.0)) < EPS);   // clamped at −maxShift
+    ASSERT_TRUE(qr::quadraticShift(1.0, 0.0, 50.0) == 0.0);                        // distort off
+
+    // --- B9 same-state formula attribution: raw-month ddAdj vs target/L3 ---
+    ASSERT_TRUE(std::fabs(qr::expiryDeltaSkew(607.0, 0.5, 0.05) - (-30.35)) < EPS);
+    ASSERT_TRUE(std::fabs(qr::expiryDeltaSkew(607.0, -0.5, 0.05) - 30.35) < EPS);
+    // delta=0 keeps the legacy non-negative sign for ddAdj, whereas L3's
+    // downstream multiplication by leg delta makes its leg contribution zero.
+    ASSERT_TRUE(std::fabs(qr::expiryDeltaSkew(607.0, 0.0, 0.05) - (-30.35)) < EPS);
+    const double pgn607 = 607.0 / 1000.0;
+    ASSERT_TRUE(std::fabs(qr::quadraticShift(pgn607, 3.0, 10.0)
+        - (-1.105347)) < EPS);
+    ASSERT_TRUE(std::fabs(0.5 * qr::quadraticShift(pgn607, 3.0, 10.0)
+        - (-0.5526735)) < EPS);
+
+    // --- mixed vega bucket: exact self-exclusion matches the original loop ---
+    // bucket = self(2×5=10) + other(25) = 35; own exact term is added later.
+    ASSERT_TRUE(std::fabs(qr::vegaBucketWithoutSelf(
+        35.0, true, 2.0, 5.0, 0.45, 0.0) - 25.0) < EPS);
+    // Self-only bucket becomes zero, not a second own-position contribution.
+    ASSERT_TRUE(std::fabs(qr::vegaBucketWithoutSelf(
+        10.0, true, 2.0, 5.0, 0.45, 0.0)) < EPS);
+    // A bucket not containing self is unchanged, including non-zero wing decay.
+    ASSERT_TRUE(std::fabs(qr::vegaBucketWithoutSelf(
+        35.0, false, 2.0, 5.0, 0.45, 0.7) - 35.0) < EPS);
+    const double selfWing = std::exp(-0.7 * std::abs(0.45 - 0.5));
+    ASSERT_TRUE(std::fabs(qr::vegaBucketWithoutSelf(
+        35.0, true, 2.0, 5.0, 0.45, 0.7) - (35.0 - 10.0 * selfWing)) < EPS);
+
+    // --- riskSizeScale: directional suppression at the quote layer ---
+    const auto BID = qr::Side::BID, ASK = qr::Side::ASK;
+    // long-delta excess (pgnD=+1.05): buy-call side flat, sell-call side full
+    ASSERT_TRUE(qr::riskSizeScale(BID, +1.0, 1.05, 0.0, 0.8) == 0.0);
+    ASSERT_TRUE(qr::riskSizeScale(ASK, +1.0, 1.05, 0.0, 0.8) == 1.0);
+    // buy-put REDUCES long delta → stays full
+    ASSERT_TRUE(qr::riskSizeScale(BID, -1.0, 1.05, 0.0, 0.8) == 1.0);
+    // short-delta excess (pgnD=−1.05): buy-call full (adds delta → reduces), sell-call flat
+    ASSERT_TRUE(qr::riskSizeScale(BID, +1.0, -1.05, 0.0, 0.8) == 1.0);
+    ASSERT_TRUE(qr::riskSizeScale(ASK, +1.0, -1.05, 0.0, 0.8) == 0.0);
+    // linear band: pgn 0.9 with start 0.8 → half size
+    ASSERT_TRUE(std::fabs(qr::riskSizeScale(BID, +1.0, 0.9, 0.0, 0.8) - 0.5) < EPS);
+    // vega dimension: pgnV=−1.05 (short vega) → buys stay full (add vega), sells flat
+    ASSERT_TRUE(qr::riskSizeScale(BID, +1.0, 0.0, -1.05, 0.8) == 1.0);
+    ASSERT_TRUE(qr::riskSizeScale(ASK, -1.0, 0.0, -1.05, 0.8) == 0.0);
+    // both dims bind → min
+    ASSERT_TRUE(qr::riskSizeScale(BID, +1.0, 1.05, -1.05, 0.8) == 0.0);
+    // disabled (start 1.0) → no shrink
+    ASSERT_TRUE(qr::riskSizeScale(BID, +1.0, 1.05, 0.0, 1.0) == 1.0);
+
+    // --- teenieCapPrice: original MMPricer semantics ---
+    ASSERT_TRUE(std::fabs(qr::teenieCapPrice(qr::Side::BID, 700.0, 690.0, 2.0) - 692.0) < EPS);  // capped at mkt+1t
+    ASSERT_TRUE(std::fabs(qr::teenieCapPrice(qr::Side::BID, 691.0, 690.0, 2.0) - 691.0) < EPS);  // already inside
+    ASSERT_TRUE(std::fabs(qr::teenieCapPrice(qr::Side::ASK, 700.0, 710.0, 2.0) - 708.0) < EPS);  // floored at mkt−1t
+
+    // --- stickyScaleFor ---
+    ASSERT_TRUE(qr::stickyScaleFor(0.5) == 1.0);
+    ASSERT_TRUE(std::fabs(qr::stickyScaleFor(0.75) - 0.5) < EPS);
+    ASSERT_TRUE(qr::stickyScaleFor(1.0) == 0.0);
+
+    // --- v4 reducing-direction rules (panic fail-gate input) ---
+    // long delta (pfDelta=+40): sells reduce, buys worsen
+    ASSERT_TRUE(qr::reducesDelta(false, 40.0));
+    ASSERT_TRUE(!qr::reducesDelta(true, 40.0));
+    // short delta (pfDelta=-40): buys reduce
+    ASSERT_TRUE(qr::reducesDelta(true, -40.0));
+    ASSERT_TRUE(!qr::reducesDelta(false, -40.0));
+    // flat delta: nothing reduces
+    ASSERT_TRUE(!qr::reducesDelta(true, 0.0) && !qr::reducesDelta(false, 0.0));
+    // short vega (pfVega=-17600): buys reduce vega
+    ASSERT_TRUE(qr::reducesVega(true, -17600.0));
+    ASSERT_TRUE(!qr::reducesVega(false, -17600.0));
+    // lenient test: short vega + long delta → a BUY reduces vega (counted)
+    ASSERT_TRUE(qr::isReducingOrder(true, 40.0, -17600.0));
+    // and a SELL reduces delta (counted)
+    ASSERT_TRUE(qr::isReducingOrder(false, 40.0, -17600.0));
+    // a buy with SHORT delta reduces delta even though it worsens long vega
+    // (lenient semantics: reducing EITHER dimension counts)
+    ASSERT_TRUE(qr::isReducingOrder(true, -40.0, 17600.0));
+
+    // --- v4 panic blackout escalation ---
+    // re-arm during the blackout → double (capped)
+    ASSERT_TRUE(std::fabs(qr::escalateBlackout(100.0, 300.0, 300.0, 1800.0) - 600.0) < EPS);
+    ASSERT_TRUE(std::fabs(qr::escalateBlackout(100.0, 1200.0, 300.0, 1800.0) - 1800.0) < EPS); // cap
+    ASSERT_TRUE(std::fabs(qr::escalateBlackout(100.0, 1800.0, 300.0, 1800.0) - 1800.0) < EPS);
+    // clean re-arm (long after expiry) → reset to base
+    ASSERT_TRUE(std::fabs(qr::escalateBlackout(2000.0, 1800.0, 300.0, 1800.0) - 300.0) < EPS);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
+// GARCH-lite estimator (borrow plan §1): EWMA variance recursion + warmup.
+// ============================================================================
+void test_garch_lite_estimator()
+{
+    std::cout << "=== test_garch_lite_estimator ===" << std::endl;
+    wt_option::GarchLiteEstimator est;
+    wt_option::GarchLiteEstimator::Config cfg;
+    cfg.sampleSec = 60.0;
+    cfg.warmup = 3;
+    est.configure(cfg);
+
+    // Before warmup: vol() stays 0 (caller falls back to fitted atmVol).
+    est.update(1000.0, 100.0);
+    est.update(1060.0, 100.0);   // first return sample
+    ASSERT_TRUE(est.vol() == 0.0);
+
+    // After warmup samples, vol > 0 and responds to the return magnitude.
+    est.update(1120.0, 101.0);
+    est.update(1180.0, 102.0);
+    ASSERT_TRUE(est.vol() > 0.0);
+    const double v1 = est.vol();
+
+    // Larger moves → larger EWMA variance → larger annualized vol.
+    est.update(1240.0, 110.0);
+    ASSERT_TRUE(est.vol() > v1);
+
+    // A long quiet stretch (tiny moves) leaves vol finite and non-negative.
+    est.update(1300.0, 110.001);
+    ASSERT_TRUE(std::isfinite(est.vol()) && est.vol() >= 0.0);
+
+    std::cout << "  PASS" << std::endl;
+}
+
+// ============================================================================
 // P1 batch-6.0/6.5: analysis sidecars — vol/pf minute series + qstream
 // (throttled flush, day-keyed files, headers on creation).
 // ============================================================================
@@ -3068,6 +3708,7 @@ int main() {
     test_strike_finders();
     test_price_limit_checker();
     test_gvv_closed_form();
+    test_gvv_general_alpha_round_trip();
     test_prediction_evaluator();
     test_command_bus();
     test_trading_state_flags();
@@ -3084,6 +3725,10 @@ int main() {
     test_fast_incremental_gamma_correction();
     test_async_vol_fitter_publish();
     test_market_readiness_gate();
+    test_volfit_l1_dataset_gate();
+    test_volfit_weight_semantics();
+    test_volfit_startup_confirm_and_max_age();
+    test_atm_reseed_rescale();
     test_option_config_loader();
     test_optiongrid_market_freshness();
     test_pnl_tracker_session_reset();
@@ -3092,8 +3737,10 @@ int main() {
     test_simul_combo_order();
     test_p0_1_disabled_cancels_hedge();
     test_p1_1_entrust_reject_clears_order();
+    test_native_same_price_replace_side_gate();
     test_p1_min_strikes_default();
     test_p0_forward_month_routing();
+    test_front_roll_excludes_stale_global_underlying();
     test_p3_wing_flat_extrapolation();
     test_p4_atm_reanchor_cap();
     test_p1_shared_hedge_attribution();
@@ -3108,6 +3755,8 @@ int main() {
     test_max_open_offset_filter();
     test_analysis_recorder();
     test_oqm_counter_restore();
+    test_quote_risk_helpers();
+    test_garch_lite_estimator();
 
     std::cout << std::endl << "========================================" << std::endl;
     std::cout << "ALL TESTS PASSED" << std::endl;

@@ -26,6 +26,13 @@ bool PositionGuard::isBrokerStale() const {
 }
 
 void PositionGuard::onFill(bool isBuy, uint32_t qty) {
+    // P0 fix (2026-11-25): before the first broker snapshot there is no
+    // baseline — counting fills into internal=0 would make any early fill
+    // read as a huge discrepancy and disable the contract (same family as
+    // the reconcile-at-boundary poisoning). Re-baseline happens at the next
+    // snapshot instead.
+    if (!m_initialized) return;
+
     int32_t signedQty = isBuy ? static_cast<int32_t>(qty) : -static_cast<int32_t>(qty);
     m_internalPos += signedQty;
 
@@ -150,6 +157,18 @@ void PositionGuard::reconcile() {
     m_lastBrokerUpdate = m_getTime ? m_getTime() : 0;
     WTSLogger::log_by_cat("strategy", LL_INFO,
         "PositionGuard: reconciled to broker pos={}", m_brokerPos);
+}
+
+// P0 fix (2026-11-25): see header — boundary reset re-baselines from the
+// NEXT broker snapshot instead of stamping a possibly-stale broker basis.
+void PositionGuard::reset() {
+    m_initialized = false;
+    m_internalPos = 0;
+    m_brokerPos = 0;
+    m_pendingAdjust = 0;
+    m_pendingAdjustTime = 0;
+    m_disabled = false;
+    m_lastBrokerUpdate = 0;
 }
 
 } // namespace wt_option

@@ -33,7 +33,11 @@ public:
                     "riskLimits","signals","scanners","optionValueWriter","margin","pnl",
                     "pricerType","wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow",
                     "wgt_atmsig","wgt_rollema","sticky_base","improve_retreat_ratio",
-                    "gammascalp","delta_hedge","fillAttribution","scannerThrottle","ui" } },
+                    "gammascalp","delta_hedge","fillAttribution","scannerThrottle","ui",
+                    "panic","positionGuard" } },
+            { "panic", { "enable_fill_price_checker" } },
+            { "positionGuard", { "tolerance","alertCooldownSec","disableOnBreach",
+                                 "staleFreezeSec","clampLimit","undoWindowSec" } },
             { "scannerThrottle", { "cooldownSec","refireGrowth","maxActiveCombos","comboTimeoutMs" } },
             { "fillAttribution", { "enable","outputDir","keepMaxRecords","graceSeconds" } },
             { "pricer", { "wgt_vegaflow","wgt_frontfut_skew","wgt_deltaflow","wgt_atmsig",
@@ -41,13 +45,19 @@ public:
                           "hedge_ratio_delta","hedge_ratio_vega","lambda_vega_decay",
                           "lambda_vega_wing","alpha","quoting","blackCalc","trace_level",
                           "gammascalp","trade_shock_ticks","trade_shock_interval",
-                          "panic_blackout_interval","interesting_ticks_window",
-                          "interesting_ticks_vol_multiple","risk_prem_bps","risk_prem_ratio",
+                          "panic_blackout_interval",
                           "fast_use_gamma_correction","fast_full_reprice_forward_step",
-                          "rp_quote","rp_future","reduce_large_size","slow_compute_interval",
-                          "min_compute_interval" } },
+                          "slow_compute_interval",
+                          "risk_prem_opt","risk_prem_vega","wgt_exp_ddelta",
+                          "risk_shift_distort_delta","risk_shift_max_delta",
+                          "risk_shift_distort_vega","risk_shift_max_vega",
+                          "risk_shift_distort_vega_vol","risk_shift_max_vega_vol",
+                          "risk_shrink_start","enable_teenie_pricing",
+                          "min_market_depth_qty","garch_weight",
+                          "use_cross_expiry_corr" } },
             { "pricer.blackCalc", { "volCurve","risk_free","dividend" } },
-            { "pricer.blackCalc.volCurve", { "type","fitter","volcurve_weight","curve2_type","fallback","beta" } },
+            { "pricer.blackCalc.volCurve", { "type","fitter","volcurve_weight","curve2_type","beta",
+                              "alpha_dn","alpha_up","startup_confirm_versions","max_age" } },
             { "pricer.blackCalc.volCurve.fitter", { "start_time","end_time","period",
                           "decay_window","threshold","fit_all_expiries","good_points_thresh",
                           "point_count","mode","atm_reanchor_period","atm_reanchor_max_step" } },
@@ -58,6 +68,7 @@ public:
                           "quote_style","enable_offset_guard","wait_for_cancels",
                           "cancel_ack_timeout_ms","cancel_max_retries","order_delay_ms",
                           "cancel_buffer","cancel_soft_max","reject_max_new_orders",
+                          "reject_release_sec",
                           "min_intra_update_period_ms","cautious_flipping","scale_factor",
                           "enable_ioc","right_flag" } },
             { "orderManager.future", { "max_side_orders","max_position","time_in_force_ms",
@@ -65,6 +76,7 @@ public:
                           "quote_style","enable_offset_guard","wait_for_cancels",
                           "cancel_ack_timeout_ms","cancel_max_retries","order_delay_ms",
                           "cancel_buffer","cancel_soft_max","reject_max_new_orders",
+                          "reject_release_sec",
                           "min_intra_update_period_ms","cautious_flipping","scale_factor",
                           "enable_ioc","right_flag" } },
             { "orderManager.riskFilters", { "enabled","max_order_size","max_order_size_reject",
@@ -84,7 +96,9 @@ public:
             { "analysis", { "enable","interval_sec","outputDir","qstream_sec" } },
             { "delta_hedge", { "enable","threshold_delta","target_delta","max_order_size",
                                "cooldown_sec","delta_per_lot","minHedgeQty",
-                               "flatten_lead_seconds","flatten_aggr_ticks" } },
+                               "flatten_lead_seconds","flatten_aggr_ticks",
+                               "bail_pgn","bail_threshold_delta",
+                               "panic_fail_streak_sec","panic_fail_rate" } },
             { "expiries[]", { "expiry","enable","underlyingCode","hedgeCode","secondaryHedgeCodes",
                               "delta_min","delta_max","sprd_fwd","sprd_atmvol","sprd_corr",
                               "max_pos_fut","max_pos_stk","max_pos_opt","max_qsize",
@@ -106,6 +120,23 @@ public:
 
     /// Recursively validate `cfg`. `path` is the section path ("" = root).
     /// Arrays are validated element-wise for known array-of-object sections.
+    static void validateStructure(wtp::WTSVariant* cfg) {
+        // 2026-11-25 follow-up (config patch incident): a swallowed section
+        // header (e.g. `pricer:`) silently DEMOTES every following key into
+        // the previous section — the pricer then runs on defaults while the
+        // unknown-key warnings point at the wrong section. Catch it loudly at
+        // startup: required sections must exist.
+        static const char* required[] = {"pricer", "expiries", "orderManager"};
+        for (const char* sec : required) {
+            if (!cfg->has(sec)) {
+                WTSLogger::log_by_cat("strategy", LL_ERROR,
+                    "CONFIG-STRUCTURE: required section '{}' MISSING — keys below it "
+                    "are silently demoted into the previous section. Fix the YAML "
+                    "(the section header was likely dropped by a config patch).", sec);
+            }
+        }
+    }
+
     static void validate(wtp::WTSVariant* cfg, const std::string& path = "", int depth = 0) {
         if (!cfg || depth > 8) return;
         if (cfg->type() != wtp::WTSVariant::VT_Object &&

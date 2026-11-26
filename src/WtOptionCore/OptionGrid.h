@@ -100,9 +100,11 @@ public:
     void onTick(const std::string& stdCode, const TickDataRef& tick);
 
     // --- Underlying price ---
-    void setUnderlyingPrice(double price);
-    void onUnderlyingTick(double price);
-    void onUnderlyingTick(double price, uint64_t updateTime);
+    // 2026-11-26 refactor: the grid-level price is DERIVED, not state.
+    // getUnderlyingPrice() returns the front expiry's underlying price
+    // (front = nearest expiry with daysToExpiry > 0, queried on every call);
+    // freshness is derived from that expiry's price-feed timestamp.
+    // See frontExpiry() and analysis/front-underlying-roles-analysis-20261126.md.
 
     // Market freshness gate.  Timeout 0 disables the check.
     void setMarketStaleTimeoutMs(uint64_t ms) { m_marketStaleTimeoutMs = ms; }
@@ -131,11 +133,6 @@ public:
     bool hasExpiryOwnUnderlying(uint32_t expiry) const {
         return m_expiryOwnUnderlying.find(expiry) != m_expiryOwnUnderlying.end();
     }
-    /// P1-⑦ (audit 2026-11-18): true when this code is the front month's
-    /// underlying (own code of the front expiry, or the global code) — gates
-    /// the grid-level m_underlyingPrice against inter-month tick mixing.
-    /// Non-const: getFrontMonthExpiryData() may roll the front month.
-    bool isFrontUnderlyingCode(const std::string& stdCode);
     const std::string* expiryOwnUnderlying(uint32_t expiry) const {
         auto it = m_expiryOwnUnderlying.find(expiry);
         return it == m_expiryOwnUnderlying.end() ? nullptr : &it->second;
@@ -158,12 +155,16 @@ public:
     void setPeriodicCurveFitter(std::shared_ptr<PeriodicCurveFitter> fitter) { m_fitter = fitter; }
     std::shared_ptr<PeriodicCurveFitter> getPeriodicCurveFitter() const { return m_fitter; }
 
-    // --- Front month ---
-    void setFrontMonth(uint32_t exp) { m_frontMonth = exp; }
-    uint32_t getFrontMonth() const { return m_frontMonth; }
-    void setFrontMonthExpiryData(ExpiryDataPtr ed) { m_frontMonthExpiry = ed; }
-    // B6: Re-evaluate front month on session begin (roll expired contracts)
-    void reevaluateFrontMonth();
+    // --- Front month (DERIVED, no state — 2026-11-26 refactor) ---
+    // frontExpiry() returns the nearest expiry with daysToExpiry > 0
+    // (fallback: earliest expiry in the map; nullptr when empty).  The
+    // former m_frontMonth/m_frontMonthExpiry state, reevaluateFrontMonth()
+    // roll logic and the isFrontUnderlyingCode() grid-price gate were all
+    // removed: the grid-level price now derives from this query, so a
+    // maintained "which month is front" state was a redundant copy of the
+    // expiry table plus the dte predicate.  See
+    // analysis/front-underlying-roles-analysis-20261126.md.
+    ExpiryDataPtr frontExpiry() const;
 
     // Refresh daysToExpiration for all expiries (call on session begin)
     void refreshExpiryDays();
@@ -258,10 +259,11 @@ private:
     // Index: expiry → list of strikes (for fast lookup)
     std::map<uint32_t, std::vector<StrikeDataPtr>> m_strikesByExpiry;
 
-    // Underlying
-    double m_underlyingPrice = 0;
-    uint64_t m_underlyingUpdateTime = 0;  // epoch ms, 0 = unknown
-    mutable std::shared_mutex m_priceMutex;
+    // Underlying — the grid-level price is DERIVED, not a per-tick mirror:
+    // multi-series scenes read the front expiry's price; single-underlying
+    // scenes read the global price state written by the global-tick branch.
+    double m_globalUnderlyingPrice = 0;
+    uint64_t m_globalUnderlyingUpdateTime = 0;  // epoch ms, 0 = unknown
     uint64_t m_marketStaleTimeoutMs = 3000;
 
     // Per-expiry underlying: contract code -> list of expiries that use it as pricing underlying
@@ -279,10 +281,6 @@ private:
     // Risk-free rate (B2)
     double m_riskFreeRate = 0;
     std::vector<std::pair<double, double>> m_rateCurve; // (days, rate) sorted by days
-
-    // Front month
-    uint32_t m_frontMonth = 0;
-    ExpiryDataPtr m_frontMonthExpiry;
 
     // Pricer / fitter
     IOptionPricerPtr m_optionPricer;

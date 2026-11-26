@@ -133,7 +133,6 @@ public:
     double wgt_rollema         = 0.0;
     double wgt_deltaflow       = 0.0;
     double wgt_atmsig          = 0.0;
-    double wgt_sizebias        = 0.0;
     // P1 (2026-11-18): per-expiry net-delta quote skew. ddAdj =
     // -coef * expiryNetDelta(incl. exclusive hedge legs) * sign(contractDelta)
     // folded into the alpha application (:915-916). X>0 lifts bid+ask (more
@@ -176,25 +175,45 @@ public:
 
     // risk premia (commented in original; defaults 0)
     double risk_prem_opt = 0.0;
-    double risk_prem_fut = 0.0;
-    double rp_quote      = 0.0;
+    // v3 (2026-11-25): separate vega risk tolerance — normalizes
+    // vega_risk_norm to ±1 at max_vega. 0 = legacy fallback (risk_prem_opt × 100).
+    double risk_prem_vega = 0.0;
+
+    // v3 L3 secondary risk shift (original quantbox quadratic form, revived):
+    //   s = −sign(pgn) · distort · pgn², clamp ±max;  adj += s × greek_leg.
+    // Price units (元). 0 distort = off (previous behavior: channel dead).
+    double risk_shift_distort_delta = 0.0;
+    double risk_shift_max_delta     = 0.0;
+    double risk_shift_distort_vega  = 0.0;
+    double risk_shift_max_vega      = 0.0;
+
+    // B12 numeric contract (deprecated migration): s_vol =
+    // −sign(pgn)·distort_vol·pgn², then adj = s_vol × vega_leg, where vega_leg
+    // is yuan per 1 vol percentage point. Therefore 0.005 means 0.005 vol
+    // points, NOT a 0.005 sigma fraction; no implicit 100× conversion. A unit
+    // migration would be a separate pricing behavior change, not key cleanup.
+    // Complete positive pairs take precedence over the legacy price keys.
+    double risk_shift_distort_vega_vol = 0.0;
+    double risk_shift_max_vega_vol     = 0.0;
+
+    // v3 soft-limit size shrink: the quote side that worsens a risk dimension
+    // shrinks linearly from shrinkStart (0.8) to zero at 1.0 (directional
+    // suppression at the quote layer). 1.0 = disabled (previous behavior).
+    double risk_shrink_start = 1.0;
+
+    // v3-P1 (borrow plan): minimum best-bid/ask size required to quote at all
+    // (anti fishing on razor-thin books). 0 = disabled (previous behavior).
+    double min_market_depth_qty = 0.0;
 
     // close
     bool    enable_auto_close = false;
     int32_t close_pos_thresh = 1;
-    int32_t reduce_large_size = 100;
-    int32_t interesting_ticks_opt = 5;
-    int32_t interesting_ticks_fut = 5;
 
     // hedge ratios
     double hedge_ratio_delta = 0.0;
     double hedge_ratio_vega  = 0.0;
     double lambda_vega_decay = 0.0;
     double lambda_vega_wing  = 0.0;
-
-    // scanner bookahead thresholds
-    int32_t max_size_ahead         = 100;
-    int32_t max_size_ahead_inside  = 50;
 
     int32_t trace_level = 0;
 
@@ -302,6 +321,22 @@ public:
     void setImproveRetreatRatio(double v) { m_config.improve_retreat_ratio = v; }
     void setTradeShockTicks(int32_t v) { m_prop_trade_shock_ticks = v; }
 
+    /// v3 risk-shift hot setters (SETPARAM whitelist; all consumed from
+    /// m_config on the next quote refresh).
+    void setRiskShiftDistortDelta(double v) { m_config.risk_shift_distort_delta = v; }
+    void setRiskShiftMaxDelta(double v)     { m_config.risk_shift_max_delta = v; }
+    void setRiskShiftDistortVega(double v)  { m_config.risk_shift_distort_vega = v; }
+    void setRiskShiftMaxVega(double v)      { m_config.risk_shift_max_vega = v; }
+    void setRiskShrinkStart(double v)       { m_config.risk_shrink_start = v; }
+    /// 2026-11-25 follow-up: vol-space vega shift (preferred over price keys).
+    void setRiskShiftDistortVegaVol(double v) { m_config.risk_shift_distort_vega_vol = v; }
+    void setRiskShiftMaxVegaVol(double v)     { m_config.risk_shift_max_vega_vol = v; }
+    /// Effective risk tolerances (mirrors setupRiskTolerances incl. fallbacks).
+    double riskTolDelta() const;
+    double riskTolVega() const;
+    /// Current sticky band downweight (1 = full sticky).
+    double stickyScale() const { return m_stickyScale; }
+
     // time (replaces ClockMonitor)
     double getTime() const { return m_time; }
     void setTime(double t) {
@@ -333,20 +368,14 @@ private:
         , OptionData* od);
 
     class ExpiryRiskConfig;
-    bool updateOurMarketSide(OptionTradingData* otd
-        , side_t side, double bid, double ask, double mid
-        , double bid_tick_size, double ask_tick_size
-        , const ExpiryRiskConfig& erc, int32_t stk_pos);
-    bool updateOurMarketSideFuture(UnderlyingTradingData* utd
-        , side_t side
-        , double bid, double ask, double mid, int32_t bid_size, int32_t ask_size
-        , double bid_tick_size, double ask_tick_size
-        , const ExpiryRiskConfig& erc);
+    // (updateOurMarketSide/…Future removed 2026-11-25: dead code — no call
+    // sites; the live quoting path is computeOurMarkets' direct block.)
 
     void clearLastTrades(const std::string& instr);
 
     void updateRiskShiftsDelta(OptionGrid* grid);
     void updateRiskShiftsVega(OptionGrid* grid);
+    void updateStickyScale(OptionGrid* grid);
 
     void alpha_adjustment(OptionData* option);
     void risk_adjustment(OptionData* option);
@@ -445,7 +474,7 @@ private:
         , double interesting_cutoff
         , const CompositeOptionPricerConfig& config);
     static double __compute_teenie_price(
-        side_t dir, double our_px, int32_t our_sz, const PriceSize& mkt, double tick_size);
+        side_t dir, double our_px, double mkt_px, double tick_size);
 
 private:
     double __apply_sticky_params(
@@ -458,7 +487,8 @@ private:
     void   __setShouldComputeRiskShiftsVega(bool b) { m_bShouldComputeRiskShiftsVega = b; }
     int32_t __computeQuoteSize(const ExpiryRiskConfig& erc
         , side_t side, double mid, double px
-        , int32_t opt_pos, int32_t stk_pos, double delta);
+        , int32_t opt_pos, int32_t stk_pos, double delta
+        , double deltaSign, double pgnDelta, double pgnVega);
     double __computeEffectiveDelta(uint32_t exp0);
 
 private:
@@ -477,6 +507,9 @@ private:
     double m_time = 0;
     uint64_t m_marketNowMs = 0;
     uint64_t m_marketStaleTimeoutMs = 0;
+    // v3: sticky band downweight under risk pressure (QuoteRiskHelpers::stickyScaleFor).
+    // Recomputed each updateRiskShifts pass; 1.0 when risk-shift features off.
+    double m_stickyScale = 1.0;
     int32_t m_traceLevel = 0;
 
     UnderlyingTradingDataPtr m_frontUnderlier;
@@ -501,8 +534,6 @@ private:
     std::map<std::string, OrderStubPtr> m_instrument_lastbuy;
     std::map<std::string, OrderStubPtr> m_instrument_lastsell;
     int32_t m_prop_trade_shock_ticks = 1;
-    int32_t m_prop_interesting_ticks_option = 5;
-    int32_t m_prop_interesting_ticks_future = 5;
 
     int32_t m_numcxl = 0, m_numrej = 0, m_numpos = 0, m_numfil = 0;
     std::map<uint32_t, int32_t> m_exp_numcxl, m_exp_numrej, m_exp_numpos, m_exp_numfil;
@@ -527,6 +558,9 @@ private:
     bool m_bShouldComputeRiskShiftsVega = true;
 
     mutable std::optional<double> m_tvPanicSignalTriggerTime;
+    // v4: escalating panic blackout (starts at panic_blackout_interval, doubles
+    // on re-arm within the blackout, cap 1800s). mutable: reset in isPanicked.
+    mutable double m_panicBlackoutSec = 0;
 
     class ExpiryRiskConfig
     {

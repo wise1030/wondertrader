@@ -83,6 +83,15 @@ public:
 
     virtual void setATMVol(double atmvol) {}
     virtual void setInitialized(bool b) {}
+
+    /// Re-base the curve's stored normalization by `factor` after the ATM
+    /// anchor moved (2026-11-26 scale-race fix).  Curves that fit in ABSOLUTE
+    /// vol space (GVV: eval divides by the live anchor) are anchor-invariant
+    /// and keep the default no-op.  Curves that store NORMALIZED multipliers
+    /// (Linear: y = IV/anchor_at_fit; Power: a) must scale them by
+    /// old_anchor/new_anchor so the absolute vol they encode stays unchanged.
+    /// factor = oldAnchor / newAnchor.
+    virtual void rescale(double /*factor*/) {}
 };
 
 // Convenience alias used by concrete configs.
@@ -95,16 +104,17 @@ protected:
 };
 
 // B2-2.2 convergence: canonical curve-type whitelists (single source).
-// Previously three copies of these rules drifted apart — the OptionPricer2
-// factory accepted "power" for the main curve while the AsyncVolFitter and
-// strategy-init whitelists rejected it.  All validation now goes through
-// these helpers; createVolCurveByType (OptionPricer2) remains the sole
-// creator, defaulting to gvv for any unrecognised string.
+// 2026-11-26 design decision (user-approved): the curve pair is chosen by
+// CONFIG, never by runtime fallback —
+//   curve1 (main):  "gvv" | "power"   (weight=1 pricing / 0<w<1 blend)
+//   curve2:         "linear"          (weight=0 pricing)
+// "constant" is retired (inaccurate as a smile; was the silent fallback of
+// the removed fallback chain) and is no longer an accepted type anywhere.
 inline bool isValidMainCurveType(const std::string& t) {
-    return t == "gvv" || t == "linear" || t == "constant";
+    return t == "gvv" || t == "power";
 }
 inline bool isValidCurve2Type(const std::string& t) {
-    return t == "gvv" || t == "power" || t == "linear" || t == "constant";
+    return t == "linear";
 }
 
 } // namespace wt_option

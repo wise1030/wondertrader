@@ -184,14 +184,29 @@ int32_t OptionQuoteManager::updateOrders(const MultiMarket& desired, bool cancel
     }
     if (m_hardFlatMode) return 0;   // latched until session reset
     if (m_cfg.reject_max_new_orders >= 0 && m_numReject >= m_cfg.reject_max_new_orders) {
-        if (!m_rejectOnlyLogged) {
-            m_rejectOnlyLogged = true;
-            WTSLogger::log_by_cat("strategy", LL_WARN,
-                "OQM: {} REJECT-ONLY entered (entrust rejects={} >= {}); new orders suppressed",
-                m_code, m_numReject, m_cfg.reject_max_new_orders);
+        // P0 fix (2026-11-24): release the latch after a quiet window so a
+        // recovered account / transient reject storm self-heals within the
+        // session instead of staying dead until the next process restart.
+        // Any new entrust reject re-latches (and re-logs, because the logged
+        // flag resets below).
+        const double quiet = (m_getTime && m_lastRejectTime > 0)
+            ? (m_getTime() - m_lastRejectTime) : 0.0;
+        if (!(m_cfg.reject_release_sec > 0 && quiet >= m_cfg.reject_release_sec)) {
+            if (!m_rejectOnlyLogged) {
+                m_rejectOnlyLogged = true;
+                WTSLogger::log_by_cat("strategy", LL_WARN,
+                    "OQM: {} REJECT-ONLY entered (entrust rejects={} >= {}); new orders suppressed",
+                    m_code, m_numReject, m_cfg.reject_max_new_orders);
+            }
+            m_rejectOnlyMode = true;
+            return 0;
         }
-        m_rejectOnlyMode = true;
-        return 0;
+        m_numReject = 0;
+        m_rejectRetryCount = 0;
+        m_rejectOnlyLogged = false;
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "OQM: {} REJECT-ONLY released after {:.0f}s without new rejects",
+            m_code, quiet);
     }
     m_rejectOnlyMode = false;
 
@@ -405,6 +420,30 @@ int32_t OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
 
         // Send new quote/order (A4: style-aware single leg)
         {
+            // P0 fix (2026-11-25): enforce max_side_orders — parsed but never
+            // checked, so with wait_for_cancels=false replacements went out
+            // before cancel acks landed and one side could hold several live
+            // orders (multi-layer ordBid/ordAsk in the UI was REAL backend
+            // state). cancelPending still counts: until the ack lands the
+            // venue may hold it. Cancels above stay unblocked (excess-size
+            // reduction must never deadlock on this gate).
+            // A native same-price quote replacement does not add a second
+            // layer, so max_side_orders must not wait for a cancel ack that
+            // was intentionally never requested. Any other-price live order
+            // still forces the conservative cancel/ack path.
+            bool nativeSamePriceReplace = false;
+            if (m_cfg.enable_quote_api) {
+                bool hasSame = false, hasOther = false;
+                for (const auto& o : orders) {
+                    if (!o.active) continue;
+                    if (std::abs(o.price - desired.px()) <= 1e-6) hasSame = true;
+                    else hasOther = true;
+                }
+                nativeSamePriceReplace = hasSame && !hasOther;
+            }
+            if (!nativeSamePriceReplace && m_cfg.max_side_orders > 0
+                && activeSideCount(isBuy) >= m_cfg.max_side_orders)
+                return txns;   // wait for acks; retry next cycle
             uint32_t id = sendSingle(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()));
             if (id != 0) {
                 trackOrder(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()), id);
@@ -416,6 +455,8 @@ int32_t OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
         if (m_cfg.enable_quote_api && m_cfg.quote_style == OptionQuoteManager::Config::QS_PAIRED) {
             // Paired quote API on a replacing exchange: just resend with new
             // size (auto-replaces) — B21: track the NEW localid
+            // This branch is already a native same-price replacement; it
+            // cannot create an additional live layer, so no side-count gate.
             uint32_t id = sendSingle(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()));
             if (id != 0) {
                 trackOrder(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()), id);
@@ -432,6 +473,8 @@ int32_t OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
                     ++txns;
                 }
             }
+            if (m_cfg.max_side_orders > 0 && activeSideCount(isBuy) >= m_cfg.max_side_orders)
+                return txns;   // wait for the cancel acks before resending
             uint32_t id = sendSingle(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()));
             if (id != 0) {
                 trackOrder(isBuy, desired.px(), static_cast<uint32_t>(desired.sz()), id);
@@ -440,6 +483,19 @@ int32_t OptionQuoteManager::updateSide(bool isBuy, const PriceSize& desired)
         }
     }
     return txns;
+}
+
+// ============================================================================
+// activeSideCount - P0 fix (2026-11-25): live orders on one side, including
+// cancel-pending ones (the venue may still hold them until the ack lands).
+// ============================================================================
+uint32_t OptionQuoteManager::activeSideCount(bool isBuy) const
+{
+    const auto& orders = isBuy ? m_bidOrders : m_askOrders;
+    uint32_t n = 0;
+    for (const auto& o : orders)
+        if (o.active) ++n;
+    return n;
 }
 
 // ============================================================================
@@ -588,11 +644,15 @@ bool OptionQuoteManager::onOrderRejected(uint32_t localid)
     if (m_quoteStats)
         m_quoteStats->onReject(m_code);
     m_numReject++;   // P2-3: previously never incremented anywhere
+    // P0 fix (2026-11-24): record the reject time unconditionally — the
+    // reject-release window (reject_release_sec) keys on it, and the retry
+    // pacing below only updated it while retry budget remained (after
+    // exhaustion the window would have been measured from a stale stamp).
+    m_lastRejectTime = m_getTime ? m_getTime() : 0;
 
     // Same retry policy as a zero-fill cancel: the level must come back.
     if (m_rejectRetryCount < m_rejectMaxRetries) {
         m_rejectRetryCount++;
-        m_lastRejectTime = m_getTime ? m_getTime() : 0;
         m_retryPending = true;
         WTSLogger::log_by_cat("strategy", LL_WARN,
             "OQM reject retry (entrust): {} attempt {}/{} pending",

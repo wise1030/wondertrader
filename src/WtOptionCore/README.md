@@ -124,7 +124,7 @@ Worker 线程 (唯一状态写者)
 | BlackImpliedCalculator | BlackImpliedCalculator.h/.cpp | Black76 隐含波动率 Brent 求解（PriceError 残差函数） |
 | OptionPricer2 | OptionPricer2.h/.cpp | 定价内核：forward/maturity/discount 装配（BCI thread_local 单实例、全量赋值——去键化消除 purge 后悬空指针整类风险）、理论价 + Greeks、**per-strike 平价合成远期反推 IV**（`computeImpliedValues`）、支持 OpenMP |
 | GvvVolCurve | GvvVolCurve.h/.cpp | GVV 波动率曲面：WLS3 栈上回归 + Brent α 搜索、α=1 闭式快路径、log-moneyness 约定 x=ln(K/F)、归一化输出 iv/atmVol、判别式负值防护 |
-| LinearVolCurve / ConstantVolCurve / PowerVolCurve | 同名文件 | 备用曲线：线性 / 常数 / 幂律双曲线 |
+| LinearVolCurve / PowerVolCurve | 同名文件 | curve2 线性曲线（weight=0 定价）/ 幂律双曲线（主曲线备选）；ConstantVolCurve 已随 fallback 机制删除（2026-11-26） |
 | PeriodicCurveFitter | PeriodicCurveFitter.* | 拟合调度（period/decay_window/start/end、good-points 阈值、ups+downs 象限检查） |
 | AsyncVolFitter | AsyncVolFitter.h | 快照收集 → SingleFlightTaskRunner 异步拟合 → 完成后发布曲线版本 |
 | IVolCurve | IVolCurve.h | 曲线接口（dataset_t / fit / eval） |
@@ -720,7 +720,7 @@ src/WtOptionCore/
 ├── CompositeOptionPricer.h/.cpp        # 做市定价器（alpha+风控调整）
 ├── GammaScalpOptionPricer.h/.cpp       # gamma scalping 策略 pricer
 ├── GvvVolCurve.h/.cpp                  # GVV 曲面（WLS3+Brent α）
-├── LinearVolCurve / ConstantVolCurve / PowerVolCurve   # 备用曲线
+├── LinearVolCurve / PowerVolCurve                      # curve2 linear / 主曲线备选（ConstantVolCurve 已删除）
 ├── PeriodicCurveFitter.h/.cpp          # 拟合调度
 ├── AsyncVolFitter.h                    # 异步拟合快照/发布
 ├── IVolCurve.h                         # 曲线接口

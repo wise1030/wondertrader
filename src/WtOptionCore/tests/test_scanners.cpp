@@ -228,7 +228,6 @@ void test_volspread_scanner_semantics()
 {
     std::cout << "=== test_volspread_scanner_semantics ===" << std::endl;
     auto grid = std::make_shared<OptionGrid>("IO", "CFFEX.000300", nullptr, nullptr);
-    grid->setUnderlyingPrice(4000.0);
 
     auto mk = [&](uint32_t exp, double iv) {
         auto sd = grid->findOrCreateStrike(exp, 4000.0);
@@ -242,6 +241,8 @@ void test_volspread_scanner_semantics()
     };
     mk(202612, 0.18);
     mk(202701, 0.22);
+    // 2026-11-26: grid-level price is derived from the front expiry.
+    grid->getExpiryData(202612)->setUnderlyingPrice(4000.0);
 
     ScannerConfig sc; sc.name = "volspread"; sc.enabled = true; sc.min_edge = 0.01;
     auto scanner = ScannerFactory::instance().createScanner("VolSpreadScanner", sc);

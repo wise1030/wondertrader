@@ -49,7 +49,11 @@ void UiSnapshotBuilder::buildLeg(const OptionData& od, double atmVol, UiLegView&
     }
 
     // 0 is the engine's "not computed" sentinel -> JSON null downstream.
-    const double theo = od.getTheoPrice();
+    // P0 fix (2026-11-25): hide theo unless actually priced — during
+    // readiness blocks the stored theo is stale (last priced pass) and must
+    // not look live on the UI.  activeValues() honours the double-buffer
+    // active index (values(0) is a literal slot, not the live one).
+    const double theo = od.activeValues().isPriced() ? od.getTheoPrice() : 0.0;
     if (theo != 0.0) { out.hasTheo = true; out.theo = theo; }
 
     const double iv = od.getImpliedVol();
@@ -84,14 +88,36 @@ void UiSnapshotBuilder::buildLeg(const OptionData& od, double atmVol, UiLegView&
         if (tick <= 0) tick = 1.0;
         if (ourBid > 0) {
             out.hasOb = true; out.obid = ourBid;
-            if (mkt.ask > 0 && ourBid >= mkt.ask - tick * 0.5) out.bqp = -1;   // crossing
+            // v3-P1 (borrow-garch-book-scanner-alpha-plan): TRUE queue position
+            // from the visible book — total bid qty strictly ABOVE our bid
+            // (orders ahead of us in queue). Falls back to the tick-gap
+            // approximation when no depth is available.
+            if (mkt.numBidLevels > 0) {
+                if (mkt.ask > 0 && ourBid >= mkt.ask - tick * 0.5) out.bqp = -1;   // crossing
+                else {
+                    double aheadQty = 0.0;
+                    for (int32_t i = 0; i < mkt.numBidLevels; ++i) {
+                        if (mkt.bidPrices[i] > ourBid + 1e-9) aheadQty += mkt.bidQty[i];
+                    }
+                    out.bqp = static_cast<int32_t>(aheadQty);
+                }
+            } else if (mkt.ask > 0 && ourBid >= mkt.ask - tick * 0.5) out.bqp = -1;   // crossing
             else if (mkt.bid > 0 && ourBid >= mkt.bid - tick * 0.5) out.bqp = 0; // at best
             else if (mkt.bid > 0) out.bqp = (int32_t)std::ceil((mkt.bid - ourBid) / tick);
             else out.bqp = 0;   // no market bid — our quote IS the best
         }
         if (ourAsk > 0) {
             out.hasOb = true; out.oask = ourAsk;
-            if (mkt.bid > 0 && ourAsk <= mkt.bid + tick * 0.5) out.aqp = -1;   // crossing
+            if (mkt.numAskLevels > 0) {
+                if (mkt.bid > 0 && ourAsk <= mkt.bid + tick * 0.5) out.aqp = -1;   // crossing
+                else {
+                    double aheadQty = 0.0;
+                    for (int32_t i = 0; i < mkt.numAskLevels; ++i) {
+                        if (mkt.askPrices[i] < ourAsk - 1e-9) aheadQty += mkt.askQty[i];
+                    }
+                    out.aqp = static_cast<int32_t>(aheadQty);
+                }
+            } else if (mkt.bid > 0 && ourAsk <= mkt.bid + tick * 0.5) out.aqp = -1;   // crossing
             else if (mkt.ask > 0 && ourAsk <= mkt.ask + tick * 0.5) out.aqp = 0; // at best
             else if (mkt.ask > 0) out.aqp = (int32_t)std::ceil((ourAsk - mkt.ask) / tick);
             else out.aqp = 0;   // no market ask — our quote IS the best
@@ -109,6 +135,7 @@ void UiSnapshotBuilder::buildExpiry(const std::vector<StrikeDataPtr>& strikes,
     out.fwd = ed.getForward();
     out.fwdReady = ed.isForwardReady();
     out.fitReady = ed.isFitReady();
+    out.curvesReady = ed.isCurvesReady();
     out.underlyingValid = ed.isUnderlyingPriceValid();
     out.daysToExpiry = ed.daysToExpiry();
 
@@ -336,6 +363,7 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
 
     w.key("risk"); w.StartObject();
     w.key("limitsBreached"); w.Bool(v.limitsBreached);
+    w.key("severity"); w.Double(v.riskSeverity);
     w.key("tps"); w.Int(v.tps);
     w.key("tpsMax"); w.Int(v.tpsMax);
     w.key("ordersSent"); w.Uint(v.ordersSent);
@@ -387,6 +415,7 @@ void UiSnapshotBuilder::encodeSnapshot(const UiSnapshotView& v, const std::strin
         w.numOrNull("fwd", e.fwd);
         w.key("fwdReady"); w.Bool(e.fwdReady);
         w.key("fitReady"); w.Bool(e.fitReady);
+        w.key("curvesReady"); w.Bool(e.curvesReady);
         w.key("underlyingValid"); w.Bool(e.underlyingValid);
         w.nullable("atmVol", e.hasAtmVol, e.atmVol);
         w.nullable("atmVolSprd", e.hasAtmVolSprd, e.atmVolSprd);

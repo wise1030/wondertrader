@@ -121,6 +121,7 @@ set(OPTION_CORE_HEADERS
     LatencyHistogram.h
     SingleFlightTaskRunner.h
     AsyncVolFitter.h
+    AsyncStress.h
     OrderGateway.h
     PositionBook.h
     optioncoretypes.h

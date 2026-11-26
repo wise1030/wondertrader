@@ -10,6 +10,7 @@
 #pragma once
 
 #include "WTSVariant.hpp"
+#include "PositionGuard.h"
 
 #include <cstdint>
 #include <map>
@@ -27,6 +28,7 @@ public:
         double minComputeInterval = 0.02;
         uint64_t marketFreshTimeoutMs = 3000;
         double slowComputeInterval = 15.0;
+        PositionGuard::Config positionGuard;
     };
 
     struct Result {

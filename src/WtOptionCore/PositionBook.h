@@ -80,7 +80,10 @@ public:
     double net(const std::string& code) const { return get(code).net(); }
     double gross(const std::string& code) const { return get(code).gross(); }
 
-    Snapshot snapshot() const { return m_positions; }
+    Snapshot snapshot() const { return m_positions; }  // cross-thread value copy
+    /// Worker-only zero-copy enumeration. Callers must not mutate or retain the
+    /// reference across threads; use snapshot() for an immutable handoff.
+    const Snapshot& view() const { return m_positions; }
     uint64_t version() const { return m_seq; }
 
 private:

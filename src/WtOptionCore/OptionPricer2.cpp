@@ -32,7 +32,6 @@
 #include "OptionGreeks.h"
 #include "GvvVolCurve.h"
 #include "LinearVolCurve.h"
-#include "ConstantVolCurve.h"
 #include "PeriodicCurveFitter.h"
 
 #include <limits>
@@ -96,10 +95,10 @@ IVolCurvePtr createVolCurveByType(const std::string& type, int powerParams,
                                   double gvvBeta, double gvvAlphaDn,
                                   double gvvAlphaUp)
 {
+    // 2026-11-26: whitelist is curve1 = gvv|power, curve2 = linear; unknown
+    // strings fall through to GVV (same defensive default as before).
     if (type == "linear")
         return std::make_shared<LinearVolCurve>();
-    if (type == "constant")
-        return std::make_shared<ConstantVolCurve>(1.0);  // flat ATM multiplier
     if (type == "power")
         return std::make_shared<PowerVolCurve>(static_cast<GvvVolCurve::Parameter>(powerParams));
     GvvVolCurve::Config cfg;
@@ -133,6 +132,29 @@ void OptionPricer2::ExpiryInfo::setATMV(double atmv)
     // Propagate to vol curves (critical for GVV fit: m_atmvol scales vi and volvol2)
     if (m_spVolCurve)  m_spVolCurve->setATMVol(atmv);
     if (m_spVolCurve2) m_spVolCurve2->setATMVol(atmv);
+}
+
+void OptionPricer2::ExpiryInfo::setATMVReseed(double atmv)
+{
+    // Bootstrap scale-correction (2026-11-26 scale-race fix): the anchor move
+    // corrects OUR estimate of the ATM vol — the market did not move — so the
+    // curves' stored normalizations are re-based by old/new to keep the
+    // ABSOLUTE vol they encode unchanged.  GVV is anchor-invariant (eval
+    // divides by the live anchor) and its rescale() is a no-op; linear/power
+    // store normalized multipliers and would otherwise be silently scaled by
+    // the anchor change (the exact mechanism of the 2026-11-26 21:05
+    // explosion).  The periodic re-anchor path deliberately does NOT re-base:
+    // there the anchor intentionally follows the market between fits.
+    const double old = m_atmvol;
+    if (old > 0.0 && atmv > 0.0 && std::fabs(atmv - old) > 1e-12) {
+        const double factor = old / atmv;
+        if (m_spVolCurve)  m_spVolCurve->rescale(factor);
+        if (m_spVolCurve2) m_spVolCurve2->rescale(factor);
+        WTSLogger::log_by_cat("strategy", LL_INFO,
+            "ATM bootstrap reseed exp={} {:.4f} -> {:.4f} (curves re-based by {:.4f})",
+            m_expiry, old, atmv, factor);
+    }
+    setATMV(atmv);
 }
 
 void OptionPricer2::ExpiryInfo::computeForwardPrice(OptionGrid* grid, const ExpiryDataPtr& ed)
@@ -259,34 +281,81 @@ const OptionPricer2::ExpiryInfoPtr& OptionPricer2::getExpiryInfo(uint32_t exp) c
 void OptionPricer2::publishFittedCurves(const std::vector<FittedCurveSet>& fitted)
 {
     for (const auto& f : fitted) {
-        if (!f.volCurve || f.version == 0) continue;
-        uint64_t& version = m_curveVersion[f.expiry];
-        if (f.version <= version) continue;
+        if (f.version == 0 && f.version2 == 0) continue;
+        if (!(f.atmVol > 0) || !std::isfinite(f.atmVol)) continue;
+        uint64_t& version  = m_curveVersion[f.expiry];
+        uint64_t& version2 = m_curve2Version[f.expiry];
         ExpiryInfoPtr ei = getExpiryInfo(f.expiry);
-        ei->m_spVolCurve = f.volCurve;
-        ei->m_spVolCurve2 = f.volCurve2;
-        ei->m_atmvol = f.atmVol;
-        ei->m_spVolCurve->setATMVol(f.atmVol);
-        ei->m_spVolCurve->setATMForward(ei->m_atmforward);
-        ei->m_spVolCurve->setMaturity(ei->m_maturity);
-        if (ei->m_spVolCurve2) {
-            ei->m_spVolCurve2->setATMVol(f.atmVol);
+
+        bool updated = false;
+        // Re-base the ATM anchor instead of rejecting (2026-11-26): a
+        // bootstrap reseed or re-anchor step may land between submit and
+        // publish.  The curve was fitted with normalization f.atmVol; keeping
+        // the LIVE anchor `cur` and scaling the stored multipliers by
+        // f.atmVol/cur leaves the absolute vol they encode unchanged (GVV is
+        // anchor-invariant — rescale() is a no-op for it).  Reverting the
+        // anchor to the snapshot value would silently undo a re-anchor step.
+        const double cur = (ei->m_atmvol > 0 && std::isfinite(ei->m_atmvol))
+            ? ei->m_atmvol : f.atmVol;
+
+        if (f.volCurve && f.version > version) {
+            if (std::fabs(f.atmVol - cur) > 1e-12) f.volCurve->rescale(f.atmVol / cur);
+            ei->m_spVolCurve = f.volCurve;
+            ei->m_spVolCurve->setATMVol(cur);
+            ei->m_spVolCurve->setATMForward(ei->m_atmforward);
+            ei->m_spVolCurve->setMaturity(ei->m_maturity);
+            version = f.version;
+            updated = true;
+        }
+        if (f.volCurve2 && f.version2 > version2) {
+            if (std::fabs(f.atmVol - cur) > 1e-12) f.volCurve2->rescale(f.atmVol / cur);
+            ei->m_spVolCurve2 = f.volCurve2;
+            ei->m_spVolCurve2->setATMVol(cur);
             ei->m_spVolCurve2->setATMForward(ei->m_atmforward);
             ei->m_spVolCurve2->setMaturity(ei->m_maturity);
+            version2 = f.version2;
+            updated = true;
         }
-        version = f.version;
+        if (!updated) continue;
+        // Keep the expiry anchor at the live value (the curves were re-based
+        // onto it); only adopt the snapshot value when there was none.
+        ei->m_atmvol = cur;
+        ei->m_prop_atmv = round_to_precision(cur, 0.0001);
 
-        // Market-readiness single flag: a successfully published curve is the
-        // proof that live market points were sufficient to fit — the expiry
-        // becomes quotable/scannable from the next compute pass on.  The
-        // drought/session re-block is the strategy's responsibility.
+        ++m_publishCount[f.expiry];
+        m_publishTime[f.expiry] = m_grid ? m_grid->getComputeTime() : 0.0;
+
+        // Dynamic readiness (L4): curves ready = required curves available
+        // for the CURRENT weight && startup-confirm satisfied.  (Freshness is
+        // re-checked every compute pass in initValuesCompute; here the set is
+        // fresh by construction.)
+        refreshCurvesReady(f.expiry);
+
+        // A successful accepted publish is the proof that live market points
+        // were sufficient to fit — lift the strategy-owned drought/session
+        // block (as before the curvesReady split).  Drought re-blocks stay
+        // the strategy's responsibility on subsequent submits.
         if (m_grid) {
             ExpiryDataPtr ed = m_grid->getExpiryData(f.expiry);
-            if (ed && !ed->isFitReady()) {
-                ed->setFitReady(true);
-                WTSLogger::log_by_cat("strategy", LL_INFO,
-                    "MarketReadiness: expiry {} ready — vol fit published (curve v{})",
-                    f.expiry, f.version);
+            if (ed) {
+                if (!ed->isFitReady())
+                    ed->setFitReady(true);
+                if (ed->isCurvesReady()) {
+                    WTSLogger::log_by_cat("strategy", LL_INFO,
+                        "MarketReadiness: expiry {} curves ready — publish v{}/v{} "
+                        "(main={}, curve2={}, weight={:.2f}, publish #{})",
+                        f.expiry, version, version2,
+                        f.volCurve ? "ok" : "absent",
+                        f.volCurve2 ? "ok" : "absent",
+                        getGvvWeight(f.expiry), m_publishCount[f.expiry]);
+                } else {
+                    WTSLogger::log_by_cat("strategy", LL_WARN,
+                        "MarketReadiness: expiry {} published but NOT ready "
+                        "(required curve missing for weight={:.2f} or startup-confirm "
+                        "{}/{} pending)",
+                        f.expiry, getGvvWeight(f.expiry), m_publishCount[f.expiry],
+                        m_config.volcurve_startup_confirm_versions);
+                }
             }
         }
     }
@@ -296,6 +365,101 @@ uint64_t OptionPricer2::getCurveVersion(uint32_t exp) const
 {
     auto it = m_curveVersion.find(exp);
     return it == m_curveVersion.end() ? 0 : it->second;
+}
+
+uint64_t OptionPricer2::getCurve2Version(uint32_t exp) const
+{
+    auto it = m_curve2Version.find(exp);
+    return it == m_curve2Version.end() ? 0 : it->second;
+}
+
+uint64_t OptionPricer2::getAnyCurveVersion(uint32_t exp) const
+{
+    return std::max(getCurveVersion(exp), getCurve2Version(exp));
+}
+
+double OptionPricer2::getGvvWeight(uint32_t exp) const
+{
+    auto it = m_gvv_weight.find(exp);
+    return it != m_gvv_weight.end() ? it->second : m_config.volcurve_weight;
+}
+
+void OptionPricer2::setATMVolReseed(uint32_t exp, double v)
+{
+    getExpiryInfo(exp)->setATMVReseed(v);
+}
+
+// ----------------------------------------------------------------------------
+// Dynamic readiness (L4, 2026-11-26): a single static fitReady flag cannot
+// express "the curves THIS weight actually prices with are available".  The
+// weight is hot-adjustable (SETPARAM volcurve_weight), so readiness is
+// re-evaluated on every publish, every weight change, and every compute pass
+// (freshness), and stored in ExpiryData::curvesReady — the market-readiness
+// drought flag (fitReady) stays strategy-owned and orthogonal.
+// ----------------------------------------------------------------------------
+bool OptionPricer2::hasRequiredCurves(uint32_t exp) const
+{
+    const double w = std::max(0.0, std::min(1.0, getGvvWeight(exp)));
+    const ExpiryInfoPtr& ei = getExpiryInfo(exp);
+    const bool mainOk = (w > 0.0)
+        ? (ei->m_spVolCurve && ei->m_spVolCurve->isInitialized()
+           && getCurveVersion(exp) > 0)
+        : true;   // weight=0: main curve is a gate-only mirror, not priced
+    const bool c2Ok = (w < 1.0)
+        ? (ei->m_spVolCurve2 && ei->m_spVolCurve2->isInitialized()
+           && getCurve2Version(exp) > 0)
+        : true;   // weight=1: curve2 not priced
+    return mainOk && c2Ok;
+}
+
+void OptionPricer2::refreshCurvesReady(uint32_t exp)
+{
+    if (!m_grid) return;
+    ExpiryDataPtr ed = m_grid->getExpiryData(exp);
+    if (!ed) return;
+
+    // Before ANY accepted publish this flag is not ours to gate: pre-publish
+    // readiness is the strategy-owned fitReady domain (and tests may preset
+    // it).  Gating starts once a curve history exists.
+    auto cntIt = m_publishCount.find(exp);
+    const uint64_t cnt = cntIt != m_publishCount.end() ? cntIt->second : 0;
+    if (cnt == 0) return;
+
+    bool ready = hasRequiredCurves(exp);
+
+    // Startup-confirm: an expiry must accumulate N accepted publishes before
+    // its first unlock — one poisoned snapshot can never arm quoting alone.
+    const int32_t confirm = std::max<int32_t>(1, m_config.volcurve_startup_confirm_versions);
+    if (ready && cnt < static_cast<uint64_t>(confirm))
+        ready = false;
+
+    // Freshness: an accepted publish older than volcurve_max_age (compute
+    // clock) stops pricing — a stale smile must not quote forever.
+    if (ready && m_config.volcurve_max_age > 0) {
+        auto tIt = m_publishTime.find(exp);
+        if (tIt != m_publishTime.end()) {
+            const double now = m_grid->getComputeTime();
+            if (now > tIt->second && now - tIt->second > m_config.volcurve_max_age)
+                ready = false;
+        }
+    }
+
+    if (ed->isCurvesReady() != ready) {
+        ed->setCurvesReady(ready);
+        WTSLogger::log_by_cat("strategy", ready ? LL_INFO : LL_WARN,
+            "MarketReadiness: expiry {} curves {} (weight={:.2f}, publishes={}, "
+            "confirm={}, maxAge={:.0f}s)",
+            exp, ready ? "READY" : "not ready", getGvvWeight(exp), cnt,
+            confirm, m_config.volcurve_max_age);
+    }
+}
+
+void OptionPricer2::setGvvWeight(uint32_t exp, double wgt)
+{
+    m_gvv_weight[exp] = wgt;
+    // Hot weight change → immediate readiness re-evaluation (0→1 with a
+    // never-fitted main curve must drop the expiry out of quoting at once).
+    refreshCurvesReady(exp);
 }
 
 // ----------------------------------------------------------------------------
@@ -613,18 +777,24 @@ bool OptionPricer2::initValuesCompute(OptionGrid* grid)
         // ~1h to reach the market (observed 09:57→10:55, 0.1000→0.1629 in
         // eleven 5% steps, theo systematically cheap all morning). Seed
         // whenever the scale is still at the default, regardless of version.
+        // 2026-11-26: the seed goes through setATMVolReseed — the anchor move
+        // corrects our scale estimate (the market did not move), so the
+        // stored curve normalizations are re-based to keep the absolute vol
+        // unchanged (this is the incident-mechanism fix; the median dataset
+        // gate in AsyncVolFitter rejects the poisoned fit outright anyway).
+        // Any accepted curve (main OR curve2) closes the bootstrap window.
         const bool stillDefaultScale =
             std::fabs(ei->m_atmvol - m_defaultVolatility) < 1e-6;
         if (ed->isForwardReady()
-            && (getCurveVersion(ed->getExpiry()) == 0 || stillDefaultScale))
+            && (getAnyCurveVersion(ed->getExpiry()) == 0 || stillDefaultScale))
         {
             // Seed the scale from the market before the first accepted fit.
             const double med = __bootstrapMedianIV(ed, grid);
             if (!std::isnan(med) && med >= 0.03 && med <= 1.0
                 && std::fabs(med - ei->m_atmvol) > 1e-6)
-                setATMVol(ed->getExpiry(), med);
+                setATMVolReseed(ed->getExpiry(), med);
         }
-        else if (getCurveVersion(ed->getExpiry()) > 0 && ed->isForwardReady()
+        else if (getAnyCurveVersion(ed->getExpiry()) > 0 && ed->isForwardReady()
                  && config().atm_reanchor_period > 0)
         {
             // P1-④ (audit 2026-11-18): periodic ATM re-anchor.  The bootstrap
@@ -667,6 +837,11 @@ bool OptionPricer2::initValuesCompute(OptionGrid* grid)
                 }
             }
         }
+
+        // Freshness re-check (2026-11-26): every compute pass re-evaluates
+        // curves-ready so a smile older than volcurve_max_age drops out of
+        // pricing without waiting for a publish or a weight change.
+        refreshCurvesReady(ed->getExpiry());
     }
     return true;
 }
@@ -735,8 +910,21 @@ void OptionPricer2::computeValue(OptionData* option)
     OptionValues& values = option->values(getValuesIndex());
     uint32_t exp = option->getExpiry();
     const ExpiryDataPtr& ed = option->getExpiryData();
+    // P0 fix (2026-11-25): no forward, no fit — no theory. Before the first
+    // GVV fit publishes (and during readiness droughts) the vol scale is the
+    // flat default/bootstrap IV; pricing anyway produced garbage theos that
+    // CTG quoted straight off. valuesReady = forwardReady && fitReady.
+    if (!ed || !ed->isValuesReady()) {
+        values.setPriced(false);
+        return;
+    }
     const ExpiryInfoPtr& ei = getExpiryInfo(exp);
     double atmvol = ei->m_atmvol;
+    // v3-GARCH-lite (borrow plan §1): optional second ATM-vol anchor blended
+    // with the fitted atmVol. garch_weight=0 (default) keeps the fitted value;
+    // garchVol<=0 (estimator warming up) also falls back to the fitted value.
+    if (m_garchWeight > 0 && m_garchVol > 0)
+        atmvol = (1.0 - m_garchWeight) * atmvol + m_garchWeight * m_garchVol;
     double atmforward = ei->m_atmforward;
     IVolCurvePtr spVolCurve  = getVolCurve(exp);
     IVolCurvePtr spVolCurve2 = getVolCurve2(exp);
@@ -744,9 +932,17 @@ void OptionPricer2::computeValue(OptionData* option)
     if (m_gvv_weight.count(exp))
         gvv_weight = std::max(0.0, std::min(1.0, m_gvv_weight[exp]));
 
-    double vol  = spVolCurve  ? (*spVolCurve)(*option, atmforward)  * atmvol : atmvol;
-    double vol2 = spVolCurve2 ? (*spVolCurve2)(*option, atmforward) * atmvol : atmvol;
-    double theoVol = gvv_weight * vol + (1.0 - gvv_weight) * vol2;
+    // 2026-11-26 weight short-circuit: only evaluate the curves the current
+    // weight actually prices with.  Evaluating a weight-0 main curve could
+    // yield inf/NaN whose 0*w term poisons theoVol (0*inf = NaN).
+    double vol = atmvol, vol2 = atmvol;
+    if (gvv_weight > 1e-12 && spVolCurve)
+        vol = (*spVolCurve)(*option, atmforward) * atmvol;
+    if (gvv_weight < 1.0 - 1e-12 && spVolCurve2)
+        vol2 = (*spVolCurve2)(*option, atmforward) * atmvol;
+    double theoVol = (gvv_weight <= 1e-12) ? vol2
+                   : (gvv_weight >= 1.0 - 1e-12) ? vol
+                   : gvv_weight * vol + (1.0 - gvv_weight) * vol2;
     if (!std::isfinite(theoVol)) {
         // Never turn a failed vol (NaN/Inf) into a 1% quote: that silently
         // prices every option off a fake vol and keeps sending orders.
@@ -768,9 +964,9 @@ void OptionPricer2::computeValue(OptionData* option)
 
     // Market-readiness: theo/Greeks ARE computed (the stored Greeks feed the
     // vol-fit point filter), but while the expiry's curve is still the
-    // default/stale one the values must not count as priced — no theo-based
-    // quoting or scanning on a curve that did not come from today's market.
-    if (ed && !ed->isFitReady())
+    // default/stale one — or the curves the CURRENT weight prices with are
+    // missing/stale (curvesReady) — the values must not count as priced.
+    if (ed && !ed->isValuesReady())
         values.setPriced(false);
 }
 
@@ -780,6 +976,11 @@ void OptionPricer2::__computeValue(OptionData* otm, OptionData* itm)
     const ExpiryDataPtr& ed = otm->getExpiryData();
     const ExpiryInfoPtr& ei = getExpiryInfo(exp);
     double atmvol = ei->m_atmvol;
+    // v3-GARCH-lite (borrow plan §1): optional second ATM-vol anchor blended
+    // with the fitted atmVol. garch_weight=0 (default) keeps the fitted value;
+    // garchVol<=0 (estimator warming up) also falls back to the fitted value.
+    if (m_garchWeight > 0 && m_garchVol > 0)
+        atmvol = (1.0 - m_garchWeight) * atmvol + m_garchWeight * m_garchVol;
     double atmforward = ei->m_atmforward;
     IVolCurvePtr spVolCurve  = getVolCurve(exp);
     IVolCurvePtr spVolCurve2 = getVolCurve2(exp);
@@ -794,9 +995,16 @@ void OptionPricer2::__computeValue(OptionData* otm, OptionData* itm)
     otmvals.setPriced(false);
     itmvals.setPriced(false);
 
-    double vol  = spVolCurve  ? (*spVolCurve)(*otm, atmforward)  * atmvol : atmvol;
-    double vol2 = spVolCurve2 ? (*spVolCurve2)(*otm, atmforward) * atmvol : atmvol;
-    double theoVol = gvv_weight * vol + (1.0 - gvv_weight) * vol2;
+    // 2026-11-26 weight short-circuit (see computeValue): only evaluate the
+    // curves the current weight actually prices with (0*w NaN guard).
+    double vol = atmvol, vol2 = atmvol;
+    if (gvv_weight > 1e-12 && spVolCurve)
+        vol = (*spVolCurve)(*otm, atmforward) * atmvol;
+    if (gvv_weight < 1.0 - 1e-12 && spVolCurve2)
+        vol2 = (*spVolCurve2)(*otm, atmforward) * atmvol;
+    double theoVol = (gvv_weight <= 1e-12) ? vol2
+                   : (gvv_weight >= 1.0 - 1e-12) ? vol
+                   : gvv_weight * vol + (1.0 - gvv_weight) * vol2;
     otmvals.m_theoVol = std::max(0.01, theoVol);
     itmvals.m_theoVol = std::max(0.01, theoVol);
 
@@ -804,8 +1012,9 @@ void OptionPricer2::__computeValue(OptionData* otm, OptionData* itm)
     __computeTheoreticalValues(itm, otmvals, ibci.get(), getValuesIndex());
 
     // Market-readiness: see computeValue — compute but do not mark priced
-    // while the expiry has no accepted fit for the current market.
-    if (ed && !ed->isFitReady()) {
+    // while the expiry has no accepted fit, or the curves the CURRENT weight
+    // prices with are missing/stale.
+    if (ed && !ed->isValuesReady()) {
         otmvals.setPriced(false);
         itmvals.setPriced(false);
     }
@@ -823,11 +1032,13 @@ bool OptionPricer2::updateTheoreticalValues(OptionData* option)
     if (!values.isPriced()) return false;
 
     // Market-readiness: a fitted curve is only trustworthy while the expiry
-    // is fit-ready.  Without this check the FAST path would keep serving
-    // cached priced values (and thus quotes) off a stale/default curve for
-    // up to a whole SLOW interval after a drought re-block.
+    // is fit-ready AND the curves the CURRENT weight prices with are
+    // available/fresh (curvesReady).  Without this check the FAST path would
+    // keep serving cached priced values (and thus quotes) off a stale/default
+    // curve for up to a whole SLOW interval after a drought re-block or a hot
+    // weight switch to a never-fitted main curve.
     const ExpiryDataPtr& ed = option->getExpiryData();
-    if (ed && !ed->isFitReady()) {
+    if (ed && !ed->isValuesReady()) {
         values.setPriced(false);
         return false;
     }

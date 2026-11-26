@@ -81,6 +81,9 @@ struct UiExpiryView
     double fwd = 0;
     bool fwdReady = false;
     bool fitReady = false;
+    /// L4 dynamic curve readiness (2026-11-26): required curves available for
+    /// the current blend weight && startup-confirm && freshness.
+    bool curvesReady = true;
     bool underlyingValid = false;
 
     bool hasAtmVol = false;     double atmVol = 0;
@@ -185,6 +188,10 @@ struct UiSnapshotView
 
     // Risk / limits
     bool limitsBreached = false;
+    // 2026-11-25 follow-up: worst |exposure|/limit ratio across the checked
+    // greeks (delta/gamma/vega/daily loss). Consumed by the UI risk panel —
+    // keeps _riskSeverity from being a write-only member.
+    double riskSeverity = 0.0;
     int32_t tps = 0, tpsMax = 0;
     // P1 batch-5.1: delta-hedge fire threshold — the hedge panel colours a
     // row red when |$Δ| exceeds it while Γ≠0 (a gamma-active expiry that the

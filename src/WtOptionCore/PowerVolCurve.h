@@ -33,6 +33,7 @@
 
 #include <string>
 #include <memory>
+#include <cmath>
 
 namespace wt_option {
 
@@ -59,6 +60,16 @@ public:
     // -- ATM anchors driven by OptionPricer2 (same protocol as GvvVolCurve) --
     void setATMForward(double fwd) override { m_atmforward = fwd; }
     void setATMVol(double /*atmvol*/) override {}                  // fit input already normalized
+
+    /// IVolCurve anchor re-base (2026-11-26): stored params are normalized
+    /// (sv = a·e^{bx} + c with sv = IV/anchor_at_fit); scale a AND the c
+    /// baseline by oldAnchor/newAnchor so the absolute vol stays unchanged.
+    void rescale(double factor) override {
+        if (!std::isfinite(factor) || !(factor > 0.0) || !m_bInitialized)
+            return;
+        m_a *= factor;
+        m_c *= factor;
+    }
 
     double getParameter(Parameter p) const { return p == PAR_A ? m_a : m_b; }
 

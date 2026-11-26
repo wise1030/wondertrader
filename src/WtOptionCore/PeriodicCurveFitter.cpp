@@ -419,7 +419,13 @@ void PeriodicCurveFitter::__fitExpiry_imp(
                || (volcurve && volcurve2
                    && volcurve->isInitialized() && volcurve2->isInitialized());
     m_expiryFitStatus[exp] = fit_ok;
-    if (v.second) v.second->setFitReady(fit_ok);
+    if (v.second) {
+        v.second->setFitReady(fit_ok);
+        // 2026-11-26: the legacy synchronous fitter owns the curve-availability
+        // verdict for its path — mirror it into curvesReady (default true)
+        // so a previously cleared dynamic flag cannot keep the expiry dark.
+        v.second->setCurvesReady(fit_ok);
+    }
 }
 
 bool PeriodicCurveFitter::doFit_imp()

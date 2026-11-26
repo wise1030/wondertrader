@@ -57,6 +57,10 @@ std::shared_ptr<OptionData> makeLeg(const std::string& code, OptionRight right,
     od->setPosition(2);
     if (withTheo) {
         auto& vals = od->beginUpdateValues();
+        // P0 fix (2026-11-25): UI theo is gated on the priced flag now — a
+        // fabricated theo without priced=true is stale-theo leak, exactly
+        // what the gate exists to prevent.
+        vals.setPriced(true);
         vals.setTheo(1235.2).setTheoVol(0.1285).setImpliedVol(0.128);
         vals.greeks().delta() = 0.52;
         od->commitUpdateValues();

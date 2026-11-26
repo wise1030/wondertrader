@@ -8,7 +8,9 @@ void OptionExpiryLifecycle::onSessionBegin(OptionGrid& grid)
 {
     grid.refreshExpiryDays();
     grid.purgeExpired();
-    grid.reevaluateFrontMonth();
+    // 2026-11-26: reevaluateFrontMonth() removed — "front" is a query
+    // (frontExpiry()), not state; purgeExpired() above keeps the expiry
+    // table clean so the query always picks the nearest live month.
 }
 
 double OptionExpiryLifecycle::grossPosition(const std::unordered_map<std::string, double>& positions)

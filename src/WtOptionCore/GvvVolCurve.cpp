@@ -23,6 +23,7 @@
 #include "WTSLogger.h"
 
 #include <iostream>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 #include <functional>
@@ -148,6 +149,7 @@ double GvvVolCurve::eval(double x) const
 {
     if (!m_bInitialized)
         return 1.0;
+    const double rawX = x;
 
     // P0-③ (audit 2026-11-18): flat extrapolation beyond the fitted strike
     // window.  The fitted candidate set covers only the densest strikes near
@@ -209,16 +211,29 @@ double GvvVolCurve::eval(double x) const
         double vol = solver.solve(f, 1.0e-4, guess, GVV_MINATMVOL, GVV_MAXATMVOL);
         return vol / m_atmvol; // normalized by m_atmvol
     }
-    catch (...) {
-        // B31 fix: root-not-bracketed used to collapse the wing to
-        // MINATMVOL/atmvol (~1% absolute vol) with no log. Fall back to the
-        // ATM value instead and warn (throttled).
-        static uint64_t s_warnCount = 0;
-        if (s_warnCount++ < 20 || s_warnCount % 1000 == 0) {
+    catch (const std::exception& e) {
+        // B31 fix: fall back to ATM, but retain the actual solver reason and
+        // curve domain. Atomic count: this function is called by fit/pricing
+        // workers and the old static counter itself raced.
+        static std::atomic<uint64_t> s_warnCount{0};
+        const uint64_t n = ++s_warnCount;
+        if (n <= 20 || n % 1000 == 0) {
             WTSLogger::log_by_cat("strategy", LL_WARN,
-                "GvvVolCurve::eval solve failed (x={:.4f}) -> fallback ATM, count={}",
-                x, s_warnCount);
+                "GvvVolCurve::eval solve failed: {} (rawX={:.6f} clampedX={:.6f} "
+                "window=[{:.6f},{:.6f}] F={:.2f} T={:.6f} atmVol={:.6f} "
+                "spotvol={:.6f} rho={:.6f} volvol={:.6f} alpha={:.6f}) -> fallback ATM, count={}",
+                e.what(), rawX, x, m_xlo, m_xhi, m_atmforward, m_maturity,
+                m_atmvol, m_spotvol, m_rho, m_volvol, m_alpha, n);
         }
+        return 1.0;
+    }
+    catch (...) {
+        static std::atomic<uint64_t> s_unknownWarnCount{0};
+        const uint64_t n = ++s_unknownWarnCount;
+        if (n <= 20 || n % 1000 == 0)
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "GvvVolCurve::eval unknown solver failure (rawX={:.6f} clampedX={:.6f}) -> fallback ATM, count={}",
+                rawX, x, n);
         return 1.0;
     }
 }
@@ -402,7 +417,10 @@ bool GvvVolCurve::fit(const IVolCurve::dataset_t& src_pts)
     }
     double atmvol = std::sqrt(atmvol2);
 
-    double volvol2 = kurt * m_maturity * std::pow(atmvol, 2.0 * m_alpha);
+    // Use the CANDIDATE alpha selected above. The old code used m_alpha from
+    // the previous fit here while eval() used the new alpha, inflating/deflating
+    // kurt and moving Brent roots outside [MINATMVOL, MAXATMVOL].
+    double volvol2 = kurt * m_maturity * std::pow(atmvol, 2.0 * alpha);
     if (volvol2 < GVV_MINVOLVOL * GVV_MINVOLVOL || volvol2 > GVV_MAXVOLVOL * GVV_MAXVOLVOL) {
         std::cout << "GvvVolCurve fit failed: m_maturity " << m_maturity
                   << " volvol2 " << volvol2 << std::endl;
