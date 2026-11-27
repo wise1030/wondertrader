@@ -829,7 +829,18 @@ void OptionQuoteManager::applyOffsetGuard(uint32_t& qty, bool isBuy)
 void OptionQuoteManager::dumpCountersCsv(const std::string& path) const
 {
     std::ofstream ofs(path, std::ios::app);
-    if (!ofs.is_open()) return;
+    if (!ofs.is_open()) {
+        // 2026-11-27: this used to fail silently — the production directory
+        // did not exist, so every "OQM counters dumped" log line for days
+        // corresponded to NO file on disk.  Surface the failure.
+        static std::atomic<uint64_t> s_dumpFail{0};
+        const uint64_t n = ++s_dumpFail;
+        if (n <= 20 || n % 100 == 0)
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "OQM: counter dump FAILED to open {} (count={}) — per-day "
+                "cancel/order statistics are NOT being persisted", path, n);
+        return;
+    }
     // code,cancels,newOrders,fills,rejects,lateFills,position
     ofs << m_code << ',' << m_numCancel << ',' << m_numNewOrders << ','
         << m_numFill << ',' << m_numReject << ',' << m_numLateFills << ','

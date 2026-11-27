@@ -107,6 +107,7 @@ void CompositeOptionPricer::ExpiryRiskConfig::init(
     max_pos_stk = 1;
     max_pos_opt = 1;
     max_qsize = 1;
+    min_quote_qty = 1;
     sprd_fut = 100.0;
     sprd_fwd = 0.01;
     sprd_atmvol = 0.1;
@@ -185,6 +186,11 @@ void CompositeOptionPricer::setMaxPosQty(uint32_t exp, int32_t maxQsize, int32_t
     erc.max_qsize = maxQsize;
     erc.max_pos_stk = maxPosStk;
     erc.max_pos_opt = maxPosOpt;
+}
+
+void CompositeOptionPricer::setMinQuoteQty(uint32_t exp, int32_t qty) {
+    auto& erc = m_mapExpiryRiskConfig[exp];
+    erc.min_quote_qty = std::max(1, qty);
 }
 
 void CompositeOptionPricer::setExpiryCloseParams(uint32_t exp, bool autoClose, int32_t closeThresh) {
@@ -821,27 +827,35 @@ int32_t CompositeOptionPricer::__computeQuoteSize(
     const ExpiryRiskConfig& erc, side_t side, double /*mid*/, double /*px*/,
     int32_t opt_pos, int32_t stk_pos, double delta
     , double deltaSign, double pgnDelta, double pgnVega) {
-    // v3 soft-limit size shrink (analysis/quote-shift-design-proposal-v3.md
-    // §3.4/§5): the side that worsens a risk dimension shrinks linearly once
-    // |pgn| passes risk_shrink_start, reaching 0 at 1.0 — directional
-    // suppression at the quote layer (stop adding risk, keep the reducing
-    // side). risk_shrink_start >= 1.0 disables (previous behavior).
+    // 2026-11-27 (market-making obligation, source-project semantics):
+    // risk suppression is expressed by PRICE — the continuous risk shift on
+    // the main quoting path moves the worsening side away from the market —
+    // never by dropping the quote.  The v3 size-shrink (risk_shrink_start <
+    // 1.0) remains available but now floors at min_quote_qty instead of
+    // reaching 0: a missing side is an obligation breach, a far-priced
+    // minimum-size quote is not.  Only position-limit exhaustion (checked
+    // below, obligation-exempt) may return 0 outside Panic.
     double riskScale = 1.0;
     if (m_config.risk_shrink_start < 1.0) {
         riskScale = quote_risk::riskSizeScale(
             side == BID ? quote_risk::Side::BID : quote_risk::Side::ASK,
             deltaSign, pgnDelta, pgnVega, m_config.risk_shrink_start);
     }
-    if (riskScale <= 0) return 0;
 
     if (side == BID) {
         int32_t bid_size = std::min(erc.max_qsize, std::max(0, erc.max_pos_stk - stk_pos));
         bid_size = std::min(bid_size, std::max(0, erc.max_pos_opt - opt_pos));
-        return static_cast<int32_t>(bid_size * riskScale);
+        if (bid_size <= 0) return 0;   // position-limit exhaustion: exempt
+        // ceil, not truncation: at size 1 any shrink used to floor to 0 and
+        // turn the "linear" band into a hard on/off switch.
+        bid_size = static_cast<int32_t>(std::ceil(bid_size * riskScale));
+        return std::max(bid_size, erc.min_quote_qty);
     } else {
         int32_t ask_size = std::min(erc.max_qsize, std::max(0, -(-erc.max_pos_stk - stk_pos)));
         ask_size = std::min(ask_size, std::max(0, -(-erc.max_pos_opt - opt_pos)));
-        return static_cast<int32_t>(ask_size * riskScale);
+        if (ask_size <= 0) return 0;   // position-limit exhaustion: exempt
+        ask_size = static_cast<int32_t>(std::ceil(ask_size * riskScale));
+        return std::max(ask_size, erc.min_quote_qty);
     }
 }
 

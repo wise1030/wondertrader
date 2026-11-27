@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <fstream>
 #include <filesystem>
 #include <regex>
@@ -74,6 +75,23 @@ HftOptionStrategy::HftOptionStrategy(const char* name)
 
 void HftOptionStrategy::shutdown()
 {
+    // 2026-11-27: cancel every live order BEFORE tearing anything down.
+    // Previously shutdown() never touched the exchange side, so a graceful
+    // exit left all working quotes on the book (observed 2026-11-27: quotes
+    // from a killed process filled hours later).  Fire-and-forget with a
+    // short grace period so the CTP requests actually leave the process —
+    // acks are irrelevant at this point.
+    if (_ctx) {
+        try {
+            const OrderIDs ids = _ctx->stra_cancel_all("");
+            WTSLogger::log_by_cat("strategy", LL_INFO,
+                "shutdown: cancel-all issued for {} live orders", ids.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        } catch (const std::exception& e) {
+            WTSLogger::log_by_cat("strategy", LL_ERROR,
+                "shutdown: cancel-all failed: {}", e.what());
+        }
+    }
     // P1 UI bridge must stop BEFORE the AEP worker: the IO heartbeat calls
     // enqueue_control() on _async; after the worker stops that would race.
     if (_uiBridge) { _uiBridge->stop(); _uiBridge.reset(); }
@@ -403,7 +421,9 @@ bool HftOptionStrategy::init(WTSVariant* cfg)
                 // early-session pricing on the degenerate seed curve — the
                 // two quality gates now share one parameter unless an
                 // explicit value overrides here.
-                e->has("min_strikes_for_synthetic") ? static_cast<int>(e->getInt32("min_strikes_for_synthetic")) : -1
+                e->has("min_strikes_for_synthetic") ? static_cast<int>(e->getInt32("min_strikes_for_synthetic")) : -1,
+                // 2026-11-27: obligation floor (per-side minimum quote size)
+                e->has("min_quote_qty") ? static_cast<int32_t>(e->getInt32("min_quote_qty")) : 1
             };
             // B14: Parse secondary hedge codes
             if (e->has("secondaryHedgeCodes")) {
@@ -1168,6 +1188,17 @@ void HftOptionStrategy::setupPricer()
         _quoteStats.setSessionInfo(_sessionInfo);
         _quoteStats.setPersistDir("generated");   // P1 batch-3.3
 
+    // 2026-11-27: ensure the OQM counter dump directory exists — production
+    // ran for days with it missing and every session-end dump failed silently.
+    {
+        std::error_code ec;
+        std::filesystem::create_directories("outputs_option", ec);
+        if (ec)
+            WTSLogger::log_by_cat("strategy", LL_WARN,
+                "cannot create outputs_option/ ({}): OQM per-day counter dumps "
+                "will fail", ec.message());
+    }
+
     // Create shared theoretical pricer (OptionPricer2) — used by both strategies
     wt_option::OptionPricer2Config p2cfg;
     // P1-a: fitter mode. "async" (default) drives AsyncVolFitter; "sync"
@@ -1460,6 +1491,7 @@ void HftOptionStrategy::setupPricer()
             if (ec.enable) {
                 _compositePricer->enableExpiry(exp, ec.delta_min, ec.delta_max);
                 _compositePricer->setMaxPosQty(exp, ec.max_qsize, ec.max_pos_stk, ec.max_pos_opt);
+                _compositePricer->setMinQuoteQty(exp, ec.min_quote_qty);
                 _compositePricer->setExpiryCloseParams(exp, ec.enable_auto_close,
                     static_cast<int32_t>(ec.close_pos_thresh));
             }
@@ -2008,6 +2040,22 @@ void HftOptionStrategy::setupAsyncCallbacks()
         }
         if (!_grid || !_pricer) return;
         publishAsyncVolFit();
+
+        // 2026-11-27: periodic OQM counter dump.  The exchange counts cancels
+        // per contract PER TRADING DAY; the session-end-only dump lost the
+        // whole day's per-contract statistics on any intraday restart (and
+        // production silently lacked the output directory for days — the dump
+        // now warns on open failure).  Every 300s keeps the same-day restore
+        // source fresh; restore is "last row wins" so append is safe.
+        if (_otg && _curSessionDate != 0) {
+            const double nowDump = _timeService.nowSeconds(_ctx);
+            if (nowDump - _lastOqmDumpT >= 300.0) {
+                _lastOqmDumpT = nowDump;
+                _otg->dumpCountersCsv(fmt::format(
+                    "outputs_option/oqm_counters_{}.csv", _curSessionDate));
+            }
+        }
+
         if (_hotUpdatePending.exchange(false, std::memory_order_acq_rel))
             applyHotParams();
 
@@ -2212,7 +2260,13 @@ void HftOptionStrategy::setupAsyncCallbacks()
                 if (!otd) continue;
                 const bool dirty = _dirtyOptions.count(od->getCode()) > 0;
 
-                if (dirty && od->isActive() && od->getBid() > 0 && od->getAsk() > 0)
+                // 2026-11-27 (pnl fix): the dirty gate froze unrealized PnL for
+                // any contract without quote activity — exactly the contracts
+                // whose positions most need marking (risk-excluded / qmode
+                // OFF).  Mark whenever the contract holds a position, keep the
+                // dirty optimization for flat quoting contracts, and do NOT
+                // gate on isActive() (OFF-with-position must still mark).
+                if ((dirty || otd->getPosition() != 0) && od->getBid() > 0 && od->getAsk() > 0)
                     otd->getPnlTracker()->onPriceUpdate(od->getBid(), od->getAsk());
                 portfolioPnl += otd->getPnlTracker()->getCurPnl();
 
@@ -4840,6 +4894,7 @@ bool HftOptionStrategy::setExpiryEnabled(uint32_t exp, bool enable) {
         // cold expiry has no erc entry yet.
         _compositePricer->enableExpiry(exp, ec.delta_min, ec.delta_max);
         _compositePricer->setMaxPosQty(exp, ec.max_qsize, ec.max_pos_stk, ec.max_pos_opt);
+        _compositePricer->setMinQuoteQty(exp, ec.min_quote_qty);
         _compositePricer->setExpiryCloseParams(exp, ec.enable_auto_close,
             static_cast<int32_t>(ec.close_pos_thresh));
         // Audit 11-23: replay merged with the hot maps (hot value wins) —

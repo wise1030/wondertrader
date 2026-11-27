@@ -102,6 +102,7 @@ public:
             { "expiries[]", { "expiry","enable","underlyingCode","hedgeCode","secondaryHedgeCodes",
                               "delta_min","delta_max","sprd_fwd","sprd_atmvol","sprd_corr",
                               "max_pos_fut","max_pos_stk","max_pos_opt","max_qsize",
+                              "min_quote_qty",
                               "enable_auto_close","close_pos_thresh","include_future",
                               "min_strikes_for_synthetic",
                               "targ_delta","targ_vega",   // P1 batch-5.2 (audit fix: was missing)

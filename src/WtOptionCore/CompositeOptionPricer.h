@@ -266,6 +266,8 @@ public:
     // Set expiry risk config (called by strategy to enable quoting)
     void enableExpiry(uint32_t exp, double deltaMin = 0.0, double deltaMax = 1.0);
     void setMaxPosQty(uint32_t exp, int32_t maxQsize, int32_t maxPosStk, int32_t maxPosOpt);
+    /// 2026-11-27: per-expiry minimum quote size (market-making obligation floor).
+    void setMinQuoteQty(uint32_t exp, int32_t qty);
     void setExpiryCloseParams(uint32_t exp, bool autoClose, int32_t closeThresh);
 
     // --- IOptionPricer ---
@@ -577,6 +579,11 @@ private:
         int32_t max_pos_stk = 0;
         int32_t max_pos_opt = 0;
         int32_t max_qsize = 0;
+        /// 2026-11-27 (market-making obligation): minimum quote size per side.
+        /// The worsening side is expressed by PRICE (continuous risk shift),
+        /// never by dropping below this floor — only position-limit
+        /// exhaustion or Panic may quote less (both obligation-exempt).
+        int32_t min_quote_qty = 1;
 
         int32_t numcxl = 0, numrej = 0, numpos = 0, numfil = 0;
 

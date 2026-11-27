@@ -145,6 +145,7 @@ private:
     /// P1-a: "async" (default, AsyncVolFitter) | "sync" (PeriodicCurveFitter)
     std::string _volFitMode{"async"};
     double _lastVolFitSubmitTime = -1e9;   // P1-a: fitter.period throttle
+    double _lastOqmDumpT = -1e9;           // 2026-11-27: periodic OQM counter dump
     wt_option::CompositeOptionPricerPtr _compositePricer;  // MM pricer (null when gammascalp)
     wt_option::GammaScalpOptionPricerPtr _gammaPricer;    // gamma scalp pricer (null when composite_mm)
     wt_option::ControllableTradingGridPtr _ctg;
@@ -268,6 +269,11 @@ private:
         double close_pos_thresh = 0;
         bool include_future = true;          // include future mid in synthetic forward (quantbox design)
         int min_strikes_for_synthetic = 1;  // min valid contributors for forward (1=any single source)
+        /// 2026-11-27: market-making obligation floor — per-side minimum
+        /// quote size (expiries[].min_quote_qty; default 1).  LAST member:
+        /// the aggregate initializer in HftOptionStrategy.cpp follows the
+        /// declaration order.
+        int32_t min_quote_qty = 1;
     };
     std::map<uint32_t, ExpiryConfig> _expiryConfigs;
     std::set<std::string> _hedgeCodes;  // distinct hedge codes (excluding underlying)
