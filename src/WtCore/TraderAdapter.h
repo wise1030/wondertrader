@@ -93,6 +93,13 @@ public:
 		uint32_t	_cancel_stat_timespan;
 		uint32_t	_cancel_total_limits;
 
+		// 2026-11-27: exclusion self-heal — after a contract is excluded by
+		// the risk rules above, it re-enters automatically once this many
+		// seconds have passed (0 = legacy permanent exclusion).  A permanent
+		// exclusion turned a one-off cancel storm (e.g. missing cancel acks
+		// on an unreliable gateway) into a whole-day quoting outage.
+		uint32_t	_exclude_cooldown_sec;
+
 		_RiskParams()
 		{
 			memset(this, 0, sizeof(_RiskParams));
@@ -129,7 +136,7 @@ private:
 	inline WTSContractInfo* getContract(const char* stdCode);
 	inline WTSCommodityInfo* getCommodify(const char* stdCommID);
 
-	const RiskParams* getRiskParams(const char* stdCode);
+	const RiskParams* getRiskParams(const char* stdCode) const;
 
 	void initSaveData();
 
@@ -265,7 +272,11 @@ private:
 	CodeTimeCacheMap	_cancel_time_cache;	//撤单时间缓存
 
 	//如果被风控了,就会进入到排除队列
-	wt_hashset<std::string>	_exclude_codes;
+	// 2026-11-27: code -> exclusion timestamp (ms); isExcluded() re-admits the
+	// contract after RiskParams::_exclude_cooldown_sec (0 = permanent, legacy).
+	mutable wt_hashmap<std::string, uint64_t>	_exclude_codes;
+
+	bool isExcluded(const char* stdCode) const;
 	
 	typedef wt_hashmap<std::string, RiskParams>	RiskParamsMap;
 	RiskParamsMap	_risk_params_map;

@@ -138,6 +138,9 @@ bool TraderAdapter::init(const char* id, WTSVariant* params, IBaseDataMgr* bdMgr
 				rParam._order_times_boundary = vProdItem->getUInt32("order_times_boundary");
 				rParam._order_stat_timespan = vProdItem->getUInt32("order_stat_timespan");
 
+				// 2026-11-27: exclusion self-heal window (0 = legacy permanent)
+				rParam._exclude_cooldown_sec = vProdItem->getUInt32("exclude_cooldown_sec");
+
 				WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO, "[{}] Risk control rule {} of trading channel loaded", _id.c_str(), product);
 			}
 
@@ -386,7 +389,7 @@ void TraderAdapter::saveData(WTSArray* ayFunds /* = NULL */)
 	}
 }
 
-const TraderAdapter::RiskParams* TraderAdapter::getRiskParams(const char* stdCode)
+const TraderAdapter::RiskParams* TraderAdapter::getRiskParams(const char* stdCode) const
 {
 	CodeHelper::CodeInfo cInfo = CodeHelper::extractStdCode(stdCode, NULL);
 	std::string pid = cInfo.stdCommID();
@@ -541,12 +544,40 @@ WTSCommodityInfo* TraderAdapter::getCommodify(const char* stdCode)
 	return _bd_mgr->getCommodity(cInfo._exchg, cInfo._product);
 }
 
+// 2026-11-27: exclusion self-heal — a contract excluded by the risk rules is
+// re-admitted after RiskParams::_exclude_cooldown_sec (0 = legacy permanent
+// exclusion).  The exclusion list used to be write-only, so one cancel storm
+// (e.g. a gateway dropping cancel acks) disabled a contract — or the whole
+// book — until the process restarted.
+bool TraderAdapter::isExcluded(const char* stdCode) const
+{
+	auto it = _exclude_codes.find(stdCode);
+	if (it == _exclude_codes.end())
+		return false;
+
+	const RiskParams* riskPara = getRiskParams(stdCode);
+	const uint32_t cooldown = riskPara ? riskPara->_exclude_cooldown_sec : 0;
+	if (cooldown > 0)
+	{
+		const uint64_t now = TimeUtils::getLocalTimeNow();
+		if (now >= it->second + static_cast<uint64_t>(cooldown) * 1000)
+		{
+			_exclude_codes.erase(it);
+			WTSLogger::log_dyn("trader", _id.c_str(), LL_INFO,
+				"[{}] {} exclusion cooldown {}s elapsed, re-admitted",
+				_id.c_str(), stdCode, cooldown);
+			return false;
+		}
+	}
+	return true;
+}
+
 bool TraderAdapter::checkCancelLimits(const char* stdCode)
 {
 	if (!_risk_mon_enabled)
 		return true;
 
-	if (_exclude_codes.find(stdCode) != _exclude_codes.end())
+	if (isExcluded(stdCode))
 		return false;
 
 	const RiskParams* riskPara = getRiskParams(stdCode);
@@ -558,7 +589,7 @@ bool TraderAdapter::checkCancelLimits(const char* stdCode)
 	{
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] {} cancel {} times totaly, beyond boundary {} times, adding to excluding list",
 			_id.c_str(), stdCode, statInfo->total_cancels(), riskPara->_cancel_total_limits);
-		_exclude_codes.insert(stdCode);
+		_exclude_codes[stdCode] = TimeUtils::getLocalTimeNow();
 		return false;
 	}
 
@@ -579,7 +610,7 @@ bool TraderAdapter::checkCancelLimits(const char* stdCode)
 			{
 				WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] {} cancel {} times within {} seconds, beyond boundary {} times, adding to excluding list",
 					_id.c_str(), stdCode, times, riskPara->_cancel_stat_timespan, riskPara->_cancel_times_boundary);
-				_exclude_codes.insert(stdCode);
+				_exclude_codes[stdCode] = TimeUtils::getLocalTimeNow();
 				return false;
 			}
 
@@ -600,7 +631,7 @@ bool TraderAdapter::isTradeEnabled(const char* stdCode) const
 	if (!_risk_mon_enabled)
 		return true;
 
-	if (_exclude_codes.find(stdCode) != _exclude_codes.end())
+	if (isExcluded(stdCode))
 		return false;
 
 	return true;
@@ -611,7 +642,7 @@ bool TraderAdapter::checkOrderLimits(const char* stdCode)
 	if (!_risk_mon_enabled)
 		return true;
 
-	if (_exclude_codes.find(stdCode) != _exclude_codes.end())
+	if (isExcluded(stdCode))
 		return false;
 
 	const RiskParams* riskPara = getRiskParams(stdCode);
@@ -623,7 +654,7 @@ bool TraderAdapter::checkOrderLimits(const char* stdCode)
 	{
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] {} entrust {} times totally, beyond boundary {} times, adding to excluding list",
 			_id.c_str(), stdCode, statInfo->total_orders(), riskPara->_order_total_limits);
-		_exclude_codes.insert(stdCode);
+		_exclude_codes[stdCode] = TimeUtils::getLocalTimeNow();
 		return false;
 	}
 
@@ -644,7 +675,7 @@ bool TraderAdapter::checkOrderLimits(const char* stdCode)
 			{
 				WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] {} entrust {} times within {} seconds, beyond boundary {} times, adding to excluding list",
 					_id.c_str(), stdCode, times, riskPara->_order_stat_timespan, riskPara->_order_times_boundary);
-				_exclude_codes.insert(stdCode);
+				_exclude_codes[stdCode] = TimeUtils::getLocalTimeNow();
 				return false;
 			}
 
@@ -1740,62 +1771,15 @@ void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 
 			_orderids.insert(orderInfo->getOrderID());
 
-			WTSTradeStateInfo* statInfo = (WTSTradeStateInfo*)_stat_map->get(stdCode.c_str());
-			if (statInfo == NULL)
-			{
-				statInfo = WTSTradeStateInfo::create(stdCode.c_str());
-				_stat_map->add(stdCode, statInfo, false);
-			}
-			TradeStatInfo& statItem = statInfo->statInfo();
-			if (isBuy)
-			{
-				statItem.b_orders++;
-				statItem.b_ordqty += orderInfo->getVolume();
-
-				if (orderInfo->isError())
-				{
-					statItem.b_wrongs++;
-					statItem.b_wrongqty += orderInfo->getVolume() - orderInfo->getVolTraded();
-				}
-				else if (orderInfo->getOrderState() == WOS_Canceled)
-				{			
-					if (orderInfo->getOrderFlag() == WOF_NOR)
-					{
-						statItem.b_cancels++;
-						statItem.b_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
-					}
-					else
-					{
-						statItem.b_auto_cancels++;
-						statItem.b_auto_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
-					}
-				}
-				
-			}
-			else
-			{
-				statItem.s_orders++;
-				statItem.s_ordqty += orderInfo->getVolume();
-
-				if (orderInfo->isError())
-				{
-					statItem.s_wrongs++;
-					statItem.s_wrongqty += orderInfo->getVolume() - orderInfo->getVolTraded();
-				}
-				else if (orderInfo->getOrderState() == WOS_Canceled)
-				{
-					if (orderInfo->getOrderFlag() == WOF_NOR)
-					{
-						statItem.s_cancels++;
-						statItem.s_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
-					}
-					else
-					{
-						statItem.s_auto_cancels++;
-						statItem.s_auto_canclqty += orderInfo->getVolume() - orderInfo->getVolTraded();
-					}
-				}
-			}			
+			// 2026-11-27 (risk-stat口径): onRspOrders replays the WHOLE trading
+			// day's order history at login — including orders placed by a
+			// previous process.  Accumulating those into _stat_map made a
+			// restarted process "inherit" the old process's cancel counts
+			// (observed 2026-11-27: fresh process excluded every contract at
+			// the 470 cancel_total_limits on its first risk check).  Replay is
+			// for order-map/undone recovery only; the per-contract risk
+			// statistics count THIS process's own actions (doCancel /
+			// doEntrust paths).
 
 			if (!orderInfo->isAlive())
 				continue;
